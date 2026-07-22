@@ -65,6 +65,13 @@ export async function boot() {
   }
 
   if (!session || session.authenticated === false || !session.user) {
+    // Not signed in: hand off to the sign-in screen rather than showing a dead
+    // end. In mock mode there is no real session, so stay put instead of
+    // bouncing in a loop.
+    if (!api.MOCK) {
+      location.replace('login.html');
+      return;
+    }
     return renderMessage('Not signed in', 'Sign in to continue.');
   }
 
@@ -279,9 +286,22 @@ function renderCrumb() {
 
 function renderAvatar() {
   if (!el.avatar || !state.user) return;
-  const name = state.user.name || state.user.email || '?';
+  const name = state.user.name || state.user.username || '?';
   el.avatar.textContent = name.trim()[0].toUpperCase();
-  el.avatar.title = name;
+  el.avatar.title = name + ' — click to sign out';
+  el.avatar.style.cursor = 'pointer';
+  el.avatar.setAttribute('role', 'button');
+  el.avatar.setAttribute('tabindex', '0');
+
+  const signOut = async () => {
+    try { await api.auth.logout(); } catch (e) { /* sign out locally regardless */ }
+    location.replace('login.html');
+  };
+
+  el.avatar.addEventListener('click', signOut);
+  el.avatar.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); signOut(); }
+  });
 }
 
 /* ------------------------------------------------------------------ *
