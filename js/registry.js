@@ -21,51 +21,106 @@ export const APPS = [
   {
     id: 'backbone',
     name: 'BackBone',
+    w1: 'Back', w2: 'Bone', letter: 'B',
+    role: 'Who we sell to',
     blurb: 'Accounts, leads, roster, scorecard.',
-    accent: '#1B5DAB',           // display only (the swatch dot); tokens.css owns theming
-    views: ['dashboard', 'inbox', 'leads', 'roster', 'scorecard', 'settings'],
+    accent: '#1B5DAB',           // display only (rail dot / app mark); tokens.css owns theming
+    views: [
+      ['inbox', 'Inbox'],
+      ['leads', 'Leads'],
+      ['roster', 'Roster'],
+      ['scorecard', 'Scorecard'],
+      ['dashboard', 'Dashboard'],
+      ['settings', 'Settings']
+    ],
     defaultView: 'dashboard',
     stub: false
   },
   {
     id: 'shopstock',
     name: 'ShopStock',
+    w1: 'Shop', w2: 'Stock', letter: 'S',
+    role: 'What we make it with',
     blurb: 'Inventory, orders, labels.',
     accent: '#E36325',
-    views: ['dashboard', 'inventory', 'orders', 'labels', 'admin'],
+    views: [
+      ['dashboard', 'Dashboard'],
+      ['inventory', 'Full Inventory'],
+      ['orders', 'Order Queue'],
+      ['labels', 'Labels'],
+      ['admin', 'Admin']
+    ],
     defaultView: 'dashboard',
     stub: false
   },
   {
     id: 'errorengine',
     name: 'ErrorEngine',
+    w1: 'Error', w2: 'Engine', letter: 'E',
+    role: 'What went wrong',
     blurb: 'Error log, records, vendor accountability.',
     accent: '#745DA8',
-    views: ['dashboard', 'log', 'records', 'vendors', 'settings'],
+    views: [
+      ['dashboard', 'Dashboard'],
+      ['log', 'Log an Error'],
+      ['records', 'Records'],
+      ['vendors', 'Vendors'],
+      ['settings', 'Settings']
+    ],
     defaultView: 'dashboard',
     stub: false
   },
   {
     id: 'givinggauge',
     name: 'GivingGauge',
+    w1: 'Giving', w2: 'Gauge', letter: 'G',
+    role: 'What we give away',
     blurb: 'Donation and sponsorship scoring.',
     accent: '#D5A029',           // gold, not green — see tokens.css note
-    views: ['requests', 'model', 'budget'],
+    views: [
+      ['requests', 'Requests'],
+      ['model', 'Model'],
+      ['budget', 'Budget']
+    ],
     defaultView: 'requests',
     stub: false
   },
   {
     id: 'traveltrack',
     name: 'TravelTrack',
+    w1: 'Travel', w2: 'Track', letter: 'T',
+    role: 'What it costs to get there',
     blurb: 'Travel and expense tracking.',
     accent: '#0E7C86',
-    views: ['dashboard'],
+    views: [
+      ['dashboard', 'Dashboard']
+    ],
     defaultView: 'dashboard',
     // Runs on Base44. There is no api/ folder to point at, so the data model
     // gets rebuilt rather than reconnected. Ships as a placeholder until then.
     stub: true
   }
 ];
+
+/* ------------------------------------------------------------------ *
+ * VIEW HELPERS
+ *
+ * views is [[key, label], ...] so the rail can render sub-nav labels without
+ * every app re-declaring them. viewKeys()/viewLabel() keep callers from
+ * caring about the tuple shape.
+ * ------------------------------------------------------------------ */
+
+export function viewKeys(app) {
+  if (!app || !Array.isArray(app.views)) return [];
+  return app.views.map((v) => (Array.isArray(v) ? v[0] : v));
+}
+
+export function viewLabel(app, key) {
+  if (!app || !Array.isArray(app.views)) return key;
+  const hit = app.views.find((v) => (Array.isArray(v) ? v[0] : v) === key);
+  if (!hit) return key;
+  return Array.isArray(hit) ? hit[1] : hit;
+}
 
 /* ------------------------------------------------------------------ *
  * LOOKUPS
@@ -124,7 +179,8 @@ export function canAccess(perms, appId) {
 export function allowedViews(perms, appId) {
   const app = getApp(appId);
   if (!app) return [];
-  if (perms && perms.superuser === true) return app.views.slice();
+  const keys = viewKeys(app);
+  if (perms && perms.superuser === true) return keys.slice();
 
   const tabs = (perms && Array.isArray(perms.tabs)) ? perms.tabs : [];
   const scoped = tabs
@@ -132,5 +188,5 @@ export function allowedViews(perms, appId) {
     .map((t) => t.slice(appId.length + 1));
 
   // No per-view grants recorded means "all views of an app you can open".
-  return scoped.length === 0 ? app.views.slice() : app.views.filter((v) => scoped.includes(v));
+  return scoped.length === 0 ? keys.slice() : keys.filter((v) => scoped.includes(v));
 }
