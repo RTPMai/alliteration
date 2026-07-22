@@ -56,6 +56,7 @@ export const ENDPOINTS = {
   // ---- Shell / auth (BackBone's, shared by all apps) ----
   auth:            '/api/auth',
   session:         '/api/auth?action=session',
+  users:           '/api/users',
 
   // ---- BackBone ----
   bbData:          '/api/data',
@@ -205,12 +206,15 @@ export const auth = {
 const MOCK_LATENCY = 120;
 
 const MOCK_USER = {
-  email: 'ryan@pmapparel.com',
+  username: 'ryan',
   name: 'Ryan',
   role: 'admin',
   perms: {
-    superuser: true,
-    tabs: ['backbone', 'shopstock', 'errorengine', 'givinggauge', 'traveltrack']
+    tabs: ['backbone', 'shopstock', 'errorengine', 'givinggauge', 'traveltrack'],
+    data_scope: 'all',
+    can_edit: true,
+    can_export: true,
+    role: 'admin'
   }
 };
 
