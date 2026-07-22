@@ -4,6 +4,9 @@
   "private": true,
   "type": "module",
   "description": "Single shell hosting P&M Apparel's internal apps under one login.",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "test": "bash test/run.sh"
   }
