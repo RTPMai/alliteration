@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 27 tests. Never let it go red.
+bash test/run.sh     # 33 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -23,9 +23,9 @@ endpoints.
 ## Layout
 
 ```
-index.html            shell entry
+index.html            shell entry (header, rail, content region)
 css/tokens.css        THE ONLY place colors and dimensions are defined
-css/shell.css         chrome only (header, switcher, view host)
+css/shell.css         chrome + shared component vocabulary, zero hex values
 js/api.js             THE SEAM. the only file that calls fetch()
 js/registry.js        app list. two lines to add an app
 js/router.js          hash routing: #/<app>/<view>
@@ -33,15 +33,36 @@ js/app-host.js        app mount contract + CSS scoping + tab adapter
 js/shell.js           boot, session, app switching
 js/giving-engine.js   ES adapter over the verbatim scoring engine
 vendor/               verbatim algorithm ports. DO NOT EDIT
+apps/hub.js           the "All apps" landing view
 apps/<id>.js          one file per app
 test/                 zero-dependency suite
 ```
+
+## Chrome
+
+Header and left rail are persistent: they never re-render on navigation. The
+rail lists apps, and expands the active app's views beneath it as sub-nav. Only
+the content region swaps.
+
+Routes are `#/` for the hub and `#/<app>/<view>` for everything else.
+
+The hub is a registered app like any other (`apps/hub.js`), which is why it gets
+the same mount contract and its own accent. Its cross-app flow table is the
+actual argument for a shared shell: each app holds a number the others need to
+tell the truth about a client.
+
+`shell.css` also carries a shared component vocabulary (`.card`, `.stat`,
+`.pill`, `table`, `.bar`) so ported apps can drop their own copies. An app that
+keeps its own CSS still wins inside its host, since `scopeCss()` prefixes it and
+the extra specificity outranks the bare element rules.
 
 ## The three rules
 
 **1. tokens.css owns color.** No app file declares a hex value. Components use
 `var(--accent)`. Setting `data-app` on `<body>` re-themes everything. Tests fail
 the build if a hex appears in `shell.css`, `index.html`, or any file in `apps/`.
+The one exemption is the brand SVG artwork in the header: the P&M mark must not
+recolor when the accent changes, so its fills are baked in deliberately.
 
 **2. api.js is the seam.** No app file calls `fetch()` directly, ever. A test
 enforces this. `MOCK = true` returns fake data; flipping to false hits the real
