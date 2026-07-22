@@ -53,7 +53,11 @@ export function currentRoute() {
  * to a real user action.
  */
 export function go(app, view, { replace = false } = {}) {
-  const hash = '#/' + [app, view].filter(Boolean).join('/');
+  // The hub lives at bare '#/' rather than '#/hub', so the landing URL stays
+  // clean and a shared link to the front page looks like the site root.
+  const hash = (app === 'hub' || !app)
+    ? '#/'
+    : '#/' + [app, view].filter(Boolean).join('/');
   if (location.hash === hash) return;
 
   if (replace) {
