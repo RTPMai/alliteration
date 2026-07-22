@@ -19,9 +19,29 @@ import { setSessionCookie, clearSessionCookie, getSession } from "../lib/session
 import { authenticate, createUser, noUsersYet, touchLastLogin, permsFor } from "../lib/users.js";
 import { isConfigured } from "../lib/kv.js";
 
+/**
+ * A missing env var should produce a readable message, not Vercel's generic
+ * 500. Checked here, at the top of the handler, so the answer reaches the
+ * browser instead of dying somewhere in an import.
+ */
+function configProblem() {
+  if (!process.env.SESSION_SECRET) {
+    return "SESSION_SECRET is not set. Generate one with: openssl rand -base64 32, " +
+           "then add it in Vercel > Settings > Environment Variables and redeploy.";
+  }
+  if (!isConfigured()) {
+    return "Storage is not configured. Add KV_REST_API_URL and KV_REST_API_TOKEN " +
+           "in Vercel > Settings > Environment Variables and redeploy.";
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(200).end();
+
+  const problem = configProblem();
+  if (problem) return res.status(503).json({ error: problem, setup: true });
 
   // Vercel usually parses JSON bodies, but not always (depends on content-type
   // and runtime). Normalise so body.action is reliable either way.
@@ -32,12 +52,6 @@ export default async function handler(req, res) {
   if (!body || typeof body !== "object") body = {};
 
   const action = (req.query && req.query.action) || body.action || "";
-
-  if (!isConfigured()) {
-    return res.status(500).json({
-      error: "Storage is not configured. Set KV_REST_API_URL and KV_REST_API_TOKEN.",
-    });
-  }
 
   try {
     // ---- who am I ----
