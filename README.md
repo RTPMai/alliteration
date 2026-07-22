@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 33 tests. Never let it go red.
+bash test/run.sh     # 66 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -35,8 +35,59 @@ js/giving-engine.js   ES adapter over the verbatim scoring engine
 vendor/               verbatim algorithm ports. DO NOT EDIT
 apps/hub.js           the "All apps" landing view
 apps/<id>.js          one file per app
+lib/                  backend: storage, sessions, accounts
+api/                  backend routes: auth, users
+login.html            sign-in / first-run setup
 test/                 zero-dependency suite
 ```
+
+## Setup
+
+The shell needs two environment variables in Vercel:
+
+```
+SESSION_SECRET       generate with: openssl rand -base64 32
+KV_REST_API_URL      from the Upstash / Vercel KV integration
+KV_REST_API_TOKEN    same
+```
+
+`SESSION_SECRET` must be the SAME value everywhere the shell runs. Changing it
+signs everybody out, because existing cookies stop verifying.
+
+First run: open the site and it redirects to `login.html`, which detects that no
+accounts exist and switches into setup mode. The first account you create is the
+administrator, and it is the only one that can add everyone else.
+
+Locally, `?mock=1` skips auth and storage entirely.
+
+## Sign-in
+
+ONE cookie (`alliteration_session`) and ONE account list for all five apps.
+
+Before the shell, BackBone and ErrorEngine each had their own `session.js`
+(byte-identical apart from comments) and their own user store. The stores hashed
+passwords in incompatible formats — BackBone `salt:hash` hex via `scryptSync`,
+ErrorEngine `scrypt$N$salt$hash` base64 via async `scrypt`. Same algorithm,
+mutually unreadable output.
+
+That matters because a shared cookie with separate account lists is the worst of
+both: a valid key for a building you are not on the guest list for. Merging the
+cookie without merging the accounts would have looked like it worked.
+
+The merged store keeps ErrorEngine's hashing (async, tunable, timing-safe) and
+BackBone's richer permissions (per-app access, not just a role label).
+
+  lib/kv.js         storage wrapper, everything under "alliteration:"
+  lib/session.js    the one lock: sign, verify, guard
+  lib/users.js      the one guest list: accounts, roles, permissions
+  api/auth.js       login / logout / session / first-admin bootstrap
+  api/users.js      admin-only account management
+  login.html        sign-in, doubles as first-run setup
+
+Roles grant apps by registry id, which is what `perms.tabs` carries to the front
+end. Permissions are looked up fresh on every session check rather than trusted
+from the cookie, so a role change takes effect on the next request instead of
+waiting 12 hours for the cookie to expire.
 
 ## Chrome
 
@@ -155,11 +206,11 @@ Recipe:
 later without silently stealing ErrorEngine's route. ErrorEngine's intake is
 `/api/errors`, behind `ERRORS_ENDPOINT`.
 
-**One login.** Both `lib/session.js` files are already byte-identical except for
-the cookie name (`backbone_session` vs `errorengine_session`), same HMAC, same
-`SESSION_SECRET`. Consolidating is mostly deleting one and standardising the
-cookie name. `SESSION_SECRET` must be identical across all apps or one-login
-breaks.
+**One login. DONE.** The two `session.js` files were byte-identical apart from
+comments, so consolidating the cookie was easy. The part the original notes
+missed: the two apps also had separate user stores with incompatible password
+hashes, so a shared cookie alone would have produced a valid key for a building
+you were not on the guest list for. Both are merged now. See Sign-in above.
 
 **perms.tabs.** Currently holds BackBone's internal tab names
 (`dashboard`, `roster`, ...). Under one login it must also carry app IDs.
