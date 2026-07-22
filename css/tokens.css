@@ -1,0 +1,129 @@
+/* ==========================================================================
+   alliteration. — design tokens
+   THE ONLY PLACE COLORS AND DIMENSIONS ARE DEFINED.
+
+   No app file declares a hex value. Components reference var(--accent) and
+   friends, so setting data-app on <body> re-themes the entire shell.
+
+   Neutrals below were already identical across BackBone, ShopStock,
+   ErrorEngine and GivingGauge, so consolidating them here changed nothing
+   visually. Only the accent triplet varies per app.
+   ========================================================================== */
+
+:root {
+  /* ---- Surfaces & text (shared by every app) ---------------------------- */
+  --bg:            #F4F6F8;
+  --card:          #FFFFFF;
+  --ink:           #1C2430;
+  --muted:         #6B7684;
+  --faint:         #9CA3AF;
+  --line:          #E4E8EC;
+  --line-soft:     #EDF0F3;
+  --wordmark-ink:  #231F20;
+
+  /* ---- Semantic status colors ------------------------------------------
+     These mean "good/bad", never "which app". GivingGauge's gauge depends on
+     green staying a GRADE color rather than a brand color, which is why its
+     accent is gold. Do not repoint --success at an accent. */
+  --success:       #3D9A5C;
+  --success-dk:    #2F7A48;
+  --success-tint:  #EAF5EE;
+  --warn:          #D5A029;
+  --warn-dk:       #A87A16;
+  --warn-tint:     #FBF2E1;
+  --danger:        #C0392B;
+  --danger-dk:     #96271B;
+  --danger-tint:   #FDECEA;
+  --danger-line:   #F5C6C0;
+
+  /* ---- Dimensions ------------------------------------------------------- */
+  --radius:        12px;
+  --radius-sm:     8px;
+  --radius-md:     12px;
+  --radius-pill:   99px;
+
+  --shell-header-h: 56px;
+  --shell-max-w:    1400px;
+  --gutter:         20px;
+  --gutter-sm:      12px;
+
+  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --shadow-card: 0 1px 2px rgba(28, 36, 48, .06);
+  --shadow-pop:  0 8px 24px rgba(28, 36, 48, .12);
+
+  --speed: .12s;
+
+  /* ---- Default accent (shell chrome before an app is chosen) ------------ */
+  --accent:        #1B5DAB;
+  --accent-deep:   #164B8A;
+  --accent-tint:   #EAF1F9;
+}
+
+/* ==========================================================================
+   PER-APP ACCENTS
+   Setting <body data-app="backbone"> re-themes everything downstream.
+   Adding an app = add a block here + one file in apps/ + two lines in
+   js/registry.js.
+   ========================================================================== */
+
+body[data-app="backbone"] {
+  --accent:      #1B5DAB;
+  --accent-deep: #164B8A;
+  --accent-tint: #EAF1F9;
+}
+
+body[data-app="shopstock"] {
+  --accent:      #E36325;
+  --accent-deep: #C24F16;
+  --accent-tint: #FCEEE6;
+}
+
+body[data-app="errorengine"] {
+  --accent:      #745DA8;
+  --accent-deep: #5B4788;
+  --accent-tint: #F0ECF7;
+}
+
+/* GivingGauge is GOLD, not green. The brief listed #3D9A5C, but that value is
+   --success in all four apps, and this app's gauge renders green/gold/red as
+   GRADE outcomes. A green accent would make the app chrome match its own
+   "grade A" color. Gold is what the app actually ships. */
+body[data-app="givinggauge"] {
+  --accent:      #D5A029;
+  --accent-deep: #A87A16;
+  --accent-tint: #FBF2E1;
+}
+
+body[data-app="traveltrack"] {
+  --accent:      #0E7C86;
+  --accent-deep: #0A5C64;
+  --accent-tint: #E4F2F3;
+}
+
+/* ==========================================================================
+   COMPATIBILITY ALIASES
+   Ported app markup references its own old variable names. Rather than
+   find-and-replace across 10k+ lines of working HTML (and risk changing
+   behaviour), the old names are aliased to the new ones. New code should use
+   --accent. These exist so ports drop in unmodified.
+   ========================================================================== */
+
+/* ErrorEngine used --purple / --purple-deep throughout. */
+body[data-app="errorengine"] {
+  --purple:      var(--accent);
+  --purple-deep: var(--accent-deep);
+}
+
+/* BackBone aliased its accent to --green* (a leftover from an earlier palette). */
+body[data-app="backbone"] {
+  --green:       var(--accent);
+  --green-dk:    var(--accent-deep);
+  --green-tint:  var(--accent-tint);
+}
+
+/* ErrorEngine also referenced a bare --green for status. */
+body[data-app="errorengine"] {
+  --green: var(--success);
+}
