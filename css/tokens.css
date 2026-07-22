@@ -28,9 +28,9 @@
   --success:       #3D9A5C;
   --success-dk:    #2F7A48;
   --success-tint:  #EAF5EE;
-  --warn:          #D5A029;
-  --warn-dk:       #A87A16;
-  --warn-tint:     #FBF2E1;
+  --warn:          #B4791E;
+  --warn-dk:       #8A5C16;
+  --warn-tint:     #FCF3E3;
   --danger:        #C0392B;
   --danger-dk:     #96271B;
   --danger-tint:   #FDECEA;
@@ -42,23 +42,46 @@
   --radius-md:     12px;
   --radius-pill:   99px;
 
-  --shell-header-h: 56px;
-  --shell-max-w:    1400px;
+  --shell-header-h: 60px;
+  --shell-max-w:    1180px;
+  --rail:           248px;
   --gutter:         20px;
   --gutter-sm:      12px;
 
-  --font: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
-  --shadow-card: 0 1px 2px rgba(28, 36, 48, .06);
-  --shadow-pop:  0 8px 24px rgba(28, 36, 48, .12);
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
+  --shadow-pop:  0 1px 2px rgba(16, 24, 40, .04), 0 4px 12px rgba(16, 24, 40, .04);
 
-  --speed: .12s;
+  --speed: .14s;
 
-  /* ---- Default accent (shell chrome before an app is chosen) ------------ */
-  --accent:        #1B5DAB;
-  --accent-deep:   #164B8A;
-  --accent-tint:   #EAF1F9;
+  /* ---- Hub (the "All apps" landing view) -------------------------------
+     The hub is not one of the five apps, so it carries its own accent. This
+     green is the shell's own color, used when no app is selected. */
+  --hub:      #52A246;
+  --hub-deep: #3F8236;
+  --hub-tint: #EDF6EB;
+
+  /* ---- Tier badges (BackBone scorecard, shown on the hub too) ----------
+     Fixed per tier, NOT app accents: an A-tier account is blue whichever app
+     is on screen. Declared here so no app file needs a hex. */
+  --tier-a: #1B5DAB;
+  --tier-b: #52A246;
+  --tier-c: #B4791E;
+  --tier-d: #9CA3AF;
+
+  /* ---- Misc surfaces ---------------------------------------------------- */
+  --on-accent:   #FFFFFF;
+  --footer-bg:   #FCFDFD;
+  --dot-idle:    #C9CFD6;
+
+  /* ---- Default accent (shell chrome before an app is chosen) ------------
+     Defaults to the hub green so the "All apps" view is themed correctly on
+     first paint, before data-app is set. */
+  --accent:        var(--hub);
+  --accent-deep:   var(--hub-deep);
+  --accent-tint:   var(--hub-tint);
 }
 
 /* ==========================================================================
@@ -67,6 +90,12 @@
    Adding an app = add a block here + one file in apps/ + two lines in
    js/registry.js.
    ========================================================================== */
+
+body[data-app="hub"] {
+  --accent:      var(--hub);
+  --accent-deep: var(--hub-deep);
+  --accent-tint: var(--hub-tint);
+}
 
 body[data-app="backbone"] {
   --accent:      #1B5DAB;
