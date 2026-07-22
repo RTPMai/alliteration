@@ -156,17 +156,35 @@
 
   // Ask the server whether anyone has an account yet. If not, this becomes the
   // setup screen instead of the sign-in screen.
-  try {
-    const res = await fetch('/api/auth?action=session', { credentials: 'same-origin' });
-    const data = await res.json();
-    if (data.authenticated) {
-      location.replace('/');
-    } else if (data.needsSetup) {
-      setSetupMode();
+  //
+  // Wrapped in a function rather than using top-level await: top-level await
+  // needs a recent browser, and when it is unsupported the whole module fails
+  // to parse, giving a blank screen with nothing in the console to explain it.
+  async function checkSession() {
+    try {
+      const res = await fetch('/api/auth?action=session', { credentials: 'same-origin' });
+      const data = await res.json();
+
+      // 503 + setup:true means an environment variable is missing. Show the
+      // server's own message rather than a vague failure, and hide the form,
+      // since signing in cannot work until it is fixed.
+      if (data.setup) {
+        show(data.error, 'err');
+        form.hidden = true;
+        return;
+      }
+
+      if (data.authenticated) {
+        location.replace('/');
+      } else if (data.needsSetup) {
+        setSetupMode();
+      }
+    } catch (e) {
+      show('Cannot reach the server. Open /api/health to see what is missing.', 'err');
     }
-  } catch (e) {
-    show('Cannot reach the server. Check that storage is configured.', 'err');
   }
+
+  checkSession();
 
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
