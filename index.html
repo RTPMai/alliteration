@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>alliteration.</title>
+
+<!-- tokens.css MUST load first: everything downstream reads its variables. -->
+<link rel="stylesheet" href="css/tokens.css">
+<link rel="stylesheet" href="css/shell.css">
+</head>
+<body>
+
+<div id="mockBanner" class="mock-banner" hidden>
+  Mock mode. No live data. Append <code>?mock=0</code> to hit real endpoints.
+</div>
+
+<header class="shell-header">
+  <span class="shell-wordmark">alliteration<span class="dot">.</span></span>
+  <nav id="appSwitcher" class="app-switcher" aria-label="Applications"></nav>
+  <span class="shell-spacer"></span>
+  <div id="shellUser" class="shell-user"></div>
+</header>
+
+<main id="shellMain" class="shell-main"></main>
+
+<script type="module">
+  import { boot } from './js/shell.js';
+  boot().catch((e) => {
+    console.error('[shell] boot failed:', e);
+    document.getElementById('shellMain').innerHTML =
+      '<div class="shell-msg"><h2>Failed to start</h2>' +
+      '<p>Check the console for details.</p></div>';
+  });
+</script>
+
+</body>
+</html>
