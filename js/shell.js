@@ -1,32 +1,32 @@
 /**
  * alliteration. — shell
  *
- * Owns the chrome, the session, and which app is on screen. Everything
- * app-specific lives in apps/. Everything network lives in api.js.
+ * Owns the chrome (header, rail, crumb), the session, and which app is on
+ * screen. Everything app-specific lives in apps/. Everything network lives in
+ * api.js.
  *
- * Boot order:
- *   1. resolve session (one login for all apps)
- *   2. build the switcher from the registry, filtered by perms
- *   3. start the router, mount the routed app, theme the body
+ * The chrome never re-renders on navigation. Switching views repaints the rail
+ * sub-nav and the crumb; the header and the mounted app hosts stay put.
+ *
+ * Routes:
+ *   #/            -> hub ("All apps")
+ *   #/<app>/<view>
  */
 
-import { APPS, getApp, canAccess, allowedViews, firstAllowed } from './registry.js';
+import { APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
 import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
 
-const el = {
-  switcher: null,
-  main: null,
-  user: null,
-  mockBanner: null
-};
+const HUB = 'hub';
 
+const el = {};
 const state = {
   user: null,
   perms: null,
-  activeApp: null,
-  hosts: new Map()      // appId -> host element
+  app: HUB,
+  view: null,
+  hosts: new Map()
 };
 
 /* ------------------------------------------------------------------ *
@@ -34,12 +34,18 @@ const state = {
  * ------------------------------------------------------------------ */
 
 export async function boot() {
-  el.switcher   = document.getElementById('appSwitcher');
-  el.main       = document.getElementById('shellMain');
-  el.user       = document.getElementById('shellUser');
+  el.rail       = document.getElementById('rail');
+  el.main       = document.getElementById('main');
+  el.crumb      = document.getElementById('crumb');
+  el.avatar     = document.getElementById('avatar');
   el.mockBanner = document.getElementById('mockBanner');
+  el.brandBtn   = document.getElementById('brandBtn');
+  el.railToggle = document.getElementById('railToggle');
 
   if (api.MOCK && el.mockBanner) el.mockBanner.hidden = false;
+
+  el.brandBtn.addEventListener('click', () => router.go(HUB, null));
+  el.railToggle.addEventListener('click', () => document.body.classList.toggle('rail-open'));
 
   api.onAuthFailure(() => renderMessage(
     'Session expired',
@@ -65,8 +71,7 @@ export async function boot() {
   state.user  = session.user;
   state.perms = session.user.perms || {};
 
-  renderUser();
-  renderSwitcher();
+  renderAvatar();
 
   const start = router.start();
   router.onRoute(handleRoute);
@@ -78,13 +83,23 @@ export async function boot() {
  * ------------------------------------------------------------------ */
 
 async function handleRoute(route) {
-  let { app: appId, view } = route;
+  const { app: appId, view } = route;
 
-  // No route, unknown app, or an app this user cannot open: fall back to the
-  // first one they can, and normalise the URL without stacking history.
-  if (!appId || !getApp(appId) || !canAccess(state.perms, appId)) {
+  // No route at all, or an explicit hub route.
+  if (!appId || appId === HUB) {
+    state.app = HUB;
+    state.view = null;
+    document.body.dataset.app = HUB;
+    renderRail();
+    renderCrumb();
+    return activateHub();
+  }
+
+  // Unknown app, or one this user cannot open: fall back to the first they can.
+  if (!getApp(appId) || !canAccess(state.perms, appId)) {
     const fallback = firstAllowed(state.perms);
     if (!fallback) {
+      renderRail();
       return renderMessage(
         'No apps available',
         'This account has no apps assigned. An administrator can grant access in Settings.'
@@ -99,13 +114,18 @@ async function handleRoute(route) {
   if (!view || !permitted.includes(view)) {
     const target = permitted.includes(meta.defaultView) ? meta.defaultView : permitted[0];
     if (!target) {
-      return renderMessage('No views available', 'This account cannot open any view in ' + meta.name + '.');
+      return renderMessage('No views available',
+        'This account cannot open any view in ' + meta.name + '.');
     }
     return router.go(appId, target, { replace: true });
   }
 
+  state.app = appId;
+  state.view = view;
   document.body.dataset.app = appId;
-  markSwitcher(appId);
+
+  renderRail();
+  renderCrumb();
 
   if (meta.stub) return renderStub(meta);
 
@@ -115,25 +135,54 @@ async function handleRoute(route) {
     console.error('[shell] failed to mount ' + appId, e);
     renderMessage(
       'Could not load ' + meta.name,
-      'The app failed to start. Check the console for details.'
+      'This app has not been ported into the shell yet.'
     );
   }
 }
 
-async function activate(meta, view) {
-  clearShellMessage();
-
-  // Hide every host, then reveal (or create) this app's.
-  state.hosts.forEach((h) => h.classList.remove('active'));
-
-  let host = state.hosts.get(meta.id);
+function hostFor(id) {
+  let host = state.hosts.get(id);
   if (!host) {
     host = document.createElement('div');
     host.className = 'app-host';
-    host.id = 'host-' + meta.id;
+    host.id = 'host-' + id;
     el.main.appendChild(host);
-    state.hosts.set(meta.id, host);
+    state.hosts.set(id, host);
   }
+  return host;
+}
+
+function hideAllHosts() {
+  state.hosts.forEach((h) => h.classList.remove('active'));
+}
+
+async function activateHub() {
+  clearShellMessage();
+  hideAllHosts();
+
+  const host = hostFor(HUB);
+  host.classList.add('active');
+
+  if (!isMounted(HUB)) {
+    host.innerHTML = '<div class="shell-spinner"></div>';
+    await mountApp({ id: HUB, views: [], defaultView: null }, host, {
+      user: state.user,
+      perms: state.perms,
+      go: () => {},
+      goApp: (a, v) => router.go(a, v)
+    });
+    const spinner = host.querySelector(':scope > .shell-spinner');
+    if (spinner) spinner.remove();
+  }
+
+  window.scrollTo({ top: 0 });
+}
+
+async function activate(meta, view) {
+  clearShellMessage();
+  hideAllHosts();
+
+  const host = hostFor(meta.id);
   host.classList.add('active');
 
   if (!isMounted(meta.id)) {
@@ -141,61 +190,98 @@ async function activate(meta, view) {
     await mountApp(meta, host, {
       user: state.user,
       perms: state.perms,
-      go: (v) => router.goView(v)
+      go: (v) => router.goView(v),
+      goApp: (a, v) => router.go(a, v)
     });
     const spinner = host.querySelector(':scope > .shell-spinner');
     if (spinner) spinner.remove();
   }
 
-  state.activeApp = meta.id;
   showView(meta.id, view);
+  window.scrollTo({ top: 0 });
 }
 
 /* ------------------------------------------------------------------ *
- * CHROME
+ * RAIL
  * ------------------------------------------------------------------ */
 
-function renderSwitcher() {
-  if (!el.switcher) return;
-  el.switcher.innerHTML = '';
+function renderRail() {
+  if (!el.rail) return;
 
-  APPS.filter((a) => canAccess(state.perms, a.id)).forEach((a) => {
-    const btn = document.createElement('button');
-    btn.className = 'app-btn';
-    btn.dataset.appId = a.id;
-    btn.dataset.stub = String(!!a.stub);
-    btn.style.setProperty('--dot', a.accent);
-    btn.title = a.blurb;
-    btn.innerHTML = '<span class="dot-swatch"></span>' + a.name;
-    btn.addEventListener('click', () => router.go(a.id, a.defaultView));
-    el.switcher.appendChild(btn);
+  const visible = APPS.filter((a) => canAccess(state.perms, a.id));
+  let html = '<div class="rail-label">Apps</div>';
+
+  visible.forEach((a) => {
+    const on = state.app === a.id;
+    html += `
+      <button class="rail-item${on ? ' active' : ''}${a.stub ? ' planned' : ''}"
+              data-app="${a.id}" style="--dot:${a.accent}">
+        <span class="sq"></span>${escape(a.name)}${a.stub ? '<span class="tag">Soon</span>' : ''}
+      </button>`;
+
+    // Sub-nav only under the open app, and only views this user may see.
+    if (on) {
+      const views = allowedViews(state.perms, a.id);
+      if (views.length > 1) {
+        html += '<div class="subnav">';
+        views.forEach((v) => {
+          html += `
+            <button class="sub-item${state.view === v ? ' active' : ''}"
+                    data-app="${a.id}" data-view="${v}">${escape(viewLabel(a, v))}</button>`;
+        });
+        html += '</div>';
+      }
+    }
+  });
+
+  html += '<div class="rail-hr"></div><div class="rail-label">Shared</div>';
+  html += `
+    <button class="rail-item${state.app === HUB ? ' active' : ''}" data-app="${HUB}">
+      <span class="sq" style="--dot:var(--hub)"></span>All apps
+    </button>`;
+
+  el.rail.innerHTML = html;
+
+  el.rail.querySelectorAll('[data-app]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.body.classList.remove('rail-open');
+      const id = btn.dataset.app;
+      if (id === HUB) return router.go(HUB, null);
+      const target = getApp(id);
+      router.go(id, btn.dataset.view || (target ? target.defaultView : null));
+    });
   });
 }
 
-function markSwitcher(appId) {
-  if (!el.switcher) return;
-  el.switcher.querySelectorAll('.app-btn').forEach((b) => {
-    b.classList.toggle('active', b.dataset.appId === appId);
-  });
+/* ------------------------------------------------------------------ *
+ * CRUMB + AVATAR
+ * ------------------------------------------------------------------ */
+
+function renderCrumb() {
+  if (!el.crumb) return;
+
+  if (state.app === HUB) {
+    el.crumb.innerHTML = '<span>All apps</span>';
+    return;
+  }
+
+  const app = getApp(state.app);
+  if (!app) { el.crumb.innerHTML = ''; return; }
+
+  el.crumb.innerHTML =
+    '<span>alliteration</span>' +
+    '<span class="sep">/</span>' +
+    `<span class="now">${escape(app.name)}</span>` +
+    (state.view
+      ? '<span class="sep">/</span><span>' + escape(viewLabel(app, state.view)) + '</span>'
+      : '');
 }
 
-function renderUser() {
-  if (!el.user || !state.user) return;
-  const name = state.user.name || state.user.email || 'Signed in';
-  el.user.innerHTML = '';
-
-  const who = document.createElement('strong');
-  who.textContent = name;
-  el.user.appendChild(who);
-
-  const out = document.createElement('button');
-  out.className = 'shell-logout';
-  out.textContent = 'Sign out';
-  out.addEventListener('click', async () => {
-    try { await api.auth.logout(); } catch (e) { /* sign out locally regardless */ }
-    location.reload();
-  });
-  el.user.appendChild(out);
+function renderAvatar() {
+  if (!el.avatar || !state.user) return;
+  const name = state.user.name || state.user.email || '?';
+  el.avatar.textContent = name.trim()[0].toUpperCase();
+  el.avatar.title = name;
 }
 
 /* ------------------------------------------------------------------ *
@@ -222,23 +308,27 @@ function renderSpinner() {
 }
 
 function renderMessage(title, body) {
-  state.hosts.forEach((h) => h.classList.remove('active'));
+  hideAllHosts();
   shellMessageNode().innerHTML =
-    '<div class="shell-msg"><h2>' + escapeHtml(title) + '</h2><p>' + body + '</p></div>';
+    '<div class="shell-msg"><h2>' + escape(title) + '</h2><p>' + body + '</p></div>';
 }
 
 function renderStub(meta) {
-  state.hosts.forEach((h) => h.classList.remove('active'));
+  hideAllHosts();
   shellMessageNode().innerHTML =
-    '<div class="shell-msg">' +
-      '<h2>' + escapeHtml(meta.name) + '</h2>' +
-      '<p>Confirmed for rebuild. This app runs on Base44, so there is no ' +
+    '<div class="view"><div class="page-head"><div>' +
+      '<div class="page-title">' + escape(meta.name) + '<span class="dot">.</span></div>' +
+      '<div class="page-sub">' + escape(meta.role || meta.blurb) + '</div>' +
+    '</div></div>' +
+    '<div class="card"><div class="card-bd"><div class="empty">' +
+      '<strong>Not built yet</strong>' +
+      'Confirmed for rebuild. This app runs on Base44, so there is no ' +
       '<code>api/</code> folder to point at. The data model gets rebuilt here ' +
-      'rather than reconnected.</p>' +
-    '</div>';
+      'rather than reconnected.' +
+    '</div></div></div></div>';
 }
 
-function escapeHtml(s) {
+function escape(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[c]);
