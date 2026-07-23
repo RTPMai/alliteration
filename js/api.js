@@ -55,6 +55,23 @@ function isLive(path) {
   return LIVE_PREFIXES.some((p) => String(path).startsWith(p));
 }
 
+/**
+ * Which apps still have no deployed backend. Drives the banner, so it can name
+ * them instead of claiming the whole shell is on sample data when most of it
+ * is not.
+ */
+export function appsOnSampleData() {
+  const byApp = {
+    shopstock:   [ENDPOINTS.ssItems, ENDPOINTS.ssSettings],
+    givinggauge: [ENDPOINTS.ggRequests, ENDPOINTS.ggBudget],
+    backbone:    [ENDPOINTS.bbData],
+    errorengine: [ENDPOINTS.eeErrors]
+  };
+  return Object.keys(byApp).filter(
+    (id) => !byApp[id].every((p) => p && isLive(p))
+  );
+}
+
 /* ------------------------------------------------------------------ *
  * ENDPOINTS
  *
