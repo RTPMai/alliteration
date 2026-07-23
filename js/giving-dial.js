@@ -1,7 +1,7 @@
 /**
  * alliteration. — GivingGauge dial adapter.
  *
- * Same story as js/giving-engine.js. vendor/gauge.cjs is a verbatim copy of
+ * Same story as js/giving-engine.js. vendor/gauge.js is a verbatim copy of
  * GivingGauge/src/gauge.js, which ends in module.exports plus a
  * window.GivingGaugeDial global. The shell is native ES modules, so it loads the
  * file as a classic script and re-exports the global rather than editing it.
@@ -11,7 +11,14 @@
  * engine is.
  */
 
-const SRC = new URL('../vendor/gauge.cjs', import.meta.url).href;
+// NOTE the .js extension. The vendored file exists TWICE, byte-identical:
+//   vendor/x.cjs  — what Node requires (package.json sets "type": "module",
+//                   so a .js there would be treated as ESM and require() breaks)
+//   vendor/x.js   — what the BROWSER fetches. A .cjs has no registered MIME
+//                   type, so hosts serve it inconsistently: as a download, as
+//                   HTML, or rewritten by cleanUrls. A .js is unambiguous.
+// The parity test hashes both, so the copies cannot drift.
+const SRC = new URL('../vendor/gauge.js', import.meta.url).href;
 
 let loading = null;
 
@@ -38,14 +45,34 @@ async function loadVendorGlobal(src) {
   } catch (e) {
     throw new Error(
       'Could not fetch dial from ' + src + ' (' + e.message + '). ' +
-      'Check that vendor/gauge.cjs deployed.'
+      'Check that vendor/gauge.js deployed.'
     );
   }
 
-  // Guard against a server that returns an HTML error page with a 200.
-  if (/^\s*</.test(code)) {
-    throw new Error('dial at ' + src + ' returned HTML, not JavaScript. ' +
-                    'The file is probably missing and a fallback page was served.');
+  // The server can return a 200 with the WRONG BODY: an HTML error page, a JSON
+  // error object, or a redirect landing page. Evaluating any of those produces
+  // a syntax error that says nothing useful, so check the shape first and
+  // report what actually arrived.
+  const head = code.slice(0, 200).trim();
+  if (head.startsWith('<')) {
+    throw new Error(
+      'dial at ' + src + ' returned HTML instead of JavaScript. The file is ' +
+      'probably not deployed, and a fallback page was served. First bytes: ' +
+      JSON.stringify(head.slice(0, 80))
+    );
+  }
+  if (head.startsWith('{') || head.startsWith('[')) {
+    throw new Error(
+      'dial at ' + src + ' returned JSON instead of JavaScript. First bytes: ' +
+      JSON.stringify(head.slice(0, 80))
+    );
+  }
+  // A real copy of this file starts with a comment or "use strict".
+  if (!/^(\/\*|\/\/|'use strict'|"use strict")/.test(head)) {
+    throw new Error(
+      'dial at ' + src + ' does not look like the expected file. First bytes: ' +
+      JSON.stringify(head.slice(0, 80))
+    );
   }
 
   // The vendored file ends with:
@@ -66,7 +93,7 @@ async function loadVendorGlobal(src) {
     : window.GivingGaugeDial;
 
   if (!api) {
-    throw new Error('dial evaluated but exported nothing. vendor/gauge.cjs may be truncated.');
+    throw new Error('dial evaluated but exported nothing. vendor/gauge.js may be truncated.');
   }
 
   // Publish the global too: the vendored file's own internals may look for it,
