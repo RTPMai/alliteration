@@ -22,6 +22,12 @@ const REQUIRED = [
   "js/api.js", "js/app-host.js", "js/registry.js", "js/router.js", "js/shell.js",
   "js/giving-engine.js", "js/giving-dial.js", "js/qrcode-loader.js",
   "apps/hub.js", "apps/traveltrack.js", "apps/givinggauge.js", "apps/shopstock.js",
+  "apps/settings.js",
+  // BackBone lives in a FOLDER, not one file. All three parts must be present:
+  // index.js imports the other two, so a missing sibling takes the whole app
+  // down with a message that only says the module failed to load.
+  "apps/backbone/index.js", "apps/backbone/styles.js", "apps/backbone/template.js",
+  "lib/giving.js",
   "vendor/scoring-engine.js", "vendor/gauge.js"
 ];
 
