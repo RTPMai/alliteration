@@ -140,9 +140,20 @@ async function handleRoute(route) {
     await activate(meta, view);
   } catch (e) {
     console.error('[shell] failed to mount ' + appId, e);
+
+    // Distinguish "not built yet" from "built but failed to load". They look
+    // identical to a user and have completely different fixes: the first is
+    // waiting on work, the second is usually a file that did not deploy.
+    const missing = e && (e.name === 'TypeError' || /Failed to fetch|Importing a module|dynamically imported/i.test(e.message || ''));
+
     renderMessage(
       'Could not load ' + meta.name,
-      'This app has not been ported into the shell yet.'
+      missing
+        ? 'The app file did not load. Check that <code>apps/' + appId + '.js</code> ' +
+          'and everything it imports were deployed, then look at the browser console ' +
+          'for the exact path that failed.'
+        : 'The app failed to start: ' + escape(e && e.message ? e.message : String(e)) +
+          '. See the browser console for details.'
     );
   }
 }
