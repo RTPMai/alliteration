@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 125 tests. Never let it go red.
+bash test/run.sh     # 129 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -106,6 +106,21 @@ waiting 12 hours for the cookie to expire.
   instead of the old standalone `/item/:id`, which matters because labels are
   permanent.
 - **ErrorEngine, BackBone** — not yet ported.
+
+### QR labels are permanent
+
+ShopStock prints QR labels that get stuck on physical bins. They cannot be
+recalled, so both formats must work forever:
+
+  /item/<id>                  labels printed BEFORE the shell. A vercel rewrite
+                              sends these to item.html, which moves the id into
+                              the hash. Do not delete that file.
+  /#/shopstock/item/<id>      what the shell prints now.
+
+The router carries a third path segment as `param`, and "item" is listed in
+ShopStock's `hiddenViews`: routable by URL, but not shown in the rail. Both
+halves are needed — without routable the shell rejects a scan and bounces to the
+dashboard, without hidden the rail grows a dead link.
 
 ### Vendor files exist twice, on purpose
 
