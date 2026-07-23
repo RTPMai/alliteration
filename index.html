@@ -44,14 +44,41 @@
   <main class="main" id="main"></main>
 </div>
 
+<script>
+  // Plain script, runs everywhere and FIRST. If the module below never manages
+  // to boot, this message is what remains on screen instead of a blank page.
+  // shell.js clears it on success.
+  document.getElementById('main').innerHTML =
+    '<div class="shell-msg"><h2>Starting\u2026</h2>' +
+    '<p>If this message stays, the app failed to load. ' +
+    'Open <code>/api/health</code> to see which files are missing, ' +
+    'and the browser console for the exact path.</p></div>';
+
+  window.addEventListener('error', function (e) {
+    // A failed module fetch surfaces here rather than in the try/catch below,
+    // because the browser reports it as a resource error on the page.
+    if (e && e.target && e.target.tagName === 'SCRIPT') {
+      document.getElementById('main').innerHTML =
+        '<div class="shell-msg"><h2>Failed to load</h2>' +
+        '<p>A script did not load: ' + (e.target.src || 'unknown') + '</p></div>';
+    }
+  }, true);
+</script>
+
 <script type="module">
-  import { boot } from './js/shell.js';
-  boot().catch((e) => {
+  // Absolute path, not './js/shell.js'. A relative specifier resolves against
+  // the PAGE url, so it breaks the moment the app is served from anywhere but
+  // the root. Absolute is unambiguous.
+  try {
+    const { boot } = await import('/js/shell.js');
+    await boot();
+  } catch (e) {
     console.error('[shell] boot failed:', e);
     document.getElementById('main').innerHTML =
       '<div class="shell-msg"><h2>Failed to start</h2>' +
-      '<p>Check the console for details.</p></div>';
-  });
+      '<p>' + (e && e.message ? String(e.message).replace(/[<>]/g, '') : 'Unknown error') + '</p>' +
+      '<p style="margin-top:10px">Open <code>/api/health</code> to see which files are missing.</p></div>';
+  }
 </script>
 
 </body>
