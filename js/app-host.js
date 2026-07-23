@@ -226,7 +226,7 @@ export async function mountApp(meta, host, ctxExtras) {
 
   const app = mod.default || mod;
   if (!app || typeof app !== 'object') {
-    throw new Error('apps/' + meta.id + '.js loaded but exported no app object.');
+    throw new Error('apps/' + rel + ' loaded but exported no app object.');
   }
 
   const root = document.createElement('div');
