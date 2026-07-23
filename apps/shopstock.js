@@ -573,10 +573,10 @@ export default {
               </div>`).join("") : `<div class="empty-star-wrap">
                 <div class="empty-star">
                   <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
-                    <polygon points="46,3 58,33 96,36 66,55 74,92 45,70 12,90 22,53 2,32 40,30" fill="var(--amber)" stroke="var(--ink)" stroke-width="1.6" stroke-linejoin="round"/>
+                    <polygon points="46,3 58,33 96,36 66,55 74,92 45,70 12,90 22,53 2,32 40,30" fill="var(--gold-bright)" stroke="var(--gold-deep)" stroke-width="1.6" stroke-linejoin="round"/>
                   </svg>
                 </div>
-                <span class="empty-star-text">Your Did It!</span>
+                <span class="empty-star-text">You Did It!</span>
               </div>`}
           </div>
         </div>`).join("")}</div>`;
