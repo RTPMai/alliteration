@@ -86,11 +86,52 @@ export default {
     display:inline-block;padding:2px 9px;border-radius:var(--radius-pill);
     font-size:11px;font-weight:700;background:var(--accent-tint);color:var(--accent-deep);
   }
-  .app-chips{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
+  /* App chips carry each app's OWN color, set inline from the registry via
+     --c. That is the whole point: scanning the list should show at a glance
+     who can open what, and grey-on-grey chips make you read every word. */
+  .app-chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:5px}
   .app-chip{
-    font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:var(--radius-pill);
-    background:var(--line-soft);color:var(--muted);
+    display:inline-flex;align-items:center;gap:5px;
+    font-size:10.5px;font-weight:700;padding:2px 9px;border-radius:var(--radius-pill);
+    background:color-mix(in srgb, var(--c) 12%, transparent);
+    color:var(--c);
+    border:1px solid color-mix(in srgb, var(--c) 26%, transparent);
   }
+  .app-chip .sq{width:6px;height:6px;border-radius:2px;background:var(--c);flex:none}
+  .app-chip.off{
+    background:transparent;color:var(--faint);border-color:var(--line);
+  }
+  .app-chip.off .sq{background:var(--line)}
+
+  /* ---- role editor ---- */
+  .role-block{
+    border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:14px 16px;margin-bottom:10px;
+  }
+  .role-block.protected{background:var(--bg)}
+  .role-top{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .role-name{font-size:14px;font-weight:700}
+  .role-id{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .role-apps{display:flex;gap:5px;flex-wrap:wrap;margin-top:10px}
+  .app-toggle{
+    display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+    font-size:11.5px;font-weight:600;padding:4px 11px;border-radius:var(--radius-pill);
+    border:1px solid var(--line);background:var(--card);color:var(--muted);
+    font-family:inherit;transition:.12s;
+  }
+  .app-toggle .sq{width:7px;height:7px;border-radius:2px;background:var(--line);flex:none}
+  .app-toggle[aria-pressed="true"]{
+    background:color-mix(in srgb, var(--c) 12%, transparent);
+    border-color:color-mix(in srgb, var(--c) 40%, transparent);
+    color:var(--c);
+  }
+  .app-toggle[aria-pressed="true"] .sq{background:var(--c)}
+  .app-toggle:disabled{opacity:.55;cursor:default}
+  .role-opts{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;font-size:12.5px}
+  .role-opts label{display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--muted)}
+  .role-opts input{cursor:pointer}
+  .role-lock{font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.5}
+  .role-holders{font-size:11.5px;color:var(--muted);margin-top:8px}
 
   .set-empty{padding:32px 20px;text-align:center;color:var(--muted);font-size:13px}
   .set-note{
@@ -148,7 +189,14 @@ export default {
       </div>
 
       <div class="set-card">
-        <div class="set-card-hd"><h2>Roles</h2></div>
+        <div class="set-card-hd">
+          <h2>Roles</h2>
+          <div>
+            <span class="set-msg" id="roleMsg" style="display:none;margin:0 8px 0 0;padding:4px 9px"></span>
+            <button class="set-btn" id="addRoleBtn">Add role</button>
+            <button class="set-btn primary" id="saveRolesBtn" disabled>Save changes</button>
+          </div>
+        </div>
         <div class="set-card-bd" id="roleList"></div>
       </div>
     </div>
@@ -185,11 +233,19 @@ export default {
       }
     }
 
-    function appNames(ids) {
-      return (ids || []).map((id) => {
+    /** App chips in each app's own color, so the list is scannable. */
+    function appChips(ids) {
+      if (!ids || !ids.length) {
+        return '<span class="app-chip off"><span class="sq"></span>No apps</span>';
+      }
+      return ids.map((id) => {
         const a = APPS.find((x) => x.id === id);
-        return a ? a.name : id;
-      });
+        const name = a ? a.name : id;
+        const color = a ? a.accent : 'var(--muted)';
+        return '<span class="app-chip" style="--c:' + esc(color) + '">' +
+                 '<span class="sq"></span>' + esc(name) +
+               '</span>';
+      }).join('');
     }
 
     function renderUsers() {
@@ -212,9 +268,7 @@ export default {
               (isMe ? ' <span class="u-sub" style="display:inline">(you)</span>' : '') +
             '</div><div class="u-sub">' + esc(u.username) + '</div></td>' +
             '<td><span class="role-pill">' + esc(role.label || u.role) + '</span>' +
-              '<div class="app-chips">' +
-                appNames(role.apps).map((n) => '<span class="app-chip">' + esc(n) + '</span>').join('') +
-              '</div></td>' +
+              '<div class="app-chips">' + appChips(role.apps) + '</div></td>' +
             '<td class="u-sub">' + (u.last_login ? esc(new Date(u.last_login).toLocaleDateString()) : 'Never') + '</td>' +
             '<td class="u-actions">' +
               '<button class="set-btn" data-reset="' + esc(u.username) + '">Reset password</button>' +
@@ -227,29 +281,84 @@ export default {
         '</tbody></table>';
     }
 
+    /**
+     * Roles are edited in place: toggle apps, tick permissions, then Save.
+     *
+     * Not saved per-click, unlike the classification dropdowns in GivingGauge.
+     * Roles have invariants that only hold for a COMPLETE set — every role must
+     * keep at least one app — so a half-made edit is a state the server would
+     * rightly reject. Batching means the whole set is valid when it is sent.
+     */
     function renderRoles() {
       const names = Object.keys(roles);
       if (!names.length) { $('#roleList').innerHTML = ''; return; }
 
-      $('#roleList').innerHTML =
-        '<table class="u-table"><thead><tr>' +
-          '<th>Role</th><th>Apps</th><th>Can edit</th>' +
-        '</tr></thead><tbody>' +
-        names.map((k) => {
-          const r = roles[k];
-          return '<tr>' +
-            '<td><div class="u-name">' + esc(r.label || k) + '</div>' +
-              '<div class="u-sub">' + esc(k) + (r.protected ? ' · protected' : '') + '</div></td>' +
-            '<td><div class="app-chips">' +
-              appNames(r.apps).map((n) => '<span class="app-chip">' + esc(n) + '</span>').join('') +
-            '</div></td>' +
-            '<td>' + (r.can_edit === false ? 'Read only' : 'Yes') + '</td>' +
-          '</tr>';
-        }).join('') +
-        '</tbody></table>' +
-        '<div class="set-note">Roles decide which apps someone can open. The admin role ' +
-        'always keeps every app, so an administrator cannot lock themselves out of the ' +
-        'only screen that could undo it.</div>';
+      const holderCount = (roleKey) => users.filter((u) => u.role === roleKey).length;
+
+      $('#roleList').innerHTML = names.map((key) => {
+        const r = roles[key];
+        const locked = !!r.protected;
+        const held = holderCount(key);
+
+        const toggles = APPS.map((a) => {
+          const on = Array.isArray(r.apps) && r.apps.includes(a.id);
+          return '<button class="app-toggle" type="button"' +
+            ' style="--c:' + esc(a.accent) + '"' +
+            ' data-role="' + esc(key) + '" data-app-toggle="' + esc(a.id) + '"' +
+            ' aria-pressed="' + on + '"' +
+            (locked ? ' disabled' : '') + '>' +
+            '<span class="sq"></span>' + esc(a.name) +
+          '</button>';
+        }).join('');
+
+        return '' +
+          '<div class="role-block' + (locked ? ' protected' : '') + '">' +
+            '<div class="role-top">' +
+              '<div>' +
+                '<div class="role-name">' + esc(r.label || key) + '</div>' +
+                '<div class="role-id">' + esc(key) +
+                  (held ? ' · ' + held + (held === 1 ? ' person' : ' people') : ' · nobody yet') +
+                '</div>' +
+              '</div>' +
+              (locked ? '' :
+                '<button class="set-btn danger" data-del-role="' + esc(key) + '">Delete role</button>') +
+            '</div>' +
+
+            '<div class="role-apps">' + toggles + '</div>' +
+
+            '<div class="role-opts">' +
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_edit"' +
+                (r.can_edit !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can edit</label>' +
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_export"' +
+                (r.can_export !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can export</label>' +
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="own_only"' +
+                (r.data_scope === 'own' ? ' checked' : '') + (locked ? ' disabled' : '') + '> Own accounts only</label>' +
+            '</div>' +
+
+            (locked
+              ? '<div class="role-lock">The admin role always keeps every app and every ' +
+                'permission. Without that, an administrator could remove their own access ' +
+                'to the only screen that could undo it.</div>'
+              : '') +
+          '</div>';
+      }).join('');
+    }
+
+    let dirty = false;
+    function markDirty(on) {
+      dirty = on;
+      const btn = $('#saveRolesBtn');
+      if (btn) btn.disabled = !on;
+    }
+
+    function sayRole(text, kind) {
+      const el = $('#roleMsg');
+      if (!el) return;
+      el.textContent = text || '';
+      el.className = 'set-msg ' + (kind || '');
+      el.style.display = text ? 'inline-block' : 'none';
+      el.style.margin = '0 8px 0 0';
+      el.style.padding = '4px 9px';
     }
 
     function fillRoleSelect() {
@@ -325,6 +434,127 @@ export default {
         } catch (err) {
           say(err.message || 'Could not remove that account', 'err');
         }
+      }
+    });
+
+    /* ---- role editing ---- */
+
+    // App toggles and permission ticks edit the LOCAL copy. Nothing reaches the
+    // server until Save, because saveRoles validates the whole set at once.
+    root.addEventListener('click', (e) => {
+      const tog = e.target.closest('[data-app-toggle]');
+      if (!tog || tog.disabled) return;
+
+      const key = tog.dataset.role;
+      const appId = tog.dataset.appToggle;
+      const role = roles[key];
+      if (!role) return;
+
+      role.apps = Array.isArray(role.apps) ? role.apps : [];
+      const at = role.apps.indexOf(appId);
+      if (at === -1) role.apps.push(appId); else role.apps.splice(at, 1);
+
+      // Warn immediately rather than letting Save fail: a role with no apps
+      // means its people sign in to a blank screen.
+      if (!role.apps.length) {
+        sayRole('"' + (role.label || key) + '" has no apps', 'err');
+      } else {
+        sayRole('');
+      }
+
+      renderRoles();
+      markDirty(true);
+    });
+
+    root.addEventListener('change', (e) => {
+      const box = e.target.closest('[data-flag]');
+      if (!box || box.disabled) return;
+
+      const role = roles[box.dataset.role];
+      if (!role) return;
+
+      const flag = box.dataset.flag;
+      if (flag === 'own_only') role.data_scope = box.checked ? 'own' : 'all';
+      else role[flag] = box.checked;
+
+      markDirty(true);
+    });
+
+    $('#saveRolesBtn').addEventListener('click', async () => {
+      const empty = Object.keys(roles).filter(
+        (k) => k !== 'admin' && (!roles[k].apps || !roles[k].apps.length));
+      if (empty.length) {
+        sayRole('Give ' + empty.join(', ') + ' at least one app first', 'err');
+        return;
+      }
+
+      const btn = $('#saveRolesBtn');
+      btn.disabled = true;
+      sayRole('Saving...');
+      try {
+        const out = await ctx.api.post(ENDPOINTS.users + '?scope=roles', { roles });
+        roles = out.roles || roles;
+        renderRoles();
+        renderUsers();          // the people table shows role apps too
+        fillRoleSelect();
+        markDirty(false);
+        sayRole('Saved', 'ok');
+        setTimeout(() => sayRole(''), 2500);
+      } catch (err) {
+        sayRole(err.message || 'Could not save roles', 'err');
+        btn.disabled = false;
+      }
+    });
+
+    $('#addRoleBtn').addEventListener('click', () => {
+      const label = prompt('Name for the new role (e.g. "Production Lead"):');
+      if (!label || !label.trim()) return;
+
+      const key = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+      if (!key) { sayRole('That name has no usable letters or numbers', 'err'); return; }
+      if (roles[key]) { sayRole('A role called "' + key + '" already exists', 'err'); return; }
+
+      roles[key] = {
+        name: key,
+        label: label.trim(),
+        protected: false,
+        // Starts with BackBone only. An empty app list would be invalid, and
+        // defaulting to everything would quietly over-grant.
+        apps: ['backbone'],
+        data_scope: 'all',
+        can_edit: true,
+        can_export: false
+      };
+      renderRoles();
+      markDirty(true);
+      sayRole('Added "' + label.trim() + '". Pick its apps, then Save.', 'ok');
+    });
+
+    root.addEventListener('click', async (e) => {
+      const del = e.target.closest('[data-del-role]');
+      if (!del) return;
+
+      const key = del.dataset.delRole;
+      const held = users.filter((u) => u.role === key);
+      if (held.length) {
+        // Deleting a role someone holds would silently drop them to viewer
+        // permissions. They would not lose access, they would lose the RIGHT
+        // access, which is harder to notice.
+        sayRole(held.length + (held.length === 1 ? ' person is' : ' people are') +
+                ' still using this role. Move them first.', 'err');
+        return;
+      }
+      if (!confirm('Delete the "' + (roles[key].label || key) + '" role?')) return;
+
+      try {
+        const out = await ctx.api.del(ENDPOINTS.users + '?scope=roles&role=' + encodeURIComponent(key));
+        roles = out.roles || roles;
+        renderRoles();
+        fillRoleSelect();
+        markDirty(false);
+        sayRole('Role deleted', 'ok');
+      } catch (err) {
+        sayRole(err.message || 'Could not delete that role', 'err');
       }
     });
 
