@@ -1,6 +1,5 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "cleanUrls": true,
   "functions": {
     "api/*.js": {
       "includeFiles": "{lib,js,css,apps,vendor}/**"
@@ -9,6 +8,10 @@
   "headers": [
     {
       "source": "/js/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
+    },
+    {
+      "source": "/apps/(.*)",
       "headers": [{ "key": "Cache-Control", "value": "no-cache" }]
     },
     {
