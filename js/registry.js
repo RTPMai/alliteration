@@ -25,12 +25,15 @@ export const APPS = [
     role: 'Who we sell to',
     blurb: 'Accounts, leads, roster, scorecard.',
     accent: '#1B5DAB',           // display only (rail dot / app mark); tokens.css owns theming
+    // BackBone is ~10k lines, so it lives in a FOLDER rather than one file.
+    // `entry` selects that layout; the app contract is unchanged.
+    entry: 'backbone/index.js',
     views: [
+      ['dashboard', 'Dashboard'],
       ['inbox', 'Inbox'],
       ['leads', 'Leads'],
       ['roster', 'Roster'],
       ['scorecard', 'Scorecard'],
-      ['dashboard', 'Dashboard'],
       ['settings', 'Settings']
     ],
     defaultView: 'dashboard',
