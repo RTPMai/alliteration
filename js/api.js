@@ -45,7 +45,11 @@ export const MOCK = resolveMock();
  * mock data when the server has no route for it. Delete an entry from this list
  * as each app's endpoints are deployed.
  */
-const LIVE_PREFIXES = ['/api/auth', '/api/users', '/api/health'];
+const LIVE_PREFIXES = [
+  '/api/auth', '/api/users', '/api/health',
+  // ShopStock: api/items.js, api/settings.js and api/scrape.js are deployed.
+  '/api/items', '/api/settings', '/api/scrape'
+];
 
 function isLive(path) {
   return LIVE_PREFIXES.some((p) => String(path).startsWith(p));
