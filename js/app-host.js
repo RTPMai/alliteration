@@ -247,11 +247,11 @@ export async function mountApp(meta, host, ctxExtras) {
   return entry;
 }
 
-export function showView(id, view) {
+export function showView(id, view, param) {
   const entry = mounted.get(id);
   if (!entry) return;
   if (typeof entry.app.showView === 'function') {
-    try { entry.app.showView(view, entry.ctx); }
+    try { entry.app.showView(view, param, entry.ctx); }
     catch (e) { console.error(`[${id}] showView failed:`, e); }
   }
 }
