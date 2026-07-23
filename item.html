@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Redirecting…</title>
+
+<link rel="stylesheet" href="/css/tokens.css">
+<link rel="stylesheet" href="/css/shell.css">
+
+<style>
+  .redir { min-height: 100vh; display: grid; place-items: center; padding: 24px; text-align: center; }
+  .redir .msg { max-width: 340px; color: var(--muted); font-size: 13px; line-height: 1.6; }
+  .redir h1 { font-size: 17px; font-weight: 700; color: var(--ink); margin-bottom: 6px; }
+</style>
+</head>
+<body data-app="shopstock">
+
+<div class="redir">
+  <div>
+    <div class="shell-spinner"></div>
+    <div class="msg">
+      <h1 id="title">Opening item…</h1>
+      <p id="detail">Taking you to ShopStock.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+  /*
+   * LEGACY QR REDIRECT.
+   *
+   * ShopStock printed permanent QR labels pointing at /item/<id> — its own
+   * route when it was a standalone deployment. Under the shell that route does
+   * not exist; items live at #/shopstock/item/<id>.
+   *
+   * Those labels are stuck on physical bins and cannot be recalled, so this
+   * page keeps them working forever. A server rewrite cannot do it: the id has
+   * to move from the PATH into the HASH, and rewrites cannot touch a fragment.
+   *
+   * Do not delete this file. Every label printed before the shell depends on it.
+   */
+  (function () {
+    var path = window.location.pathname;                 // "/item/abc123"
+    var id = path.replace(/^\/+item\/+/, '').replace(/\/+$/, '');
+
+    if (!id) {
+      document.getElementById('title').textContent = 'No item in that code';
+      document.getElementById('detail').innerHTML =
+        'That QR code did not include an item id. ' +
+        '<a href="/#/shopstock/inventory">Open ShopStock</a>';
+      return;
+    }
+
+    // replace(), not assign(): the redirect should not sit in history, or Back
+    // from the item bounces straight back here.
+    window.location.replace('/#/shopstock/item/' + encodeURIComponent(id));
+  })();
+</script>
+
+</body>
+</html>
