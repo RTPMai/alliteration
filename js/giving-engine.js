@@ -44,8 +44,15 @@ async function loadVendorGlobal(src) {
       // The file checks for `module`, so give it one; it also sets the window
       // global, which is what we actually read back.
       const shim = { exports: {} };
-      new Function('module', 'exports', 'window', code)(shim, shim.exports, window);
+      // NOTE: `window` is deliberately NOT passed as a parameter. The vendored
+      // file ends with `window.GivingGauge = ...`, and a parameter named
+      // `window` would shadow the real one, so that assignment would land on a
+      // throwaway object and the global would never appear. Leaving it out lets
+      // the file see the genuine window through the normal scope chain.
+      new Function('module', 'exports', code)(shim, shim.exports);
       if (window.GivingGauge) return window.GivingGauge;
+      // Fall back to module.exports for the same object, and publish it so the
+      // vendored file's own global lookups still resolve.
       if (shim.exports && Object.keys(shim.exports).length) {
         window.GivingGauge = shim.exports;
         return shim.exports;
