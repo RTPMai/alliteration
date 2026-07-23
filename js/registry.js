@@ -53,6 +53,12 @@ export const APPS = [
       ['full', 'Full Inventory'],
       ['admin', 'Admin']
     ],
+    // Reachable by URL but NOT shown in the rail. "item" is where a scanned QR
+    // label lands (#/shopstock/item/<id>) and "queue" is opened from a row
+    // click. Listing them above would put two dead links in the nav; leaving
+    // them out entirely would make the shell reject the route and bounce a scan
+    // back to the dashboard.
+    hiddenViews: ['item', 'queue'],
     defaultView: 'inventory',
     stub: false
   },
@@ -141,6 +147,12 @@ export function viewKeys(app) {
   return app.views.map((v) => (Array.isArray(v) ? v[0] : v));
 }
 
+/** Views reachable by URL, including ones the rail does not list. */
+export function routableViews(app) {
+  if (!app) return [];
+  return viewKeys(app).concat(app.hiddenViews || []);
+}
+
 export function viewLabel(app, key) {
   if (!app || !Array.isArray(app.views)) return key;
   const hit = app.views.find((v) => (Array.isArray(v) ? v[0] : v) === key);
@@ -214,7 +226,9 @@ export function canAccess(perms, appId) {
 export function allowedViews(perms, appId) {
   const app = getApp(appId);
   if (!app) return [];
-  const keys = viewKeys(app);
+  // Hidden views are included: they are legitimate destinations (a QR scan, a
+  // row click), just not rail entries. renderRail() filters them back out.
+  const keys = routableViews(app);
   if (perms && perms.superuser === true) return keys.slice();
 
   const tabs = (perms && Array.isArray(perms.tabs)) ? perms.tabs : [];
