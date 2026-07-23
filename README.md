@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 98 tests. Never let it go red.
+bash test/run.sh     # 111 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -135,6 +135,45 @@ apps. `/login` gets an explicit rewrite instead.
 
 The exemption is declared in the code, not assumed by the test, so this stays a
 real rule. A stray hex anywhere else still fails the build.
+
+## GivingGauge intake
+
+Donation requests come from the Jotform at form.jotform.com/231636854478064.
+
+  api/giving-intake.js     the webhook. PUBLIC — Jotform is never signed in.
+                           Can only CREATE a pending request; it cannot read,
+                           edit or delete. Optional shared secret via
+                           JOTFORM_WEBHOOK_TOKEN and ?token=.
+  api/giving-requests.js   read + decide + backfill. Session required.
+  lib/giving.js            storage and the field mapping.
+
+Setup:
+  1. Vercel env: JOTFORM_API_KEY, JOTFORM_FORM_ID (backfill only), and
+     optionally JOTFORM_WEBHOOK_TOKEN.
+  2. In Jotform: Settings > Integrations > Webhooks, point at
+     https://<domain>/api/giving-intake
+  3. Backfill once: POST /api/giving-requests?action=backfill  (admin/manager).
+     Defaults to submissions from Jan 1 of the current year. Re-running is safe;
+     anything already stored is skipped by submission id.
+
+### The score is a FLOOR until a human looks
+
+The form cannot answer everything the engine scores. Two things are left unset
+on purpose:
+
+- **The account is unmatched.** Relationship and spend are 46 of 100 points and
+  score zero until someone matches the org to Apparelytics. The submitter ticking
+  "current customer" is a claim, not a match.
+- **Mission fit and org type are unclassified.** The engine defaults mission to
+  general civic benefit and says so in its reason text.
+
+The same real submission scores **F (26)** on arrival and **C (58)** once matched
+and classified. So the arriving grade is a floor, not a verdict, and the card
+says "Needs review" rather than presenting it as a decision.
+
+Nothing infers `isReligious` or `isPolitical` from the text. Both are hard
+disqualifiers, and a keyword match on "Christian" would auto-decline a school
+with no trace of why. A human sets them.
 
 ## Chrome
 
