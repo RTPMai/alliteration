@@ -109,7 +109,7 @@ export async function boot() {
  * ------------------------------------------------------------------ */
 
 async function handleRoute(route) {
-  const { app: appId, view } = route;
+  const { app: appId, view, param } = route;
 
   // No route at all, or an explicit hub route.
   if (!appId || appId === HUB) {
@@ -148,6 +148,7 @@ async function handleRoute(route) {
 
   state.app = appId;
   state.view = view;
+  state.param = param;
   document.body.dataset.app = appId;
 
   renderRail();
@@ -156,7 +157,7 @@ async function handleRoute(route) {
   if (meta.stub) return renderStub(meta);
 
   try {
-    await activate(meta, view);
+    await activate(meta, view, param);
   } catch (e) {
     console.error('[shell] failed to mount ' + appId, e);
 
@@ -215,7 +216,7 @@ async function activateHub() {
   window.scrollTo({ top: 0 });
 }
 
-async function activate(meta, view) {
+async function activate(meta, view, param) {
   clearShellMessage();
   hideAllHosts();
 
@@ -235,7 +236,8 @@ async function activate(meta, view) {
     if (spinner) spinner.remove();
   }
 
-  showView(meta.id, view);
+  // The param is the third route segment (e.g. an item id from a QR scan).
+  showView(meta.id, view, param);
   window.scrollTo({ top: 0 });
 }
 
@@ -273,7 +275,10 @@ function renderRail() {
 
     // Sub-nav only under the open app, and only views this user may see.
     if (on) {
-      const views = allowedViews(state.perms, a.id);
+      // Hidden views (a QR destination, a row-click detail page) are routable
+      // but must not appear as nav links.
+      const hidden = a.hiddenViews || [];
+      const views = allowedViews(state.perms, a.id).filter((v) => !hidden.includes(v));
       if (views.length > 1) {
         html += '<div class="subnav">';
         views.forEach((v) => {
