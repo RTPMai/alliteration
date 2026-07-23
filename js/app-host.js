@@ -193,8 +193,29 @@ export function getMounted(id) {
 export async function mountApp(meta, host, ctxExtras) {
   if (mounted.has(meta.id)) return mounted.get(meta.id);
 
-  const mod = await import(`../apps/${meta.id}.js`);
+  // Resolve the path against THIS module's URL rather than leaving it relative.
+  // A bare relative specifier is resolved by the browser against the importing
+  // module, which is usually fine, but any server-side URL rewriting (Vercel's
+  // cleanUrls, for one) can turn "/apps/x.js" into "/apps/x" and the import
+  // then 404s with a message that only says the module failed to load.
+  const url = new URL('../apps/' + meta.id + '.js', import.meta.url).href;
+
+  let mod;
+  try {
+    mod = await import(url);
+  } catch (e) {
+    // Say which path failed. "Failed to fetch dynamically imported module" on
+    // its own sends you looking in the wrong place.
+    throw new Error(
+      'Could not load ' + url + '. Check that apps/' + meta.id + '.js deployed ' +
+      'and that the server is not rewriting .js paths. Original error: ' + e.message
+    );
+  }
+
   const app = mod.default || mod;
+  if (!app || typeof app !== 'object') {
+    throw new Error('apps/' + meta.id + '.js loaded but exported no app object.');
+  }
 
   const root = document.createElement('div');
   root.className = 'app-root';
