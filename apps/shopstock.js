@@ -506,9 +506,16 @@ export default {
 
     function updateBadge() {
       const n = allItems.filter(i => i.status === "Needs Ordered").length;
+      // "queue-badge" lived in the app's OWN header, which the shell replaced,
+      // so this element no longer exists. The count still matters, so it is
+      // published to the shell instead of silently dropped. Guarded because the
+      // element is genuinely absent, not because null checks are free.
       const badge = $id("queue-badge");
-      badge.textContent = n;
-      badge.style.display = n > 0 ? "" : "none";
+      if (badge) {
+        badge.textContent = n;
+        badge.style.display = n > 0 ? "" : "none";
+      }
+      if (typeof ctx.setBadge === "function") ctx.setBadge(n);
     }
 
     // ── Needs Ordering view (dashboard) ──────────────────────────────────────
