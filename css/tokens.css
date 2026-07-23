@@ -83,6 +83,13 @@
   --amber-line:  #F5E4B0;
   --amber-hover: #FBEEC8;
 
+  /* A bright, saturated gold for celebration marks (ShopStock's "nothing needs
+     ordering" star). Deliberately NOT --amber: that is a dark text color chosen
+     for contrast against a pale background, and it reads muddy when it fills a
+     large shape. */
+  --gold-bright: #F5B301;
+  --gold-deep:   #D99400;
+
   /* ---- Misc surfaces ---------------------------------------------------- */
   --on-accent:   #FFFFFF;
   --footer-bg:   #FCFDFD;
