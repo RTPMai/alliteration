@@ -13,8 +13,11 @@ import path from "path";
 
 // Files the front end needs. A missing one produces a vague "failed to load"
 // in the browser, so list them here and report exactly which are absent.
+// NOTE: index.html and login.html are deliberately NOT listed. Vercel serves
+// them as static pages and does not bundle them with a function, so checking
+// for them here always reports them absent even when they are fine. Only files
+// that ARE bundled (via includeFiles in vercel.json) can be checked this way.
 const REQUIRED = [
-  "index.html", "login.html",
   "css/tokens.css", "css/shell.css",
   "js/api.js", "js/app-host.js", "js/registry.js", "js/router.js", "js/shell.js",
   "js/giving-engine.js", "js/giving-dial.js", "js/qrcode-loader.js",
