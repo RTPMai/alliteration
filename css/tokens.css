@@ -90,6 +90,26 @@
   --gold-bright: #F5B301;
   --gold-deep:   #D99400;
 
+  /* ---- Status hues (BackBone) -------------------------------------------
+     BackBone encodes MEANING in color, not decoration: a lead's stage, what
+     contact details are on file, how loaded an account manager is. Those need
+     hues the semantic tokens above do not cover, so they get their own scale.
+     Each is tint (background) + ink (text on that tint). */
+  --hue-blue:        #1D4ED8;
+  --hue-blue-tint:   #E3EBFD;
+  --hue-blue-deep:   #1E40AF;
+  --hue-indigo:      #4F46E5;
+  --hue-indigo-tint: #EEF2FF;
+  --hue-violet:      #6D28D9;
+  --hue-violet-tint: #EDE9FE;
+  --hue-sky:         #0369A1;
+  --hue-sky-tint:    #E0F2FE;
+  --hue-forest:      #1E7A44;
+  --hue-forest-tint: #E4F4EA;
+  --hue-clay:        #B42318;
+  --hue-clay-tint:   #FDE7E5;
+  --hue-clay-line:   #F5B5B0;
+
   /* ---- Misc surfaces ---------------------------------------------------- */
   --on-accent:   #FFFFFF;
   --footer-bg:   #FCFDFD;
