@@ -48,7 +48,9 @@ export const MOCK = resolveMock();
 const LIVE_PREFIXES = [
   '/api/auth', '/api/users', '/api/health',
   // ShopStock: api/items.js, api/settings.js and api/scrape.js are deployed.
-  '/api/items', '/api/settings', '/api/scrape'
+  '/api/items', '/api/settings', '/api/scrape',
+  // GivingGauge: fed by the Jotform webhook.
+  '/api/giving-requests', '/api/giving-intake'
 ];
 
 function isLive(path) {
@@ -63,7 +65,9 @@ function isLive(path) {
 export function appsOnSampleData() {
   const byApp = {
     shopstock:   [ENDPOINTS.ssItems, ENDPOINTS.ssSettings],
-    givinggauge: [ENDPOINTS.ggRequests, ENDPOINTS.ggBudget],
+    // Only ggRequests: the budget view was never built, so requiring its
+    // endpoint would report the app as fake when its real data is live.
+    givinggauge: [ENDPOINTS.ggRequests],
     backbone:    [ENDPOINTS.bbData],
     errorengine: [ENDPOINTS.eeErrors]
   };
@@ -121,7 +125,8 @@ export const ENDPOINTS = {
   ssScrape:        '/api/scrape',
 
   // ---- GivingGauge ----
-  ggRequests:      '/api/giving/requests',
+  ggRequests:      '/api/giving-requests',
+  ggIntake:        '/api/giving-intake',
   ggBudget:        '/api/giving/budget',
 
   // ---- TravelTrack ----
