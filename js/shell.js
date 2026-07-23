@@ -26,7 +26,11 @@ const state = {
   perms: null,
   app: HUB,
   view: null,
-  hosts: new Map()
+  hosts: new Map(),
+  // Counts an app wants shown in the rail (e.g. ShopStock's "needs ordering").
+  // The apps used to render these into their own headers, which the shell
+  // replaced, so the shell surfaces them instead.
+  badges: new Map()
 };
 
 /* ------------------------------------------------------------------ *
@@ -207,7 +211,8 @@ async function activate(meta, view) {
       user: state.user,
       perms: state.perms,
       go: (v) => router.goView(v),
-      goApp: (a, v) => router.go(a, v)
+      goApp: (a, v) => router.go(a, v),
+      setBadge: (n) => setBadge(meta.id, n)
     });
     const spinner = host.querySelector(':scope > .shell-spinner');
     if (spinner) spinner.remove();
@@ -221,6 +226,20 @@ async function activate(meta, view) {
  * RAIL
  * ------------------------------------------------------------------ */
 
+/** A count an app asked the shell to show beside its name in the rail. */
+function badgeHtml(app) {
+  const n = state.badges.get(app.id);
+  if (!n) return '';
+  return '<span class="rail-badge">' + (n > 99 ? '99+' : n) + '</span>';
+}
+
+function setBadge(appId, n) {
+  const next = Number(n) || 0;
+  if (state.badges.get(appId) === next) return;
+  state.badges.set(appId, next);
+  renderRail();
+}
+
 function renderRail() {
   if (!el.rail) return;
 
@@ -232,7 +251,7 @@ function renderRail() {
     html += `
       <button class="rail-item${on ? ' active' : ''}${a.stub ? ' planned' : ''}"
               data-app="${a.id}" style="--dot:${a.accent}">
-        <span class="sq"></span>${escape(a.name)}${a.stub ? '<span class="tag">Soon</span>' : ''}
+        <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}${a.stub ? '<span class="tag">Soon</span>' : ''}
       </button>`;
 
     // Sub-nav only under the open app, and only views this user may see.
