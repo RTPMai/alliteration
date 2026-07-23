@@ -33,6 +33,24 @@ function resolveMock() {
 
 export const MOCK = resolveMock();
 
+/**
+ * Endpoints that exist on the server RIGHT NOW.
+ *
+ * The shell ships auth before the app backends are migrated, so the two cannot
+ * share one on/off switch: signing in needs the real server, while an app whose
+ * api/ folder has not been copied over yet needs mock data. With a single flag
+ * you get either a fake login or an app that cannot load.
+ *
+ * A path listed here always goes to the network. Everything else falls back to
+ * mock data when the server has no route for it. Delete an entry from this list
+ * as each app's endpoints are deployed.
+ */
+const LIVE_PREFIXES = ['/api/auth', '/api/users', '/api/health'];
+
+function isLive(path) {
+  return LIVE_PREFIXES.some((p) => String(path).startsWith(p));
+}
+
 /* ------------------------------------------------------------------ *
  * ENDPOINTS
  *
@@ -134,7 +152,9 @@ export async function request(path, opts = {}) {
 
   const { method = 'GET', body, query, signal, headers = {} } = opts;
 
-  if (MOCK) return mockResponse(path, method, body, query);
+  // Auth always talks to the real server, even in mock mode, or you would be
+  // "signed in" as a fake user. Everything else uses mock data when MOCK is on.
+  if (MOCK && !isLive(path)) return mockResponse(path, method, body, query);
 
   let url = path;
   if (query && Object.keys(query).length) {
@@ -173,6 +193,13 @@ export async function request(path, opts = {}) {
   }
 
   if (!res.ok) {
+    // A 404 on a not-yet-migrated endpoint falls back to mock data instead of
+    // breaking the app. This is what lets a ported app run against the shell
+    // before its api/ folder has been copied over. Auth is never faked.
+    if (res.status === 404 && !isLive(path)) {
+      console.warn('[api] ' + path + ' is not deployed yet; using mock data.');
+      return mockResponse(path, method, body, query);
+    }
     const msg = (payload && payload.error) || res.statusText || ('HTTP ' + res.status);
     const err = new ApiError(msg, res.status, payload);
     if (err.isAuth) announceAuthFailure(err);
