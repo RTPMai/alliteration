@@ -193,12 +193,24 @@ export function getMounted(id) {
 export async function mountApp(meta, host, ctxExtras) {
   if (mounted.has(meta.id)) return mounted.get(meta.id);
 
-  // Resolve the path against THIS module's URL rather than leaving it relative.
-  // A bare relative specifier is resolved by the browser against the importing
-  // module, which is usually fine, but any server-side URL rewriting (Vercel's
-  // cleanUrls, for one) can turn "/apps/x.js" into "/apps/x" and the import
-  // then 404s with a message that only says the module failed to load.
-  const url = new URL('../apps/' + meta.id + '.js', import.meta.url).href;
+  // TWO LAYOUTS, both supported:
+  //
+  //   apps/<id>.js            a single file. The default, and right for most.
+  //   apps/<id>/index.js      a folder. For an app big enough that one file
+  //                           stops being navigable — BackBone is ~10k lines,
+  //                           where "scroll to the leads code" is a real cost.
+  //
+  // meta.entry picks the folder form. Everything downstream is identical: the
+  // module still default-exports one app object, so the contract does not
+  // change, only where the pieces live.
+  //
+  // Resolved against THIS module's URL rather than left relative: a bare
+  // specifier is resolved against the importing module, which is usually fine,
+  // but server-side URL rewriting (Vercel's cleanUrls, for one) can turn
+  // "/apps/x.js" into "/apps/x" and the import then 404s with a message that
+  // only says the module failed to load.
+  const rel = meta.entry || (meta.id + '.js');
+  const url = new URL('../apps/' + rel, import.meta.url).href;
 
   let mod;
   try {
@@ -207,7 +219,7 @@ export async function mountApp(meta, host, ctxExtras) {
     // Say which path failed. "Failed to fetch dynamically imported module" on
     // its own sends you looking in the wrong place.
     throw new Error(
-      'Could not load ' + url + '. Check that apps/' + meta.id + '.js deployed ' +
+      'Could not load ' + url + '. Check that apps/' + rel + ' deployed ' +
       'and that the server is not rewriting .js paths. Original error: ' + e.message
     );
   }
