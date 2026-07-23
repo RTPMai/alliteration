@@ -33,11 +33,31 @@ export default {
   template,
 
   async mount(ctx) {
-    // The application code lands here next. Kept as a separate module so this
-    // file stays readable: index.js should describe the app's shape, not
-    // contain 9,000 lines of it.
-    const { start } = await import('./main.js');
-    this._app = await start(ctx);
+    // The application code lives in its own module so this file stays readable:
+    // index.js should describe the app's SHAPE, not contain 9,000 lines of it.
+    //
+    // Loaded optionally on purpose. The CSS and markup are ported; main.js is
+    // not yet. Without this guard the whole app fails to mount and you cannot
+    // see the layout at all — which makes an unfinished port indistinguishable
+    // from a broken one.
+    try {
+      const { start } = await import('./main.js');
+      this._app = await start(ctx);
+    } catch (e) {
+      const missing = /Failed to fetch|not found|Cannot find/i.test(e.message || '');
+      if (!missing) throw e;   // a real error in main.js must still surface
+
+      console.warn('[backbone] main.js is not present yet; rendering static markup only.');
+      const note = document.createElement('div');
+      note.className = 'shell-msg';
+      note.style.margin = '24px auto';
+      note.innerHTML =
+        '<h2>Views only</h2>' +
+        '<p>BackBone\'s pages and styling are ported. The application code ' +
+        '(data loading, filters, the scorecard) has not been moved across yet, ' +
+        'so nothing here is live.</p>';
+      ctx.root.insertBefore(note, ctx.root.firstChild);
+    }
   },
 
   showView(view, param) {
