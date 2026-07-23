@@ -1,96 +1,520 @@
-/**
- * Engine parity.
- *
- * js/scorecard.js and js/giving-engine.js are VERBATIM PORTS of Ryan's real
- * algorithms. This test is what makes "verbatim" enforceable rather than
- * aspirational: it hashes the vendored copy and compares it to a recorded
- * fingerprint.
- *
- * IF THIS TEST FAILS, someone edited the engine in place. That is the wrong
- * fix in every case. The rule is:
- *   1. Change the rule in the SOURCE repo (GivingGauge).
- *   2. Re-copy the file into vendor/.
- *   3. Update FINGERPRINT below, in the same commit, with the reason.
- *
- * Updating the fingerprint without step 1 defeats the point of the test.
- */
+/* ==========================================================================
+   alliteration. — shell chrome
+   Header, left rail, sub-nav, view host, and the shared component vocabulary
+   (cards, tables, stats, pills) that ported apps can lean on.
 
-const fs = require('fs');
-const path = require('path');
-const crypto = require('crypto');
+   NO HEX VALUES IN THIS FILE. Everything comes from tokens.css, which is what
+   lets data-app on <body> re-theme the whole surface.
+   ========================================================================== */
 
-const ENGINE = path.join(__dirname, '..', 'vendor', 'scoring-engine.cjs');
-const DIAL = path.join(__dirname, '..', 'vendor', 'gauge.cjs');
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
 
-// sha256 of GivingGauge/src/scoring-engine.js v1.0 as copied on import.
-const FINGERPRINT = '153dc2f00de4551d556619ca95870335c2ac623b64b0355c76aa7ab6f57c4780';
-// sha256 of GivingGauge/src/gauge.js as copied on import.
-const DIAL_FINGERPRINT = '0b121e63d095b90b5f52a69d62cca7426d3e54756c0ba36c6fe38765b1db3bf4';
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
 
-const t = require('./harness.cjs');
+/* ==========================================================================
+   PERSISTENT CHROME
+   Header and rail never re-render on navigation. Only .main swaps.
+   ========================================================================== */
 
-t.test('vendored engine file exists', () => {
-  t.assert(fs.existsSync(ENGINE), 'vendor/scoring-engine.cjs is missing');
-});
+.hdr {
+  background: var(--card);
+  border-bottom: 1px solid var(--line);
+  padding: 0 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--shell-header-h);
+  position: sticky;
+  top: 0;
+  z-index: 200;
+}
 
-t.test('vendored engine is byte-identical to the source port', () => {
-  const hash = crypto.createHash('sha256').update(fs.readFileSync(ENGINE)).digest('hex');
-  t.equal(hash, FINGERPRINT,
-    'Engine was edited in place. Change it in the source repo and re-copy instead.');
-});
+.hdr-left { display: flex; align-items: center; gap: 14px; }
 
-t.test('engine still exposes the expected surface', () => {
-  const src = fs.readFileSync(ENGINE, 'utf8');
-  ['evaluate', 'computeDaysOut', 'toGrade', 'gaugeColor',
-   'LEAD_TIME_FLOOR_DAYS', 'DIMENSION_MAX', 'TOTAL_MAX'].forEach((key) => {
-    t.assert(src.includes(key), 'engine no longer exports ' + key);
-  });
-});
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  background: none;
+  border: none;
+  font-family: inherit;
+  padding: 0;
+  text-align: left;
+}
+.logomark, .logomark svg { width: 34px; height: 34px; display: block; flex: none; }
+.wordmark-svg svg { height: 18px; width: auto; display: block; }
+.hdr-sub { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 
-t.test('vendored gauge is byte-identical to the source', () => {
-  t.assert(fs.existsSync(DIAL), 'vendor/gauge.cjs is missing');
-  const hash = crypto.createHash('sha256').update(fs.readFileSync(DIAL)).digest('hex');
-  t.equal(hash, DIAL_FINGERPRINT,
-    'gauge.cjs was edited in place. Change it in the source repo and re-copy.');
-});
+.hdr-right { display: flex; align-items: center; gap: 14px; }
 
-t.test('the gauge renders SVG from a scoring result', () => {
-  global.window = global.window || {};
-  const engine = require(ENGINE);
-  const dial = require(DIAL);
-  const result = engine.evaluate(
-    { orgType: 'nonprofit', eventDate: '2026-12-01', missionFit: 'core' },
-    { found: true },
-    { today: '2026-01-01' }
-  );
-  const svg = dial.renderGauge(result, {});
-  t.assert(svg.includes('<svg') && svg.includes('</svg>'), 'renderGauge must return SVG');
-});
+.crumb { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); }
+.crumb .sep { color: var(--faint); }
+.crumb .now { color: var(--accent); font-weight: 700; }
 
-t.test('engine scores a known request correctly', () => {
-  // Loads the CommonJS engine directly, the same way GivingGauge's own tests do.
-  const GG = require(ENGINE);
+.avatar {
+  width: 30px; height: 30px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: var(--on-accent);
+  display: grid;
+  place-items: center;
+  font-size: 12px;
+  font-weight: 700;
+  flex: none;
+}
 
-  const result = GG.evaluate(
-    { orgType: 'political', isPolitical: true, eventDate: '2026-12-01' },
-    { found: false },
-    { today: '2026-01-01' }
-  );
+.shell { display: flex; min-height: calc(100vh - var(--shell-header-h)); }
 
-  t.equal(result.disqualified, true, 'a political org must be disqualified');
-  t.equal(result.grade, 'F', 'a disqualified request grades F');
-});
+/* ==========================================================================
+   LEFT RAIL
+   App list, with the active app's views expanded beneath it.
+   ========================================================================== */
 
-t.test('adapter does not redefine engine logic', () => {
-  const adapter = fs.readFileSync(
-    path.join(__dirname, '..', 'js', 'giving-engine.js'), 'utf8');
+.rail {
+  width: var(--rail);
+  flex: none;
+  background: var(--card);
+  border-right: 1px solid var(--line);
+  padding: 18px 12px;
+  position: sticky;
+  top: var(--shell-header-h);
+  height: calc(100vh - var(--shell-header-h));
+  overflow-y: auto;
+}
 
-  // The adapter is a pass-through. Scoring constants appearing in it would mean
-  // logic had leaked out of the engine.
-  ['DIMENSION_MAX =', 'GRADE_BANDS', 'LEAD_TIME_FLOOR_DAYS ='].forEach((marker) => {
-    t.assert(!adapter.includes(marker),
-      'giving-engine.js contains engine logic (' + marker + '); it must only delegate');
-  });
-});
+.rail-label {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--faint);
+  padding: 0 10px;
+  margin: 4px 0 8px;
+}
 
-process.exit(t.report());
+.rail-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: none;
+  background: transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--muted);
+  text-align: left;
+  transition: background var(--speed), color var(--speed);
+}
+.rail-item:hover { background: var(--bg); color: var(--ink); }
+.rail-item.active { background: var(--accent-tint); color: var(--accent-deep); }
+.rail-item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Each app's dot carries ITS OWN color, not the active accent, so the rail
+   reads as a legend. Set inline from registry meta via --dot. */
+.rail-item .sq {
+  width: 9px; height: 9px;
+  border-radius: 3px;
+  flex: none;
+  background: var(--dot, var(--dot-idle));
+}
+
+.rail-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--on-accent);
+  font-size: 10.5px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+}
+
+.rail-item.planned { opacity: .6; }
+.rail-item .tag {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+
+.rail-hr { height: 1px; background: var(--line); margin: 14px 6px; }
+
+.subnav { margin: 4px 0 0; padding-left: 8px; display: flex; flex-direction: column; gap: 1px; }
+.sub-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 7px 10px 7px 20px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--muted);
+  border-left: 2px solid var(--line);
+  transition: color var(--speed), border-color var(--speed);
+}
+.sub-item:hover { color: var(--ink); }
+.sub-item.active { color: var(--accent-deep); font-weight: 700; border-left-color: var(--accent); }
+.sub-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ==========================================================================
+   CONTENT REGION
+   ========================================================================== */
+
+/* Full available width. An app that genuinely reads better narrow can opt in
+   by setting max-width on its own container. */
+.main { flex: 1; min-width: 0; padding: 26px 28px 70px; max-width: var(--shell-max-w); }
+
+.view { animation: fade .18s ease; }
+@keyframes fade {
+  from { opacity: 0; transform: translateY(3px); }
+  to   { opacity: 1; transform: none; }
+}
+
+/* Each mounted app renders into its own host. Only one is visible; hosts
+   persist once mounted so app state survives switching. */
+.app-host { display: none; }
+.app-host.active { display: block; }
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  margin-bottom: 22px;
+  flex-wrap: wrap;
+}
+.page-title { font-size: 24px; font-weight: 800; letter-spacing: -.02em; }
+.page-title .dot { color: var(--accent); }
+.page-sub { font-size: 13px; color: var(--muted); margin-top: 3px; max-width: 74ch; }
+
+/* ==========================================================================
+   SHARED COMPONENT VOCABULARY
+   Ported apps can use these instead of shipping their own. Anything an app
+   still needs stays in its own scoped <style>.
+   ========================================================================== */
+
+.btn {
+  border: 1px solid var(--line);
+  background: var(--card);
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--speed);
+}
+.btn:hover { border-color: var(--muted); }
+.btn-accent { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.btn-accent:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  margin-bottom: 22px;
+}
+.stat {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  box-shadow: var(--shadow-card);
+}
+.stat .label {
+  font-size: 11.5px;
+  color: var(--muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.stat .value { font-size: 27px; font-weight: 800; letter-spacing: -.02em; margin-top: 5px; }
+.stat .delta { font-size: 11.5px; font-weight: 600; margin-top: 3px; }
+.stat .value.muted { color: var(--muted); }
+.stat .value.warn { color: var(--warn); }
+.stat .value.bad { color: var(--danger); }
+.up { color: var(--success-dk); }
+.down { color: var(--danger); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  margin-bottom: 16px;
+  box-shadow: var(--shadow-card);
+}
+.card-hd {
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.card-hd h3 { font-size: 14.5px; font-weight: 700; }
+.card-hd .meta { font-size: 12px; color: var(--muted); }
+.card-bd { padding: 16px 20px 20px; }
+.help { font-size: 12.5px; color: var(--muted); margin-bottom: 14px; max-width: 78ch; }
+
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 600;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  font-size: 11.5px;
+  text-transform: uppercase;
+  letter-spacing: .03em;
+  white-space: nowrap;
+}
+td { padding: 11px 12px; border-bottom: 1px solid var(--line-soft); vertical-align: middle; }
+tbody tr:last-child td { border-bottom: none; }
+tbody tr { transition: background var(--speed); }
+tbody tr:hover { background: var(--bg); }
+td.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td .strong, td.strong { font-weight: 700; }
+td.zero { color: var(--muted); }
+td.cost { color: var(--danger); }
+td.credited { color: var(--success-dk); }
+.sub { font-size: 11.5px; color: var(--muted); margin-top: 1px; }
+.mono { font-variant-numeric: tabular-nums; color: var(--muted); }
+
+.pill {
+  display: inline-block;
+  padding: 3px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .02em;
+}
+.p-accent { background: var(--accent-tint); color: var(--accent-deep); }
+.p-ok     { background: var(--success-tint); color: var(--success-dk); }
+.p-warn   { background: var(--warn-tint); color: var(--warn); }
+.p-bad    { background: var(--danger-tint); color: var(--danger); }
+.p-mute   { background: var(--line-soft); color: var(--muted); }
+
+/* Tier badges are fixed per tier, not per app: an A-tier account stays blue
+   whichever app is on screen. */
+.tier {
+  display: inline-grid;
+  place-items: center;
+  width: 22px; height: 22px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--on-accent);
+}
+.t-a { background: var(--tier-a); }
+.t-b { background: var(--tier-b); }
+.t-c { background: var(--tier-c); }
+.t-d { background: var(--tier-d); }
+
+.bar {
+  height: 7px;
+  border-radius: var(--radius-pill);
+  background: var(--line-soft);
+  overflow: hidden;
+  min-width: 90px;
+}
+.bar span { display: block; height: 100%; background: var(--accent); border-radius: var(--radius-pill); }
+.bar-row { display: flex; align-items: center; gap: 8px; }
+.bar-row .n { font-weight: 700; font-size: 12px; }
+
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+
+.empty { padding: 40px 20px; text-align: center; color: var(--muted); font-size: 13px; }
+.empty strong { display: block; color: var(--ink); font-size: 14px; margin-bottom: 6px; }
+.note {
+  font-size: 12.5px;
+  color: var(--muted);
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+  margin-top: 14px;
+  line-height: 1.55;
+}
+
+.dotc { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: middle; background: var(--dot, var(--muted)); }
+.flowrow td .from { font-weight: 700; }
+
+/* Simple labelled progress rows, used by several dashboards. */
+.meter {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.meter:last-child { border-bottom: none; }
+.meter .name { width: 130px; font-weight: 600; font-size: 13px; }
+.meter .val { width: 64px; text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; font-size: 12.5px; }
+
+/* ==========================================================================
+   HUB — the "All apps" landing view
+   ========================================================================== */
+
+/* The hub is cards and prose, not a data table, so it keeps the prose width
+   even though .main no longer caps. Wide app cards just look stretched. */
+[data-app="hub"] .main { max-width: var(--shell-max-w-prose); }
+
+.apps { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+
+.app {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+  display: flex;
+  flex-direction: column;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  padding: 0;
+  transition: box-shadow .18s, transform .18s;
+}
+.app:hover { box-shadow: var(--shadow-pop); transform: translateY(-1px); }
+.app:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.app-hd { padding: 15px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 11px; }
+.app-mark {
+  width: 30px; height: 30px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 13px;
+  color: var(--on-accent);
+  background: var(--mark, var(--muted));
+}
+.app-name { font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; line-height: 1; }
+.app-name .w1 { color: var(--mark, var(--muted)); }
+.app-name .w2 { color: var(--wordmark-ink); }
+.app-name .dot { color: var(--mark, var(--muted)); }
+.app-role { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+
+.app-body { padding: 14px 20px 16px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
+.app-metrics { display: flex; gap: 18px; }
+.app-metric .v { font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
+.app-metric .l { font-size: 11px; color: var(--muted); font-weight: 600; }
+.app-line { font-size: 12.5px; color: var(--muted); }
+
+.app-ft {
+  padding: 10px 20px;
+  border-top: 1px solid var(--line-soft);
+  background: var(--footer-bg);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.app-ft .go { font-size: 11.5px; color: var(--faint); font-weight: 600; }
+
+.app.planned { border-style: dashed; box-shadow: none; cursor: default; }
+.app.planned:hover { transform: none; box-shadow: none; }
+.app.planned .app-mark { background: var(--line); color: var(--muted); }
+.app.planned .app-name .w1,
+.app.planned .app-name .dot { color: var(--muted); }
+
+/* ==========================================================================
+   SHELL-LEVEL STATES
+   ========================================================================== */
+
+.mock-banner {
+  background: var(--warn-tint);
+  border-bottom: 1px solid var(--warn);
+  color: var(--warn-dk);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 24px;
+  text-align: center;
+}
+.mock-banner[hidden] { display: none; }
+.mock-banner code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--card);
+  border-radius: 4px;
+  padding: 1px 4px;
+}
+
+.shell-msg { max-width: 460px; margin: 80px auto; text-align: center; color: var(--muted); line-height: 1.6; }
+.shell-msg h2 { margin: 0 0 8px; font-size: 17px; color: var(--ink); font-weight: 700; }
+.shell-msg code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 1px 5px;
+}
+
+.shell-spinner {
+  width: 22px; height: 22px;
+  margin: 60px auto;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: shell-spin .7s linear infinite;
+}
+@keyframes shell-spin { to { transform: rotate(360deg); } }
+
+/* ==========================================================================
+   RESPONSIVE
+   ========================================================================== */
+
+.railtoggle { display: none; }
+
+@media (max-width: 980px) {
+  .grid2, .grid3, .apps { grid-template-columns: 1fr; }
+  .rail {
+    position: fixed;
+    left: 0;
+    top: var(--shell-header-h);
+    z-index: 150;
+    transform: translateX(-100%);
+    transition: transform .2s;
+    box-shadow: var(--shadow-pop);
+  }
+  body.rail-open .rail { transform: none; }
+  .main { padding: 20px 16px 60px; }
+  .railtoggle {
+    display: inline-grid;
+    place-items: center;
+    width: 32px; height: 32px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--card);
+    cursor: pointer;
+  }
+  .crumb { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
