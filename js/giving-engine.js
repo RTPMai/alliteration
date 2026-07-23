@@ -24,20 +24,46 @@ const SRC = new URL('../vendor/scoring-engine.cjs', import.meta.url).href;
 
 let loading = null;
 
-function loadClassicScript(src) {
-  return new Promise((resolve, reject) => {
-    const existing = document.querySelector(`script[data-engine="giving"]`);
-    if (existing) {
-      if (window.GivingGauge) return resolve(window.GivingGauge);
-      existing.addEventListener('load', () => resolve(window.GivingGauge));
-      existing.addEventListener('error', () => reject(new Error('engine failed to load')));
-      return;
+/**
+ * Load the vendored file and hand back its global.
+ *
+ * Two-step, because a .cjs file is easy to serve with a Content-Type the
+ * browser refuses to execute as a script:
+ *   1. fetch() the text and run it. This works regardless of Content-Type.
+ *   2. If that fails, fall back to a <script> tag.
+ *
+ * The file itself is never modified. It ends in module.exports plus a window
+ * global, so a shim provides `module` and the global lands on window either way.
+ */
+async function loadVendorGlobal(src) {
+  // --- 1. fetch and evaluate -------------------------------------------------
+  try {
+    const res = await fetch(src, { cache: 'no-cache' });
+    if (res.ok) {
+      const code = await res.text();
+      // The file checks for `module`, so give it one; it also sets the window
+      // global, which is what we actually read back.
+      const shim = { exports: {} };
+      new Function('module', 'exports', 'window', code)(shim, shim.exports, window);
+      if (window.GivingGauge) return window.GivingGauge;
+      if (shim.exports && Object.keys(shim.exports).length) {
+        window.GivingGauge = shim.exports;
+        return shim.exports;
+      }
     }
+  } catch (e) {
+    console.warn('[engine] fetch-eval failed, falling back to script tag:', e.message);
+  }
+
+  // --- 2. classic script tag -------------------------------------------------
+  return new Promise((resolve, reject) => {
     const s = document.createElement('script');
     s.src = src;
-    s.dataset.engine = 'giving';
+    s.dataset.vendor = 'engine';
     s.onload = () => {
-      if (!window.GivingGauge) return reject(new Error('engine loaded but window.GivingGauge is undefined'));
+      if (!window.GivingGauge) {
+        return reject(new Error('engine loaded but window.GivingGauge is undefined'));
+      }
       resolve(window.GivingGauge);
     };
     s.onerror = () => reject(new Error('engine failed to load: ' + src));
@@ -48,7 +74,7 @@ function loadClassicScript(src) {
 /** Resolves to the engine object. Safe to call repeatedly. */
 export function loadEngine() {
   if (window.GivingGauge) return Promise.resolve(window.GivingGauge);
-  if (!loading) loading = loadClassicScript(SRC);
+  if (!loading) loading = loadVendorGlobal(SRC);
   return loading;
 }
 
