@@ -146,6 +146,15 @@ body[data-app="givinggauge"] {
   --accent-tint: #FBF2E1;
 }
 
+/* Settings is a SHELL screen, not one of the five apps. Deliberately neutral
+   grey: it belongs to the shell, and giving it a brand color would imply it is
+   another app in the lineup. */
+body[data-app="settings"] {
+  --accent:      #6B7684;
+  --accent-deep: #55606D;
+  --accent-tint: #EEF1F4;
+}
+
 body[data-app="traveltrack"] {
   --accent:      #0E7C86;
   --accent-deep: #0A5C64;
