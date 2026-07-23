@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 66 tests. Never let it go red.
+bash test/run.sh     # 98 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -88,6 +88,53 @@ Roles grant apps by registry id, which is what `perms.tabs` carries to the front
 end. Permissions are looked up fresh on every session check rather than trusted
 from the cookie, so a role change takes effect on the next request instead of
 waiting 12 hours for the cookie to expire.
+
+## Ports
+
+- **GivingGauge** — DONE. First real port. Single view (the request queue). Its
+  score comes entirely from the two verbatim files in vendor/ (scoring-engine.cjs
+  and gauge.cjs), reached through js/giving-engine.js and js/giving-dial.js. The
+  six sample requests moved into api.js as mock data, so MOCK=false hits the real
+  endpoint with no change to the app. What the port touched: removed the app's own
+  header and :root, scoped every getElementById to the app root, moved the click
+  listener off document, and routed data through ctx.api.
+- **ShopStock** — DONE. Dashboard, Full Inventory, Admin. All 10 fetch calls go
+  through the seam; all 70 DOM lookups are scoped to the app root. Its 46 inline
+  `onclick` handlers are namespaced to ONE global, `window.ShopStock` (see the
+  note at the top of apps/shopstock.js). The QR library loads on demand rather
+  than on every page view, and printed labels now point at the shell route
+  instead of the old standalone `/item/:id`, which matters because labels are
+  permanent.
+- **ErrorEngine, BackBone** — not yet ported.
+
+### Vendor files exist twice, on purpose
+
+  vendor/x.cjs   what NODE requires. package.json sets "type": "module", so a
+                 .js here would be parsed as ESM and require() would fail.
+  vendor/x.js    what the BROWSER fetches. A .cjs has no registered MIME type,
+                 so hosts serve it inconsistently: as a download, as HTML, or
+                 rewritten. A .js is unambiguous.
+
+Both are byte-identical and the parity test hashes both against the same
+fingerprint, so they cannot drift.
+
+Related: `cleanUrls` must stay OFF in vercel.json. It strips `.js` from static
+URLs, which breaks the dynamic `import('../apps/<id>.js')` the shell uses to load
+apps. `/login` gets an explicit rewrite instead.
+
+### The token rule has three narrow exemptions
+
+`apps/` may not contain hex colors, with three exceptions, each marked
+`TOKEN-EXEMPT` in the source and pattern-matched by the test:
+
+1. **Department colors** are data Ryan picks in Admin, not theming. A department
+   keeps its color whichever app is on screen.
+2. **QR codes** are generated images. `var(--ink)` would render a blank code.
+3. **Print windows** are separate documents that never load tokens.css, so a CSS
+   variable resolves to nothing there. Labels are black on white deliberately.
+
+The exemption is declared in the code, not assumed by the test, so this stays a
+real rule. A stray hex anywhere else still fails the build.
 
 ## Chrome
 
