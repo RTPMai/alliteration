@@ -56,6 +56,29 @@ export default function handler(req, res) {
     if (!there) absent.push(rel);
   }
 
+  // Version markers. A file can be PRESENT but stale — an older copy that
+  // predates a feature the rest of the code now depends on. That produces
+  // errors which look like a missing file and are not, so check for the marker
+  // rather than just the path.
+  const markers = [
+    { file: "js/app-host.js", needle: "meta.entry",
+      why: "app-host is an older copy without folder-app support; apps/backbone/ cannot load" },
+    { file: "js/registry.js", needle: "backbone/index.js",
+      why: "registry is an older copy that still points backbone at a single file" },
+    { file: "js/api.js", needle: "LIVE_PREFIXES",
+      why: "api.js is an older copy without per-endpoint mocking" }
+  ];
+
+  const stale = [];
+  for (const m of markers) {
+    try {
+      const full = path.join(process.cwd(), m.file);
+      if (fs.existsSync(full) && !fs.readFileSync(full, "utf8").includes(m.needle)) {
+        stale.push({ file: m.file, why: m.why });
+      }
+    } catch (e) { /* absent files are already reported above */ }
+  }
+
   const ready = missing.length === 0;
 
   res.status(200).json({
@@ -67,7 +90,7 @@ export default function handler(req, res) {
       KV_REST_API_TOKEN: kvToken,
     },
     missing,
-    files: { checked: REQUIRED.length, absent },
+    files: { checked: REQUIRED.length, absent, stale },
     next: ready
       ? "Configuration looks complete. Open /login.html to create the first account."
       : "Add the missing variables in Vercel > Settings > Environment Variables, then redeploy.",
