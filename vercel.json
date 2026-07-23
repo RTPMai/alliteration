@@ -4,6 +4,9 @@
   "functions": {
     "api/**/*.js": {
       "includeFiles": "lib/**"
+    },
+    "api/health.js": {
+      "includeFiles": "{lib,js,css,apps,vendor}/**"
     }
   },
   "headers": [
