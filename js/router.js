@@ -18,9 +18,17 @@ let started = false;
 
 function parse(hash) {
   const raw = String(hash || '').replace(/^#\/?/, '').trim();
-  if (!raw) return { app: null, view: null };
-  const [app, view] = raw.split('/').filter(Boolean);
-  return { app: app || null, view: view || null };
+  if (!raw) return { app: null, view: null, param: null };
+  const parts = raw.split('/').filter(Boolean);
+  // A third segment is a parameter for the view, e.g.
+  //   #/shopstock/item/PM-0142   -> { app:'shopstock', view:'item', param:'PM-0142' }
+  // ShopStock's QR labels depend on this: without it a scan opens the item page
+  // with no item.
+  return {
+    app: parts[0] || null,
+    view: parts[1] || null,
+    param: parts[2] ? decodeURIComponent(parts.slice(2).join('/')) : null
+  };
 }
 
 function emit() {
@@ -32,7 +40,7 @@ function emit() {
 
 function handleHashChange() {
   const next = parse(location.hash);
-  if (next.app === current.app && next.view === current.view) return;
+  if (next.app === current.app && next.view === current.view && next.param === current.param) return;
   current = next;
   emit();
 }
@@ -52,12 +60,14 @@ export function currentRoute() {
  * normalising a URL (e.g. filling in a default view) rather than responding
  * to a real user action.
  */
-export function go(app, view, { replace = false } = {}) {
+export function go(app, view, opts = {}) {
+  const { replace = false, param = null } = opts;
   // The hub lives at bare '#/' rather than '#/hub', so the landing URL stays
   // clean and a shared link to the front page looks like the site root.
   const hash = (app === 'hub' || !app)
     ? '#/'
-    : '#/' + [app, view].filter(Boolean).join('/');
+    : '#/' + [app, view, param == null ? null : encodeURIComponent(param)]
+        .filter(Boolean).join('/');
   if (location.hash === hash) return;
 
   if (replace) {
