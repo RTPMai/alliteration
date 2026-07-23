@@ -6,7 +6,7 @@ Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 116 tests. Never let it go red.
+bash test/run.sh     # 120 tests. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
