@@ -174,7 +174,12 @@ async function handleRoute(route) {
     renderMessage(
       'Could not load ' + meta.name,
       missing
-        ? 'The app file did not load. Check that <code>apps/' + appId + '.js</code> ' +
+        // Name the ACTUAL path, which for a folder app is not apps/<id>.js.
+        // Hardcoding the single-file form sent three rounds of debugging at the
+        // wrong file: the message said apps/backbone.js while the code was
+        // correctly requesting apps/backbone/index.js.
+        ? 'The app file did not load. Check that <code>apps/' +
+          (meta.entry || (appId + '.js')) + '</code> ' +
           'and everything it imports were deployed, then look at the browser console ' +
           'for the exact path that failed.'
         : 'The app failed to start: ' + escape(e && e.message ? e.message : String(e)) +
