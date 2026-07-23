@@ -2,10 +2,7 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
   "functions": {
-    "api/**/*.js": {
-      "includeFiles": "lib/**"
-    },
-    "api/health.js": {
+    "api/*.js": {
       "includeFiles": "{lib,js,css,apps,vendor}/**"
     }
   },
