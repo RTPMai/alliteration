@@ -1324,12 +1324,19 @@ export default {
     }
   },
 
-  showView(view) {
+  showView(view, param) {
     // The rail drives navigation now, but the app's own showPage() still owns
     // what each page does on entry (rendering, admin init), so route through it
     // rather than duplicating that logic here.
-    if (window.ShopStock && window.ShopStock.showPage) {
-      window.ShopStock.showPage(view);
+    if (!window.ShopStock || !window.ShopStock.showPage) return;
+
+    window.ShopStock.showPage(view);
+
+    // A QR scan while ShopStock is ALREADY open arrives here rather than
+    // through mount(), so the item has to be opened explicitly. Without this
+    // the scan lands on a blank item page.
+    if (view === 'item' && param && window.ShopStock.viewItem) {
+      window.ShopStock.viewItem(param);
     }
   },
 
