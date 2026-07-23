@@ -417,7 +417,7 @@ export default {
 
       return '' +
         '<button class="req" data-id="' + row.meta.id + '">' +
-          '<span class="dial">' + GivingGaugeDial.dial.renderGauge(r, { size: 168 }) + '</span>' +
+          '<span class="dial">' + dial.renderGauge(r, { size: 168 }) + '</span>' +
           '<h3>' + esc(q.orgName) + '</h3>' +
           '<span class="line">' +
             '<span class="status-dot ' + dotClass + '"></span>' +
@@ -631,7 +631,7 @@ export default {
         '</div>' +
 
         '<div class="card hero">' +
-          '<div class="dial">' + GivingGaugeDial.dial.renderGauge(r, { size: 132 }) + '</div>' +
+          '<div class="dial">' + dial.renderGauge(r, { size: 132 }) + '</div>' +
           '<div class="read">' +
             '<div class="rec">' + esc(recLine) + '</div>' +
             '<p>' + esc(recWhy) + '</p>' +
