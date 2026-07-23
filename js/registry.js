@@ -106,6 +106,28 @@ export const APPS = [
   }
 ];
 
+/**
+ * Shell-level screens. Not one of the five apps: these belong to the shell
+ * itself, so they live in the rail's "Shared" section rather than the app list.
+ *
+ * Settings used to be a tab inside BackBone. Accounts are shell-level now (one
+ * login covers every app), so managing them from inside one app would imply
+ * that app owns them.
+ */
+export const SHELL_APPS = [
+  {
+    id: 'settings',
+    name: 'Settings',
+    role: 'Accounts and access',
+    accent: '#6B7684',
+    views: [['accounts', 'Accounts']],
+    defaultView: 'accounts',
+    adminOnly: true,
+    shellLevel: true,
+    stub: false
+  }
+];
+
 /* ------------------------------------------------------------------ *
  * VIEW HELPERS
  *
@@ -130,7 +152,7 @@ export function viewLabel(app, key) {
  * LOOKUPS
  * ------------------------------------------------------------------ */
 
-const BY_ID = new Map(APPS.map((a) => [a.id, a]));
+const BY_ID = new Map(APPS.concat(SHELL_APPS).map((a) => [a.id, a]));
 
 export function getApp(id) {
   return BY_ID.get(id) || null;
@@ -166,6 +188,15 @@ export function firstAllowed(perms) {
  */
 export function canAccess(perms, appId) {
   if (!perms) return false;
+
+  // Shell-level screens gate on ROLE, not on perms.tabs. They are not apps, so
+  // they are never listed in a role's app grants.
+  const shell = SHELL_APPS.find((a) => a.id === appId);
+  if (shell) {
+    if (!shell.adminOnly) return true;
+    return perms.role === 'admin' || perms.superuser === true;
+  }
+
   if (perms.superuser === true) return true;
 
   const tabs = Array.isArray(perms.tabs) ? perms.tabs : [];
