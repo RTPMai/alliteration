@@ -43,14 +43,17 @@ export const APPS = [
     role: 'What we make it with',
     blurb: 'Inventory, orders, labels.',
     accent: '#E36325',
+    // These are the app's THREE real nav buttons, matching its page-* ids.
+    // "Order Queue" and "Labels" were in the earlier plan but do not exist:
+    // ordering lives on the dashboard, and labels print from Full Inventory.
+    // page-queue and page-item exist in the markup but are reached in-app
+    // (from a row click), not from the rail.
     views: [
-      ['dashboard', 'Dashboard'],
-      ['inventory', 'Full Inventory'],
-      ['orders', 'Order Queue'],
-      ['labels', 'Labels'],
+      ['inventory', 'Dashboard'],
+      ['full', 'Full Inventory'],
       ['admin', 'Admin']
     ],
-    defaultView: 'dashboard',
+    defaultView: 'inventory',
     stub: false
   },
   {
@@ -77,10 +80,11 @@ export const APPS = [
     role: 'What we give away',
     blurb: 'Donation and sponsorship scoring.',
     accent: '#D5A029',           // gold, not green — see tokens.css note
+    // The standalone app ships ONE view (the request queue). Model and Budget
+    // were planned tabs that were never built, so listing them would put dead
+    // sub-nav in the rail. Add them here when they exist.
     views: [
-      ['requests', 'Requests'],
-      ['model', 'Model'],
-      ['budget', 'Budget']
+      ['requests', 'Requests']
     ],
     defaultView: 'requests',
     stub: false
