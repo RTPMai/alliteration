@@ -496,7 +496,12 @@ export default {
         updateBadge();
         renderInventory();
         populateFilters();
-      } catch(e) { showToast("Failed to load items", true); }
+      } catch(e) {
+        // Surface the real reason. A bare "Failed to load items" hides whether
+        // the endpoint is missing, the data is malformed, or a render threw.
+        console.error('[shopstock] loadItems failed:', e);
+        showToast("Failed to load items: " + (e && e.message ? e.message : e), true);
+      }
     }
 
     function updateBadge() {
