@@ -464,11 +464,15 @@ export default {
 
     // ── Routing ───────────────────────────────────────────────────────────────
     function getPage() {
-      const path = window.location.pathname;
-      if(path.startsWith("/item/")) return { page: "item", id: path.split("/item/")[1] };
-      if(path === "/queue") return { page: "queue" };
-      if(path === "/admin") return { page: "admin" };
-      return { page: "inventory" };
+      // The standalone app read window.location.pathname. Under the shell the
+      // pathname is always "/" and the route lives in the hash, so read that:
+      //   #/shopstock/<page>          e.g. #/shopstock/full
+      //   #/shopstock/item/<id>       the QR scan destination
+      const hash = window.location.hash.replace(/^#\/?/, "");
+      const parts = hash.split("/").filter(Boolean);   // ["shopstock", page, id?]
+      const page = parts[1] || "inventory";
+      if (page === "item" && parts[2]) return { page: "item", id: parts[2] };
+      return { page };
     }
 
     function showPage(name, btn) {
@@ -1257,21 +1261,6 @@ export default {
       setTimeout(() => t.classList.remove("show"), 3000);
     }
 
-    // ── Init ──────────────────────────────────────────────────────────────────
-    const route = getPage();
-    if(route.page === "item" && route.id) {
-      // QR scan destination — load items then show item
-      showPage("item");
-      loadItems().then(() => {
-        const item = allItems.find(i=>i.id===route.id);
-        if(item) viewItem(route.id);
-        else $id("item-detail").innerHTML = `<div class="flag-wrap"><div class="flag-icon">❓</div><div class="flag-title">Item not found</div><div class="flag-sub">This QR code may be outdated.</div><button class="btn btn-gray flag-btn" onclick="window.location='/'">Go to Inventory</button></div>`;
-      });
-    } else {
-      showPage(route.page);
-      loadItems();
-    }
-
 
     // ---- namespaced globals for the inline handlers (see note at top) ----
     window.ShopStock = {
@@ -1304,7 +1293,23 @@ export default {
       viewItem,
     };
 
-    await loadItems();
+    // Init runs AFTER window.ShopStock exists: the markup contains inline
+    // handlers, and one firing before the namespace was set would silently fail.
+    const route = getPage();
+    if (route.page === "item" && route.id) {
+      // QR scan destination: load items, then open that item.
+      showPage("item");
+      await loadItems();
+      const item = allItems.find(i => i.id === route.id);
+      if (item) viewItem(route.id);
+      else $id("item-detail").innerHTML =
+        `<div class="flag-wrap"><div class="flag-icon">?</div>` +
+        `<div class="flag-title">Item not found</div>` +
+        `<div class="flag-sub">This QR code may be outdated.</div></div>`;
+    } else {
+      showPage(route.page);
+      await loadItems();
+    }
   },
 
   showView(view) {
