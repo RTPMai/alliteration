@@ -227,6 +227,24 @@ hashes the file and fails if it drifts.
 
 ---
 
+### An app can be a folder
+
+Most apps are one file. BackBone is ~10,000 lines, where "go to the leads code"
+becomes a scroll rather than a jump, so it splits:
+
+  apps/backbone/index.js      the app contract, mount, routing
+  apps/backbone/styles.js     575 lines of CSS, tokenised
+  apps/backbone/template.js   the six pages and five modals
+  apps/backbone/main.js       the application code
+
+Selected by `entry: 'backbone/index.js'` in the registry. The contract does not
+change: the entry module still default-exports one app object with the same
+members. Single-file remains the default and the right choice for most apps.
+
+The test scanners recurse into app folders. A flat readdir would skip
+apps/backbone/ entirely, and a rule test that silently checks nothing is worse
+than one that fails.
+
 ## Adding an app
 
 1. `apps/<id>.js` exporting the contract below
