@@ -46,7 +46,24 @@ export async function boot() {
   el.brandBtn   = document.getElementById('brandBtn');
   el.railToggle = document.getElementById('railToggle');
 
-  if (api.MOCK && el.mockBanner) el.mockBanner.hidden = false;
+  // Name the apps that are actually on sample data. A blanket "sample data"
+  // message is wrong once some backends are deployed, and wrong in the
+  // direction that matters: it makes real data look fake.
+  if (el.mockBanner) {
+    const pending = api.appsOnSampleData();
+    if (pending.length) {
+      const names = pending.map((id) => {
+        const a = getApp(id);
+        return a ? a.name : id;
+      });
+      el.mockBanner.innerHTML =
+        'Sample data in ' + escape(names.join(', ')) +
+        '. Everything else is live.';
+      el.mockBanner.hidden = false;
+    } else {
+      el.mockBanner.hidden = true;
+    }
+  }
 
   el.brandBtn.addEventListener('click', () => router.go(HUB, null));
   el.railToggle.addEventListener('click', () => document.body.classList.toggle('rail-open'));
