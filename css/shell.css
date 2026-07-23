@@ -182,6 +182,8 @@ body {
    CONTENT REGION
    ========================================================================== */
 
+/* Full available width. An app that genuinely reads better narrow can opt in
+   by setting max-width on its own container. */
 .main { flex: 1; min-width: 0; padding: 26px 28px 70px; max-width: var(--shell-max-w); }
 
 .view { animation: fade .18s ease; }
@@ -375,6 +377,10 @@ td.credited { color: var(--success-dk); }
 /* ==========================================================================
    HUB — the "All apps" landing view
    ========================================================================== */
+
+/* The hub is cards and prose, not a data table, so it keeps the prose width
+   even though .main no longer caps. Wide app cards just look stretched. */
+[data-app="hub"] .main { max-width: var(--shell-max-w-prose); }
 
 .apps { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
 
