@@ -65,14 +65,12 @@ export async function boot() {
   }
 
   if (!session || session.authenticated === false || !session.user) {
-    // Not signed in: hand off to the sign-in screen rather than showing a dead
-    // end. In mock mode there is no real session, so stay put instead of
-    // bouncing in a loop.
-    if (!api.MOCK) {
-      location.replace('login.html');
-      return;
-    }
-    return renderMessage('Not signed in', 'Sign in to continue.');
+    // Always hand off to the sign-in screen. This used to be skipped in mock
+    // mode, back when mock mode faked the user too. It no longer does: auth is
+    // ALWAYS real (see LIVE_PREFIXES in api.js), so skipping the redirect just
+    // stranded signed-out visitors on a dead end that offered no way to sign in.
+    location.replace('login.html');
+    return;
   }
 
   state.user  = session.user;
