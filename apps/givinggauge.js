@@ -268,7 +268,7 @@ export default {
     // Requests come through the seam. Under MOCK these are the same six records
     // the standalone app had inline; with MOCK off they come from the endpoint.
     const payload = await ctx.api.get(ENDPOINTS.ggRequests);
-    ctx.data = (payload && payload.requests) || [];
+    ctx.data = Array.isArray(payload) ? payload : ((payload && payload.requests) || []);
 
     let onKeydown;
 
@@ -405,6 +405,14 @@ export default {
       if (!row.meta.account.found) tags.push(['', 'Not a customer']);
       else tags.push(['', row.meta.account.tier]);
 
+      // Anything the intake could not determine. Until these are answered the
+      // score is a FLOOR, not a verdict: an unmatched account scores 0 of the
+      // 55 relationship-and-spend points, and an unclassified mission defaults
+      // to general civic. Saying so on the card stops a provisional F reading
+      // as a decision.
+      var review = row.meta.needsReview || [];
+      if (review.length) tags.push(['gold', 'Needs review (' + review.length + ')']);
+
       var dotClass = status === 'approved' ? 'done' : status === 'declined' ? 'declined' : '';
       var verdictText = status === 'pending'
         ? r.decision
@@ -519,6 +527,30 @@ export default {
       }
 
       return out;
+    }
+
+    /** What the intake could not determine, and what it costs the score. */
+    function reviewCard(row) {
+      var review = row.meta.needsReview || [];
+      if (!review.length) return '';
+
+      var unmatched = !row.meta.account.found;
+      var lead = unmatched
+        ? 'This score is a floor. The account is not matched, so relationship ' +
+          'and spend score zero out of 46.'
+        : 'Some details could not be read from the submission.';
+
+      return '' +
+        '<div class="card">' +
+          '<div class="card-hd">Needs a human</div>' +
+          '<p style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:12px">' +
+            esc(lead) + '</p>' +
+          review.map(function (n) {
+            return '<div class="flag-item">' +
+              '<div class="ft"><span class="sev amber"></span>' + esc(n.field) + '</div>' +
+              '<div class="fd">' + esc(n.why) + '</div></div>';
+          }).join('') +
+        '</div>';
     }
 
     function accountCard(row) {
@@ -638,6 +670,7 @@ export default {
           '</div>' +
         '</div>' +
 
+        reviewCard(row) +
         eventCard(row) +
         accountCard(row) +
         scorecard(r) +
