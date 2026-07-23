@@ -36,46 +36,52 @@ let loading = null;
  * global, so a shim provides `module` and the global lands on window either way.
  */
 async function loadVendorGlobal(src) {
-  // --- 1. fetch and evaluate -------------------------------------------------
+  // Fetch the text and evaluate it. Deliberately NOT a <script> tag: a .cjs is
+  // easily served with a Content-Type the browser refuses to execute, and
+  // cleanUrls can rewrite the path, both of which fail silently.
+  let code;
   try {
     const res = await fetch(src, { cache: 'no-cache' });
-    if (res.ok) {
-      const code = await res.text();
-      // The file checks for `module`, so give it one; it also sets the window
-      // global, which is what we actually read back.
-      const shim = { exports: {} };
-      // NOTE: `window` is deliberately NOT passed as a parameter. The vendored
-      // file ends with `window.GivingGauge = ...`, and a parameter named
-      // `window` would shadow the real one, so that assignment would land on a
-      // throwaway object and the global would never appear. Leaving it out lets
-      // the file see the genuine window through the normal scope chain.
-      new Function('module', 'exports', code)(shim, shim.exports);
-      if (window.GivingGauge) return window.GivingGauge;
-      // Fall back to module.exports for the same object, and publish it so the
-      // vendored file's own global lookups still resolve.
-      if (shim.exports && Object.keys(shim.exports).length) {
-        window.GivingGauge = shim.exports;
-        return shim.exports;
-      }
-    }
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    code = await res.text();
   } catch (e) {
-    console.warn('[engine] fetch-eval failed, falling back to script tag:', e.message);
+    throw new Error(
+      'Could not fetch engine from ' + src + ' (' + e.message + '). ' +
+      'Check that vendor/scoring-engine.cjs deployed.'
+    );
   }
 
-  // --- 2. classic script tag -------------------------------------------------
-  return new Promise((resolve, reject) => {
-    const s = document.createElement('script');
-    s.src = src;
-    s.dataset.vendor = 'engine';
-    s.onload = () => {
-      if (!window.GivingGauge) {
-        return reject(new Error('engine loaded but window.GivingGauge is undefined'));
-      }
-      resolve(window.GivingGauge);
-    };
-    s.onerror = () => reject(new Error('engine failed to load: ' + src));
-    document.head.appendChild(s);
-  });
+  // Guard against a server that returns an HTML error page with a 200.
+  if (/^\s*</.test(code)) {
+    throw new Error('engine at ' + src + ' returned HTML, not JavaScript. ' +
+                    'The file is probably missing and a fallback page was served.');
+  }
+
+  // The vendored file ends with:
+  //     if (typeof module !== 'undefined' && module.exports) module.exports = X;
+  //     if (typeof window !== 'undefined') window.X = X;
+  // Reading module.exports is what makes this reliable: the window assignment
+  // depends on scope-chain details that differ between eval contexts, and
+  // chasing that is what broke this twice. The CommonJS export is unambiguous.
+  const shim = { exports: {} };
+  try {
+    new Function('module', 'exports', code + '\n;return module.exports;')(shim, shim.exports);
+  } catch (e) {
+    throw new Error('engine failed to evaluate: ' + e.message);
+  }
+
+  const api = (shim.exports && Object.keys(shim.exports).length)
+    ? shim.exports
+    : window.GivingGauge;
+
+  if (!api) {
+    throw new Error('engine evaluated but exported nothing. vendor/scoring-engine.cjs may be truncated.');
+  }
+
+  // Publish the global too: the vendored file's own internals may look for it,
+  // and so may anything else expecting the standalone app's shape.
+  window.GivingGauge = api;
+  return api;
 }
 
 /** Resolves to the engine object. Safe to call repeatedly. */
