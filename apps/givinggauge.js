@@ -197,6 +197,33 @@ export default {
   .card.dq .fd{color:var(--danger-dk)}
   .card.dq .flag-item{border-bottom-color:var(--danger-line)}
 
+  /* ---------- classify ---------- */
+  .cls-intro{font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px}
+  .cls-row{display:block;margin-bottom:12px}
+  .cls-row:last-child{margin-bottom:0}
+  .cls-lbl{
+    display:block;font-size:11px;font-weight:700;letter-spacing:.05em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:5px;
+  }
+  .cls-sel{
+    width:100%;border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:9px 11px;font-family:inherit;font-size:13px;color:var(--ink);
+    background:var(--card);cursor:pointer;
+  }
+  .cls-sel:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint)}
+  .cls-note{display:block;font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.5}
+
+  /* ---------- toolbar ---------- */
+  .tools{display:flex;gap:8px;align-items:center}
+  .tool-btn{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:8px 14px;font-size:13px;font-weight:600;color:var(--ink);
+    cursor:pointer;font-family:inherit;
+  }
+  .tool-btn:hover{border-color:var(--muted)}
+  .tool-btn:disabled{opacity:.6;cursor:default}
+  .tool-msg{font-size:12.5px;color:var(--muted)}
+
   /* ---------- decision ---------- */
   .decide{position:sticky;bottom:0;background:var(--bg);padding:12px 0 0}
   .btns{display:flex;gap:8px}
@@ -244,6 +271,10 @@ export default {
         <div>
           <h1>Requests.</h1>
           <div class="sub" id="queueMeta"></div>
+        </div>
+        <div class="tools">
+          <span class="tool-msg" id="importMsg"></span>
+          <button class="tool-btn" id="importBtn">Import from Jotform</button>
         </div>
       </div>
       <div class="filters" id="filters"></div>
@@ -609,6 +640,81 @@ export default {
         '</div>';
     }
 
+    /* ---------------- classification ---------------- */
+
+    // The engine's own vocabulary. These strings must match MISSION_POINTS in
+    // vendor/scoring-engine.cjs exactly, or the score silently defaults.
+    var MISSION_OPTIONS = [
+      ['core',        'Core priority — children, mental health, foster/adoption', 18],
+      ['adjacent',    'Adjacent — school programs, youth sports, first responders', 13],
+      ['civic',       'Civic — chamber, festivals, service clubs', 7],
+      ['promotional', 'Promotional — a business marketing event, for-profit raffle', 2],
+      ['contrary',    'Contrary to values / reputationally risky', 0]
+    ];
+
+    var ORG_OPTIONS = [
+      ['nonprofit',  'Nonprofit'],
+      ['school',     'School or district'],
+      ['youth',      'Youth sports / club'],
+      ['civic',      'Civic or service org'],
+      ['religious',  'Religious'],
+      ['political',  'Political'],
+      ['business',   'For-profit business'],
+      ['individual', 'Individual']
+    ];
+
+    /**
+     * Lets a human answer what the form cannot. Until this is filled in the
+     * engine scores mission as general civic (7 of 18) and skips the religious
+     * and political checks entirely, so an unclassified request is scoring
+     * BELOW what it deserves, not above.
+     */
+    function classifyCard(row) {
+      var q = row.meta.request;
+      var id = row.meta.id;
+
+      function sel(name, options, current, hint) {
+        return '' +
+          '<label class="cls-row">' +
+            '<span class="cls-lbl">' + esc(name) + '</span>' +
+            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '">' +
+              '<option value="">Not classified</option>' +
+              options.map(function (o) {
+                return '<option value="' + o[0] + '"' +
+                  (current === o[0] ? ' selected' : '') + '>' + esc(o[1]) + '</option>';
+              }).join('') +
+            '</select>' +
+          '</label>';
+      }
+
+      function tri(name, current, hint, note) {
+        return '' +
+          '<label class="cls-row">' +
+            '<span class="cls-lbl">' + esc(name) + '</span>' +
+            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '">' +
+              '<option value=""' + (current == null ? ' selected' : '') + '>Not answered</option>' +
+              '<option value="yes"' + (current === true ? ' selected' : '') + '>Yes</option>' +
+              '<option value="no"' + (current === false ? ' selected' : '') + '>No</option>' +
+            '</select>' +
+            (note ? '<span class="cls-note">' + esc(note) + '</span>' : '') +
+          '</label>';
+      }
+
+      return '' +
+        '<div class="card">' +
+          '<div class="card-hd">Classify</div>' +
+          '<p class="cls-intro">The form cannot ask these. The score updates as you set them.</p>' +
+          sel('Mission fit', MISSION_OPTIONS, q.missionFit, 'missionFit') +
+          sel('Organization type', ORG_OPTIONS, q.orgType, 'orgType') +
+          tri('Religious org', q.isReligious, 'isReligious',
+              'Not an automatic decline for a customer, or when the ask is secular.') +
+          tri('Political org', q.isPolitical, 'isPolitical',
+              'Always an automatic decline.') +
+          tri('Ask is secular', q.askIsSecular, 'askIsSecular',
+              'Only matters if the org is religious.') +
+        '</div>';
+    }
+
     function decisionBlock(row) {
       var r = row.result;
       var dec = decisionOf(row);
@@ -671,6 +777,7 @@ export default {
         '</div>' +
 
         reviewCard(row) +
+        classifyCard(row) +
         eventCard(row) +
         accountCard(row) +
         scorecard(r) +
@@ -722,20 +829,24 @@ export default {
 
       var dec = e.target.closest('[data-decide]');
       if (dec) {
-        delete state.reopened[dec.dataset.id];
-        state.decisions[dec.dataset.id] = {
-          status: dec.dataset.decide,
-          by: 'Ryan',
-          note: ''
-        };
+        var decId = dec.dataset.id;
+        var status = dec.dataset.decide;
+
+        delete state.reopened[decId];
+        state.decisions[decId] = { status: status, by: ctx.user ? (ctx.user.name || ctx.user.username) : '', note: '' };
         renderQueue();
-        openPanel(dec.dataset.id);
+        openPanel(decId);
+
+        // Persist. Before there was a backend this lived only in memory and a
+        // refresh silently undid every decision.
+        saveDecision(decId, status);
         return;
       }
 
       var undo = e.target.closest('[data-undo]');
       if (undo) {
         var id = undo.dataset.undo;
+        saveDecision(id, 'pending');
         // Delete rather than set to pending: decisionOf() treats any stored
         // object as a made decision, so a {status:'pending'} stub would keep
         // the request locked in the decided state.
@@ -747,10 +858,114 @@ export default {
       }
     });
 
+    /** Write a decision through the seam; roll the screen back if it fails. */
+    function saveDecision(id, status) {
+      var row = (ctx.data || []).filter(function (r) { return r.id === id; })[0];
+      var previous = row ? row.status : null;
+      if (row) row.status = status;
+
+      return ctx.api.request(ENDPOINTS.ggRequests + '?id=' + encodeURIComponent(id), {
+        method: 'PATCH',
+        body: { status: status }
+      }).catch(function (err) {
+        if (row) row.status = previous;
+        delete state.decisions[id];
+        renderQueue();
+        openPanel(id);
+        console.error('[givinggauge] could not save decision:', err);
+        alert('Could not save that decision: ' + (err && err.message ? err.message : err));
+      });
+    }
+
+    /**
+     * Classification changes save immediately and re-score. No save button:
+     * a half-classified request that was never submitted is worse than one
+     * saved a field at a time, because the score would keep lying quietly.
+     */
+    root.addEventListener('change', function (e) {
+      var sel = e.target.closest('[data-classify]');
+      if (!sel) return;
+
+      var field = sel.dataset.classify;
+      var id = sel.dataset.id;
+      var raw = sel.value;
+
+      var value;
+      if (field === 'missionFit' || field === 'orgType') {
+        value = raw || null;
+      } else {
+        value = raw === 'yes' ? true : raw === 'no' ? false : null;
+      }
+
+      var row = (ctx.data || []).filter(function (r) { return r.id === id; })[0];
+      if (!row) return;
+
+      var previous = row.request[field];
+      row.request[field] = value;      // optimistic, so the score updates now
+
+      renderQueue();
+      openPanel(id);
+
+      ctx.api.request(ENDPOINTS.ggRequests + '?id=' + encodeURIComponent(id), {
+        method: 'PATCH',
+        body: { request: (function () { var o = {}; o[field] = value; return o; })() }
+      }).catch(function (err) {
+        // Put it back rather than leaving the screen disagreeing with storage.
+        row.request[field] = previous;
+        renderQueue();
+        openPanel(id);
+        console.error('[givinggauge] could not save ' + field + ':', err);
+        alert('Could not save that classification: ' + (err && err.message ? err.message : err));
+      });
+    });
+
     onKeydown = function (e) {
       if (e.key === 'Escape' && state.openId) closePanel();
     };
     document.addEventListener('keydown', onKeydown);
+
+    /* ---------------- import from Jotform ---------------- */
+
+    var importBtn = $('#importBtn');
+    var importMsg = $('#importMsg');
+
+    // Only admins and managers can run this; the endpoint enforces it too, so
+    // hiding the button is a courtesy rather than the control.
+    var role = ctx.user && ctx.user.role;
+    if (role !== 'admin' && role !== 'manager') {
+      if (importBtn) importBtn.style.display = 'none';
+    }
+
+    if (importBtn) {
+      importBtn.addEventListener('click', async function () {
+        importBtn.disabled = true;
+        importMsg.textContent = 'Importing...';
+
+        try {
+          // Safe to run repeatedly: the endpoint skips submissions it already
+          // has, matched on Jotform's own submission id.
+          var out = await ctx.api.post(ENDPOINTS.ggRequests + '?action=backfill', {});
+
+          var bits = [];
+          if (out.imported) bits.push(out.imported + ' imported');
+          if (out.skipped) bits.push(out.skipped + ' already here');
+          if (out.tooOld) bits.push(out.tooOld + ' before ' + out.since);
+          if (out.failed) bits.push(out.failed + ' failed');
+          importMsg.textContent = bits.length ? bits.join(' · ') : 'Nothing new';
+
+          if (out.imported) {
+            var payload = await ctx.api.get(ENDPOINTS.ggRequests);
+            ctx.data = Array.isArray(payload) ? payload : ((payload && payload.requests) || []);
+            renderQueue();
+          }
+        } catch (err) {
+          console.error('[givinggauge] import failed:', err);
+          importMsg.textContent = (err && err.message) ? err.message : 'Import failed';
+        } finally {
+          importBtn.disabled = false;
+        }
+      });
+    }
 
     renderQueue();
 
