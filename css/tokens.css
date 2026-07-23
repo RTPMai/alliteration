@@ -43,7 +43,11 @@
   --radius-pill:   99px;
 
   --shell-header-h: 60px;
-  --shell-max-w:    1180px;
+  /* Content width. The prototype capped this at 1180px, which suits prose but
+     wastes half a wide screen on a data table. Apps here are dense: inventory
+     rows, error logs, rosters. They should use the width available. */
+  --shell-max-w:    none;
+  --shell-max-w-prose: 1180px;
   --rail:           248px;
   --gutter:         20px;
   --gutter-sm:      12px;
