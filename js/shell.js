@@ -13,7 +13,7 @@
  *   #/<app>/<view>
  */
 
-import { APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
+import { APPS, SHELL_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
 import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
@@ -291,6 +291,16 @@ function renderRail() {
     <button class="rail-item${state.app === HUB ? ' active' : ''}" data-app="${HUB}">
       <span class="sq" style="--dot:var(--hub)"></span>All apps
     </button>`;
+
+  // Shell-level screens (Settings). Not apps, so they sit under Shared and
+  // gate on role rather than on a role's app grants.
+  SHELL_APPS.filter((a) => canAccess(state.perms, a.id)).forEach((a) => {
+    html += `
+      <button class="rail-item${state.app === a.id ? ' active' : ''}"
+              data-app="${a.id}" style="--dot:${a.accent}">
+        <span class="sq"></span>${escape(a.name)}
+      </button>`;
+  });
 
   el.rail.innerHTML = html;
 
