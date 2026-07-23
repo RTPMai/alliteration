@@ -286,15 +286,19 @@ export default {
           </div>
         </div>
         <div class="card">
-          <div class="card-hd"><h3>Admin Access</h3></div>
+          <div class="card-hd"><h3>Access</h3></div>
           <div style="padding:16px">
-            <div class="field">
-              <label>Admin Key</label>
-              <input type="password" id="admin-key-input" placeholder="Enter admin key"/>
+            <div style="font-size:13px;line-height:1.6" id="admin-status"></div>
+            <!-- The shared ADMIN_KEY is gone from this screen. Permission comes
+                 from being signed in: api/items.js accepts an admin or manager
+                 session. The key still exists in the environment so the
+                 scheduled price scraper (which has no session) can authenticate,
+                 but nobody needs to type it. -->
+            <div style="font-size:12px;color:var(--muted);margin-top:8px">
+              Access follows your account. An administrator can change who has it
+              in Settings.
             </div>
-            <button class="btn btn-green" onclick="ShopStock.saveAdminKey()" style="margin-bottom:10px">Save Admin Key</button>
-            <div style="font-size:12px;color:var(--muted)">The admin key is set in your Vercel environment variables as ADMIN_KEY. Enter it here to unlock admin features.</div>
-            <div style="margin-top:10px;font-size:13px;font-weight:600" id="admin-status"></div>
+            <input type="hidden" id="admin-key-input">
           </div>
         </div>
         <div class="card">
@@ -734,7 +738,7 @@ export default {
         updateBadge(); renderQueue(); renderInventory();
         showToast(`Marked as ${status}`);
       } catch (e) {
-        showToast("Failed — check admin key", true);
+        showToast(e && e.message ? "Failed: " + e.message : "Failed to update that item", true);
       }
     }
 
@@ -757,7 +761,9 @@ export default {
       // Explicit selection required — no select-all fallback
       if(!ids.length) { showToast("Select at least one item first", true); return; }
       if(!status) { showToast("Choose a status to apply", true); return; }
-      if(!adminKey) { showToast("Admin key required — set it in Admin", true); return; }
+      // No admin-key gate: the session is the credential now. api/items.js
+      // accepts a signed-in admin or manager, and still accepts the legacy key
+      // for the scheduled price scraper.
 
       showToast(`Updating ${ids.length} item${ids.length!==1?"s":""}...`);
 
@@ -778,7 +784,7 @@ export default {
       if(sel) sel.value = "";
       updateBadge(); renderInventory(); renderQueue();
       updateBulkCount();
-      showToast(fail ? `${ok} updated, ${fail} failed — check admin key` : `${ok} item${ok!==1?"s":""} marked as ${status}`, fail>0);
+      showToast(fail ? `${ok} updated, ${fail} failed` : `${ok} item${ok!==1?"s":""} marked as ${status}`, fail>0);
     }
 
     // ── Item detail ───────────────────────────────────────────────────────────
@@ -939,7 +945,7 @@ export default {
         renderInventory(); populateFilters(); updateBadge();
         showToast(id ? "Item updated" : "Item added");
       } catch (err) {
-        showToast(err.message || "Save failed — check admin key", true);
+        showToast(err.message || "Save failed", true);
       }
     }
 
@@ -1076,8 +1082,14 @@ export default {
 
     // ── Admin ─────────────────────────────────────────────────────────────────
     function initAdmin() {
-      $id("admin-key-input").value = adminKey;
-      $id("admin-status").textContent = adminKey ? "✅ Admin key saved" : "";
+      var who = ctx.user ? (ctx.user.name || ctx.user.username) : "";
+      var role = ctx.user ? ctx.user.role : "";
+      var canWrite = role === "admin" || role === "manager";
+      // textContent, not innerHTML: a name is user-controlled and this needs no
+      // markup, so there is nothing to escape and nothing to get wrong.
+      $id("admin-status").textContent = canWrite
+        ? "Signed in as " + who + " (" + role + "). You can edit inventory."
+        : "Signed in as " + who + " (" + role + "). This role is read only.";
       renderDeptList();
       renderCatList();
     }
@@ -1173,10 +1185,16 @@ export default {
       if(sel) sel.innerHTML = `<option value="">Select or type below</option>` + cats.map(c=>`<option>${c}</option>`).join("");
     }
 
+    /**
+     * Kept only because the namespace still exposes it and something could call
+     * it. The key input is hidden and permission comes from the session now, so
+     * this must NOT overwrite the status line with a stale "key saved" message.
+     */
     function saveAdminKey() {
-      adminKey = $id("admin-key-input").value;
+      var el = $id("admin-key-input");
+      if (!el || !el.value) return;
+      adminKey = el.value;
       localStorage.setItem("shopstock.admin_key", adminKey);
-      $id("admin-status").textContent = adminKey ? "✅ Admin key saved" : "";
     }
 
     async function runScrape() {
@@ -1193,7 +1211,7 @@ export default {
     async function importCSV(input) {
       const file = input.files[0];
       if(!file) { showToast("Please select a CSV file first", true); return; }
-      if(!adminKey) { showToast("Please save your admin key first", true); return; }
+      // Signed-in admins and managers can import; no key needed.
 
       const statusEl = $id("import-status");
       statusEl.textContent = "Reading file...";
