@@ -197,6 +197,40 @@ export default {
   .card.dq .fd{color:var(--danger-dk)}
   .card.dq .flag-item{border-bottom-color:var(--danger-line)}
 
+  /* ---------- account matching ---------- */
+  .match-wrap{margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft)}
+  .match-btn{
+    background:var(--accent);border:none;color:var(--on-accent);font-family:inherit;
+    font-size:12.5px;font-weight:700;padding:8px 14px;border-radius:var(--radius-sm);cursor:pointer;
+  }
+  .match-btn:hover{background:var(--accent-deep)}
+  .match-btn:disabled{opacity:.6;cursor:default}
+  .match-hint{display:block;font-size:11.5px;color:var(--muted);margin-top:6px;line-height:1.5}
+  .match-results{margin-top:10px}
+  .match-row{
+    display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:9px 11px;border:1px solid var(--line);border-radius:var(--radius-sm);
+    margin-bottom:6px;cursor:pointer;background:var(--card);
+  }
+  .match-row:hover{border-color:var(--accent)}
+  .match-row .nm{font-size:13px;font-weight:700}
+  .match-row .meta{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .match-row .conf{
+    font-size:10.5px;font-weight:700;padding:2px 8px;border-radius:var(--radius-pill);
+    background:var(--line-soft);color:var(--muted);white-space:nowrap;
+  }
+  .match-row .conf.high{background:var(--success-tint);color:var(--success-dk)}
+  .match-row .conf.medium{background:var(--amber-tint);color:var(--amber)}
+  .match-done{
+    margin-top:14px;padding-top:14px;border-top:1px solid var(--line-soft);
+    font-size:12.5px;color:var(--muted);
+  }
+  .match-done b{color:var(--ink)}
+  .match-clear{
+    background:none;border:none;color:var(--accent-deep);font-family:inherit;
+    font-size:12px;font-weight:600;cursor:pointer;text-decoration:underline;padding:0;margin-left:6px;
+  }
+
   /* ---------- classify ---------- */
   .cls-intro{font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px}
   .cls-row{display:block;margin-bottom:12px}
@@ -609,7 +643,19 @@ export default {
           '</ul>';
       }
 
-      return '<div class="card"><div class="card-hd">The account</div>' + body + '</div>';
+      // Matching is where 46 of the 100 points come from. Until it happens the
+      // score is a floor, so the control lives right where the gap is visible.
+      var matchUI = a.found
+        ? '<div class="match-done">Matched to <b>' + esc(a.name || '') + '</b>' +
+            (a.matchConfidence ? ' (' + esc(a.matchConfidence) + ' confidence)' : '') +
+            ' <button class="match-clear" data-unmatch="' + esc(row.meta.id) + '">Change</button></div>'
+        : '<div class="match-wrap">' +
+            '<button class="match-btn" data-match="' + esc(row.meta.id) + '">Find this account</button>' +
+            '<span class="match-hint">Relationship and spend score 0 of 46 until matched.</span>' +
+            '<div class="match-results" data-results="' + esc(row.meta.id) + '"></div>' +
+          '</div>';
+
+      return '<div class="card"><div class="card-hd">The account</div>' + body + matchUI + '</div>';
     }
 
     function eventCard(row) {
@@ -923,6 +969,104 @@ export default {
       if (e.key === 'Escape' && state.openId) closePanel();
     };
     document.addEventListener('keydown', onKeydown);
+
+    /* ---------------- account matching ---------------- */
+
+    /** Persist a match and re-score. The account is 46 of the 100 points. */
+    async function applyMatch(id, account) {
+      var row = (ctx.data || []).filter(function (r) { return r.id === id; })[0];
+      if (!row) return;
+
+      var previous = row.account;
+      row.account = account;          // optimistic, so the score updates now
+      renderQueue();
+      openPanel(id);
+
+      try {
+        await ctx.api.request(ENDPOINTS.ggRequests + '?id=' + encodeURIComponent(id), {
+          method: 'PATCH',
+          body: { account: account }
+        });
+      } catch (err) {
+        row.account = previous;
+        renderQueue();
+        openPanel(id);
+        console.error('[givinggauge] could not save match:', err);
+        alert('Could not save that match: ' + (err && err.message ? err.message : err));
+      }
+    }
+
+    root.addEventListener('click', async function (e) {
+      // ---- search for candidates ----
+      var find = e.target.closest('[data-match]');
+      if (find) {
+        var id = find.dataset.match;
+        var row = (ctx.data || []).filter(function (r) { return r.id === id; })[0];
+        if (!row) return;
+
+        var results = root.querySelector('[data-results="' + id + '"]');
+        find.disabled = true;
+        if (results) results.innerHTML = '<div class="match-hint">Searching the roster\u2026</div>';
+
+        try {
+          var out = await ctx.api.get(ENDPOINTS.bbCustomerMatch, {
+            name: row.request.orgName
+          });
+
+          if (!out.candidates || !out.candidates.length) {
+            results.innerHTML = '<div class="match-hint">No similar account on the roster. ' +
+              'This looks like a genuine non-customer, which is what the score already assumes.</div>';
+            find.disabled = false;
+            return;
+          }
+
+          // A single high-confidence hit is applied directly; anything else is
+          // a suggestion, because a wrong match puts a wrong score on a real
+          // decision.
+          if (out.autoMatch) {
+            await applyMatch(id, out.autoMatch);
+            return;
+          }
+
+          results.innerHTML = out.candidates.map(function (c) {
+            return '<div class="match-row" data-pick="' + esc(id) + '" data-cid="' + esc(c.customerId) + '">' +
+              '<div>' +
+                '<div class="nm">' + esc(c.name) + '</div>' +
+                '<div class="meta">' + esc(c.tier) + ' \u00b7 ' + money(c.lifetimeRevenue) +
+                  ' lifetime \u00b7 ' + c.orderCount + ' orders</div>' +
+              '</div>' +
+              '<span class="conf ' + esc(c.matchConfidence) + '">' + esc(c.matchConfidence) + '</span>' +
+            '</div>';
+          }).join('');
+
+          // Hold the candidates so a click can apply one without re-fetching.
+          root._matchCandidates = out.candidates;
+        } catch (err) {
+          console.error('[givinggauge] match lookup failed:', err);
+          results.innerHTML = '<div class="match-hint">Could not reach the roster: ' +
+            esc(err && err.message ? err.message : 'unknown error') + '</div>';
+        }
+        find.disabled = false;
+        return;
+      }
+
+      // ---- pick one ----
+      var pick = e.target.closest('[data-pick]');
+      if (pick) {
+        var chosen = (root._matchCandidates || []).filter(function (c) {
+          return String(c.customerId) === pick.dataset.cid;
+        })[0];
+        if (chosen) applyMatch(pick.dataset.pick, chosen);
+        return;
+      }
+
+      // ---- unmatch ----
+      var un = e.target.closest('[data-unmatch]');
+      if (un) {
+        applyMatch(un.dataset.unmatch, { found: false });
+        return;
+      }
+    });
 
     /* ---------------- import from Jotform ---------------- */
 
