@@ -4040,7 +4040,14 @@ export async function start(ctx) {
   function render() {
     $id("kpiTotal").textContent = state.synced.length;
     $id("kpiEnriched").textContent = state.synced.filter(hasEnrichment).length;
-    $id("lastUpdated").textContent = state.lastSynced
+    function render() {
+  if (!$id("kpiTotal")) {
+    console.warn('render() ran with empty root. root children:', root.children.length, root.innerHTML.slice(0,200));
+    return;
+  }
+  $id("kpiTotal").textContent = state.synced.length;
+  ...
+      $id("lastUpdated").textContent = state.lastSynced
       ? "Last refresh: " + new Date(state.lastSynced).toLocaleString()
       : "";
 
