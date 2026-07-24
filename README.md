@@ -105,7 +105,52 @@ waiting 12 hours for the cookie to expire.
   than on every page view, and printed labels now point at the shell route
   instead of the old standalone `/item/:id`, which matters because labels are
   permanent.
-- **ErrorEngine, BackBone** — not yet ported.
+- **BackBone** — DONE. Six views, 8,795 lines of application code, and all 12
+  API endpoints. See "What the BackBone port fixed" below.
+- **ErrorEngine** — not yet ported. The last one.
+
+### What the BackBone port fixed
+
+Three security problems that were live in the standalone app:
+
+- **The roster was readable by anyone.** api/data.js had no authentication and
+  sent wildcard CORS: company names, revenue, invoice counts, contacts and
+  scores were available to anyone with the URL, from any origin. BackBone
+  contained a fixed version in lib/data.js that was never wired up; that is the
+  one now deployed.
+- **api/printavo-schema.js** was also unauthenticated with wildcard CORS, and it
+  introspects Printavo using the shop's credentials.
+- **The public intake form was broken.** api/intake.js and intake.html are
+  byte-identical in the source repo — the API file contains the HTML page — so
+  every submission from the "Start a Project" form posted to something that
+  returned a web page. api/intake.js here is the handler that file was supposed
+  to contain.
+
+Two data-loss guards carried across deliberately:
+
+- **save.js merges, never overwrites.** A whole-object write would destroy
+  hand-entered enrichment on every Printavo sync.
+- **leads-save throws on a failed write.** An earlier version returned
+  { ok: true } regardless, so a failed save looked successful and nobody
+  re-entered what they believed was stored.
+
+### Account matching
+
+GivingGauge scores a request out of 100, and 46 of those points come from the
+requesting organisation's relationship and spend. Until a request is matched to
+a real account those 46 score zero, so a real customer's request was
+indistinguishable from a stranger's — the same submission scores F (32) unmatched
+and C (56) matched.
+
+api/customer-match.js bridges the two: given a name it searches BackBone's
+roster and returns candidates in the shape the scoring engine reads. Matching is
+by token overlap rather than edit distance, because organisations get renamed,
+extended and abbreviated far more often than they get misspelt. Legal suffixes
+and generic words (Inc, LLC, Foundation, Association) are ignored.
+
+It SUGGESTS rather than decides. Only a single high-confidence hit applies
+automatically; everything else waits for a human, because a wrong match puts a
+wrong score on a real decision.
 
 ### QR labels are permanent
 
@@ -235,7 +280,7 @@ becomes a scroll rather than a jump, so it splits:
   apps/backbone/index.js      the app contract, mount, routing
   apps/backbone/styles.js     575 lines of CSS, tokenised
   apps/backbone/template.js   the six pages and five modals
-  apps/backbone/main.js       the application code
+  apps/backbone/main.js       the application code (8,795 lines)
 
 Selected by `entry: 'backbone/index.js'` in the registry. The contract does not
 change: the entry module still default-exports one app object with the same
