@@ -463,7 +463,7 @@ export default `
   <div class="modal" style="max-width:680px">
     <div class="modal-hd brief-noprint">
       <h3 id="briefModalTitle">Account Manager Brief</h3>
-      <button class="modal-close" onclick="closeAmBrief()">&times;</button>
+      <button class="modal-close" onclick="BackBone.closeAmBrief()">&times;</button>
     </div>
     <div class="modal-bd">
       <div id="briefPrintArea"></div>
