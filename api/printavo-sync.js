@@ -1,5 +1,7 @@
 export const config = { maxDuration: 300 };
 
+import { getSession, safeEqual } from "../lib/session.js";
+
 // BackBone <- Printavo sync
 //
 // Two modes, one endpoint:
@@ -35,22 +37,37 @@ export default async function handler(req, res) {
   if (!token || !email)   return res.status(500).json({ error: "Missing Printavo credentials" });
   if (!kvUrl || !kvToken) return res.status(500).json({ error: "Missing Upstash env vars" });
 
-  // Secret guard. A session cookie is no use here — cron can't send one — so this
-  // endpoint authenticates with a shared secret instead.
+  // Auth: EITHER a signed-in shell session (a person clicking Reconcile in
+  // BackBone — the browser sends the cookie automatically) OR the shared
+  // SYNC_SECRET (the cron, which has no cookie).
   //
-  // It now FAILS CLOSED. The old code only enforced the check "if (secret)", so with
+  // It still FAILS CLOSED. The old code only enforced the check "if (secret)", so with
   // SYNC_SECRET unset the endpoint was completely open: anyone who knew the URL could
   // trigger a full reconcile, hammer the Printavo rate limit, and rebuild your roster.
   // An unset secret is a misconfiguration, not permission to skip the check.
-  if (!secret) {
-    return res.status(500).json({
-      error: "SYNC_SECRET is not set. Generate one (openssl rand -base64 32), add it in " +
-             "Vercel > Environment Variables, redeploy, and pass it as ?secret= or the " +
-             "x-sync-secret header. Refusing to run an unauthenticated sync."
-    });
+  //
+  // safeEqual (not !==) for two reasons: constant-time compare, and it treats a
+  // missing value as a non-match instead of accidentally passing when both sides
+  // are undefined — the exact trap that bit api/scrape.js.
+  const sess = getSession(req);
+  const viaSession = !!sess;
+  if (!viaSession) {
+    if (!secret) {
+      return res.status(500).json({
+        error: "SYNC_SECRET is not set. Generate one (openssl rand -base64 32), add it in " +
+               "Vercel > Environment Variables, redeploy, and pass it as ?secret= or the " +
+               "x-sync-secret header (or sign in and use the Reconcile button). " +
+               "Refusing to run an unauthenticated sync."
+      });
+    }
+    const provided = req.headers["x-sync-secret"] || req.query.secret;
+    if (!safeEqual(provided, secret)) return res.status(401).json({ error: "Unauthorized" });
   }
-  const provided = req.headers["x-sync-secret"] || req.query.secret;
-  if (provided !== secret) return res.status(401).json({ error: "Unauthorized" });
+  // Resume URLs must carry the same credential the caller used. Session callers
+  // get a bare URL (the cookie rides along on the next request); secret callers
+  // get the secret echoed back. Never put the secret in a session caller's
+  // response — that would hand it to every signed-in browser.
+  const secretQS = viaSession ? "" : `&secret=${encodeURIComponent(secret)}`;
 
   const mode         = (req.query.mode || "incremental").toLowerCase();
   const resumeCursor = req.query.cursor || null;
@@ -1352,7 +1369,7 @@ export default async function handler(req, res) {
       if (cursor) {
         return res.status(200).json({
           ok: true, mode, status: "partial", pages, customersTouched: Object.keys(acc).length,
-          nextUrl: `/api/printavo-sync?mode=incremental&cursor=${encodeURIComponent(cursor)}`,
+          nextUrl: `/api/printavo-sync?mode=incremental&cursor=${encodeURIComponent(cursor)}${secretQS}`,
         });
       }
 
@@ -1507,7 +1524,7 @@ export default async function handler(req, res) {
           progress: { year: curYear, pass, cursor: cursor || null },
           // Resume reads the saved partial (incl. cursor) automatically, so the
           // URL just needs to re-trigger reconcile. No cursor/rstate needed.
-          nextUrl: `/api/printavo-sync?mode=reconcile`,
+          nextUrl: `/api/printavo-sync?mode=reconcile${secretQS}`,
         });
       }
 
@@ -1804,7 +1821,7 @@ export default async function handler(req, res) {
           return res.status(200).json({
             ok: true, mode: "ops", status: "partial", phase: "quotes",
             quotesScanned: acc.quotesScanned, quotePages: acc.quotePages,
-            nextUrl: `/api/printavo-sync?mode=ops&secret=${encodeURIComponent(secret)}`,
+            nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
         }
         // Quotes done — advance to invoices phase.
@@ -1911,7 +1928,7 @@ export default async function handler(req, res) {
           return res.status(200).json({
             ok: true, mode: "ops", status: "partial", phase: "invoices",
             invoicePages: acc.invoicePages, outstandingSoFar: acc.outstanding.length,
-            nextUrl: `/api/printavo-sync?mode=ops&secret=${encodeURIComponent(secret)}`,
+            nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
         }
       }
