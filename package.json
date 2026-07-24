@@ -9,5 +9,8 @@
   },
   "scripts": {
     "test": "bash test/run.sh"
+  },
+  "dependencies": {
+    "@vercel/blob": "^2.6.1"
   }
 }
