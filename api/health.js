@@ -27,7 +27,8 @@ const REQUIRED = [
   // index.js imports the other two, so a missing sibling takes the whole app
   // down with a message that only says the module failed to load.
   "apps/backbone/index.js", "apps/backbone/styles.js", "apps/backbone/template.js",
-  "lib/giving.js",
+  "apps/backbone/main.js",
+  "lib/giving.js", "lib/backbone-store.js", "lib/playbook.js",
   "vendor/scoring-engine.js", "vendor/gauge.js"
 ];
 
