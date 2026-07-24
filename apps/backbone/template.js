@@ -166,6 +166,7 @@ export default `
         <div class="kpi-lbl">Data source</div>
         <div class="kpi-val" style="font-size:15px">Printavo (live)</div>
         <div class="kpi-s">Auto-sync · paid-only revenue</div>
+        <div class="kpi-s" id="lastUpdated"></div>
       </div>
     </div>
 
