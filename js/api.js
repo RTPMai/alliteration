@@ -50,7 +50,11 @@ const LIVE_PREFIXES = [
   // ShopStock: api/items.js, api/settings.js and api/scrape.js are deployed.
   '/api/items', '/api/settings', '/api/scrape',
   // GivingGauge: fed by the Jotform webhook.
-  '/api/giving-requests', '/api/giving-intake'
+  '/api/giving-requests', '/api/giving-intake',
+  // BackBone: roster, leads, inbox and the AI endpoints are all deployed.
+  '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
+  '/api/intake', '/api/qualify', '/api/brief', '/api/scan-card',
+  '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match'
 ];
 
 function isLive(path) {
@@ -112,6 +116,7 @@ export const ENDPOINTS = {
   bbScanCard:      '/api/scan-card',
   bbPrintavoSync:  '/api/printavo-sync',
   bbPrintavoSchema:'/api/printavo-schema',
+  bbCustomerMatch: '/api/customer-match',
 
   // ---- ErrorEngine (collisions resolved) ----
   eeErrors:        ERRORS_ENDPOINT,        // renamed from /api/intake
