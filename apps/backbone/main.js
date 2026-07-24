@@ -4037,13 +4037,18 @@ export async function start(ctx) {
     return rows;
   }
 
+  function setText(id, txt) {
+    const el = $id(id);
+    if (el) el.textContent = txt;
+  }
+
   function render() {
     if (!$id("kpiTotal")) return;
-    $id("kpiTotal").textContent = state.synced.length;
-    $id("kpiEnriched").textContent = state.synced.filter(hasEnrichment).length;
-    $id("lastUpdated").textContent = state.lastSynced
+    setText("kpiTotal", state.synced.length);
+    setText("kpiEnriched", state.synced.filter(hasEnrichment).length);
+    setText("lastUpdated", state.lastSynced
       ? "Last refresh: " + new Date(state.lastSynced).toLocaleString()
-      : "";
+      : "");
 
     const rows = getRows();
     const wrap = $id("tableWrap");
