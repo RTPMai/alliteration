@@ -405,6 +405,10 @@ function renderMessage(title, body) {
 
 function renderStub(meta) {
   hideAllHosts();
+  // Each stub carries its own note in the registry. This text used to be
+  // hardcoded here, which was fine with one stub (TravelTrack) and wrong the
+  // moment a second one existed: CrewCore's page would have claimed it runs
+  // on Base44.
   shellMessageNode().innerHTML =
     '<div class="view"><div class="page-head"><div>' +
       '<div class="page-title">' + escape(meta.name) + '<span class="dot">.</span></div>' +
@@ -412,9 +416,7 @@ function renderStub(meta) {
     '</div></div>' +
     '<div class="card"><div class="card-bd"><div class="empty">' +
       '<strong>Not built yet</strong>' +
-      'Confirmed for rebuild. This app runs on Base44, so there is no ' +
-      '<code>api/</code> folder to point at. The data model gets rebuilt here ' +
-      'rather than reconnected.' +
+      escape(meta.stubNote || 'Planned. This app ships as a placeholder until it is built.') +
     '</div></div></div></div>';
 }
 
