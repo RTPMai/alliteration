@@ -620,6 +620,71 @@ export default async function handler(req, res) {
     }
   }
 
+  // Introspect the transactions query — the cash-collected feed. NOTHING here is
+  // assumed: the query's existence, its node type, and its field names are all
+  // discovered at runtime, the same discipline as resolveInvoiceArgs above. If
+  // any step comes back empty, cash reporting is skipped for the run (with the
+  // reason recorded in diagnostics) and the dashboard falls back to the legacy
+  // salesByMonth series rather than breaking.
+  async function probeTransactions() {
+    const out = {
+      available: false, selection: null,
+      amountField: null, dateField: null, kindField: null,
+      dateArgName: null, note: "",
+    };
+    try {
+      const data = await gql(`query{__type(name:"Query"){fields{name args{name} type{name kind ofType{name kind}}}}}`);
+      const fields = (data.__type && data.__type.fields) || [];
+      const tx = fields.find(function (f) { return f.name === "transactions"; });
+      if (!tx) { out.note = "schema has no transactions query"; return out; }
+      const argNames = (tx.args || []).map(function (a) { return a.name; });
+
+      // Follow the connection type to its node type.
+      let ct = tx.type;
+      while (ct && !ct.name && ct.ofType) ct = ct.ofType;
+      const connName = ct && ct.name;
+      if (!connName) { out.note = "transactions has no resolvable connection type"; return out; }
+      await rlPause();
+      const conn = await gql(`query{__type(name:"${connName}"){fields{name type{name kind ofType{name kind ofType{name kind ofType{name kind}}}}}}}`);
+      const nodesField = ((conn.__type && conn.__type.fields) || []).find(function (f) { return f.name === "nodes"; });
+      let nt = nodesField && nodesField.type;
+      while (nt && !nt.name && nt.ofType) nt = nt.ofType;
+      const nodeName = nt && nt.name;
+      if (!nodeName) { out.note = "transactions connection has no node type"; return out; }
+      await rlPause();
+      const node = await gql(`query{__type(name:"${nodeName}"){kind fields{name}}}`);
+      const nodeFields = ((node.__type && node.__type.fields) || []).map(function (f) { return f.name; });
+      if (!nodeFields.length) { out.note = "node type " + nodeName + " exposes no shared fields"; return out; }
+
+      const pick = function (cands) {
+        for (let i = 0; i < cands.length; i++) if (nodeFields.indexOf(cands[i]) !== -1) return cands[i];
+        return null;
+      };
+      out.amountField = pick(["amount", "total", "amountPaid", "value"]);
+      out.dateField = pick(["transactionDate", "createdAt", "processedAt", "paidAt", "date"]);
+      out.kindField = pick(["category", "source", "description"]);
+      if (!out.amountField || !out.dateField) {
+        out.note = "node type " + nodeName + " is missing an amount or date field";
+        return out;
+      }
+      // __typename classifies Payment vs Refund/Void/Dispute when no kind field exists.
+      out.selection = ["__typename", out.amountField, out.dateField]
+        .concat(out.kindField ? [out.kindField] : []).join(" ");
+
+      // A server-side date window is the best case: only this year's transactions
+      // come over the wire. Detected, never assumed.
+      out.dateArgName = argNames.find(function (n) {
+        return /after$/i.test(n) && /(created|transacted|processed|paid|date)/i.test(n);
+      }) || null;
+
+      out.available = true;
+      return out;
+    } catch (e) {
+      out.note = "introspection failed: " + (e && e.message ? e.message : String(e));
+      return out;
+    }
+  }
+
   // Fold one invoice into a per-customer accumulator.
   //
   // Two-pass reconcile model:
@@ -1948,6 +2013,82 @@ export default async function handler(req, res) {
             nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
         }
+
+        acc.phase = "cash";
+        acc.cursor = null;
+        await kvSet("backbone_ops_partial", acc);
+      }
+
+      // ---------- PHASE 3: cash collected per month (payment transactions) ----------
+      // "Cash in the door": every Payment-typed transaction bucketed by the month
+      // it HAPPENED, regardless of when its order was written. This is the number
+      // the $280k/month goal is judged against. salesByMonth above (collected so
+      // far, credited to the order's creation month) systematically starves the
+      // current month — July 2026 showed $31k while actual July collections were
+      // $190k+ — so the dashboard prefers cashByMonth whenever it is present.
+      // Refund / Return / Void / Dispute transactions are excluded, matching how
+      // Apparelytics counts payments.
+      if (acc.phase === "cash") {
+        if (!acc.cashProbe) {
+          acc.cashProbe = await probeTransactions();
+          await kvSet("backbone_ops_partial", acc);
+          await rlPause();
+        }
+        const probe = acc.cashProbe;
+        acc.cashByMonth = acc.cashByMonth || {};
+        acc.cashPages = acc.cashPages || 0;
+        acc.cashScanned = acc.cashScanned || 0;
+
+        if (probe.available) {
+          const dateQS = probe.dateArgName ? `,${probe.dateArgName}:"${yearStart}"` : "";
+          let tCursor = acc.cursor;
+          do {
+            const after = tCursor ? `,after:"${tCursor}"` : "";
+            let data;
+            try {
+              data = await gql(
+                `query{transactions(first:50${dateQS}${after}){nodes{${probe.selection}} pageInfo{hasNextPage endCursor}}}`
+              );
+            } catch (e) {
+              // Introspection can promise a shape the server still rejects in
+              // practice. Cash is additive: record why and finish the snapshot
+              // without it rather than failing the whole sync.
+              probe.available = false;
+              probe.note = "transactions query failed: " + (e && e.message ? e.message : String(e));
+              acc.cursor = null;
+              break;
+            }
+            const nodes = (data.transactions && data.transactions.nodes) || [];
+            for (const t of nodes) {
+              acc.cashScanned++;
+              const kind = String((probe.kindField && t[probe.kindField]) || t.__typename || "");
+              // Payment-typed only; refunds, returns, voids, and disputes are not cash goals met.
+              if (!/payment/i.test(kind)) continue;
+              if (/(refund|return|void|dispute)/i.test(kind)) continue;
+              const when = String(t[probe.dateField] || "");
+              if (when.slice(0, 4) !== curYear) continue; // client-side window when no date arg exists
+              const amt = Number(t[probe.amountField]) || 0;
+              if (amt <= 0) continue;
+              const mk = when.slice(0, 7);
+              acc.cashByMonth[mk] = (acc.cashByMonth[mk] || 0) + amt;
+            }
+            tCursor = (data.transactions && data.transactions.pageInfo && data.transactions.pageInfo.hasNextPage)
+              ? data.transactions.pageInfo.endCursor : null;
+            acc.cashPages++;
+            acc.cursor = tCursor;
+            if (tCursor) await new Promise(r => setTimeout(r, 1200));
+          } while (tCursor && Date.now() < deadline);
+
+          if (acc.cursor) {
+            // Ran out of time mid-transactions. Save and ask to continue.
+            await kvSet("backbone_ops_partial", acc);
+            return res.status(200).json({
+              ok: true, mode: "ops", status: "partial", phase: "cash",
+              cashPages: acc.cashPages, cashScanned: acc.cashScanned,
+              nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
+            });
+          }
+        }
       }
 
       // ---------- Finalize: everything paged, write the real key, clear partial ----------
@@ -1955,12 +2096,19 @@ export default async function handler(req, res) {
       Object.keys(acc.salesByMonth).forEach(function (m) {
         salesByMonth[m] = Math.round(acc.salesByMonth[m] * 100) / 100;
       });
+      const cashOk = !!(acc.cashProbe && acc.cashProbe.available);
+      const cashByMonth = {};
+      if (cashOk) {
+        Object.keys(acc.cashByMonth || {}).forEach(function (m) {
+          cashByMonth[m] = Math.round(acc.cashByMonth[m] * 100) / 100;
+        });
+      }
       const outstanding = acc.outstanding.slice().sort(function (a, b) { return b.amount - a.amount; });
       const outstandingTotal = outstanding.reduce(function (s, r) { return s + r.amount; }, 0);
 
       const opsPayload = {
         generatedAt: nowIso,
-        buildVersion: "ops-v2-resumable",
+        buildVersion: "ops-v3-cash",
         quotesThisWeek: acc.quotesThisWeek,
         artDeclinedYtd: acc.artDeclinedYtd,
         // #3 live snapshot: quotes currently sitting in each declined status (all-time).
@@ -1974,11 +2122,23 @@ export default async function handler(req, res) {
         outstanding,
         outstandingTotal: Math.round(outstandingTotal * 100) / 100,
         salesByMonth,
+        // Cash collected per month (payment transactions by transaction date).
+        // Present only when the transactions probe succeeded; the dashboard
+        // falls back to salesByMonth when absent.
+        cashByMonth: cashOk ? cashByMonth : undefined,
         workload: Object.values(acc.workloadByCustomer),
         statusGroups: WORKLOAD_STATUS_GROUPS,
         diagnostics: {
           quotesScanned: acc.quotesScanned, quotePages: acc.quotePages,
           invoicePages: acc.invoicePages,
+          cashAvailable: cashOk,
+          cashPages: acc.cashPages || 0,
+          cashScanned: acc.cashScanned || 0,
+          cashNote: (acc.cashProbe && acc.cashProbe.note) || (cashOk ? "ok" : "not probed"),
+          cashFields: acc.cashProbe ? {
+            amount: acc.cashProbe.amountField, date: acc.cashProbe.dateField,
+            kind: acc.cashProbe.kindField, dateArg: acc.cashProbe.dateArgName,
+          } : null,
           quotesSort: qMeta.sortOn, quotesHasDesc: qMeta.hasSortDescending,
           quotesArtDeclineStatusMatched: acc.currentArtDeclined > 0,
           // Every distinct quote status name seen this run, most common first. This is
@@ -2004,6 +2164,9 @@ export default async function handler(req, res) {
         outstandingTotal: opsPayload.outstandingTotal,
         workloadCustomers: opsPayload.workload.length,
         salesMonths: Object.keys(salesByMonth).length,
+        cashAvailable: cashOk,
+        cashMonths: cashOk ? Object.keys(cashByMonth).length : 0,
+        cashNote: (acc.cashProbe && acc.cashProbe.note) || (cashOk ? "ok" : "not probed"),
         diagnostics: opsPayload.diagnostics,
         nextUrl: null,
       });
