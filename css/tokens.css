@@ -181,6 +181,15 @@ body[data-app="traveltrack"] {
   --accent-tint: #E4F2F3;
 }
 
+/* CrewCore's accent matches its logo mark: a lighter, brighter blue than
+   BackBone's #1B5DAB. Distinct enough side by side that the two blues do not
+   read as the same app. */
+body[data-app="crewcore"] {
+  --accent:      #4A90E2;
+  --accent-deep: #3372BC;
+  --accent-tint: #EDF4FC;
+}
+
 /* ==========================================================================
    COMPATIBILITY ALIASES
    Ported app markup references its own old variable names. Rather than
