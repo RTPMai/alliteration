@@ -5,6 +5,12 @@
       "includeFiles": "{lib,js,css,apps,vendor}/**"
     }
   },
+  "crons": [
+    {
+      "path": "/api/printavo-sync?mode=ops",
+      "schedule": "0 11 * * *"
+    }
+  ],
   "headers": [
     {
       "source": "/js/(.*)",
