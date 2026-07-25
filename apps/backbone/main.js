@@ -4710,15 +4710,18 @@ export async function start(ctx) {
   function loadDashLayout() {
     try {
       const raw = localStorage.getItem(DASH_LAYOUT_KEY);
-      if (!raw) return { order: [], paired: {}, hidden: {} };
+      if (!raw) return { order: [], paired: {}, hidden: {}, full: {} };
       const p = JSON.parse(raw);
       return {
         order: Array.isArray(p.order) ? p.order : [],
         paired: p.paired && typeof p.paired === "object" ? p.paired : {},
-        hidden: p.hidden && typeof p.hidden === "object" ? p.hidden : {}
+        hidden: p.hidden && typeof p.hidden === "object" ? p.hidden : {},
+        // Explicit "keep this card full width" choices from the expand button.
+        // Absent in older saved layouts; defaults to none, which is the old behaviour.
+        full: p.full && typeof p.full === "object" ? p.full : {}
       };
     } catch (e) {
-      return { order: [], paired: {}, hidden: {} };
+      return { order: [], paired: {}, hidden: {}, full: {} };
     }
   }
 
@@ -4757,11 +4760,13 @@ export async function start(ctx) {
       const paired = hasSaved ? !!l.paired[id] : c.classList.contains("w-half");
       c.dataset.paired = paired ? "1" : "0";
       c.dataset.pairIntent = "";
+      c.dataset.full = l.full[id] ? "1" : "";
     });
 
     reflowDashWidths();
     renderDashTools();
     renderHiddenChips();
+    initDashMasonry();
   }
 
   function currentDashOrder() {
@@ -4775,16 +4780,19 @@ export async function start(ctx) {
     l.order = currentDashOrder();
     l.paired = {};
     l.hidden = {};
+    l.full = {};
     Array.from(grid.querySelectorAll(".dash-card")).forEach(function(c) {
       l.paired[c.dataset.card] = c.classList.contains("w-half");
       l.hidden[c.dataset.card] = c.classList.contains("is-hidden");
+      l.full[c.dataset.card] = c.dataset.full === "1";
     });
     saveDashLayout(l);
   }
 
-  // Hide button only. Width is no longer a manual toggle — it follows drag position
-  // (drop a card beside another to pair them half/half; drop it on its own row for
-  // full width). One less control to fight with the layout.
+  // Two tools per card: a width toggle and hide. Width normally follows drag
+  // position (beside = half pair, own row = full), but the expand button pins a
+  // card to full width regardless of what sits next to it — the "I can't make
+  // this card wide" fix. Clicking again releases it back to position-driven.
   function renderDashTools() {
     const grid = $id("dashGrid");
     if (!grid) return;
@@ -4797,13 +4805,26 @@ export async function start(ctx) {
         tools.className = "dash-tools";
         hd.appendChild(tools);
       }
+      const pinned = c.dataset.full === "1";
       tools.innerHTML =
+        '<button class="dash-tool' + (pinned ? " on" : "") + '" data-act="width" title="' +
+          (pinned ? "Unpin: let width follow position again" : "Pin to full width") +
+        '">\u2194</button>' +
         '<button class="dash-tool" data-act="hide" title="Hide this card">\u2715</button>';
 
       tools.querySelectorAll(".dash-tool").forEach(function(b) {
         b.addEventListener("click", function(ev) {
           ev.stopPropagation();
-          c.classList.add("is-hidden");
+          if (b.dataset.act === "width") {
+            const on = c.dataset.full === "1";
+            c.dataset.full = on ? "" : "1";
+            c.dataset.pairIntent = "";
+            // Pinning breaks any pair; unpinning lets it pair back up with a
+            // neighbour on the next reflow.
+            c.dataset.paired = on ? "1" : "0";
+          } else {
+            c.classList.add("is-hidden");
+          }
           reflowDashWidths();
           persistDashLayout();
           renderDashTools();
@@ -4838,6 +4859,7 @@ export async function start(ctx) {
   }
 
   let dashDragEl = null;
+  let dashDropTarget = null;   // { card, pos } for the edge the drag is hovering
 
   // Width follows position. We walk the cards in order and pair them up: a card that
   // wants to sit beside its neighbour (pairIntent, or a saved pairing) becomes half
@@ -4851,13 +4873,18 @@ export async function start(ctx) {
     let i = 0;
     while (i < cards.length) {
       const cur = cards[i];
+      // A pinned card takes a full row no matter what, and never joins a pair.
+      if (cur.dataset.full === "1") {
+        cur.classList.add("w-full"); cur.classList.remove("w-half");
+        cur.dataset.paired = "0"; cur.dataset.pairIntent = "";
+        i += 1;
+        continue;
+      }
       const next = cards[i + 1];
-      // Pair cur+next into a half/half row when either side expressed side-by-side
-      // intent on the most recent drag, OR they were a saved pair and neither has since
-      // asked to be full. Otherwise cur takes a full row on its own.
+      const nextEligible = next && next.dataset.full !== "1";  // pinned cards can't be pulled into a pair
       const curWantsPair = cur.dataset.pairIntent === "1" || cur.dataset.paired === "1";
-      const nextWantsPair = next && (next.dataset.pairIntent === "1" || next.dataset.paired === "1");
-      if (next && (curWantsPair || nextWantsPair)) {
+      const nextWantsPair = nextEligible && (next.dataset.pairIntent === "1" || next.dataset.paired === "1");
+      if (nextEligible && (curWantsPair || nextWantsPair)) {
         cur.classList.add("w-half"); cur.classList.remove("w-full");
         next.classList.add("w-half"); next.classList.remove("w-full");
         cur.dataset.paired = "1"; next.dataset.paired = "1";
@@ -4869,6 +4896,47 @@ export async function start(ctx) {
         i += 1;
       }
     }
+    masonryDash();
+  }
+
+  // ---- Masonry row packing ----------------------------------------------------
+  // The grid used to be plain rows, so every row was as tall as its TALLEST card
+  // and a short card beside a tall one left dead white space beneath it. Now each
+  // card spans exactly as many fine-grained 8px rows as its own content needs, so
+  // the next card starts right below it. Card order is untouched: auto-placement
+  // only fills forward, never backfills earlier gaps, so nothing "jumps" — this
+  // is compatible with the no-dense rule the layout was built around.
+  // DASH_ROW must match grid-auto-rows in styles.js; DASH_GAP matches the grid gap.
+  const DASH_ROW = 8, DASH_GAP = 12;
+
+  function masonryDash() {
+    const grid = $id("dashGrid");
+    if (!grid) return;
+    grid.dataset.masonry = "1";   // switches on grid-auto-rows in styles.js
+    grid.querySelectorAll(".dash-card:not(.is-hidden)").forEach(function(c) {
+      const h = c.getBoundingClientRect().height;
+      if (!h) return;   // not laid out yet; the ResizeObserver will catch it
+      c.style.gridRowEnd = "span " + Math.max(1, Math.ceil((h + DASH_GAP) / (DASH_ROW + DASH_GAP)));
+    });
+  }
+
+  // Card content renders asynchronously (charts fill in after data loads), so
+  // heights change after the first pass. Re-pack whenever any card body resizes,
+  // coalesced to one relayout per frame, plus on window resize.
+  let dashResizeObs = null;
+  function initDashMasonry() {
+    const grid = $id("dashGrid");
+    if (!grid || grid.dataset.masonryInit) return;
+    grid.dataset.masonryInit = "1";
+    if (typeof ResizeObserver !== "undefined") {
+      let raf = 0;
+      dashResizeObs = new ResizeObserver(function() {
+        if (raf) return;
+        raf = requestAnimationFrame(function() { raf = 0; masonryDash(); });
+      });
+      grid.querySelectorAll(".dash-card .card-bd").forEach(function(b) { dashResizeObs.observe(b); });
+    }
+    window.addEventListener("resize", masonryDash);
   }
 
   function initDashDrag() {
@@ -4904,44 +4972,65 @@ export async function start(ctx) {
 
     grid.addEventListener("dragend", function() {
       if (dashDragEl) { dashDragEl.classList.remove("dragging"); dashDragEl.draggable = false; }
-      grid.querySelectorAll(".drag-over,.drag-side").forEach(function(c) { c.classList.remove("drag-over","drag-side"); });
+      clearDropMarks();
       dashDragEl = null;
+      dashDropTarget = null;
       reflowDashWidths();   // width follows position: paired => half, alone => full
       persistDashLayout();
     });
 
+    function clearDropMarks() {
+      grid.querySelectorAll(".drop-top,.drop-bottom,.drop-left,.drop-right,.drag-over,.drag-side")
+        .forEach(function(c) {
+          c.classList.remove("drop-top", "drop-bottom", "drop-left", "drop-right", "drag-over", "drag-side");
+        });
+    }
+
+    // The card no longer moves WHILE dragging — cards shuffling live under the
+    // cursor made it hard to tell what a drop would do. Instead an accent bar
+    // marks the edge of the hovered card where the drag will land (top/bottom =
+    // its own row above/below; left/right = pair up beside it), and the actual
+    // move happens on drop.
     grid.addEventListener("dragover", function(e) {
       e.preventDefault();
       const over = e.target.closest(".dash-card");
       if (!over || !dashDragEl || over === dashDragEl) return;
-      grid.querySelectorAll(".drag-over,.drag-side").forEach(function(c) { c.classList.remove("drag-over","drag-side"); });
-      over.classList.add("drag-over");
+      clearDropMarks();
 
-      // Position decides both ORDER and WIDTH. Horizontal drops (left/right edge of a
-      // card) mean "sit beside this card" → the two become a half-width pair. Vertical
-      // drops (top/bottom) mean "own row" → full width. We mark intent here and let
-      // reflowDashWidths() on drop compute the actual spans, so the rule is always
-      // "beside = half for both, under = full", regardless of how cards started.
       const r = over.getBoundingClientRect();
       const dx = e.clientX - r.left;
       const edgeZone = r.width * 0.28; // near a vertical edge => side-by-side intent
-      const nearLeftEdge = dx < edgeZone;
-      const nearRightEdge = dx > (r.width - edgeZone);
+      let pos;
+      if (dx < edgeZone) pos = "left";
+      else if (dx > r.width - edgeZone) pos = "right";
+      else pos = (e.clientY - r.top) > r.height / 2 ? "bottom" : "top";
 
-      if (nearLeftEdge || nearRightEdge) {
-        // Side-by-side: place immediately before/after the target and flag the pair.
-        over.classList.add("drag-side");
-        grid.insertBefore(dashDragEl, nearRightEdge ? over.nextSibling : over);
-        dashDragEl.dataset.pairIntent = "1";
-      } else {
-        // Own row: insert above/below by vertical midpoint, clear pairing intent.
-        const after = (e.clientY - r.top) > r.height / 2;
-        grid.insertBefore(dashDragEl, after ? over.nextSibling : over);
-        dashDragEl.dataset.pairIntent = "0";
-      }
+      over.classList.add("drop-" + pos);
+      dashDropTarget = { card: over, pos: pos };
     });
 
-    grid.addEventListener("drop", function(e) { e.preventDefault(); });
+    grid.addEventListener("drop", function(e) {
+      e.preventDefault();
+      if (!dashDragEl || !dashDropTarget) return;
+      const t = dashDropTarget.card;
+      const pos = dashDropTarget.pos;
+      const before = (pos === "left" || pos === "top");
+      grid.insertBefore(dashDragEl, before ? t : t.nextSibling);
+
+      if (pos === "left" || pos === "right") {
+        // Side drop: pair up. Pairing is an explicit act, so it overrides a
+        // full-width pin on either card.
+        dashDragEl.dataset.pairIntent = "1";
+        dashDragEl.dataset.full = "";
+        t.dataset.full = "";
+        t.dataset.pairIntent = "1";
+      } else {
+        // Own row above/below the target.
+        dashDragEl.dataset.pairIntent = "0";
+        dashDragEl.dataset.full = "";
+      }
+      // dragend fires next and does the reflow + persist.
+    });
 
     const reset = $id("dashResetLayout");
     if (reset) {
