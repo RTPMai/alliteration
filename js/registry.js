@@ -111,7 +111,33 @@ export const APPS = [
     defaultView: 'dashboard',
     // Runs on Base44. There is no api/ folder to point at, so the data model
     // gets rebuilt rather than reconnected. Ships as a placeholder until then.
-    stub: true
+    stub: true,
+    // Shown on the shell's "not built yet" page. Each stub carries its own
+    // note; renderStub() used to hardcode this text, which was fine with one
+    // stub and wrong with two.
+    stubNote: 'Confirmed for rebuild. This app runs on Base44, so there is ' +
+      'no api/ folder to point at. The data model gets rebuilt here rather ' +
+      'than reconnected.'
+  },
+  {
+    id: 'crewcore',
+    name: 'CrewCore',
+    w1: 'Crew', w2: 'Core', letter: 'C',
+    role: 'Who does the work',
+    blurb: 'Employees, PTO, reviews, anniversaries.',
+    accent: '#4A90E2',           // display only (rail dot / app mark); tokens.css owns theming
+    views: [
+      ['dashboard', 'Dashboard']
+    ],
+    defaultView: 'dashboard',
+    // The most sensitive app in the shell: hourly rates and review notes.
+    // No role should be granted 'crewcore' until the real build lands, so it
+    // is visible only to superusers for now. That is canAccess()'s default
+    // for an app id no role carries; nothing extra to enforce here.
+    stub: true,
+    stubNote: 'Planned. Employee management for the whole team: roster ' +
+      '(role, start date, hourly rate, apparel stipend), PTO balances and ' +
+      'requests, one-on-one review history, and anniversaries. Admin only.'
   }
 ];
 
