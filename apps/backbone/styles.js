@@ -53,7 +53,11 @@ export default `
 .chip-new{background:var(--hue-indigo-tint);color:var(--hue-indigo)}
 .chip-internal{background:var(--hue-violet-tint);color:var(--hue-violet)}
 .page{display:none}.page.active{display:block}
-.dash{padding:32px;max-width:1440px;margin:0 auto}
+/* Full available width. The standalone app capped this at 1440px and centered
+   it, which read as heavy white margins on a wide screen. The shell already
+   dropped its own cap for dense apps (see --shell-max-w in tokens.css), so
+   the app-level cap goes too. Padding kept for breathing room at the edges. */
+.dash{padding:32px}
 
 .kpi-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:16px;margin-bottom:22px}
 #page-dashboard #dashPortfolioKpiGrid{grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;margin-bottom:12px}
@@ -375,6 +379,20 @@ textarea.field{min-height:60px;resize:vertical}
 .dash-card.dragging{opacity:.35;transform:scale(.99)}
 .dash-card.drag-over{box-shadow:0 0 0 2px var(--accent),0 6px 18px rgba(16,24,40,.12)}
 .dash-card.drag-side{box-shadow:0 0 0 2px var(--accent),inset 0 0 0 9999px rgba(27,93,171,.04)}
+/* Drop-position indicators: an accent bar on the edge of the card the drag is
+   hovering, showing WHERE the dragged card will land relative to it. The bar
+   sits in the 12px grid gap (4px bar, offset 8px) so it reads as "between",
+   not "on". main.js sets exactly one of these on the hovered card and clears
+   it on dragleave/drop. The older drag-over/drag-side ring styles above stay
+   until main.js stops using them. */
+.dash-card.drop-top::after,.dash-card.drop-bottom::after,
+.dash-card.drop-left::after,.dash-card.drop-right::after{
+  content:'';position:absolute;background:var(--accent);border-radius:99px;
+  pointer-events:none;z-index:2}
+.dash-card.drop-top::after{left:8px;right:8px;top:-8px;height:4px}
+.dash-card.drop-bottom::after{left:8px;right:8px;bottom:-8px;height:4px}
+.dash-card.drop-left::after{top:8px;bottom:8px;left:-8px;width:4px}
+.dash-card.drop-right::after{top:8px;bottom:8px;right:-8px;width:4px}
 .dash-card .card-hd{user-select:none;align-items:center}
 .dash-card .card-hd h3{font-size:13px;font-weight:800;letter-spacing:.02em}
 .dash-card.dragging .card-hd{cursor:grabbing}
