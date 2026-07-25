@@ -330,6 +330,25 @@ export default `
         </div>
       </div>
     </div>
+
+    <!-- Capacity: coming soon. Deliberately OUTSIDE #dashGrid so the drag /
+         hide / reset-layout machinery never has to know about it. Static
+         placeholder; replace with the real Capacity view when it ships.
+         It will grow out of the Account Managers card above, adding
+         PTO-weighted availability once CrewCore exists to ask. -->
+    <div class="card" id="dashCapacitySoon" style="margin-top:12px">
+      <div class="card-hd">
+        <h3>Capacity <span class="badge badge-amber" style="margin-left:8px">Coming soon</span></h3>
+      </div>
+      <div class="card-bd">
+        <div class="help">
+          Who has room for the next job: open jobs and open-quote value per
+          account manager, at a glance. Builds on the Account Managers card
+          above, and once CrewCore ships it can weight availability by PTO
+          — someone out Thursday and Friday has less capacity that week.
+        </div>
+      </div>
+    </div>
   </div>
 
   <div id="page-settings" class="page">
