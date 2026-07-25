@@ -51,7 +51,18 @@ export default async function handler(req, res) {
   // are undefined — the exact trap that bit api/scrape.js.
   const sess = getSession(req);
   const viaSession = !!sess;
-  if (!viaSession) {
+
+  // Vercel cron authentication. When a CRON_SECRET env var exists, Vercel
+  // automatically attaches "Authorization: Bearer <CRON_SECRET>" to every cron
+  // invocation, so the secret never has to appear in vercel.json (which is
+  // committed to the repo). Same fail-closed rule as everything else here:
+  // safeEqual treats an unset secret or a missing header as a non-match, never
+  // as a pass.
+  const cronSecret = process.env.CRON_SECRET;
+  const viaCron = !!cronSecret &&
+    safeEqual(req.headers["authorization"], "Bearer " + cronSecret);
+
+  if (!viaSession && !viaCron) {
     if (!secret) {
       return res.status(500).json({
         error: "SYNC_SECRET is not set. Generate one (openssl rand -base64 32), add it in " +
@@ -66,10 +77,16 @@ export default async function handler(req, res) {
   // Resume URLs must carry the same credential the caller used. Session callers
   // get a bare URL (the cookie rides along on the next request); secret callers
   // get the secret echoed back. Never put the secret in a session caller's
-  // response — that would hand it to every signed-in browser.
-  const secretQS = viaSession ? "" : `&secret=${encodeURIComponent(secret)}`;
+  // response — that would hand it to every signed-in browser. Cron callers get a
+  // bare URL too: Vercel re-attaches the header itself, and an interrupted ops
+  // run resumes from its saved partial on the next scheduled hit anyway.
+  const secretQS = (viaSession || viaCron) ? "" : `&secret=${encodeURIComponent(secret)}`;
 
-  const mode         = (req.query.mode || "incremental").toLowerCase();
+  // Cron invocations default to the ops slice: the schedule exists to keep the
+  // dashboard fresh, and this holds even if the query string is ever lost
+  // between vercel.json and the function. Everyone else defaults to
+  // incremental, as before.
+  const mode         = (req.query.mode || (viaCron ? "ops" : "incremental")).toLowerCase();
   const resumeCursor = req.query.cursor || null;
 
   // --- Printavo GraphQL --------------------------------------------------
