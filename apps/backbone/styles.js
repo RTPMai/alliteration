@@ -359,6 +359,12 @@ textarea.field{min-height:60px;resize:vertical}
    the order the user dragged it to, even if that leaves a half-width gap. */
 .dash-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;align-items:start;
   grid-auto-flow:row}
+/* Masonry packing: main.js sets data-masonry and gives each card a row span
+   sized to its own content (see masonryDash — the 8px here must match its
+   DASH_ROW). Gated on the attribute so the grid still lays out sanely if the
+   script never runs. Cards keep their dragged order; short cards just stop
+   reserving their tall neighbour's height. */
+.dash-grid[data-masonry="1"]{grid-auto-rows:8px}
 
 .dash-card{grid-column:span 1;position:relative;border-radius:14px;
   box-shadow:0 1px 3px rgba(16,24,40,.07);
@@ -400,6 +406,9 @@ textarea.field{min-height:60px;resize:vertical}
 .dash-tool{border:none;background:none;cursor:pointer;padding:4px 6px;border-radius:6px;
   color:var(--faint);font-size:12px;line-height:1;font-family:inherit;transition:all .12s ease}
 .dash-tool:hover{background:var(--bg);color:var(--ink)}
+/* Width pin engaged: the tool reads as "on". */
+.dash-tool.on{color:var(--accent)}
+.dash-tool.on:hover{color:var(--accent-deep)}
 .dash-grip{color:var(--line);font-size:14px;margin-right:8px;flex:0 0 auto;cursor:grab;line-height:1}
 .dash-grip:hover{color:var(--faint)}
 .dash-bar{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap}
