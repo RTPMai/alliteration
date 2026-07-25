@@ -385,20 +385,22 @@ textarea.field{min-height:60px;resize:vertical}
 .dash-card.dragging{opacity:.35;transform:scale(.99)}
 .dash-card.drag-over{box-shadow:0 0 0 2px var(--accent),0 6px 18px rgba(16,24,40,.12)}
 .dash-card.drag-side{box-shadow:0 0 0 2px var(--accent),inset 0 0 0 9999px rgba(27,93,171,.04)}
-/* Drop-position indicators: an accent bar on the edge of the card the drag is
-   hovering, showing WHERE the dragged card will land relative to it. The bar
-   sits in the 12px grid gap (4px bar, offset 8px) so it reads as "between",
-   not "on". main.js sets exactly one of these on the hovered card and clears
-   it on dragleave/drop. The older drag-over/drag-side ring styles above stay
-   until main.js stops using them. */
+/* Drop-position indicators: an accent bar flush along the edge of the card the
+   drag is hovering, showing WHERE the dragged card will land relative to it
+   (top/bottom = its own row above/below; left/right = pair up beside it).
+   The bars sit INSIDE the card: .card has overflow:hidden for its rounded
+   corners, so anything drawn outside the box is clipped invisible — the first
+   version of these bars floated in the grid gap and was never seen. main.js
+   sets exactly one of these on the hovered card and clears it on drop/dragend.
+   The older drag-over/drag-side ring styles above stay until nothing uses them. */
 .dash-card.drop-top::after,.dash-card.drop-bottom::after,
 .dash-card.drop-left::after,.dash-card.drop-right::after{
-  content:'';position:absolute;background:var(--accent);border-radius:99px;
+  content:'';position:absolute;background:var(--accent);
   pointer-events:none;z-index:2}
-.dash-card.drop-top::after{left:8px;right:8px;top:-8px;height:4px}
-.dash-card.drop-bottom::after{left:8px;right:8px;bottom:-8px;height:4px}
-.dash-card.drop-left::after{top:8px;bottom:8px;left:-8px;width:4px}
-.dash-card.drop-right::after{top:8px;bottom:8px;right:-8px;width:4px}
+.dash-card.drop-top::after{left:0;right:0;top:0;height:4px}
+.dash-card.drop-bottom::after{left:0;right:0;bottom:0;height:4px}
+.dash-card.drop-left::after{top:0;bottom:0;left:0;width:4px}
+.dash-card.drop-right::after{top:0;bottom:0;right:0;width:4px}
 .dash-card .card-hd{user-select:none;align-items:center}
 .dash-card .card-hd h3{font-size:13px;font-weight:800;letter-spacing:.02em}
 .dash-card.dragging .card-hd{cursor:grabbing}
