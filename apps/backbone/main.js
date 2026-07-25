@@ -5059,6 +5059,26 @@ export async function start(ctx) {
   const MONTHLY_GOAL = 280000;
   const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
+  // "Data through ..." stamp for the cards fed by the Printavo ops sync. The
+  // sync already writes generatedAt into every snapshot and api/data.js passes
+  // it through; nothing ever displayed it. That let a dead cron impersonate a
+  // bad month (July 2026: the card showed $31k while the month was really past
+  // $190k, because the sync had silently been down for three weeks). Stale data
+  // now announces itself.
+  function opsStampHtml() {
+    if (!opsData || !opsData.generatedAt) return "";
+    const t = new Date(opsData.generatedAt);
+    if (isNaN(t.getTime())) return "";
+    const ageHours = (Date.now() - t.getTime()) / 3600000;
+    const when = t.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    if (ageHours <= 48) {
+      return '<div class="help" style="margin-top:6px">Data through ' + when + '</div>';
+    }
+    return '<div class="help" style="margin-top:6px;color:var(--amber);font-weight:600">' +
+      '\u26A0 Stale: last sync ' + when + '. Run <code>/api/printavo-sync?mode=ops</code> ' +
+      'or check the Vercel cron.</div>';
+  }
+
   function renderSalesGoal() {
     const el = $id("dashSalesGoalWrap");
     if (!el) return;
@@ -5130,7 +5150,8 @@ export async function start(ctx) {
           '</div>';
         }).join("") +
       '</div>' +
-      '<div class="help" style="margin-top:8px">Line marks the $' + Math.round(MONTHLY_GOAL / 1000) + 'k monthly goal. Bars: <b style="color:var(--success)">green</b> met goal, <b style="color:var(--amber)">orange</b> within $' + Math.round(MONTH_CLOSE/1000) + 'k\u2013$' + Math.round(MONTHLY_GOAL/1000) + 'k, <b style="color:var(--danger)">red</b> under $' + Math.round(MONTH_CLOSE/1000) + 'k. Greyed months are still ahead.</div>';
+      '<div class="help" style="margin-top:8px">Line marks the $' + Math.round(MONTHLY_GOAL / 1000) + 'k monthly goal. Bars: <b style="color:var(--success)">green</b> met goal, <b style="color:var(--amber)">orange</b> within $' + Math.round(MONTH_CLOSE/1000) + 'k\u2013$' + Math.round(MONTHLY_GOAL/1000) + 'k, <b style="color:var(--danger)">red</b> under $' + Math.round(MONTH_CLOSE/1000) + 'k. Greyed months are still ahead.</div>' +
+      opsStampHtml();
   }
 
   // ---- Outstanding for payment (open invoice balances) ----
@@ -5145,7 +5166,7 @@ export async function start(ctx) {
     }
     const list = opsData.outstanding;
     if (!list.length) {
-      el.innerHTML = '<div class="empty-state">No open balances. Everything invoiced is paid.</div>';
+      el.innerHTML = '<div class="empty-state">No open balances. Everything invoiced is paid.</div>' + opsStampHtml();
       return;
     }
     const total = Number(opsData.outstandingTotal) || list.reduce(function(s, r) { return s + (r.amount || 0); }, 0);
@@ -5166,7 +5187,8 @@ export async function start(ctx) {
       (list.length > 8 ?
         '<details class="alert-group sev-low" style="margin-top:8px"' + (dashOutstandingOpen ? " open" : "") + '>' +
           '<summary>See all ' + list.length + '</summary><div class="alert-group-body">' +
-          list.slice(8).map(row).join("") + '</div></details>' : "");
+          list.slice(8).map(row).join("") + '</div></details>' : "") +
+      opsStampHtml();
     var d = el.querySelector("details");
     if (d) d.addEventListener("toggle", function() { dashOutstandingOpen = d.open; });
     el.querySelectorAll(".out-name[data-open]").forEach(function(n) {
