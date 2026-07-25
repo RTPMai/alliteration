@@ -249,7 +249,7 @@ export default `
       <div class="card dash-card w-full" data-card="salesgoal">
         <div class="card-hd"><span class="dash-grip">⠿</span><h3>YTD sales vs goal</h3></div>
         <div class="card-bd">
-          <div class="help">Paid revenue booked per month this year against the $280k/month target. Needs the Printavo ops sync.</div>
+          <div class="help">Cash collected per month this year against the $280k/month target, any order age. Needs the Printavo ops sync.</div>
           <div id="dashSalesGoalWrap"></div>
         </div>
       </div>
