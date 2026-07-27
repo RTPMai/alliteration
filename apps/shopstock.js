@@ -493,9 +493,16 @@ export default {
     // ── Data ──────────────────────────────────────────────────────────────────
     async function loadItems() {
       try {
-        await loadSettings();
+        // Settings and items are independent reads, so fetch them TOGETHER.
+        // The old sequence awaited settings, then items: two server round
+        // trips back to back (two cold starts, worst case). This was the
+        // "why does ShopStock take so long to load" bug. loadSettings still
+        // catches its own errors, so a settings failure cannot sink items.
         // The seam may return the array directly or wrapped as { items }.
-        const payload = await api.get(ENDPOINTS.ssItems);
+        const [, payload] = await Promise.all([
+          loadSettings(),
+          api.get(ENDPOINTS.ssItems),
+        ]);
         allItems = Array.isArray(payload) ? payload : (payload && payload.items) || [];
         updateBadge();
         renderInventory();
