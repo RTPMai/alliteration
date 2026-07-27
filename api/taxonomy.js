@@ -1,0 +1,171 @@
+// api/taxonomy.js — curate ErrorEngine's error type / root cause / status lists
+// and the fusion price list.
+//
+// PORTED from the standalone repo's api/taxonomy.js. Changes for alliteration:
+//   - AUTH IS SHELL-LEVEL: imports requireAuth from the repo's shared
+//     lib/session.js. Role names in CAN_EDIT gained "superuser" for the shell's
+//     role model — adjust that one constant if the shell's roles differ.
+//   - Library imports point at lib/errorengine/.
+//   - No route rename needed: nothing else in the repo ships /api/taxonomy.
+//   - Everything else is verbatim.
+//
+// GET    -> { taxonomy, usage, prices, protected, can_edit }   any signed-in user
+//           (the intake form needs the active options to render)
+// POST   -> add an option / price                management + admin only
+// PATCH  -> retire / restore / relabel / price   management + admin only
+// DELETE -> hard delete, only if unused          management + admin only
+//
+// Writes are restricted to the taxonomy lists. Management deliberately does NOT
+// get user management or error deletion — those stay admin-only.
+//
+// NOTE ON THE GUARD: this calls requireAuth(req, res) with two args and checks
+// sess.role itself, rather than passing a role as the third arg. That form takes
+// a single role — this route allows several, so the check lives here where it
+// can't be ambiguous.
+//
+// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
+
+import { requireAuth } from "../lib/session.js";
+import {
+  getTaxonomy, addOption, setOptionActive, renameOption, deleteOption,
+  setOptionPriceList, getPrices, addPrice, updatePrice, deletePrice,
+  LISTS, PROTECTED,
+} from "../lib/errorengine/taxonomy-store.js";
+import { listErrors } from "../lib/errorengine/store.js";
+
+// Roles allowed to modify the lists.
+const CAN_EDIT = ["admin", "superuser", "management"];
+
+// Vercel doesn't always pre-parse JSON bodies. Normalize so field access is safe.
+function parseBody(req) {
+  let b = req.body;
+  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
+  return b && typeof b === "object" ? b : {};
+}
+
+// How many records reference each value, per list. Drives two things in the UI:
+// the "in use by N records" hint, and whether hard delete is offered at all.
+async function countUsage() {
+  const errors = await listErrors();
+  const usage = {};
+  for (const field of LISTS) usage[field] = {};
+  for (const e of errors) {
+    for (const field of LISTS) {
+      const v = e[field];
+      if (v == null || v === "") continue;
+      usage[field][v] = (usage[field][v] || 0) + 1;
+    }
+  }
+  return usage;
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const sess = requireAuth(req, res);
+  if (!sess) return; // 401 already sent
+
+  try {
+    // READ is open to any signed-in user — the intake form can't render its
+    // dropdowns without it.
+    if (req.method === "GET") {
+      const [taxonomy, usage, prices] = await Promise.all([getTaxonomy(), countUsage(), getPrices()]);
+      return res.status(200).json({
+        taxonomy,
+        usage,
+        prices,
+        protected: PROTECTED,
+        can_edit: CAN_EDIT.includes(sess.role),
+      });
+    }
+
+    // Everything past here mutates the lists.
+    if (!CAN_EDIT.includes(sess.role)) {
+      return res.status(403).json({ error: "Only management and admins can edit these lists" });
+    }
+
+    const body = parseBody(req);
+
+    // ---- price list ----
+    // Routed on `kind: "price"` before the taxonomy `field` check, since price
+    // entries aren't tied to one of the three option lists.
+    const kind = body.kind || (req.query && req.query.kind);
+    if (kind === "price") {
+      if (req.method === "POST") {
+        const list = await addPrice({ label: body.label, unit_cost: body.unit_cost });
+        return res.status(201).json({ ok: true, prices: list });
+      }
+      if (req.method === "PATCH") {
+        if (!body.id) return res.status(400).json({ error: "Missing price id" });
+        const list = await updatePrice(body.id, { label: body.label, unit_cost: body.unit_cost });
+        return res.status(200).json({ ok: true, prices: list });
+      }
+      if (req.method === "DELETE") {
+        const id = (req.query && req.query.id) || body.id;
+        if (!id) return res.status(400).json({ error: "Missing price id" });
+        // Safe to delete outright: line items copy the cost at logging time rather
+        // than referencing the entry, so removing one never alters a saved error.
+        const list = await deletePrice(id);
+        return res.status(200).json({ ok: true, prices: list });
+      }
+      return res.status(400).json({ error: "Unsupported price operation" });
+    }
+
+    const field = body.field || (req.query && req.query.field);
+    if (!LISTS.includes(field)) {
+      return res.status(400).json({ error: `field must be one of: ${LISTS.join(", ")}` });
+    }
+
+    if (req.method === "POST") {
+      const { list, reactivated } = await addOption(field, { value: body.value, label: body.label });
+      return res.status(201).json({ ok: true, field, list, reactivated });
+    }
+
+    if (req.method === "PATCH") {
+      const value = body.value;
+      if (!value) return res.status(400).json({ error: "Missing value" });
+
+      // action: "retire" | "restore" | "rename" | "price_list"
+      if (body.action === "rename") {
+        const list = await renameOption(field, value, body.label);
+        return res.status(200).json({ ok: true, field, list });
+      }
+      if (body.action === "retire" || body.action === "restore") {
+        const list = await setOptionActive(field, value, body.action === "restore");
+        return res.status(200).json({ ok: true, field, list });
+      }
+      if (body.action === "price_list") {
+        const list = await setOptionPriceList(field, value, !!body.on);
+        return res.status(200).json({ ok: true, field, list });
+      }
+      return res.status(400).json({ error: 'action must be "retire", "restore", "rename", or "price_list"' });
+    }
+
+    if (req.method === "DELETE") {
+      const value = (req.query && req.query.value) || body.value;
+      if (!value) return res.status(400).json({ error: "Missing value" });
+
+      // The safety rail: refuse to delete anything a record still points at.
+      // Retiring is the supported path for options that are in use.
+      const usage = await countUsage();
+      const n = (usage[field] && usage[field][value]) || 0;
+      if (n > 0) {
+        return res.status(409).json({
+          error: `"${value}" is used by ${n} record${n === 1 ? "" : "s"}. Retire it instead — it will disappear from new-record dropdowns but stay readable on existing records.`,
+          usage: n,
+        });
+      }
+
+      const list = await deleteOption(field, value);
+      return res.status(200).json({ ok: true, field, list, deleted: value });
+    }
+
+    res.setHeader("Allow", "GET, POST, PATCH, DELETE");
+    return res.status(405).json({ error: "Method not allowed" });
+  } catch (e) {
+    console.error("taxonomy error:", e);
+    // taxonomy-store throws user-facing messages (duplicate, protected, last-option).
+    return res.status(400).json({ error: e.message });
+  }
+}
