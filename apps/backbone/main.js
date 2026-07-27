@@ -5461,7 +5461,13 @@ export async function start(ctx) {
     const avgScore = rows.reduce(function(s, r) { return s + r.total; }, 0) / rows.length;
     const tierCounts = { "Platinum": 0, "Gold": 0, "Silver": 0, "Bronze": 0, "Valuable Dirt": 0 };
     rows.forEach(function(r) { tierCounts[r.tier]++; });
-    const topTierShare = ((tierCounts["Platinum"] + tierCounts["Gold"]) / rows.length * 100).toFixed(0);
+    // Lead with the COUNT, not a rounded percent: 6 of 2,508 is 0.24%, and
+    // toFixed(0) turned that into "0%" — reading as zero Platinum/Gold accounts
+    // while the Scorecard tiles correctly showed 6. Counts match the Scorecard
+    // at a glance; the share keeps one decimal below 10% so it can't lie.
+    const topTierCount = tierCounts["Platinum"] + tierCounts["Gold"];
+    const topTierPct = rows.length ? (topTierCount / rows.length * 100) : 0;
+    const topTierShare = topTierPct >= 10 ? topTierPct.toFixed(0) : topTierPct.toFixed(1);
 
     // Choose the more informative sub-note: if a large share of the roster has no year
     // breakdown at all, that's a "run a reconcile" signal, not a per-client $0 fact.
@@ -5480,7 +5486,7 @@ export async function start(ctx) {
         yearSubNote + '</div>' +
       '<div class="kpi"><div class="kpi-lbl">Total clients</div><div class="kpi-val">' + rows.length + '</div></div>' +
       '<div class="kpi"><div class="kpi-lbl">Avg score</div><div class="kpi-val">' + avgScore.toFixed(2) + '</div><div class="kpi-s">out of 5' + (dashYear !== "all" ? " · this year's revenue/invoices" : "") + '</div></div>' +
-      '<div class="kpi"><div class="kpi-lbl">Platinum + Gold</div><div class="kpi-val">' + topTierShare + '%</div><div class="kpi-s">of roster' + (dashYear !== "all" ? ", " + dashYear + " basis" : "") + '</div></div>' +
+      '<div class="kpi"><div class="kpi-lbl">Platinum + Gold</div><div class="kpi-val">' + topTierCount + '</div><div class="kpi-s">' + topTierShare + '% of roster' + (dashYear !== "all" ? ", " + dashYear + " basis" : "") + '</div></div>' +
       // Ops mini-KPI — only when the Printavo ops slice is loaded. "New quotes" is a
       // real 7-day event count. (Art-decline KPI was dropped; the sync still computes
       // the fields but they're not surfaced — status matching needs work before they're
