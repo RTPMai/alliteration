@@ -54,7 +54,11 @@ const LIVE_PREFIXES = [
   // BackBone: roster, leads, inbox and the AI endpoints are all deployed.
   '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
   '/api/intake', '/api/qualify', '/api/brief', '/api/scan-card',
-  '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match'
+  '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
+  // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
+  // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
+  // the 's' vs 'e' at position 10 keeps them distinct.)
+  '/api/errors', '/api/taxonomy', '/api/errorengine/'
 ];
 
 function isLive(path) {
@@ -285,8 +289,28 @@ const MOCK_DATA = {
     accounts: []
   }),
 
-  [ENDPOINTS.eeErrors]: () => ({ errors: [], total: 0 }),
-  [ENDPOINTS.eeTaxonomy]: () => ({ types: [], causes: [], vendors: [] }),
+  // Shapes mirror api/errors.js, api/taxonomy.js and api/errorengine/customers.js
+  // so views built against MOCK keep working when the flag flips.
+  [ENDPOINTS.eeErrors]: () => ({ errors: [] }),
+  [ENDPOINTS.eeTaxonomy]: () => {
+    const opt = (v) => ({ value: v, label: v.replace(/\b([a-z])/g, (m, c) => c.toUpperCase()), active: true });
+    return {
+      taxonomy: {
+        error_type: ['misprint','wrong garment','wrong size/color','short ship','late','art error','vendor defect','replacement/reprint'].map(opt),
+        root_cause: ['art','production','purchasing','vendor','CSR','customer-supplied'].map(opt),
+        status: ['open','in review','resolved','written-off'].map(opt)
+      },
+      usage: { error_type: {}, root_cause: {}, status: {} },
+      prices: [
+        { id: '4x4', label: '4x4', unit_cost: 8 },
+        { id: '5x11', label: '5x11', unit_cost: 10 },
+        { id: '11x11', label: '11x11', unit_cost: 12 }
+      ],
+      protected: { status: ['open', 'resolved'], error_type: [], root_cause: [] },
+      can_edit: true
+    };
+  },
+  [ENDPOINTS.eeCustomers]: () => ({ customers: [], lastSynced: null, source: 'mock' }),
 
   [ENDPOINTS.ssItems]: () => ([{"id":"itm_0142","name":"Plastisol white, gallon","department":"Screen print","category":"Ink","supplier":"Fusion","status":"In Stock","qty":14,"reorderAt":6,"unitCost":38.4,"sku":"PM-0142"},{"id":"itm_0143","name":"Plastisol black, gallon","department":"Screen print","category":"Ink","supplier":"Fusion","status":"Needs Ordered","qty":5,"reorderAt":6,"unitCost":38.4,"sku":"PM-0143"},{"id":"itm_0219","name":"Poly thread, 5500yd black","department":"Embroidery","category":"Thread","supplier":"Madeira","status":"In Stock","qty":22,"reorderAt":10,"unitCost":6.2,"sku":"PM-0219"},{"id":"itm_0221","name":"Poly thread, 5500yd white","department":"Embroidery","category":"Thread","supplier":"Madeira","status":"Needs Ordered","qty":4,"reorderAt":10,"unitCost":6.2,"sku":"PM-0221"},{"id":"itm_0308","name":"Cutaway backing 2.5oz","department":"Embroidery","category":"Backing","supplier":"Madeira","status":"Ordered","qty":0,"reorderAt":8,"unitCost":41.0,"sku":"PM-0308"},{"id":"itm_0410","name":"Emulsion, quart","department":"Screen print","category":"Chemical","supplier":"Fusion","status":"In Stock","qty":9,"reorderAt":4,"unitCost":29.75,"sku":"PM-0410"},{"id":"itm_0512","name":"Poly mailers 12x15","department":"Shipping","category":"Packaging","supplier":"Uline","status":"In Stock","qty":340,"reorderAt":150,"unitCost":0.14,"sku":"PM-0512"},{"id":"itm_0530","name":"Folding boards","department":"Finishing","category":"Supplies","supplier":"Uline","status":"Needs Ordered","qty":2,"reorderAt":5,"unitCost":11.9,"sku":"PM-0530"},{"id":"itm_0611","name":"Squeegee 70/90 durometer","department":"Screen print","category":"Tools","supplier":"Fusion","status":"Issue","qty":3,"reorderAt":2,"unitCost":24.5,"sku":"PM-0611"}]),
   [ENDPOINTS.ssSettings]: () => ({"deptColors":{"Screen print":"#E36325","Embroidery":"#1B5DAB","Finishing":"#745DA8","Shipping":"#3D9A5C","Front office":"#6B7684"},"categories":["Ink","Thread","Backing","Chemical","Packaging","Supplies","Tools"]}),
