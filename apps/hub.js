@@ -1,44 +1,68 @@
 /**
  * Hub — the "All apps" landing view.
  *
- * Not one of the five apps. It is the shell's own front page: what needs
- * attention across everything, and where the apps feed each other.
+ * Not one of the apps. It is the shell's own front page: what needs attention
+ * across everything, and where the apps feed each other.
  *
- * That second table is the actual argument for a shared shell. The login is
- * incidental; the reason these belong together is that each app holds a number
- * the others need to tell the truth about a client. ErrorEngine knows what a
- * customer's remakes cost, which is what turns BackBone's revenue tiering into
- * margin tiering.
+ * v2: REAL numbers. The original shipped hardcoded prototype values ("312
+ * customers", "4 trips to Cedar Rapids") wearing Live pills — including on the
+ * TravelTrack stub, which has never held a trip. Everything here now comes
+ * through the seam on mount, and anything that can't be fetched says so
+ * instead of inventing.
  *
- * Numbers here come from ctx.api like anywhere else. Under MOCK they are the
- * placeholder values below; when the seam flips they come from the real
- * endpoints and this file does not change.
+ * Endpoint names are looked up defensively: BackBone's are verified; the other
+ * apps' entries in ENDPOINTS are found from a candidate list, so a card whose
+ * endpoint isn't wired renders an honest "not wired" line rather than crashing
+ * or lying. When js/api.js gains a name that matches, the card lights up with
+ * no further changes here.
  */
 
-import { APPS, getApp } from '../js/registry.js';
+import { APPS, getApp, canAccess } from '../js/registry.js';
+import { ENDPOINTS, appsOnSampleData } from '../js/api.js';
 
-/* Per-app hub summary. Replaced by a real /api/summary call when the endpoints
-   are wired; shaped the same either way so the markup does not change. */
-const SUMMARY = {
-  backbone:    { metrics: [['312', 'Customers'], ['7', 'Inquiries']],
-                 line: 'Last sync from Printavo 6 minutes ago' },
-  shopstock:   { metrics: [['486', 'SKUs'], ['12', 'Low stock']],
-                 line: '3 orders queued, 1 awaiting vendor price' },
-  errorengine: { metrics: [['5', 'Open'], ['$1,840', 'Exposure']],
-                 line: '2 vendor-attributed, awaiting credit' },
-  givinggauge: { metrics: [['3', 'Requests'], ['$4,200', 'Remaining']],
-                 line: 'One request over the 21-day lead time floor' },
-  traveltrack: { metrics: [['4', 'Trips'], ['$2,310', 'Unfiled']],
-                 line: 'Des Moines to Cedar Rapids, filed Friday' }
-};
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
+}
 
-const HEADLINE = [
-  ['Open inquiries', '7', '+3 this week', 'up'],
-  ['Items to reorder', '12', '4 critical', 'down'],
-  ['Open errors', '5', '$1,840 exposure', ''],
-  ['Unfiled expenses', '9', '2 trips', ''],
-  ['Donation asks', '3', 'Awaiting review', '']
-];
+/* First ENDPOINTS key that actually exists, or null. Never guess a URL. */
+function findEndpoint(candidates) {
+  for (const k of candidates) {
+    if (ENDPOINTS && ENDPOINTS[k]) return ENDPOINTS[k];
+  }
+  return null;
+}
+
+function fmtMoneyShort(n) {
+  n = Number(n) || 0;
+  if (n >= 1000) return '$' + Math.round(n / 1000) + 'k';
+  return '$' + Math.round(n);
+}
+
+function relTime(iso) {
+  if (!iso) return null;
+  const t = new Date(iso).getTime();
+  if (isNaN(t)) return null;
+  const mins = Math.round((Date.now() - t) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return mins + ' min ago';
+  const hrs = Math.round(mins / 60);
+  if (hrs < 48) return hrs + ' hr ago';
+  return Math.round(hrs / 24) + ' days ago';
+}
+
+/* Tolerant list reader: endpoints variously return an array or an object
+   wrapping one. Counting is the only thing the hub needs, so read generously. */
+function listOf(data, keys) {
+  if (Array.isArray(data)) return data;
+  if (data && typeof data === 'object') {
+    for (const k of keys) {
+      if (Array.isArray(data[k])) return data[k];
+    }
+  }
+  return null;
+}
 
 /* Where the apps feed each other. Kept as data so it stays honest as apps
    land: a flow whose source app is still a stub is worth seeing greyed. */
@@ -49,30 +73,24 @@ const FLOWS = [
   ['shopstock', 'ErrorEngine', 'Live supply pricing, so remake cost is stamped accurately']
 ];
 
-function esc(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
-  })[c]);
-}
-
-function statCard([label, value, delta, dir]) {
+function flowRow([fromId, to, what]) {
+  const from = getApp(fromId);
   return `
-    <div class="stat">
-      <div class="label">${esc(label)}</div>
-      <div class="value">${esc(value)}</div>
-      <div class="delta ${dir}">${esc(delta)}</div>
-    </div>`;
+    <tr class="flowrow">
+      <td><span class="dotc" style="--dot:${from ? from.accent : 'var(--muted)'}"></span><span class="from">${esc(from ? from.name : fromId)}</span></td>
+      <td>${esc(to)}</td>
+      <td>${esc(what)}</td>
+    </tr>`;
 }
 
-function appCard(app) {
-  const s = SUMMARY[app.id] || { metrics: [], line: '' };
+/* One skeleton card per app; mount() fills the metric/line/pill nodes in. */
+function appCard(app, sample) {
   const planned = app.stub;
-
-  const metrics = s.metrics.map(([v, l]) => `
-    <div class="app-metric">
-      <div class="v">${esc(v)}</div>
-      <div class="l">${esc(l)}</div>
-    </div>`).join('');
+  const pill = planned
+    ? '<span class="pill p-mute">Not built</span>'
+    : (sample
+      ? '<span class="pill p-mute" data-hub-pill="' + app.id + '">Sample data</span>'
+      : '<span class="pill p-ok" data-hub-pill="' + app.id + '">Live</span>');
 
   return `
     <button class="app${planned ? ' planned' : ''}"
@@ -88,24 +106,14 @@ function appCard(app) {
         </div>
       </div>
       <div class="app-body">
-        <div class="app-metrics">${metrics}</div>
-        <div class="app-line">${esc(s.line)}</div>
+        <div class="app-metrics" data-hub-metrics="${app.id}">${planned ? '' : '<div class="app-metric"><div class="v">&mdash;</div><div class="l">Loading</div></div>'}</div>
+        <div class="app-line" data-hub-line="${app.id}">${planned ? esc(app.blurb || '') : ''}</div>
       </div>
       <div class="app-ft">
-        <span class="pill ${planned ? 'p-mute' : 'p-ok'}">${planned ? 'Not built' : 'Live'}</span>
+        ${pill}
         <span class="go">${planned ? 'Proposed' : 'Open'}</span>
       </div>
     </button>`;
-}
-
-function flowRow([fromId, to, what]) {
-  const from = getApp(fromId);
-  return `
-    <tr class="flowrow">
-      <td><span class="dotc" style="--dot:${from ? from.accent : 'var(--muted)'}"></span><span class="from">${esc(from ? from.name : fromId)}</span></td>
-      <td>${esc(to)}</td>
-      <td>${esc(what)}</td>
-    </tr>`;
 }
 
 export default {
@@ -116,16 +124,13 @@ export default {
       <div class="page-head">
         <div>
           <div class="page-title">All apps<span class="dot">.</span></div>
-          <div class="page-sub">
-            The chrome around this content never reloads. Pick an app and only
-            this region changes.
-          </div>
+          <div class="page-sub" id="hubSub">What needs attention, across everything.</div>
         </div>
       </div>
 
-      <div class="stats">${HEADLINE.map(statCard).join('')}</div>
+      <div class="stats" id="hubStats"></div>
 
-      <div class="apps">${APPS.map(appCard).join('')}</div>
+      <div class="apps" id="hubApps"></div>
 
       <div class="card" style="margin-top:16px">
         <div class="card-hd">
@@ -147,12 +152,130 @@ export default {
   `,
 
   async mount(ctx) {
-    ctx.root.querySelectorAll('[data-goto]').forEach((btn) => {
+    const root = ctx.root;
+    const $ = (sel) => root.querySelector(sel);
+    const api = ctx.api;
+
+    let sampleApps = [];
+    try { sampleApps = appsOnSampleData() || []; } catch (e) { /* seam predates helper */ }
+
+    // Only apps this person can open; matches the rail.
+    const visible = APPS.filter((a) => canAccess(ctx.perms, a.id));
+    $('#hubApps').innerHTML = visible.map((a) => appCard(a, sampleApps.includes(a.id))).join('');
+
+    root.querySelectorAll('[data-goto]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const target = getApp(btn.dataset.goto);
         if (target) ctx.goApp(target.id, target.defaultView);
       });
     });
+
+    const setCard = (id, metrics, line) => {
+      const m = $('[data-hub-metrics="' + id + '"]');
+      const l = $('[data-hub-line="' + id + '"]');
+      if (m) m.innerHTML = metrics.map(([v, lab]) =>
+        '<div class="app-metric"><div class="v">' + esc(v) + '</div><div class="l">' + esc(lab) + '</div></div>').join('');
+      if (l) l.textContent = line || '';
+    };
+    const notWired = (id) => setCard(id, [], "The hub isn't wired to this app's data yet.");
+
+    // Headline stats accumulate from whatever the fetches below produce; a stat
+    // whose app couldn't answer simply doesn't appear.
+    const stats = [];
+    const renderStats = () => {
+      $('#hubStats').innerHTML = stats.map(([label, value, delta]) => `
+        <div class="stat">
+          <div class="label">${esc(label)}</div>
+          <div class="value">${esc(value)}</div>
+          <div class="delta">${esc(delta || '')}</div>
+        </div>`).join('');
+    };
+
+    const has = (id) => visible.some((a) => a.id === id);
+    const jobs = [];
+
+    // ---- BackBone: roster size, last sync, quotes this week, outstanding ----
+    if (has('backbone')) {
+      jobs.push((async () => {
+        try {
+          const d = await api.get(ENDPOINTS.bbData);
+          const roster = (d && Array.isArray(d.synced)) ? d.synced.length : 0;
+          const when = relTime(d && d.lastSynced);
+          let quotesWk = null, outTotal = null;
+          try {
+            const ops = await api.get(ENDPOINTS.bbData, { ops: 1 });
+            if (ops && ops.available) {
+              quotesWk = ops.quotesThisWeek;
+              outTotal = ops.outstandingTotal;
+            }
+          } catch (e) { /* ops slice optional */ }
+          setCard('backbone',
+            [[String(roster), 'Customers']].concat(quotesWk != null ? [[String(quotesWk), 'Quotes this wk']] : []),
+            when ? 'Last sync from Printavo ' + when : 'No sync recorded yet');
+          if (quotesWk != null) stats.push(['New quotes', String(quotesWk), 'last 7 days']);
+          if (outTotal != null) stats.push(['Outstanding', fmtMoneyShort(outTotal), 'open invoices']);
+          renderStats();
+        } catch (e) { setCard('backbone', [], 'Could not load roster.'); }
+      })());
+    }
+
+    // ---- ShopStock: item counts. Endpoint discovered, never guessed. ----
+    if (has('shopstock')) {
+      jobs.push((async () => {
+        const ep = findEndpoint(['ssItems', 'ssInventory', 'ssData', 'shopstockItems', 'items']);
+        if (!ep) return notWired('shopstock');
+        try {
+          const d = await api.get(ep);
+          const items = listOf(d, ['items', 'inventory', 'rows', 'data']);
+          if (!items) return notWired('shopstock');
+          // Field names vary; count a "needs ordering" state only when a field
+          // confidently carries it. Absent that, the total alone is still true.
+          const needs = items.filter((it) =>
+            it && (it.needsOrdered === true || it.needs_order === true ||
+                   /need/i.test(String(it.status || '')))).length;
+          setCard('shopstock',
+            [[String(items.length), 'Items']].concat(needs ? [[String(needs), 'Need ordering']] : []),
+            needs ? needs + ' flagged for reorder' : 'Nothing needs ordering');
+          if (needs) { stats.push(['Items to reorder', String(needs), '']); renderStats(); }
+        } catch (e) { setCard('shopstock', [], 'Could not load inventory.'); }
+      })());
+    }
+
+    // ---- ErrorEngine: open error count (sample data until it goes live). ----
+    if (has('errorengine')) {
+      jobs.push((async () => {
+        const ep = findEndpoint(['eeErrors', 'eeData', 'errors', 'errorLog', 'eeRecords']);
+        if (!ep) return notWired('errorengine');
+        try {
+          const d = await api.get(ep);
+          const errs = listOf(d, ['errors', 'records', 'rows', 'data']);
+          if (!errs) return notWired('errorengine');
+          setCard('errorengine', [[String(errs.length), 'Errors logged']], '');
+        } catch (e) { setCard('errorengine', [], 'Could not load errors.'); }
+      })());
+    }
+
+    // ---- GivingGauge: request count. ----
+    if (has('givinggauge')) {
+      jobs.push((async () => {
+        const ep = findEndpoint(['ggRequests', 'ggData', 'givingRequests', 'requests']);
+        if (!ep) return notWired('givinggauge');
+        try {
+          const d = await api.get(ep);
+          const reqs = listOf(d, ['requests', 'rows', 'items', 'data']);
+          if (!reqs) return notWired('givinggauge');
+          setCard('givinggauge', [[String(reqs.length), 'Requests']], '');
+          stats.push(['Donation asks', String(reqs.length), '']);
+          renderStats();
+        } catch (e) { setCard('givinggauge', [], 'Could not load requests.'); }
+      })());
+    }
+
+    await Promise.allSettled(jobs);
+    if (!stats.length) {
+      // Nothing headline-worthy loaded; keep the strip empty rather than fake.
+      $('#hubStats').innerHTML = '';
+    }
   },
 
   showView() {
