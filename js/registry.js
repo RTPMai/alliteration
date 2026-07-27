@@ -72,12 +72,18 @@ export const APPS = [
     role: 'What went wrong',
     blurb: 'Error log, records, vendor accountability.',
     accent: '#745DA8',
+    // These match the ported app's four sections. "Vendors" from the earlier
+    // plan is not a view: vendor accountability renders on the Dashboard (the
+    // Errors by Vendor panel and the replaced stat). "Settings" became "Manage
+    // Lists": its user-management half moved to the shell's Settings screen
+    // (accounts are shell-level now), and what remains is the taxonomy + fusion
+    // price list editor. The record DETAIL screen is internal to Records
+    // (opened by row click), so it is not routable and not listed here.
     views: [
       ['dashboard', 'Dashboard'],
       ['log', 'Log an Error'],
       ['records', 'Records'],
-      ['vendors', 'Vendors'],
-      ['settings', 'Settings']
+      ['lists', 'Manage Lists']
     ],
     defaultView: 'dashboard',
     stub: false
