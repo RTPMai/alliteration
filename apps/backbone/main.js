@@ -4332,11 +4332,20 @@ export async function start(ctx) {
   }
 
   function getDashboardData() {
+    const curYearStr = String(new Date().getFullYear());
     const rows = state.synced.map(function(c) {
       const adj = yearAdjustedCustomer(c, dashYear);
       const cc = adj.customer;
       const enrichment = state.enrichment[c.customer_id] || {};
-      const sc = computeScorecard(cc, enrichment);
+      // Scoring basis must match the Scorecard's definitions or the two screens
+      // contradict each other. Current year uses the SCALED partial-year bands
+      // (identical to the Scorecard's YTD toggle) — judging seven months of
+      // revenue against twelve-month thresholds under-tiered everyone (2 vs 6
+      // Platinum+Gold, Jul 2026). Past years are complete, so full bands on the
+      // year-adjusted figures are correct. "All" is lifetime on lifetime bands.
+      const sc = (dashYear === curYearStr)
+        ? computeScorecard(c, enrichment, "ytd")
+        : computeScorecard(cc, enrichment);
       const daysSinceVal = daysSince(c.last_invoice_date); // recency always reflects real last activity, not the year filter
       const industry = enrichment.industry || "";
       const explicitAM = enrichment.account_manager || "";
