@@ -629,7 +629,7 @@ export default async function handler(req, res) {
   async function probeTransactions() {
     const out = {
       available: false, selection: null,
-      amountField: null, dateField: null, kindField: null,
+      typePlans: null,   // { "<__typename>" or "*": { amount, date, kind } }
       dateArgName: null, note: "",
     };
     try {
@@ -652,24 +652,61 @@ export default async function handler(req, res) {
       const nodeName = nt && nt.name;
       if (!nodeName) { out.note = "transactions connection has no node type"; return out; }
       await rlPause();
-      const node = await gql(`query{__type(name:"${nodeName}"){kind fields{name}}}`);
+      const node = await gql(`query{__type(name:"${nodeName}"){kind fields{name} possibleTypes{name}}}`);
+      const nodeKind = node.__type && node.__type.kind;
       const nodeFields = ((node.__type && node.__type.fields) || []).map(function (f) { return f.name; });
-      if (!nodeFields.length) { out.note = "node type " + nodeName + " exposes no shared fields"; return out; }
+      const possible = ((node.__type && node.__type.possibleTypes) || []).map(function (p) { return p.name; });
 
-      const pick = function (cands) {
-        for (let i = 0; i < cands.length; i++) if (nodeFields.indexOf(cands[i]) !== -1) return cands[i];
+      const AMOUNT_CANDS = ["amount", "total", "amountPaid", "value"];
+      const DATE_CANDS = ["transactionDate", "createdAt", "processedAt", "paidAt", "date", "timestamp"];
+      const KIND_CANDS = ["category", "source", "description", "type"];
+      const pickFrom = function (names, cands) {
+        for (let i = 0; i < cands.length; i++) if (names.indexOf(cands[i]) !== -1) return cands[i];
         return null;
       };
-      out.amountField = pick(["amount", "total", "amountPaid", "value"]);
-      out.dateField = pick(["transactionDate", "createdAt", "processedAt", "paidAt", "date"]);
-      out.kindField = pick(["category", "source", "description"]);
-      if (!out.amountField || !out.dateField) {
-        out.note = "node type " + nodeName + " is missing an amount or date field";
+
+      if (nodeFields.length) {
+        // OBJECT or INTERFACE: shared fields, one plan covers every node.
+        const amount = pickFrom(nodeFields, AMOUNT_CANDS);
+        const date = pickFrom(nodeFields, DATE_CANDS);
+        if (!amount || !date) {
+          out.note = "node type " + nodeName + " is missing an amount or date field";
+          return out;
+        }
+        const kind = pickFrom(nodeFields, KIND_CANDS);
+        out.typePlans = { "*": { amount: amount, date: date, kind: kind } };
+        out.selection = ["__typename", amount, date].concat(kind ? [kind] : []).join(" ");
+      } else if (nodeKind === "UNION" && possible.length) {
+        // UNION (Printavo ships TransactionUnion): members share NO fields, so
+        // each is introspected separately and selected with an inline fragment.
+        // The member type names themselves (…Payment, …Refund, …Dispute) become
+        // the classification signal at read time.
+        out.typePlans = {};
+        const frags = [];
+        for (const tn of possible.slice(0, 12)) {
+          await rlPause();
+          let tf;
+          try {
+            tf = await gql(`query{__type(name:"${tn}"){fields{name}}}`);
+          } catch (e) { continue; }
+          const names = ((tf.__type && tf.__type.fields) || []).map(function (f) { return f.name; });
+          const amount = pickFrom(names, AMOUNT_CANDS);
+          const date = pickFrom(names, DATE_CANDS);
+          if (!amount || !date) continue; // this member can't be bucketed; histogram will reveal it if it mattered
+          const kind = pickFrom(names, KIND_CANDS);
+          out.typePlans[tn] = { amount: amount, date: date, kind: kind };
+          frags.push(`...on ${tn}{${[amount, date].concat(kind ? [kind] : []).join(" ")}}`);
+        }
+        if (!frags.length) {
+          out.note = "no member of " + nodeName + " (" + possible.join(", ") + ") exposes amount+date";
+          return out;
+        }
+        out.selection = "__typename " + frags.join(" ");
+        out.note = "union members: " + Object.keys(out.typePlans).join(", ");
+      } else {
+        out.note = "node type " + nodeName + " exposes no shared fields";
         return out;
       }
-      // __typename classifies Payment vs Refund/Void/Dispute when no kind field exists.
-      out.selection = ["__typename", out.amountField, out.dateField]
-        .concat(out.kindField ? [out.kindField] : []).join(" ");
 
       // A server-side date window is the best case: only this year's transactions
       // come over the wire. Detected, never assumed.
@@ -2061,13 +2098,23 @@ export default async function handler(req, res) {
             const nodes = (data.transactions && data.transactions.nodes) || [];
             for (const t of nodes) {
               acc.cashScanned++;
-              const kind = String((probe.kindField && t[probe.kindField]) || t.__typename || "");
-              // Payment-typed only; refunds, returns, voids, and disputes are not cash goals met.
-              if (!/payment/i.test(kind)) continue;
-              if (/(refund|return|void|dispute)/i.test(kind)) continue;
-              const when = String(t[probe.dateField] || "");
+              const tp = (probe.typePlans && (probe.typePlans[t.__typename] || probe.typePlans["*"])) || null;
+              if (!tp) continue; // a member type the probe couldn't plan for
+              const amt = Number(t[tp.amount]) || 0;
+              // Diagnostic histogram: every member type seen, with count and sum,
+              // so an undercount names its own culprit instead of hiding.
+              const hk = t.__typename || "unknown";
+              if (!acc.cashTypes) acc.cashTypes = {};
+              if (!acc.cashTypes[hk]) acc.cashTypes[hk] = { count: 0, sum: 0 };
+              acc.cashTypes[hk].count++;
+              acc.cashTypes[hk].sum += amt;
+              // Classification reads BOTH the member type name and the kind field
+              // value. Exclusions win; then a payment signal is required.
+              const signals = (t.__typename || "") + " " + ((tp.kind && t[tp.kind]) || "");
+              if (/(refund|return|void|dispute|chargeback)/i.test(signals)) continue;
+              if (!/payment/i.test(signals)) continue;
+              const when = String(t[tp.date] || "");
               if (when.slice(0, 4) !== curYear) continue; // client-side window when no date arg exists
-              const amt = Number(t[probe.amountField]) || 0;
               if (amt <= 0) continue;
               const mk = when.slice(0, 7);
               acc.cashByMonth[mk] = (acc.cashByMonth[mk] || 0) + amt;
@@ -2108,7 +2155,7 @@ export default async function handler(req, res) {
 
       const opsPayload = {
         generatedAt: nowIso,
-        buildVersion: "ops-v3-cash",
+        buildVersion: "ops-v4-cash-union",
         quotesThisWeek: acc.quotesThisWeek,
         artDeclinedYtd: acc.artDeclinedYtd,
         // #3 live snapshot: quotes currently sitting in each declined status (all-time).
@@ -2135,10 +2182,10 @@ export default async function handler(req, res) {
           cashPages: acc.cashPages || 0,
           cashScanned: acc.cashScanned || 0,
           cashNote: (acc.cashProbe && acc.cashProbe.note) || (cashOk ? "ok" : "not probed"),
-          cashFields: acc.cashProbe ? {
-            amount: acc.cashProbe.amountField, date: acc.cashProbe.dateField,
-            kind: acc.cashProbe.kindField, dateArg: acc.cashProbe.dateArgName,
-          } : null,
+          cashFields: (acc.cashProbe && acc.cashProbe.typePlans) || null,
+          cashTypes: Object.keys(acc.cashTypes || {}).map(function (k) {
+            return { type: k, count: acc.cashTypes[k].count, sum: Math.round(acc.cashTypes[k].sum * 100) / 100 };
+          }).sort(function (a, b) { return b.sum - a.sum; }),
           quotesSort: qMeta.sortOn, quotesHasDesc: qMeta.hasSortDescending,
           quotesArtDeclineStatusMatched: acc.currentArtDeclined > 0,
           // Every distinct quote status name seen this run, most common first. This is
