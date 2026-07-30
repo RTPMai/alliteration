@@ -260,6 +260,42 @@ export default {
 
   /* ---------- decision ---------- */
   .decide{position:sticky;bottom:0;background:var(--bg);padding:12px 0 0}
+  .spend{margin-top:10px;padding:12px;border:1px solid var(--line-soft);border-radius:var(--r-sm);background:var(--card)}
+  .spend-hd{font-size:12px;font-weight:600;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+  .spend-todo{font-weight:400;text-transform:none;letter-spacing:0;color:var(--amber)}
+  .spend-set .spend-hd{color:var(--fg)}
+  .spend-row{display:flex;gap:10px;margin-bottom:10px}
+  .spend-f{display:block;flex:1;font-size:12px;color:var(--muted)}
+  .spend-f span{display:block;margin-bottom:4px}
+  .spend-date{flex:0 0 140px}
+  .spend-in{width:100%;padding:7px 9px;border:1px solid var(--line);border-radius:var(--r-xs);background:var(--bg);color:var(--fg);font-size:13px;font-family:inherit}
+  .spend-in:focus{outline:none;border-color:var(--accent)}
+  .spend-notes{resize:vertical;min-height:44px}
+  .spend-msg{font-size:11.5px;color:var(--faint);margin-top:8px;min-height:14px}
+  .toggle{display:inline-flex;border:1px solid var(--line);border-radius:var(--r-xs);overflow:hidden}
+  .tog{padding:6px 12px;font-size:12.5px;background:var(--bg);color:var(--muted);border:0;cursor:pointer;font-family:inherit}
+  .tog.active{background:var(--accent);color:var(--on-accent)}
+  .gv-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:22px}
+  .gv-kpi{padding:16px;border:1px solid var(--line-soft);border-radius:var(--r-sm);background:var(--card)}
+  .gv-kpi .k{font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin-bottom:6px}
+  .gv-kpi .v{font-size:24px;font-weight:600;color:var(--ink)}
+  .gv-kpi .s{font-size:12px;color:var(--faint);margin-top:4px}
+  .gv-sec{margin-bottom:26px}
+  .gv-sec h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 12px}
+  .gv-bars{display:flex;flex-direction:column;gap:8px}
+  .gv-bar{display:grid;grid-template-columns:88px 1fr 100px;align-items:center;gap:10px;font-size:12.5px}
+  .gv-bar .lbl{color:var(--muted)}
+  .gv-bar .track{height:16px;background:var(--line-soft);border-radius:3px;overflow:hidden}
+  .gv-bar .fill{height:100%;background:var(--accent);border-radius:3px}
+  .gv-bar .amt{text-align:right;color:var(--ink);font-variant-numeric:tabular-nums}
+  .gv-tbl{width:100%;border-collapse:collapse;font-size:13px}
+  .gv-tbl th{text-align:left;font-size:11.5px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line)}
+  .gv-tbl td{padding:10px;border-bottom:1px solid var(--line-soft);vertical-align:top}
+  .gv-tbl .num{text-align:right;font-variant-numeric:tabular-nums}
+  .gv-tbl tr:hover td{background:var(--accent-tint)}
+  .gv-share{font-variant-numeric:tabular-nums}
+  .gv-none{color:var(--faint);font-size:13px;padding:18px 0}
+  .gv-warn{font-size:12.5px;color:var(--amber);margin-bottom:14px}
   .btns{display:flex;gap:8px}
   .btn{
     border:none;padding:11px 16px;border-radius:var(--radius-sm);cursor:pointer;
@@ -300,7 +336,7 @@ export default {
   `,
 
   template: `
-    <div class="page">
+    <div class="page" id="queuePage">
       <div class="page-hd">
         <div>
           <h1>Requests.</h1>
@@ -316,6 +352,22 @@ export default {
       <div class="queue" id="queue"></div>
     </div>
 
+    <div class="page" id="givingPage" hidden>
+      <div class="page-hd">
+        <div>
+          <h1>Giving.</h1>
+          <div class="sub" id="givingMeta"></div>
+        </div>
+        <div class="tools">
+          <div class="toggle" id="measureToggle">
+            <button class="tog active" data-measure="cost">Our cost</button>
+            <button class="tog" data-measure="retail">Retail value</button>
+          </div>
+        </div>
+      </div>
+      <div id="givingBody"></div>
+    </div>
+
     <div class="scrim" id="scrim"></div>
     <aside class="panel" id="panel" aria-label="Request detail" tabindex="-1">
       <div class="panel-in" id="panelIn"></div>
@@ -323,6 +375,9 @@ export default {
   `,
 
   async mount(ctx) {
+    // showView runs on every route change, after mount. Keep the root so it
+    // can find the two pages without a second ctx.
+    this._root = ctx.root;
     const root = ctx.root;
     const $ = (sel) => root.querySelector(sel);
 
@@ -803,6 +858,54 @@ export default {
         '</div>';
     }
 
+
+    /**
+     * What the donation actually cost, captured after approval.
+     *
+     * Two figures because they answer different questions. Retail value is
+     * what the goods would have sold for, which is the number an org wants on
+     * a receipt. Cost is what P&M actually gave up, and is the honest one to
+     * weigh against what a client spends with us. Either can be left blank.
+     */
+    function spendBlock(row) {
+      var f = (row.meta && row.meta.fulfillment) || {};
+      var has = f.retailValue != null || f.cost != null;
+      var id = row.meta.id;
+
+      return '' +
+        '<div class="spend' + (has ? ' spend-set' : '') + '">' +
+          '<div class="spend-hd">' +
+            'Donation recorded' +
+            (has ? '' : ' <span class="spend-todo">not yet entered</span>') +
+          '</div>' +
+          '<div class="spend-row">' +
+            '<label class="spend-f">' +
+              '<span>Retail value</span>' +
+              '<input type="text" inputmode="decimal" class="spend-in" data-spend="retailValue" ' +
+                'data-id="' + esc(id) + '" value="' + esc(f.retailValue == null ? '' : f.retailValue) + '" placeholder="0.00">' +
+            '</label>' +
+            '<label class="spend-f">' +
+              '<span>Our cost</span>' +
+              '<input type="text" inputmode="decimal" class="spend-in" data-spend="cost" ' +
+                'data-id="' + esc(id) + '" value="' + esc(f.cost == null ? '' : f.cost) + '" placeholder="0.00">' +
+            '</label>' +
+            '<label class="spend-f spend-date">' +
+              '<span>Date</span>' +
+              '<input type="date" class="spend-in" data-spend="fulfilledAt" ' +
+                'data-id="' + esc(id) + '" value="' + esc(f.fulfilledAt || '') + '">' +
+            '</label>' +
+          '</div>' +
+          '<label class="spend-f">' +
+            '<span>Notes</span>' +
+            '<textarea class="spend-in spend-notes" data-spend="notes" data-id="' + esc(id) + '" ' +
+              'rows="2" placeholder="What went out, any conditions agreed">' + esc(f.notes || '') + '</textarea>' +
+          '</label>' +
+          '<div class="spend-msg" id="spendMsg-' + esc(id) + '">' +
+            (f.recordedBy ? 'Recorded by ' + esc(f.recordedBy) : '') +
+          '</div>' +
+        '</div>';
+    }
+
     function decisionBlock(row) {
       var r = row.result;
       var dec = decisionOf(row);
@@ -818,6 +921,7 @@ export default {
               (dec.note ? '<br>' + esc(dec.note) : '') +
               '<br><button class="undo" data-undo="' + row.meta.id + '">Reopen this request</button>' +
             '</div>' +
+            (dec.status === 'approved' ? spendBlock(row) : '') +
           '</div>';
       }
 
@@ -944,6 +1048,45 @@ export default {
         openPanel(id);
         return;
       }
+    });
+
+    /**
+     * Save a recorded amount. Fires on blur rather than per keystroke, so a
+     * dollar figure is written once when the person moves on rather than
+     * generating a request per digit.
+     */
+    root.addEventListener('change', function (e) {
+      var el = e.target.closest('[data-spend]');
+      if (!el) return;
+
+      var id = el.dataset.id;
+      var field = el.dataset.spend;
+      var msg = $('#spendMsg-' + id);
+      var patch = {};
+      patch[field] = el.value;
+
+      if (msg) msg.textContent = 'Saving...';
+
+      ctx.api.request(ENDPOINTS.ggRequests + '?id=' + encodeURIComponent(id), {
+        method: 'PATCH',
+        body: { fulfillment: patch }
+      }).then(function (out) {
+        var saved = (out && out.request) || null;
+        if (saved) {
+          // Keep the in-memory row in step so reopening the panel shows the
+          // stored value rather than the pre-save one.
+          (ctx.data || []).forEach(function (r) {
+            if (r.id === id) r.fulfillment = saved.fulfillment;
+          });
+        }
+        if (msg) {
+          var f = saved && saved.fulfillment;
+          msg.textContent = f && f.recordedBy ? 'Recorded by ' + f.recordedBy : 'Saved';
+        }
+      }).catch(function (err) {
+        console.error('[givinggauge] spend save failed:', err);
+        if (msg) msg.textContent = (err && err.message) ? err.message : 'Could not save';
+      });
     });
 
     /** Write a decision through the seam; roll the screen back if it fails. */
@@ -1185,6 +1328,139 @@ export default {
       });
     }
 
+    /* ---------------- giving summary view ---------------- */
+
+    var givingMeasure = 'cost';
+
+    function usd(n) {
+      return '$' + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
+    }
+
+    function monthLabel(key) {
+      var parts = String(key).split('-');
+      var d = new Date(Number(parts[0]), Number(parts[1]) - 1, 1);
+      return d.toLocaleString(undefined, { month: 'short', year: '2-digit' });
+    }
+
+    function bars(rows, pick) {
+      var max = rows.reduce(function (m, r) { return Math.max(m, pick(r)); }, 0);
+      if (!max) return '<div class="gv-none">Nothing recorded yet.</div>';
+      return '<div class="gv-bars">' + rows.map(function (r) {
+        var v = pick(r);
+        var pct = max > 0 ? Math.round((v / max) * 100) : 0;
+        return '<div class="gv-bar">' +
+          '<span class="lbl">' + esc(r.label) + '</span>' +
+          '<span class="track"><span class="fill" style="width:' + pct + '%"></span></span>' +
+          '<span class="amt">' + usd(v) + '</span>' +
+        '</div>';
+      }).join('') + '</div>';
+    }
+
+    async function renderGiving() {
+      var body = $('#givingBody');
+      var meta = $('#givingMeta');
+      if (!body) return;
+
+      body.innerHTML = '<div class="gv-none">Loading...</div>';
+
+      var sum;
+      try {
+        sum = await ctx.api.get(ENDPOINTS.ggRequests, {
+          action: 'summary', measure: givingMeasure
+        });
+      } catch (err) {
+        console.error('[givinggauge] summary failed:', err);
+        body.innerHTML = '<div class="gv-none">Could not load the summary.</div>';
+        return;
+      }
+
+      var key = givingMeasure === 'retail' ? 'retail' : 'cost';
+      var thisYear = String(new Date().getFullYear());
+      var thisMonth = new Date().toISOString().slice(0, 7);
+      var yr = sum.byYear[thisYear] || { retail: 0, cost: 0, count: 0 };
+      var mo = sum.byMonth[thisMonth] || { retail: 0, cost: 0, count: 0 };
+
+      if (meta) {
+        meta.textContent = sum.allTime.count + ' donation' +
+          (sum.allTime.count === 1 ? '' : 's') + ' recorded';
+      }
+
+      // An approved request with no amount entered is invisible in every total
+      // below, so say so rather than letting a low number read as fact.
+      var warn = sum.unrecorded
+        ? '<div class="gv-warn">' + sum.unrecorded + ' approved request' +
+          (sum.unrecorded === 1 ? '' : 's') + ' with no amount entered yet, ' +
+          'not counted in any total below.</div>'
+        : '';
+
+      var months = Object.keys(sum.byMonth).sort().slice(-12).map(function (k) {
+        return { label: monthLabel(k), retail: sum.byMonth[k].retail, cost: sum.byMonth[k].cost };
+      });
+
+      var years = Object.keys(sum.byYear).sort().map(function (k) {
+        return { label: k, retail: sum.byYear[k].retail, cost: sum.byYear[k].cost };
+      });
+
+      var clientRows = sum.clients.length
+        ? sum.clients.map(function (c) {
+            var share = c.shareOfRevenue == null
+              ? '<span class="gv-none">no revenue on file</span>'
+              : (c.shareOfRevenue * 100).toFixed(2) + '%';
+            return '<tr>' +
+              '<td>' + esc(c.name) + '</td>' +
+              '<td class="num">' + c.count + '</td>' +
+              '<td class="num">' + usd(c[key]) + '</td>' +
+              '<td class="num">' + usd(c.revenueBasis) + '</td>' +
+              '<td class="num gv-share">' + share + '</td>' +
+            '</tr>';
+          }).join('')
+        : '<tr><td colspan="5" class="gv-none">No donations attached to a client yet.</td></tr>';
+
+      body.innerHTML =
+        warn +
+        '<div class="gv-kpis">' +
+          '<div class="gv-kpi"><div class="k">This month</div><div class="v">' + usd(mo[key]) + '</div>' +
+            '<div class="s">' + mo.count + ' donation' + (mo.count === 1 ? '' : 's') + '</div></div>' +
+          '<div class="gv-kpi"><div class="k">' + thisYear + '</div><div class="v">' + usd(yr[key]) + '</div>' +
+            '<div class="s">' + yr.count + ' donation' + (yr.count === 1 ? '' : 's') + '</div></div>' +
+          '<div class="gv-kpi"><div class="k">All time</div><div class="v">' + usd(sum.allTime[key]) + '</div>' +
+            '<div class="s">' + sum.allTime.count + ' donation' + (sum.allTime.count === 1 ? '' : 's') + '</div></div>' +
+        '</div>' +
+
+        '<div class="gv-sec"><h2>By month</h2>' +
+          bars(months, function (r) { return r[key]; }) + '</div>' +
+
+        '<div class="gv-sec"><h2>By year</h2>' +
+          bars(years, function (r) { return r[key]; }) + '</div>' +
+
+        '<div class="gv-sec"><h2>By client</h2>' +
+          '<table class="gv-tbl">' +
+            '<thead><tr>' +
+              '<th>Client</th><th class="num">Gifts</th>' +
+              '<th class="num">' + (givingMeasure === 'retail' ? 'Retail value' : 'Our cost') + '</th>' +
+              '<th class="num">Lifetime revenue</th><th class="num">Share</th>' +
+            '</tr></thead>' +
+            '<tbody>' + clientRows + '</tbody>' +
+          '</table>' +
+        '</div>';
+    }
+
+    // Exposed so showView can render on first visit to the tab.
+    this._renderGiving = renderGiving;
+
+    var measureToggle = $('#measureToggle');
+    if (measureToggle) {
+      measureToggle.addEventListener('click', function (e) {
+        var btn = e.target.closest('.tog');
+        if (!btn) return;
+        givingMeasure = btn.dataset.measure;
+        $$('#measureToggle .tog').forEach(function (b) {
+          b.classList.toggle('active', b === btn);
+        });
+        renderGiving();
+      });
+    }
+
     renderQueue();
 
 
@@ -1195,8 +1471,20 @@ export default {
     };
   },
 
-  showView() {
-    // Single view. The rail shows no sub-nav for a one-view app.
+  showView(view) {
+    var root = this._root;
+    if (!root) return;
+    var queue = root.querySelector('#queuePage');
+    var giving = root.querySelector('#givingPage');
+    if (!queue || !giving) return;
+
+    var showGiving = view === 'giving';
+    queue.hidden = showGiving;
+    giving.hidden = !showGiving;
+
+    // Rendered on first visit rather than at mount, so opening the queue does
+    // not pay for a summary nobody asked for.
+    if (showGiving && this._renderGiving) this._renderGiving();
   },
 
   unmount() {
