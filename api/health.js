@@ -6,7 +6,9 @@
 //
 // Open /api/health in a browser to see what is and isn't configured.
 //
-// SAFE TO EXPOSE: reports only whether each variable is SET, never its value.
+// PUBLIC BY DESIGN, SAFE TO EXPOSE: reports only whether each variable is SET,
+// never its value. No auth on purpose; this is the page you open when auth
+// itself is broken.
 
 import fs from "fs";
 import path from "path";
