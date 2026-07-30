@@ -335,12 +335,53 @@ export default {
     const payload = await ctx.api.get(ENDPOINTS.ggRequests);
     ctx.data = Array.isArray(payload) ? payload : ((payload && payload.requests) || []);
 
+    /**
+     * Re-pull roster numbers for every matched account.
+     *
+     * A match stores a snapshot of the customer's figures at match time.
+     * Revenue and recency keep moving after that, so a queue reopened weeks
+     * later would score against stale numbers. One request refreshes them
+     * all; identity fields (found, customerId, matchConfidence) stay put,
+     * only the figures update. Failure is non-fatal: stored numbers stand.
+     */
+    async function refreshMatchedAccounts() {
+      var matched = (ctx.data || []).filter(function (r) {
+        return r.account && r.account.found && r.account.customerId;
+      });
+      if (!matched.length) return;
+      var ids = matched.map(function (r) { return r.account.customerId; }).join(',');
+      try {
+        var out = await ctx.api.get(ENDPOINTS.bbCustomerMatch, { ids: ids });
+        var accounts = (out && out.accounts) || {};
+        matched.forEach(function (r) {
+          var fresh = accounts[String(r.account.customerId)];
+          if (!fresh) return;
+          ['tier', 'lifetimeRevenue', 'ytdRevenue', 'priorYtdRevenue',
+           'orderCount', 'daysSinceLastOrder', 'medianGapDays', 'isFirstYear',
+           'trendingStrong', 'owner'].forEach(function (k) {
+            if (fresh[k] !== undefined) r.account[k] = fresh[k];
+          });
+        });
+      } catch (err) {
+        console.warn('[givinggauge] account refresh skipped:', err && err.message);
+      }
+    }
+    await refreshMatchedAccounts();
+
     let onKeydown;
 
 
   
 
-    var TODAY = '2026-07-21';
+    // Live local date, YYYY-MM-DD. A hardcoded date shipped here once and
+    // silently inflated every lead-time score as real days passed; the engine
+    // takes { today } so tests can still pin a date, but the app never does.
+    var TODAY = (function () {
+      var d = new Date();
+      return d.getFullYear() + '-' +
+        String(d.getMonth() + 1).padStart(2, '0') + '-' +
+        String(d.getDate()).padStart(2, '0');
+    })();
 
     var DIM_LABEL = {
       relationship: 'Customer relationship',
