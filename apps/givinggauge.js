@@ -308,6 +308,7 @@ export default {
         </div>
         <div class="tools">
           <span class="tool-msg" id="importMsg"></span>
+          <button class="tool-btn" id="rematchBtn">Match to roster</button>
           <button class="tool-btn" id="importBtn">Import from Jotform</button>
         </div>
       </div>
@@ -1116,9 +1117,40 @@ export default {
 
     // Only admins and managers can run this; the endpoint enforces it too, so
     // hiding the button is a courtesy rather than the control.
+    var rematchBtn = $('#rematchBtn');
+
     var role = ctx.user && ctx.user.role;
     if (role !== 'admin' && role !== 'manager') {
       if (importBtn) importBtn.style.display = 'none';
+      if (rematchBtn) rematchBtn.style.display = 'none';
+    }
+
+    // Re-run roster matching across the whole queue. New requests match on
+    // arrival now, but anything stored before that shipped came in as "Not a
+    // customer", and re-importing will not fix it because the import skips
+    // submissions it already has.
+    if (rematchBtn) {
+      rematchBtn.addEventListener('click', async function () {
+        rematchBtn.disabled = true;
+        importMsg.textContent = 'Matching...';
+        try {
+          var out = await ctx.api.post(ENDPOINTS.ggRequests + '?action=rematch', {});
+          var bits = [];
+          if (out.matched) bits.push(out.matched + ' matched');
+          if (out.already) bits.push(out.already + ' already matched');
+          if (out.unmatched) bits.push(out.unmatched + ' no roster match');
+          importMsg.textContent = bits.length ? bits.join(' \u00b7 ') : 'Nothing to match';
+
+          var payload = await ctx.api.get(ENDPOINTS.ggRequests);
+          ctx.data = Array.isArray(payload) ? payload : ((payload && payload.requests) || []);
+          renderQueue();
+        } catch (err) {
+          console.error('[givinggauge] rematch failed:', err);
+          importMsg.textContent = (err && err.message) ? err.message : 'Match failed';
+        } finally {
+          rematchBtn.disabled = false;
+        }
+      });
     }
 
     if (importBtn) {
