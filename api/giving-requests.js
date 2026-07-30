@@ -10,7 +10,7 @@
 // api/giving-intake.js and can only create.
 
 import { requireAuth } from "../lib/session.js";
-import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount } from "../lib/giving.js";
+import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 
 const JOTFORM_API = "https://api.jotform.com";
@@ -52,21 +52,35 @@ export default async function handler(req, res) {
     // already has, by design. This is the one-click repair for that backlog.
     if (req.method === "POST" && action === "rematch") {
       const rows = await listRequests();
-      let matched = 0, already = 0, unmatched = 0;
+      let matched = 0, already = 0, unmatched = 0, repaired = 0;
+      const recovered = {};
 
       for (const row of rows) {
-        if (row.account && row.account.found) { already++; continue; }
-        await attachAccount(row);
-        if (row.account && row.account.found) {
-          await saveRequest(row);
-          matched++;
-        } else {
-          unmatched++;
+        let dirty = false;
+
+        // Re-derive location, date and the rest from the stored payload. Rows
+        // saved before a mapping fix keep the old parse until this runs.
+        const out = repairRequest(row);
+        if (out.changed.length) {
+          dirty = true;
+          repaired++;
+          out.changed.forEach((f) => { recovered[f] = (recovered[f] || 0) + 1; });
         }
+
+        if (row.account && row.account.found) {
+          already++;
+        } else {
+          await attachAccount(row);
+          if (row.account && row.account.found) { matched++; dirty = true; }
+          else unmatched++;
+        }
+
+        if (dirty) await saveRequest(row);
       }
 
       return res.status(200).json({
-        ok: true, matched, already, unmatched, total: rows.length
+        ok: true, matched, already, unmatched, repaired,
+        recovered, total: rows.length
       });
     }
 
