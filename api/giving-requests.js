@@ -13,6 +13,7 @@ import { requireAuth } from "../lib/session.js";
 import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 import { applyClassification } from "../lib/giving-classify.js";
+import { summarise } from "../lib/giving-summary.js";
 
 const JOTFORM_API = "https://api.jotform.com";
 
@@ -38,6 +39,17 @@ export default async function handler(req, res) {
 
   try {
     if (req.method === "GET") {
+      // Spend rollups: by month, by year, all time, and per client against
+      // what that client spends with us. Must be checked before the id and
+      // list branches, both of which return.
+      if (action === "summary") {
+        const rows = await listRequests();
+        return res.status(200).json(summarise(rows, {
+          measure: (req.query && req.query.measure) || "cost",
+          basis: (req.query && req.query.basis) || "lifetime"
+        }));
+      }
+
       if (id) {
         const row = await getRequest(id);
         if (!row) return res.status(404).json({ error: "Not found" });
@@ -102,6 +114,13 @@ export default async function handler(req, res) {
       if (body.request)  patch.request = body.request;   // human classification
       if (body.account)  patch.account = body.account;
       if (body.override !== undefined) patch.override = body.override;
+
+      // Recorded spend. Stamped with who entered it, from the session.
+      if (body.fulfillment) {
+        patch.fulfillment = Object.assign({}, body.fulfillment, {
+          recordedBy: sess.name || sess.username
+        });
+      }
 
       // Stamp WHO decided from the session, never from the payload — otherwise
       // the audit trail is whatever the client claimed.
