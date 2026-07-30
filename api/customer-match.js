@@ -151,6 +151,33 @@ export default async function handler(req, res) {
     return res.status(503).json({ error: "Storage is not configured." });
   }
 
+  // Refresh mode: ?ids=C-1042,C-3310 returns a fresh account object per id.
+  // GivingGauge calls this on queue load so a match made months ago carries
+  // TODAY's revenue and recency figures, not the ones frozen at match time.
+  // (Stale matched numbers quietly skewed scores once; this is the fix.)
+  const ids = (req.query && req.query.ids) || "";
+  if (String(ids).trim()) {
+    try {
+      const data = await readKey(KEYS.data);
+      if (!data || !Array.isArray(data.synced)) {
+        return res.status(200).json({ accounts: {} });
+      }
+      const enrichment = data.enrichment || {};
+      const wanted = new Set(String(ids).split(",").map((s) => s.trim()).filter(Boolean));
+      const accounts = {};
+      data.synced.forEach((c) => {
+        const cid = String(c.customer_id);
+        if (!wanted.has(cid)) return;
+        // Score 1: this is a confirmed id lookup, not a fuzzy name guess.
+        accounts[cid] = toAccount(c, enrichment[c.customer_id], 1);
+      });
+      return res.status(200).json({ accounts });
+    } catch (e) {
+      console.error("customer-match refresh error:", e);
+      return res.status(500).json({ error: "Refresh failed" });
+    }
+  }
+
   const q = (req.query && (req.query.name || req.query.q)) || "";
   if (!String(q).trim()) {
     return res.status(400).json({ error: "A name is required" });
