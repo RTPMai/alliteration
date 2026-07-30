@@ -10,7 +10,7 @@
 // api/giving-intake.js and can only create.
 
 import { requireAuth } from "../lib/session.js";
-import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave } from "../lib/giving.js";
+import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 
 const JOTFORM_API = "https://api.jotform.com";
@@ -44,6 +44,30 @@ export default async function handler(req, res) {
       }
       const requests = await listRequests();
       return res.status(200).json({ requests });
+    }
+
+    // Re-run roster matching over requests already in the queue. Everything
+    // stored before auto-matching existed came in as "Not a customer", and
+    // re-importing will not fix them: the endpoint skips submissions it
+    // already has, by design. This is the one-click repair for that backlog.
+    if (req.method === "POST" && action === "rematch") {
+      const rows = await listRequests();
+      let matched = 0, already = 0, unmatched = 0;
+
+      for (const row of rows) {
+        if (row.account && row.account.found) { already++; continue; }
+        await attachAccount(row);
+        if (row.account && row.account.found) {
+          await saveRequest(row);
+          matched++;
+        } else {
+          unmatched++;
+        }
+      }
+
+      return res.status(200).json({
+        ok: true, matched, already, unmatched, total: rows.length
+      });
     }
 
     if (req.method === "POST" && action === "backfill") {
@@ -139,6 +163,7 @@ async function backfill(req, res, body) {
           : new Date().toISOString()
       });
 
+      await attachAccount(row);
       await saveRequest(row);
       result.imported++;
     } catch (e) {
