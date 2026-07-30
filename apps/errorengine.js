@@ -263,11 +263,23 @@ export default {
         <div id="ee-by-month"></div>
       </div>
       <div class="panel">
-        <h2>Errors by Type</h2>
+        <div class="panel-head">
+          <h2>Errors by Type</h2>
+          <div class="toggle" id="ee-type-metric">
+            <button class="tog active" data-metric="count">Count</button>
+            <button class="tog" data-metric="cost">Cost</button>
+          </div>
+        </div>
         <div id="ee-by-type"><div class="empty">No data yet &mdash; log your first error.</div></div>
       </div>
       <div class="panel">
-        <h2>Errors by Root Cause</h2>
+        <div class="panel-head">
+          <h2>Errors by Root Cause</h2>
+          <div class="toggle" id="ee-cause-metric">
+            <button class="tog active" data-metric="count">Count</button>
+            <button class="tog" data-metric="cost">Cost</button>
+          </div>
+        </div>
         <div id="ee-by-cause"></div>
       </div>
       <div class="panel">
@@ -923,6 +935,8 @@ export default {
     let selectedYear = new Date().getFullYear();
     let monthMetric = 'count';
     let vendorMetric = 'count';
+    let typeMetric = 'count';
+    let causeMetric = 'count';
     let statusFilter = 'all';
     const selected = new Set();
 
@@ -990,21 +1004,35 @@ export default {
 
       renderMonthChart(yearErrors);
 
-      const typeCounts = Object.fromEntries(ERROR_TYPES_ALL().map(t => [t, 0]));
-      const causeCounts = Object.fromEntries(ROOT_CAUSES_ALL().map(c => [c, 0]));
-      yearErrors.forEach(e => {
-        if (typeCounts[e.error_type] != null) typeCounts[e.error_type]++;
-        if (causeCounts[e.root_cause] != null) causeCounts[e.root_cause]++;
+      // Type and cause honor the same Count/Cost toggle as month and vendor.
+      // Count answers "what goes wrong most"; cost answers "what hurts most",
+      // and they rank differently: one $900 short ship outweighs five $30
+      // misprints on one axis and not the other.
+      const groupTotals = (field, keys, metric) => {
+        const totals = Object.fromEntries(keys.map(k => [k, 0]));
+        yearErrors.forEach(e => {
+          if (totals[e[field]] == null) return;
+          totals[e[field]] += metric === 'cost' ? (Number(e.cost) || 0) : 1;
+        });
+        return totals;
+      };
+      const dollars = v => '$' + v.toLocaleString(undefined, { maximumFractionDigits: 0 });
+
+      renderBars('ee-by-type', groupTotals('error_type', ERROR_TYPES_ALL(), typeMetric), {
+        label: k => labelFor('error_type', k),
+        wide: typeMetric === 'cost',
+        format: typeMetric === 'cost' ? dollars : undefined,
       });
-      renderBars('ee-by-type', typeCounts, { label: k => labelFor('error_type', k) });
-      renderBars('ee-by-cause', causeCounts, { label: k => labelFor('root_cause', k) });
+      renderBars('ee-by-cause', groupTotals('root_cause', ROOT_CAUSES_ALL(), causeMetric), {
+        label: k => labelFor('root_cause', k),
+        wide: causeMetric === 'cost',
+        format: causeMetric === 'cost' ? dollars : undefined,
+      });
 
       renderBars('ee-by-vendor', vendorTotals(yearErrors, vendorMetric), {
         empty: 'No vendor-attributed errors in this period.',
         wide: vendorMetric === 'cost',
-        format: vendorMetric === 'cost'
-          ? (v => '$' + v.toLocaleString(undefined, { maximumFractionDigits: 0 }))
-          : undefined,
+        format: vendorMetric === 'cost' ? dollars : undefined,
       });
 
       renderReplacedStat(yearErrors);
@@ -1116,6 +1144,22 @@ export default {
       if (!btn) return;
       vendorMetric = btn.dataset.metric;
       $$('#ee-vendor-metric .tog').forEach(b => b.classList.toggle('active', b === btn));
+      draw();
+    });
+
+    $('ee-type-metric').addEventListener('click', (e) => {
+      const btn = e.target.closest('.tog');
+      if (!btn) return;
+      typeMetric = btn.dataset.metric;
+      $$('#ee-type-metric .tog').forEach(b => b.classList.toggle('active', b === btn));
+      draw();
+    });
+
+    $('ee-cause-metric').addEventListener('click', (e) => {
+      const btn = e.target.closest('.tog');
+      if (!btn) return;
+      causeMetric = btn.dataset.metric;
+      $$('#ee-cause-metric .tog').forEach(b => b.classList.toggle('active', b === btn));
       draw();
     });
 
