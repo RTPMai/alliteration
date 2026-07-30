@@ -12,6 +12,7 @@
 import { requireAuth } from "../lib/session.js";
 import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
+import { applyClassification } from "../lib/giving-classify.js";
 
 const JOTFORM_API = "https://api.jotform.com";
 
@@ -178,6 +179,7 @@ async function backfill(req, res, body) {
       });
 
       await attachAccount(row);
+      applyClassification(row);
       await saveRequest(row);
       result.imported++;
     } catch (e) {
