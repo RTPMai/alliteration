@@ -308,7 +308,7 @@ export default {
         </div>
         <div class="tools">
           <span class="tool-msg" id="importMsg"></span>
-          <button class="tool-btn" id="rematchBtn">Match to roster</button>
+          <button class="tool-btn" id="rematchBtn">Match &amp; refresh</button>
           <button class="tool-btn" id="importBtn">Import from Jotform</button>
         </div>
       </div>
@@ -1139,7 +1139,8 @@ export default {
           if (out.matched) bits.push(out.matched + ' matched');
           if (out.already) bits.push(out.already + ' already matched');
           if (out.unmatched) bits.push(out.unmatched + ' no roster match');
-          importMsg.textContent = bits.length ? bits.join(' \u00b7 ') : 'Nothing to match';
+          if (out.repaired) bits.push(out.repaired + ' details recovered');
+          importMsg.textContent = bits.length ? bits.join(' \u00b7 ') : 'Nothing to update';
 
           var payload = await ctx.api.get(ENDPOINTS.ggRequests);
           ctx.data = Array.isArray(payload) ? payload : ((payload && payload.requests) || []);
