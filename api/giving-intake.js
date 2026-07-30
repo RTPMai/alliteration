@@ -16,7 +16,7 @@
 // The worst a bad actor can do is add junk to the review queue, which a human
 // sees and declines. That is an acceptable blast radius for a form endpoint.
 
-import { buildRequest, saveRequest, alreadyHave } from "../lib/giving.js";
+import { buildRequest, saveRequest, alreadyHave, attachAccount } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 
 export default async function handler(req, res) {
@@ -69,6 +69,10 @@ export default async function handler(req, res) {
       source: "jotform-webhook",
       submittedAt: new Date().toISOString()
     });
+
+    // Match the roster before saving, so the request is scored correctly the
+    // first time it is seen rather than sitting as "Not a customer".
+    await attachAccount(row);
 
     await saveRequest(row);
 
