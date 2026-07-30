@@ -42,6 +42,8 @@ let loading = null;
  * The file itself is never modified. It ends in module.exports plus a window
  * global, so a shim provides `module` and the global lands on window either way.
  */
+// SEAM-EXEMPT: vendor loader. Fetches static vendored file text from our
+// own deploy and evaluates it; module loading, not data traffic.
 async function loadVendorGlobal(src) {
   // Fetch the text and evaluate it. Deliberately NOT a <script> tag: a .cjs is
   // easily served with a Content-Type the browser refuses to execute, and
