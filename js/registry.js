@@ -95,11 +95,12 @@ export const APPS = [
     role: 'What we give away',
     blurb: 'Donation and sponsorship scoring.',
     accent: '#D5A029',           // gold, not green — see tokens.css note
-    // The standalone app ships ONE view (the request queue). Model and Budget
-    // were planned tabs that were never built, so listing them would put dead
-    // sub-nav in the rail. Add them here when they exist.
+    // Model and Budget were planned tabs in the standalone app that were never
+    // built, so they are still absent: listing a view that does not exist puts
+    // dead sub-nav in the rail.
     views: [
-      ['requests', 'Requests']
+      ['requests', 'Requests'],
+      ['giving', 'Giving']
     ],
     defaultView: 'requests',
     stub: false
