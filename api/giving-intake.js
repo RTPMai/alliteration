@@ -17,6 +17,7 @@
 // sees and declines. That is an acceptable blast radius for a form endpoint.
 
 import { buildRequest, saveRequest, alreadyHave, attachAccount } from "../lib/giving.js";
+import { applyClassification } from "../lib/giving-classify.js";
 import { isConfigured } from "../lib/kv.js";
 
 export default async function handler(req, res) {
@@ -73,6 +74,7 @@ export default async function handler(req, res) {
     // Match the roster before saving, so the request is scored correctly the
     // first time it is seen rather than sitting as "Not a customer".
     await attachAccount(row);
+    applyClassification(row);
 
     await saveRequest(row);
 
