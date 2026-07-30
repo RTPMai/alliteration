@@ -8482,12 +8482,12 @@ export async function start(ctx) {
     return state_intake.filter(function(s) { return s.status === "new"; }).length;
   }
 
-  function updateInboxBadge() {
-    const badge = $id("inboxNavBadge");
-    if (!badge) return;
-    const n = inboxNewCount();
-    if (n > 0) { badge.textContent = n; badge.style.display = "inline-flex"; }
-    else { badge.style.display = "none"; }
+ function updateInboxBadge() {
+    // The standalone app had a #inboxNavBadge pill on its own header nav. The
+    // shell owns navigation now, and it already exposes a rail badge for
+    // exactly this (the count beside the app name). The old $id lookup found
+    // nothing and silently no-opped, so the new-submission count never showed.
+    if (typeof ctx.setBadge === "function") ctx.setBadge(inboxNewCount());
   }
 
   function projectSummary(s) {
