@@ -110,12 +110,17 @@ export default {
 
   /* ---------- detail panel ---------- */
   .scrim{
-    position:fixed;inset:0;background:rgba(28,36,48,.32);
+    position:fixed;top:var(--shell-header-h);right:0;bottom:0;left:0;
+    background:rgba(28,36,48,.32);
     opacity:0;pointer-events:none;transition:opacity .18s;z-index:110;
   }
   .scrim.open{opacity:1;pointer-events:auto}
   .panel{
-    position:fixed;top:0;right:0;bottom:0;width:min(560px,100%);
+    /* The shell header is sticky at z-index 200, so a panel pinned to top:0
+       lost its first 60px behind it: the org name was invisible and the
+       sub-line was sliced in half. Start below the header instead of trying
+       to out-stack it, which would cover the shell's own navigation. */
+    position:fixed;top:var(--shell-header-h);right:0;bottom:0;width:min(560px,100%);
     background:var(--bg);z-index:120;overflow-y:auto;
     transform:translateX(100%);transition:transform .22s cubic-bezier(.4,0,.2,1);
     box-shadow:-14px 0 40px rgba(16,24,40,.13);
@@ -124,7 +129,8 @@ export default {
   .panel-in{padding:20px 24px 40px}
   .panel-top{
     display:flex;align-items:flex-start;justify-content:space-between;
-    gap:14px;padding-bottom:16px;
+    gap:14px;padding:0 0 16px;
+    position:sticky;top:0;background:var(--bg);z-index:2;
   }
   .panel-top h2{font-size:22px;font-weight:800;letter-spacing:-.02em;line-height:1.2}
   .panel-top .sub{font-size:12.5px;color:var(--muted);margin-top:3px}
@@ -968,9 +974,13 @@ export default {
           '</div>' +
         '</div>' +
 
+        // WHAT THEY ASKED FOR comes first, directly under the grade. The
+        // review and classify cards are things the app needs from a person;
+        // they were pushing the actual request below the fold, so the panel
+        // opened on housekeeping instead of on the ask being judged.
+        eventCard(row) +
         reviewCard(row) +
         classifyCard(row) +
-        eventCard(row) +
         accountCard(row) +
         scorecard(r) +
         flagCards(r) +
