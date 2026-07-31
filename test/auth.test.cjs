@@ -346,6 +346,18 @@ t.test('role edits are batched, not saved per click', () => {
   t.assert(src.includes('markDirty'), 'unsaved changes should be tracked');
 });
 
+t.test('accounts table can switch another user\'s role', () => {
+  const src = read('apps/settings.js');
+  // The API always supported PATCH { role }; the UI has to expose it.
+  t.assert(src.includes('data-role-user'), 'each other-user row needs a role dropdown');
+  t.assert(/data-role-user[\s\S]*?method:\s*'PATCH'[\s\S]*?role:\s*next/.test(src),
+    'the dropdown must PATCH the role through the seam');
+  // Your own role stays read-only: the session cookie carries the role, so
+  // demoting yourself silently locks you out of Settings at next sign-in.
+  t.assert(/isMe\s*\?\s*'<span class="role-pill"/.test(src),
+    'your own row must keep the static pill, not a dropdown');
+});
+
 t.test('app chips carry each app accent, not a shared grey', () => {
   const src = read('apps/settings.js');
   // The point of the chips is scanning: grey-on-grey means reading every word.
