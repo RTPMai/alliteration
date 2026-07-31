@@ -356,6 +356,10 @@ export default {
                 (r.can_export !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can export</label>' +
               '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="own_only"' +
                 (r.data_scope === 'own' ? ' checked' : '') + (locked ? ' disabled' : '') + '> Own accounts only</label>' +
+              // Opt-in (checked only when explicitly true): roles saved before
+              // this flag existed must not silently gain list editing.
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="manage_lists"' +
+                (r.manage_lists === true ? ' checked' : '') + (locked ? ' disabled' : '') + '> Manage ErrorEngine lists</label>' +
             '</div>' +
 
             (locked
