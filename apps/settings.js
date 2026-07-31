@@ -86,6 +86,18 @@ export default {
     display:inline-block;padding:2px 9px;border-radius:var(--radius-pill);
     font-size:11px;font-weight:700;background:var(--accent-tint);color:var(--accent-deep);
   }
+  /* Inline role switcher in the Accounts table. Styled like the pill so the
+     table reads the same whether the cell is editable (others) or not (you). */
+  .role-select{
+    padding:2px 24px 2px 9px;border-radius:var(--radius-pill);
+    font-size:11px;font-weight:700;font-family:inherit;
+    background:var(--accent-tint);color:var(--accent-deep);
+    border:1px solid transparent;cursor:pointer;appearance:auto;
+  }
+  .role-select:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint);
+  }
+  .role-select:disabled{opacity:.6;cursor:default}
   /* App chips carry each app's OWN color, set inline from the registry via
      --c. That is the whole point: scanning the list should show at a glance
      who can open what, and grey-on-grey chips make you read every word. */
@@ -267,7 +279,18 @@ export default {
             '<td><div class="u-name">' + esc(u.name || u.username) +
               (isMe ? ' <span class="u-sub" style="display:inline">(you)</span>' : '') +
             '</div><div class="u-sub">' + esc(u.username) + '</div></td>' +
-            '<td><span class="role-pill">' + esc(role.label || u.role) + '</span>' +
+            // Your own role is not editable here, same reasoning as Remove:
+            // the session cookie carries the role, so demoting yourself
+            // silently locks you out of this screen at your next sign-in.
+            '<td>' + (isMe
+              ? '<span class="role-pill">' + esc(role.label || u.role) + '</span>'
+              : '<select class="role-select" data-role-user="' + esc(u.username) + '">' +
+                  Object.keys(roles).map((k) =>
+                    '<option value="' + esc(k) + '"' + (k === u.role ? ' selected' : '') + '>' +
+                      esc(roles[k].label || k) +
+                    '</option>'
+                  ).join('') +
+                '</select>') +
               '<div class="app-chips">' + appChips(role.apps) + '</div></td>' +
             '<td class="u-sub">' + (u.last_login ? esc(new Date(u.last_login).toLocaleDateString()) : 'Never') + '</td>' +
             '<td class="u-actions">' +
@@ -434,6 +457,32 @@ export default {
         } catch (err) {
           say(err.message || 'Could not remove that account', 'err');
         }
+      }
+    });
+
+    /* ---- switch a user's role ---- */
+
+    // Saved per-change, unlike the role editor below: one user's role is a
+    // single independent value, so there is no half-made state to batch.
+    root.addEventListener('change', async (e) => {
+      const sel = e.target.closest('[data-role-user]');
+      if (!sel) return;
+      const username = sel.dataset.roleUser;
+      const next = sel.value;
+      sel.disabled = true;
+      try {
+        await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
+          method: 'PATCH',
+          body: { role: next }
+        });
+        // Sessions carry the role in the cookie, so a signed-in user keeps
+        // their old access until they next sign in. Worth saying out loud.
+        say(username + ' is now ' + (roles[next] ? (roles[next].label || next) : next) +
+            '. Takes effect the next time they sign in.', 'ok');
+        await load();
+      } catch (err) {
+        say(err.message || 'Could not change that role', 'err');
+        await load(); // reload puts the dropdown back on their real role
       }
     });
 
