@@ -57,6 +57,12 @@ export async function start(ctx) {
   const currentUser = ctx.user || null;
   const currentRole = currentUser ? currentUser.role : null;
 
+  // Sales director decision (Jul 2026): AMs never delete leads. A lead exits the
+  // pipeline through exactly one of "Reach Back Out", "Won", or "Lost". Delete
+  // survives for admin/superuser only, as a cleanup tool for test rows and bots.
+  // Cosmetic gate like everything else here — the server enforces its own rules.
+  const CAN_DELETE_LEADS = currentRole === "admin" || currentRole === "superuser";
+
 
   const SEED_CUSTOMERS = [
     { customer_id: "5860474", company_name: "Foth & VanDyke LLC", invoice_count: 378, last_invoice_date: "2026-07-01", total_revenue: 465300.17, median_gap_days: 2.777, revenue_by_year: {"2023": 67871.49, "2024": 111234.1, "2025": 186111.84, "2026": 100082.74}, invoices_by_year: {"2023": 53, "2024": 97, "2025": 152, "2026": 76} },
@@ -3573,11 +3579,11 @@ export async function start(ctx) {
   // reliable single-AM default at all (flagged with varies: true).
   const INDUSTRY_LANES = [
     { industry: "Blue Collar/Agriculture", am: "Alexis Davis" },
-    { industry: "Cities/Associations", am: "Abby Penton" },
+    { industry: "Cities/Associations", am: "Alexis Davis" }, // per AM reference sheet Jul 2026
     { industry: "City Fire, EMS & Police", am: "Alexis Davis" },
     { industry: "Contract", am: "Alexis Davis" },
     { industry: "Military/Reserve", am: "Alexis Davis" },
-    { industry: "Heathcare & Wellness", am: null, varies: true }, // 55 Alexis / 57 Abby -- essentially a coin flip in real data
+    { industry: "Heathcare & Wellness", am: "Alexis Davis" }, // per AM reference sheet Jul 2026 (was a coin flip in real data)
     { industry: "Church", am: "Abby Penton" },
     { industry: "Clubs - Non sports", am: "Abby Penton" },
     { industry: "Dance", am: "Abby Penton" },
@@ -3587,13 +3593,13 @@ export async function start(ctx) {
     { industry: "Music & Entertainment", am: "Abby Penton" },
     { industry: "Real Estate", am: "Abby Penton" },
     { industry: "Lifestyle Brands", am: "Abby Penton" },
-    { industry: "Food & Hospitality", am: "Abby Penton" },
+    { industry: "Food & Hospitality", am: "Hannah Posey" }, // per AM reference sheet Jul 2026
     { industry: "Club Sports/School Athletics", am: "Hannah Posey" },
     { industry: "Higher Education/Universities", am: "Hannah Posey" },
     { industry: "K-12", am: "Hannah Posey" },
     { industry: "PTO/Boosters", am: "Hannah Posey" },
     { industry: "Star wars - pew pew", am: "Ryan Toney" }, // 48 of 49 real accounts -- essentially Ryan's own lane
-    { industry: "Corporate/Small Business", am: null, varies: true }, // largest bucket, split across every AM
+    { industry: "Corporate/Small Business", am: "Abby Penton" }, // per AM reference sheet Jul 2026: Abby, only when no more specific industry applies
     { industry: "Personal Order", am: null, varies: true } // one-off/personal orders, split across every AM
   ];
 
@@ -6362,6 +6368,8 @@ export async function start(ctx) {
         return;
       }
       state_leads = d.leads;
+      // Retire the old "Dead" label in place — same bucket, kinder name.
+      state_leads.forEach(function(l) { l.status = normalizeLeadStatus(l.status); });
     } catch (e) {
       leadsLoadError = (e && (e.status === 401 || e.status === 403))
         ? "Not authorised to load leads — your session may have expired. Try signing out and back in."
@@ -6370,6 +6378,7 @@ export async function start(ctx) {
       return; // leave state_leads untouched rather than wiping it
     }
     populateLeadIndustryDropdown();
+    populateMarketingInitiativeDropdown();
     renderLeadsPage();
   }
 
@@ -6386,6 +6395,26 @@ export async function start(ctx) {
       INDUSTRY_LANES.map(function(l) { return '<option value="' + l.industry + '">' + l.industry + '</option>'; }).join("");
   }
 
+  // Marketing initiatives, matching the "Marketing Initiative Templates - Step
+  // Library" board in Monday. PLACEHOLDER SET: replace these entries with the
+  // real Step Library names once they're pasted in from Monday. The field is a
+  // label only for now — nothing fires when one is picked. It exists so the
+  // choice is captured today and the automation can key off it later.
+  const MARKETING_INITIATIVES = [
+    "New lead welcome sequence",
+    "Event follow-up sequence",
+    "Reorder nudge",
+    "Seasonal outreach",
+    "Win-back campaign"
+  ];
+
+  function populateMarketingInitiativeDropdown() {
+    const sel = $id("leadMarketingInitiative");
+    if (!sel || sel.options.length > 0) return;
+    sel.innerHTML = '<option value="">None yet</option>' +
+      MARKETING_INITIATIVES.map(function(m) { return '<option value="' + m + '">' + m + '</option>'; }).join("");
+  }
+
   function qualTierClass(tier) {
     if (tier === "Strategic Account") return "qt-strategic";
     if (tier === "High-Value Growth Account") return "qt-highvalue";
@@ -6395,13 +6424,98 @@ export async function start(ctx) {
   }
 
   let leadsSort = { col: "created", dir: "desc" };
+  // The column you sorted by BEFORE the current one — used as the tiebreaker.
+  let leadsSortPrev = null;
+  // "My leads" toggle: filter the pipeline to the signed-in AM's assignments.
+  let myLeadsOnly = false;
+
+  // Which AM name does the signed-in user map to? Exact match against the AM
+  // list first, then a contains fallback so "Alexis" still finds "Alexis Davis".
+  function myAMName() {
+    const u = currentUser ? (currentUser.name || currentUser.username || "") : "";
+    if (!u) return "";
+    const low = u.toLowerCase().trim();
+    const exact = ACCOUNT_MANAGERS.find(function(a) { return a.toLowerCase() === low; });
+    if (exact) return exact;
+    const partial = ACCOUNT_MANAGERS.find(function(a) {
+      return a.toLowerCase().indexOf(low) !== -1 || low.indexOf(a.toLowerCase()) !== -1;
+    });
+    return partial || "";
+  }
 
   // Single source of truth for lead pipeline statuses.
-  const LEAD_STATUSES = ["New", "Researching", "Qualified", "AM Notified", "Contacted", "Won", "Dead"];
+  // Exit buckets by design decision (sales director, Jul 2026): a lead ends in
+  // exactly one of "Reach Back Out" (with a date), "Won", or "Lost". Never deleted.
+  const LEAD_STATUSES = ["New", "Researching", "Qualified", "AM Notified", "Contacted", "Reach Back Out", "Won", "Lost"];
+
+  // Old records may still say "Dead" — map on read so nothing displays a retired name.
+  function normalizeLeadStatus(status) {
+    return status === "Dead" ? "Lost" : (status || "New");
+  }
+
+  // EVERY status change goes through here so the lead keeps a timestamped trail.
+  // The trail is what makes "did the AM act on this?" answerable: a lead sitting
+  // in AM Notified for a week is visible instead of silently stale.
+  function setLeadStatus(lead, status) {
+    if (!lead) return;
+    if (lead.status === status) return;
+    lead.status = status;
+    if (!Array.isArray(lead.status_history)) lead.status_history = [];
+    lead.status_history.push({ status: status, at: new Date().toISOString() });
+  }
+
+  // How long has the lead been in its current stage? Falls back to created_at
+  // for leads that predate the history trail.
+  function daysInCurrentStage(lead) {
+    let since = lead.created_at;
+    if (Array.isArray(lead.status_history) && lead.status_history.length) {
+      since = lead.status_history[lead.status_history.length - 1].at;
+    }
+    if (!since) return null;
+    const ms = Date.now() - new Date(since).getTime();
+    return Math.floor(ms / 86400000);
+  }
+
+  // A "Reach Back Out" lead is due when its date has arrived. No date = due now,
+  // so a lead can't hide in the bucket by skipping the date.
+  function reachBackDue(lead) {
+    if (lead.status !== "Reach Back Out") return false;
+    if (!lead.reach_back_at) return true;
+    return new Date(lead.reach_back_at) <= new Date();
+  }
+
+  // How many days an AM Notified lead can sit before it's flagged as stalled.
+  const AM_NOTIFIED_STALE_DAYS = 5;
+
+  // Chip rendered beside the status pill: makes a stalled handoff or a due
+  // reach-back visible in the list without opening the lead.
+  function statusAgeChip(lead) {
+    if (lead.status === "AM Notified") {
+      const d = daysInCurrentStage(lead);
+      if (d !== null && d >= AM_NOTIFIED_STALE_DAYS) {
+        return ' <span class="lead-age-chip" title="Notified ' + d + ' days ago with no status change — check whether the AM made contact.">' + d + 'd, no action</span>';
+      }
+    }
+    if (lead.status === "Reach Back Out") {
+      if (reachBackDue(lead)) {
+        return ' <span class="lead-age-chip" title="The follow-up date for this lead has arrived.">due now</span>';
+      }
+      if (lead.reach_back_at) {
+        return ' <span class="lead-wait-chip" title="Parked until this date, then it flags as due.">' + fmtDate(lead.reach_back_at) + '</span>';
+      }
+    }
+    return "";
+  }
 
   // "AM Notified" -> "AMNotified" so it's usable as a CSS class.
   function statusClass(status) {
     return "lead-status-" + String(status || "").replace(/[^A-Za-z0-9]/g, "");
+  }
+
+  // Small hoverable "i" that explains what a control or number is for.
+  // Plain title-attribute tooltips: zero JS, works everywhere, reads on hover.
+  function infoI(text) {
+    return ' <span class="info-i" title="' + String(text).replace(/"/g, "&quot;") + '">i</span>';
   }
 
   // Funnel: the ordered flow stages, plus Dead parked at the end as an exit bucket.
@@ -6412,8 +6526,9 @@ export async function start(ctx) {
     { name: "Qualified",   color: "var(--hue-blue)" },
     { name: "AM Notified", color: "var(--amber)" },
     { name: "Contacted",   color: "var(--hue-violet)" },
+    { name: "Reach Back Out", color: "var(--hue-clay)" },
     { name: "Won",         color: "var(--success)" },
-    { name: "Dead",        color: "var(--danger)" }
+    { name: "Lost",        color: "var(--danger)" }
   ];
 
   // null = no stage filter (show everything).
@@ -6470,12 +6585,25 @@ export async function start(ctx) {
     if (!ignoreStage && leadsStageFilter) {
       rows = rows.filter(function(r) { return r.status === leadsStageFilter; });
     }
+    // "My leads": only rows routed to the signed-in user, so an AM can weed out
+    // everyone else's assignments with one click.
+    if (myLeadsOnly && myAMName()) {
+      const me = myAMName().toLowerCase();
+      rows = rows.filter(function(r) { return (r.am_sort || "").toLowerCase() === me; });
+    }
     const colMap = {
       company_name: "company_name", email: "email_sort", source_type: "source_type", status: "status",
       score: "score_sort", tier: "tier_sort", am: "am_sort", followup: "followup_sort", created: "created_sort"
     };
+    // Two-level sort: the column you clicked sorts first; the column you had
+    // before breaks ties. Sort by AM then click Score = each AM's leads ranked.
     const key = colMap[leadsSort.col] || "created_sort";
-    rows.sort(function(a, b) { return compareForSort(a[key], b[key], leadsSort.dir); });
+    const prevKey = (leadsSortPrev && leadsSortPrev.col !== leadsSort.col) ? colMap[leadsSortPrev.col] : null;
+    rows.sort(function(a, b) {
+      const primary = compareForSort(a[key], b[key], leadsSort.dir);
+      if (primary !== 0 || !prevKey) return primary;
+      return compareForSort(a[prevKey], b[prevKey], leadsSortPrev.dir);
+    });
     return rows;
   }
 
@@ -7230,7 +7358,7 @@ export async function start(ctx) {
       const ok = confirm("Draft opened for " + pending.length + " lead(s).\n\n" +
         'Mark them as "AM Notified"?');
       if (!ok) return;
-      pending.forEach(function(l) { l.status = "AM Notified"; });
+      pending.forEach(function(l) { setLeadStatus(l, "AM Notified"); });
       await saveLeads();
       if (activeLeadId && pending.some(function(l) { return l.lead_id === activeLeadId; })) {
         const el = $id("leadStatusSelect");
@@ -7345,12 +7473,12 @@ export async function start(ctx) {
       const score = typeof qs.total_score === "number" ? qs.total_score : null;
       s.leadsTotal++;
       if (l.status === "Won") s.won++;
-      else if (l.status === "Dead") s.dead++;
+      else if (l.status === "Lost") s.dead++;
       else s.live++;
       if (score != null) {
         s.scored += score;
-        if (l.status !== "Won" && l.status !== "Dead") s.pipeline += score;
-        if (score >= 40 && l.status !== "Dead") s.hot++;
+        if (l.status !== "Won" && l.status !== "Lost") s.pipeline += score;
+        if (score >= 40 && l.status !== "Lost") s.hot++;
       }
     });
 
@@ -7560,9 +7688,10 @@ export async function start(ctx) {
     }
     const note = $id("leadsFilterNote");
     if (note) {
-      note.innerHTML = leadsStageFilter
-        ? 'Showing <b>' + leadsStageFilter + '</b> only'
-        : "";
+      const bits = [];
+      if (leadsStageFilter) bits.push('Showing <b>' + leadsStageFilter + '</b> only');
+      if (myLeadsOnly && myAMName()) bits.push('<b>' + myAMName() + "</b>'s leads only");
+      note.innerHTML = bits.join(" · ");
     }
   }
 
@@ -7575,13 +7704,21 @@ export async function start(ctx) {
         l.qualification.qualification_scoring.qualification_tier === "Strategic Account";
     }).length;
 
+    const reachDue = state_leads.filter(reachBackDue).length;
+
     const kpiGrid = $id("leadsKpiGrid");
     if (kpiGrid) {
+      // "Scored", not "Qualified": this counts leads the research agent has scored,
+      // in ANY stage. The pipeline's Qualified bar counts stage only. Naming them
+      // the same thing made the two numbers look broken when both were right.
       kpiGrid.innerHTML =
-        '<div class="kpi"><div class="kpi-lbl">Total leads</div><div class="kpi-val">' + total + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Qualified</div><div class="kpi-val">' + qualified + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Strategic tier</div><div class="kpi-val">' + strategic + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Won</div><div class="kpi-val">' + won + '</div></div>';
+        '<div class="kpi"><div class="kpi-lbl">Total leads' + infoI("Every lead in the pipeline, all stages.") + '</div><div class="kpi-val">' + total + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">Scored' + infoI("Leads the AI research agent has scored, in any stage. Different from the Qualified stage in the funnel below, which counts only leads currently sitting in that stage.") + '</div><div class="kpi-val">' + qualified + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">Strategic tier' + infoI("Scored 40 or more out of 50: the highest-value account tier.") + '</div><div class="kpi-val">' + strategic + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">Won</div><div class="kpi-val">' + won + '</div></div>' +
+        (reachDue
+          ? '<div class="kpi"><div class="kpi-lbl">Reach back due' + infoI("Reach Back Out leads whose follow-up date has arrived. Open them and get back in touch.") + '</div><div class="kpi-val" style="color:var(--amber)">' + reachDue + '</div></div>'
+          : '');
     }
 
     renderLeadsFunnel();
@@ -7621,8 +7758,10 @@ export async function start(ctx) {
         '<button id="bulkStatusApplyBtn" class="btn btn-gray btn-sm"' + disabled + '>' +
           'Apply to <span id="bulkStatusCount">0</span></button>' +
       '</div>' +
-      '<button id="bulkDeleteBtn" class="btn btn-danger btn-sm"' + disabled + '>' +
-        'Delete (<span id="bulkDeleteCount">0</span>)</button>' +
+      (CAN_DELETE_LEADS
+        ? '<button id="bulkDeleteBtn" class="btn btn-danger btn-sm"' + disabled + ' title="Admin cleanup only — leads normally exit as Reach Back Out, Won, or Lost">' +
+          'Delete (<span id="bulkDeleteCount">0</span>)</button>'
+        : '') +
       '<button id="emailSelectedBtn" class="btn btn-green" disabled>' +
         'Email selected to AM (<span id="selectedCount">0</span>)</button>' +
       '<button id="copyDraftBtn" class="btn btn-gray" title="Use this if no mail client opened">' +
@@ -7641,7 +7780,7 @@ export async function start(ctx) {
         '<td class="company-cell">' + l.company_name + '</td>' +
         '<td>' + leadContactTag(d.contact) + '</td>' +
         '<td>' + (l.source_type || "—") + '</td>' +
-        '<td><span class="lead-status-pill ' + statusClass(l.status) + '">' + l.status + '</span></td>' +
+        '<td><span class="lead-status-pill ' + statusClass(l.status) + '">' + l.status + '</span>' + statusAgeChip(l) + '</td>' +
         '<td>' + (d.score === null ? "—" : d.score) + '</td>' +
         '<td>' + tierHtml + '</td>' +
         '<td>' + (d.am || "—") + '</td>' +
@@ -7652,7 +7791,12 @@ export async function start(ctx) {
     html += "</tbody></table>";
     wrap.innerHTML = html;
 
-    attachSortHandlers(wrap, leadsSort, renderLeadsPage);
+    const sortSnapshot = { col: leadsSort.col, dir: leadsSort.dir };
+    attachSortHandlers(wrap, leadsSort, function() {
+      // A new column was clicked: the old one becomes the tiebreaker.
+      if (leadsSort.col !== sortSnapshot.col) leadsSortPrev = sortSnapshot;
+      renderLeadsPage();
+    });
     // Row click opens detail — but not when the click originated on the checkbox cell.
     wrap.querySelectorAll("tr.row").forEach(function(tr) {
       tr.addEventListener("click", function(e) {
@@ -7697,6 +7841,7 @@ export async function start(ctx) {
 
   // Delete every checked lead in one save. Rolls back cleanly if the save fails.
   async function handleBulkDeleteLeads() {
+    if (!CAN_DELETE_LEADS) return; // button never renders for these roles; belt and suspenders
     const targets = state_leads.filter(function(l) { return selectedLeadIds.has(l.lead_id); });
     if (targets.length === 0) return;
 
@@ -7776,7 +7921,17 @@ export async function start(ctx) {
     const ok = confirm('Set ' + targets.length + ' lead(s) to "' + status + '"?');
     if (!ok) return;
 
-    targets.forEach(function(l) { l.status = status; });
+    // One date for the whole batch — bulk-parking a set of soft no's together.
+    let reachDate = null;
+    if (status === "Reach Back Out") {
+      reachDate = promptReachBackDate(targets[0]);
+      if (reachDate === null) return;
+    }
+
+    targets.forEach(function(l) {
+      if (reachDate) l.reach_back_at = reachDate;
+      setLeadStatus(l, status);
+    });
     await saveLeads();
 
     // Keep an open detail modal in sync if it's one of the edited leads.
@@ -7837,7 +7992,13 @@ export async function start(ctx) {
       }
       const filled = [];
       if (setIf("leadCompanyName", data.company_name)) filled.push("company");
-      if (setIf("leadContactName", data.contact_name)) filled.push("contact");
+      // The card yields one full name — split it across the first/last fields.
+      (function() {
+        const np = String(data.contact_name || "").trim().split(/\s+/);
+        const f = setIf("leadContactFirst", np[0] || "");
+        const l2 = setIf("leadContactLast", np.length > 1 ? np.slice(1).join(" ") : "");
+        if (f || l2) filled.push("contact");
+      })();
       if (setIf("leadWebsite", data.website_url)) filled.push("website");
       if (setIf("leadContactEmail", data.email)) filled.push("email");
       if (setIf("leadContactPhone", data.phone)) filled.push("phone");
@@ -7864,11 +8025,21 @@ export async function start(ctx) {
     errEl.textContent = "";
     if (!name) { errEl.textContent = "Company name is required."; return; }
 
+    // normalizeCo strips punctuation, apostrophes, and suffixes like LLC/Inc, so
+    // "Gino's" and "Ginos" collide the way a human would expect them to.
+    const nameKey = normalizeCo(name);
     const existing = state.synced.find(function(c) {
-      return c.company_name.toLowerCase() === name.toLowerCase();
+      return normalizeCo(c.company_name) === nameKey;
     });
     if (existing) {
-      errEl.textContent = 'A customer named "' + name + '" already exists in the Roster — check before adding as a new lead.';
+      errEl.textContent = 'A customer named "' + existing.company_name + '" already exists in the Roster — check before adding as a new lead.';
+      return;
+    }
+    const dupLead = state_leads.find(function(l) {
+      return l.company_name && normalizeCo(l.company_name) === nameKey;
+    });
+    if (dupLead) {
+      errEl.textContent = 'A lead named "' + dupLead.company_name + '" is already in the pipeline (status: ' + dupLead.status + ') — open that one instead of adding a duplicate.';
       return;
     }
 
@@ -7899,24 +8070,32 @@ export async function start(ctx) {
       lead_id: uid(),
       company_name: name,
       website_url: $id("leadWebsite").value.trim(),
-      contact_name: $id("leadContactName").value.trim(),
+      // First and last stored separately — that's the shape Printavo and QB both
+      // want, so a promoted lead maps straight across with no splitting later.
+      contact_first_name: $id("leadContactFirst").value.trim(),
+      contact_last_name: $id("leadContactLast").value.trim(),
+      contact_name: [$id("leadContactFirst").value.trim(), $id("leadContactLast").value.trim()].filter(Boolean).join(" "),
       contact_email: email,
       contact_phone: phone,
       source_type: $id("leadSourceType").value,
+      source_event: $id("leadSourceEvent").value.trim(),
+      marketing_initiative: $id("leadMarketingInitiative").value,
       industry: $id("leadIndustry").value,
       inquiry_notes: $id("leadInquiryNotes").value.trim(),
       existing_crm_notes: $id("leadCrmNotes").value.trim(),
       status: "New",
+      status_history: [{ status: "New", at: new Date().toISOString() }],
       created_at: new Date().toISOString(),
       qualification: null,
       promoted_customer_id: null
     };
     state_leads.push(lead);
     await saveLeads();
-    ["leadCompanyName","leadWebsite","leadContactName","leadContactEmail","leadContactPhone","leadInquiryNotes","leadCrmNotes"].forEach(function(id) {
+    ["leadCompanyName","leadWebsite","leadContactFirst","leadContactLast","leadContactEmail","leadContactPhone","leadSourceEvent","leadInquiryNotes","leadCrmNotes"].forEach(function(id) {
       $id(id).value = "";
     });
     $id("leadSourceType").value = "";
+    $id("leadMarketingInitiative").value = "";
     $id("leadIndustry").value = "";
     renderLeadsPage();
   }
@@ -7926,6 +8105,8 @@ export async function start(ctx) {
     if (!lead) return;
     activeLeadId = leadId;
     resetDeleteLeadBtn();
+    const delBtn = $id("deleteLeadBtn");
+    if (delBtn) delBtn.style.display = CAN_DELETE_LEADS ? "" : "none";
     $id("leadDetailTitle").textContent = lead.company_name;
     $id("leadStatusSelect").value = lead.status;
     try {
@@ -7959,17 +8140,28 @@ export async function start(ctx) {
   function buildIntakeEditForm(lead) {
     const sourceOptions = [
       ["", "Not set"], ["Inbound quote request", "Inbound quote request"], ["Website form", "Website form"],
-      ["Outbound prospecting", "Outbound prospecting"], ["Trade show", "Trade show"], ["Referral", "Referral"],
-      ["Existing account expansion", "Existing account expansion"]
+      ["Outbound prospecting", "Outbound prospecting"], ["Trade show", "Trade show"], ["Event", "Event"],
+      ["Referral", "Referral"], ["Existing account expansion", "Existing account expansion"]
     ];
+    // Older leads only carry a single contact_name — split it for display so
+    // the next save writes it back as proper first/last.
+    const _np = (lead.contact_name || "").trim().split(/\s+/);
+    const firstVal = lead.contact_first_name || _np[0] || "";
+    const lastVal = lead.contact_last_name || (_np.length > 1 ? _np.slice(1).join(" ") : "");
     return '<div class="qual-section"><h4>Intake</h4>' +
       '<div class="lead-form-grid">' +
         '<div><label class="field-lbl">Website URL</label><input class="field" id="editLeadWebsite" value="' + escapeHtml(lead.website_url) + '"/></div>' +
-        '<div><label class="field-lbl">Contact name</label><input class="field" id="editLeadContact" value="' + escapeHtml(lead.contact_name) + '"/></div>' +
+        '<div><label class="field-lbl">Contact first name</label><input class="field" id="editLeadFirst" value="' + escapeHtml(firstVal) + '"/></div>' +
+        '<div><label class="field-lbl">Contact last name</label><input class="field" id="editLeadLast" value="' + escapeHtml(lastVal) + '"/></div>' +
         '<div><label class="field-lbl">Contact email</label><input class="field" id="editLeadEmail" value="' + escapeHtml(lead.contact_email || "") + '" placeholder="name@company.com"/></div>' +
         '<div><label class="field-lbl">Contact phone</label><input class="field" id="editLeadPhone" value="' + escapeHtml(lead.contact_phone || "") + '"/></div>' +
         '<div><label class="field-lbl">Source type</label><select class="field" id="editLeadSource">' +
           sourceOptions.map(function(o) { return '<option value="' + o[0] + '"' + (o[0] === (lead.source_type || "") ? ' selected' : '') + '>' + o[1] + '</option>'; }).join("") +
+        '</select></div>' +
+        '<div><label class="field-lbl">Event of origin' + infoI("The event this lead came from. It stays on the record through handoffs so nobody loses the origin story or creates a duplicate.") + '</label><input class="field" id="editLeadSourceEvent" value="' + escapeHtml(lead.source_event || "") + '"/></div>' +
+        '<div><label class="field-lbl">Marketing initiative' + infoI("Which initiative from the Step Library this lead should get. A label for now — automations will key off it later.") + '</label><select class="field" id="editLeadInitiative">' +
+          '<option value="">None yet</option>' +
+          MARKETING_INITIATIVES.map(function(m) { return '<option value="' + m + '"' + (m === (lead.marketing_initiative || "") ? ' selected' : '') + '>' + m + '</option>'; }).join("") +
         '</select></div>' +
         '<div><label class="field-lbl">Industry</label><select class="field" id="editLeadIndustry">' +
           '<option value="">Not set</option>' +
@@ -7992,10 +8184,14 @@ export async function start(ctx) {
     const lead = state_leads.find(function(l) { return l.lead_id === activeLeadId; });
     if (!lead) return;
     lead.website_url = $id("editLeadWebsite").value.trim();
-    lead.contact_name = $id("editLeadContact").value.trim();
+    lead.contact_first_name = $id("editLeadFirst").value.trim();
+    lead.contact_last_name = $id("editLeadLast").value.trim();
+    lead.contact_name = [lead.contact_first_name, lead.contact_last_name].filter(Boolean).join(" ");
     lead.contact_email = $id("editLeadEmail").value.trim();
     lead.contact_phone = $id("editLeadPhone").value.trim();
     lead.source_type = $id("editLeadSource").value;
+    lead.source_event = $id("editLeadSourceEvent").value.trim();
+    lead.marketing_initiative = $id("editLeadInitiative").value;
     lead.industry = $id("editLeadIndustry").value;
     lead.account_manager = $id("editLeadAM").value;
     lead.inquiry_notes = $id("editLeadInquiryNotes").value.trim();
@@ -8171,7 +8367,7 @@ export async function start(ctx) {
       }
       lead.qualification = result;
       const noContact = backfillLeadContactFromQual(lead);
-      if (lead.status === "New") lead.status = "Qualified";
+      if (lead.status === "New") setLeadStatus(lead, "Qualified");
       $id("leadStatusSelect").value = lead.status;
       await saveLeads();
       renderLeadDetailBody(lead);
@@ -8208,7 +8404,7 @@ export async function start(ctx) {
     parsed.qualified_at = new Date().toISOString();
     lead.qualification = parsed;
     const noContact = backfillLeadContactFromQual(lead);
-    if (lead.status === "New") lead.status = "Qualified";
+    if (lead.status === "New") setLeadStatus(lead, "Qualified");
     $id("leadStatusSelect").value = lead.status;
     await saveLeads();
     box.value = "";
@@ -8282,15 +8478,17 @@ export async function start(ctx) {
     }
 
     // Same duplicate guards as handleAddLead, plus a check against the leads pipeline itself.
+    // Normalized compare so punctuation variants ("Gino's" vs "Ginos") still collide.
+    const jsonNameKey = normalizeCo(name);
     const dupRoster = state.synced.find(function(c) {
-      return c.company_name && c.company_name.toLowerCase() === name.toLowerCase();
+      return c.company_name && normalizeCo(c.company_name) === jsonNameKey;
     });
     if (dupRoster) {
-      errEl.textContent = 'A customer named "' + name + '" already exists in the Roster — check before adding as a new lead.';
+      errEl.textContent = 'A customer named "' + dupRoster.company_name + '" already exists in the Roster — check before adding as a new lead.';
       return;
     }
     const dupLead = state_leads.find(function(l) {
-      return l.company_name && l.company_name.toLowerCase() === name.toLowerCase();
+      return l.company_name && normalizeCo(l.company_name) === jsonNameKey;
     });
     if (dupLead) {
       const ok = confirm('A lead named "' + name + '" is already in the pipeline (status: ' + dupLead.status + ').\n\n' +
@@ -8344,9 +8542,34 @@ export async function start(ctx) {
   async function handleLeadStatusChange() {
     const lead = state_leads.find(function(l) { return l.lead_id === activeLeadId; });
     if (!lead) return;
-    lead.status = $id("leadStatusSelect").value;
+    const status = $id("leadStatusSelect").value;
+    if (status === "Reach Back Out") {
+      const date = promptReachBackDate(lead);
+      if (date === null) { $id("leadStatusSelect").value = lead.status; return; } // cancelled
+      lead.reach_back_at = date;
+    }
+    setLeadStatus(lead, status);
     await saveLeads();
     renderLeadsPage();
+  }
+
+  // Ask when to resurface a "Reach Back Out" lead. Defaults to 6 months out —
+  // the agreed parking distance for a soft no. Returns YYYY-MM-DD, or null on cancel.
+  function promptReachBackDate(lead) {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 6);
+    const def = d.toISOString().slice(0, 10);
+    while (true) {
+      const raw = prompt(
+        'When should "' + lead.company_name + '" resurface?\n\n' +
+        "Enter a date as YYYY-MM-DD. If they gave you a date, use it.\n" +
+        "If it's a soft no with no date, 6 months out is the default.",
+        lead.reach_back_at || def);
+      if (raw === null) return null;
+      const t = raw.trim();
+      if (/^\d{4}-\d{2}-\d{2}$/.test(t) && !isNaN(new Date(t).getTime())) return t;
+      alert('"' + t + '" isn\'t a valid date — use YYYY-MM-DD, like ' + def + '.');
+    }
   }
 
   async function handlePromoteToRoster() {
@@ -8372,11 +8595,15 @@ export async function start(ctx) {
     });
 
     const promoContact = leadBestContact(lead);
+    // Map first/last properly — the old code put the whole name in first_name,
+    // which is exactly the shape mismatch Printavo and QB choke on.
+    const _pnp = (lead.contact_name || "").trim().split(/\s+/);
     state.enrichment[customerId] = {
       industry: industry || "",
       account_manager: (lead.account_manager || "").trim(),
       website_url: lead.website_url || "",
-      contact_first_name: lead.contact_name || "",
+      contact_first_name: lead.contact_first_name || _pnp[0] || "",
+      contact_last_name: lead.contact_last_name || (_pnp.length > 1 ? _pnp.slice(1).join(" ") : ""),
       contact_email: promoContact.email || "",
       contact_phone: promoContact.phone || "",
       notes: "Promoted from Leads pipeline on " + new Date().toLocaleDateString() +
@@ -8385,7 +8612,7 @@ export async function start(ctx) {
     };
 
     lead.promoted_customer_id = customerId;
-    lead.status = "Won";
+    setLeadStatus(lead, "Won");
     $id("leadStatusSelect").value = "Won";
 
     await saveSynced(state.synced);
@@ -8410,6 +8637,7 @@ export async function start(ctx) {
   }
 
   async function handleDeleteLead() {
+    if (!CAN_DELETE_LEADS) return; // hidden for these roles; belt and suspenders
     const btn = $id("deleteLeadBtn");
     const lead = state_leads.find(function(l) { return l.lead_id === activeLeadId; });
     if (!lead) return;
@@ -8490,6 +8718,60 @@ export async function start(ctx) {
     if (typeof ctx.setBadge === "function") ctx.setBadge(inboxNewCount());
   }
 
+  // ---- Fake/placeholder inquiry screening -------------------------------------
+  // Bots and shell websites fill out the intake form with boilerplate. Three
+  // independent signals, and the hard flag requires ALL THREE, because small
+  // businesses legitimately use website templates — one signal alone must never
+  // condemn an inquiry (sales director's rule, Jul 2026):
+  //   1. Fictional phone: the 555 exchange is reserved for TV and movies.
+  //   2. Boilerplate address filler ("123 Business Rd", "80022 Commerce City").
+  //   3. Vague generic service claims (wholesale trading, general merchandise,
+  //      business consulting, contract solutions) with no real detail.
+  // Nothing is ever auto-deleted: 3/3 shows "Suspected bot", 1-2 shows a soft
+  // "check legitimacy" caution. A human always makes the call.
+  const BOT_SERVICE_PHRASES = ["wholesale trading", "general merchandise", "business consulting", "contract solutions"];
+
+  function inquiryText(s) {
+    const c = s.contact || {}, co = s.company || {}, p = s.project || {}, det = p.details || {}, vis = s.vision || {};
+    const parts = [co.name, co.industry, c.url, p.name, p.description, vis.vision_description];
+    Object.keys(det).forEach(function(k) { if (typeof det[k] === "string") parts.push(det[k]); });
+    return parts.filter(Boolean).join(" \n ").toLowerCase();
+  }
+
+  function botSignals(s) {
+    const c = s.contact || {};
+    const text = inquiryText(s);
+    const hits = [];
+
+    const digits = String(c.phone || "").replace(/\D/g, "");
+    const ten = digits.length === 11 && digits[0] === "1" ? digits.slice(1) : digits;
+    if (ten.length === 10 && ten.slice(3, 6) === "555") {
+      hits.push("Phone uses the fictional 555 exchange (reserved for TV and movies)");
+    }
+
+    if (/123\s+business\s+r(oa)?d/.test(text) || (/80022/.test(text) && /commerce\s+city/.test(text))) {
+      hits.push("Address is standard boilerplate filler (123 Business Rd / 80022 Commerce City)");
+    }
+
+    const phraseHits = BOT_SERVICE_PHRASES.filter(function(p2) { return text.indexOf(p2) !== -1; });
+    if (phraseHits.length >= 2) {
+      hits.push("Claims a random assortment of generic services with no real detail (" + phraseHits.join(", ") + ")");
+    }
+
+    return { hits: hits, suspected: hits.length >= 3 };
+  }
+
+  function botChip(s) {
+    const b = botSignals(s);
+    if (b.suspected) {
+      return '<span class="chip chip-bot" title="All three fake-website signals tripped:\n\u2022 ' + b.hits.join("\n\u2022 ").replace(/"/g, "&quot;") + '\n\nReview before dismissing — nothing is excluded automatically.">Suspected bot</span>';
+    }
+    if (b.hits.length) {
+      return '<span class="chip chip-caution" title="' + b.hits.length + ' of 3 fake-website signals tripped:\n\u2022 ' + b.hits.join("\n\u2022 ").replace(/"/g, "&quot;") + '\n\nSmall businesses use templates too — one signal alone is not proof.">Check legitimacy</span>';
+    }
+    return "";
+  }
+
   function projectSummary(s) {
     const p = s.project || {};
     const parts = [];
@@ -8554,7 +8836,7 @@ export async function start(ctx) {
         '<div class="inbox-top"><div class="inbox-co">' + escapeHtml(co) + '</div>' +
         '<div style="font-size:11px;color:var(--faint)">' + when + '</div></div>' +
         '<div class="inbox-meta">' + escapeHtml(projectSummary(s)) + (contact ? " — " + escapeHtml(contact) : "") + '</div>' +
-        '<div class="inbox-chips">' + gateChip + (statusChip[s.status] || "") + '</div>' +
+        '<div class="inbox-chips">' + gateChip + botChip(s) + (statusChip[s.status] || "") + '</div>' +
       '</div>';
     }).join("");
 
@@ -8608,6 +8890,20 @@ export async function start(ctx) {
     const isExisting = ["yes", "yes_new", "not_sure"].indexOf(gate) !== -1;
 
     let html = "";
+
+    // Fake-website screening verdict, shown before anything else so nobody
+    // routes a bot to an AM without seeing the warning.
+    const bot = botSignals(s);
+    if (bot.hits.length) {
+      html += '<div class="qual-section" style="border-left:3px solid ' + (bot.suspected ? "var(--danger)" : "var(--amber)") + ';padding-left:10px">' +
+        '<h4>' + (bot.suspected ? "Suspected fake/placeholder website" : "Legitimacy check") + '</h4>' +
+        '<div class="help">' + (bot.suspected
+          ? "All three screening signals tripped. This inquiry looks like a bot or shell-site submission. Verify before spending AM time on it — and dismiss it manually if it's fake. Nothing is excluded automatically."
+          : bot.hits.length + " of 3 screening signals tripped. One or two signals alone are not proof — plenty of real small businesses use website templates. Worth a quick look before routing.") + '</div>' +
+        '<ul style="font-size:12px;color:var(--muted);margin:8px 0 0 16px">' +
+          bot.hits.map(function(h) { return "<li>" + escapeHtml(h) + "</li>"; }).join("") +
+        '</ul></div>';
+    }
 
     // status line
     html += '<div class="help" style="margin-bottom:14px">Submitted ' +
@@ -8835,6 +9131,23 @@ export async function start(ctx) {
     leadsSearchQuery = e.target.value;
     renderLeadsPage();
   });
+  (function wireMyLeadsBtn() {
+    const btn = $id("myLeadsBtn");
+    if (!btn) return;
+    if (!myAMName()) {
+      // Signed-in user isn't on the AM list (e.g. bookkeeping) — the filter
+      // would always be empty, so don't offer it.
+      btn.style.display = "none";
+      return;
+    }
+    btn.addEventListener("click", function() {
+      myLeadsOnly = !myLeadsOnly;
+      btn.classList.toggle("btn-green", myLeadsOnly);
+      btn.classList.toggle("btn-gray", !myLeadsOnly);
+      btn.textContent = myLeadsOnly ? "My leads ✓" : "My leads";
+      renderLeadsPage();
+    });
+  })();
   $id("leadDetailClose").addEventListener("click", function() {
     $id("leadDetailOverlay").classList.remove("open");
     activeLeadId = null;
