@@ -441,10 +441,10 @@ export default {
       </div>
     </section>
 
-    <!-- MANAGE LISTS (admin + management; the old Settings tab minus users) -->
+    <!-- MANAGE LISTS (roles with manage_lists; the old Settings tab minus users) -->
     <section data-ee-section="lists" class="hidden">
       <div id="ee-lists-denied" class="panel hidden">
-        <div class="empty">Only management and admins can edit these lists.</div>
+        <div class="empty">Your role can&rsquo;t edit these lists. An admin can turn it on in Settings under Roles (&ldquo;Manage ErrorEngine lists&rdquo;).</div>
       </div>
       <div id="ee-lists-wrap" class="hidden">
         <div class="panel">
