@@ -99,4 +99,33 @@ t.test('the inbox count goes through ctx.setBadge, not a dead DOM id', () => {
     'the inbox new-count should reach the rail via ctx.setBadge');
 });
 
+/* ---- ops chaining (Jul 31 fix) ------------------------------------------ */
+/* The daily cron did ONE ~4-minute chunk per DAY, so a multi-chunk ops pull
+ * never finished and the dashboard stamp froze at Jul 27. The fix makes a
+ * cron-initiated run fire its own next chunk. These lock the three legs of
+ * that fix: the chain fires on every partial, it cannot loop forever, and a
+ * days-old partial restarts fresh instead of resuming a dead cursor. */
+
+t.test('every ops partial return fires the self-continue chain', () => {
+  const partials = (sync.match(/status: "partial", phase/g) || []).length;
+  const chains = (sync.match(/await continueOps\(\)/g) || []).length;
+  t.assert(partials >= 3, 'expected the three ops phase partial returns');
+  t.assert(chains >= partials - 2, // incremental/reconcile partials do not chain
+    'an ops partial return no longer calls continueOps(); the cron will freeze again');
+  t.assert(/chainDepth\s*\+\s*1/.test(sync),
+    'the chained call must increment the depth counter');
+});
+
+t.test('the ops chain has a hard depth cap', () => {
+  t.assert(/CHAIN_MAX/.test(sync) && /chainDepth\s*<\s*CHAIN_MAX/.test(sync),
+    'continueOps can loop forever without a CHAIN_MAX guard');
+});
+
+t.test('ops partial saves are stamped and stale partials restart fresh', () => {
+  t.assert(!/kvSet\("backbone_ops_partial",\s*acc\)/.test(sync),
+    'a partial save bypasses saveOpsPartial and will carry no freshness stamp');
+  t.assert(/OPS_RESUME_WINDOW_MS/.test(sync),
+    'the ops partial no longer has a freshness window; day-old cursors will be resumed');
+});
+
 process.exit(t.report());
