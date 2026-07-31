@@ -3,20 +3,21 @@
 //
 // PORTED from the standalone repo's api/taxonomy.js. Changes for alliteration:
 //   - AUTH IS SHELL-LEVEL: imports requireAuth from the repo's shared
-//     lib/session.js. Role names in CAN_EDIT gained "superuser" for the shell's
-//     role model — adjust that one constant if the shell's roles differ.
+//     lib/session.js. Write access is no longer a hardcoded role-name list:
+//     it reads the role's manage_lists flag from the roles store, so admins
+//     grant or revoke it per role in Settings without touching code.
 //   - Library imports point at lib/errorengine/.
 //   - No route rename needed: nothing else in the repo ships /api/taxonomy.
 //   - Everything else is verbatim.
 //
 // GET    -> { taxonomy, usage, prices, protected, can_edit }   any signed-in user
 //           (the intake form needs the active options to render)
-// POST   -> add an option / price                management + admin only
-// PATCH  -> retire / restore / relabel / price   management + admin only
-// DELETE -> hard delete, only if unused          management + admin only
+// POST   -> add an option / price                roles with manage_lists + admin
+// PATCH  -> retire / restore / relabel / price   roles with manage_lists + admin
+// DELETE -> hard delete, only if unused          roles with manage_lists + admin
 //
-// Writes are restricted to the taxonomy lists. Management deliberately does NOT
-// get user management or error deletion — those stay admin-only.
+// Writes are restricted to the taxonomy lists. manage_lists deliberately does
+// NOT grant user management or error deletion — those stay admin-only.
 //
 // NOTE ON THE GUARD: this calls requireAuth(req, res) with two args and checks
 // sess.role itself, rather than passing a role as the third arg. That form takes
@@ -26,6 +27,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
+import { getRole } from "../lib/users.js";
 import {
   getTaxonomy, addOption, setOptionActive, renameOption, deleteOption,
   setOptionPriceList, getPrices, addPrice, updatePrice, deletePrice,
@@ -33,8 +35,15 @@ import {
 } from "../lib/errorengine/taxonomy-store.js";
 import { listErrors } from "../lib/errorengine/store.js";
 
-// Roles allowed to modify the lists.
-const CAN_EDIT = ["admin", "superuser", "management"];
+// Whether this session's role may modify the lists. Reads the roles store on
+// every request rather than caching: an admin flipping the flag in Settings
+// should take effect immediately, not at the next deploy. Admin is always
+// allowed, matching saveRoles forcing the flag on for admin.
+async function roleCanEdit(sess) {
+  if (sess.role === "admin") return true;
+  const role = await getRole(sess.role);
+  return role.manage_lists === true;
+}
 
 // Vercel doesn't always pre-parse JSON bodies. Normalize so field access is safe.
 function parseBody(req) {
@@ -76,13 +85,13 @@ export default async function handler(req, res) {
         usage,
         prices,
         protected: PROTECTED,
-        can_edit: CAN_EDIT.includes(sess.role),
+        can_edit: await roleCanEdit(sess),
       });
     }
 
     // Everything past here mutates the lists.
-    if (!CAN_EDIT.includes(sess.role)) {
-      return res.status(403).json({ error: "Only management and admins can edit these lists" });
+    if (!(await roleCanEdit(sess))) {
+      return res.status(403).json({ error: "Your role does not have list editing turned on" });
     }
 
     const body = parseBody(req);
