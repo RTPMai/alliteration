@@ -358,6 +358,26 @@ t.test('accounts table can switch another user\'s role', () => {
     'your own row must keep the static pill, not a dropdown');
 });
 
+t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => {
+  const api = read('api/taxonomy.js');
+  // The old CAN_EDIT constant named roles the shell does not even have
+  // ("superuser", "management"), which silently reduced it to admin-only.
+  t.assert(!api.includes('CAN_EDIT ='), 'the hardcoded CAN_EDIT list must be gone');
+  t.assert(api.includes('manage_lists'), 'the gate must read the manage_lists flag');
+  t.assert(api.includes('getRole'), 'the gate must read the roles store live');
+
+  const users = read('lib/users.js');
+  // Opt-in: roles stored before the flag existed must NOT gain edit rights.
+  t.assert(users.includes('manage_lists: role.manage_lists === true'),
+    'permsFor must treat manage_lists as opt-in, default off');
+  t.assert(/roles\.admin = Object\.assign\([\s\S]*?manage_lists: true/.test(users),
+    'saveRoles must force manage_lists on for admin');
+
+  const set = read('apps/settings.js');
+  t.assert(set.includes('data-flag="manage_lists"'),
+    'the role editor must expose a Manage ErrorEngine lists checkbox');
+});
+
 t.test('app chips carry each app accent, not a shared grey', () => {
   const src = read('apps/settings.js');
   // The point of the chips is scanning: grey-on-grey means reading every word.
