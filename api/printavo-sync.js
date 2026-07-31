@@ -89,6 +89,38 @@ export default async function handler(req, res) {
   const mode         = (req.query.mode || (viaCron ? "ops" : "incremental")).toLowerCase();
   const resumeCursor = req.query.cursor || null;
 
+  // --- Ops self-continue (chaining) ---------------------------------------
+  // One invocation gets ~4 minutes, but a full ops pull needs many chunks.
+  // The daily cron used to do ONE chunk per DAY, so the snapshot never
+  // finished and the dashboard stamp froze (Jul 27 incident). Fix: a run
+  // that saves a partial fires the next chunk itself before responding, so
+  // the whole pull completes minutes after the 6 AM cron instead of never.
+  // The chain carries a depth counter and hard-stops at CHAIN_MAX so a
+  // cursor that stops advancing can never loop forever. Plain browser runs
+  // do NOT chain (chainDepth 0, not cron): pages that follow nextUrl already
+  // auto-continue, and two drivers on one partial would double-count. Kick
+  // off a manual server-side chain deliberately with &chain=1.
+  const chainDepth  = parseInt(req.query.chain || "0", 10) || 0;
+  const CHAIN_MAX   = 60;
+  const shouldChain = (viaCron || chainDepth > 0) && chainDepth < CHAIN_MAX;
+  async function continueOps() {
+    if (!shouldChain) return false;
+    // The child is a fresh request with no cookie, so it authenticates with
+    // whichever shared secret exists. Both fail closed on the receiving end.
+    const authHeaders = secret ? { "x-sync-secret": secret }
+      : (cronSecret ? { authorization: "Bearer " + cronSecret } : null);
+    if (!authHeaders) return false;
+    const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
+    try {
+      // Fire the next chunk and give the request ~1.5s to actually leave
+      // before this invocation responds and gets frozen. The child's
+      // completion is deliberately not awaited — it has its own time budget.
+      const fired = fetch(url, { headers: authHeaders }).catch(function () {});
+      await Promise.race([fired, new Promise(function (r) { setTimeout(r, 1500); })]);
+      return true;
+    } catch (e) { return false; }
+  }
+
   // --- Printavo GraphQL --------------------------------------------------
   async function gql(query, _attempt = 0) {
     const r = await fetch("https://www.printavo.com/api/v2", {
@@ -1853,6 +1885,21 @@ export default async function handler(req, res) {
       let acc = (await kvGet("backbone_ops_partial")) || null;
       // ?fresh=1 forces a clean restart (ignore any stale partial).
       if (req.query.fresh === "1" || req.query.fresh === "true") acc = null;
+      // A partial older than a few hours is an abandoned chain from another
+      // day. Resuming it would splice a days-old Printavo cursor into today's
+      // snapshot (and the counters with it), so it restarts fresh instead.
+      // Legacy partials without a stamp count as stale. Same idea as
+      // reconcile's RESUME_WINDOW_MS, sized for a chained run.
+      const OPS_RESUME_WINDOW_MS = 3 * 60 * 60 * 1000;
+      const opsPartialFresh = acc && acc.updatedAt &&
+        (Date.now() - new Date(acc.updatedAt).getTime() < OPS_RESUME_WINDOW_MS);
+      if (acc && !opsPartialFresh) acc = null;
+      // Every partial save goes through here so the freshness stamp can never
+      // be forgotten at one of the six save sites.
+      async function saveOpsPartial(a) {
+        a.updatedAt = new Date().toISOString();
+        await kvSet("backbone_ops_partial", a);
+      }
       if (!acc) {
         acc = {
           phase: "quotes",
@@ -1936,9 +1983,10 @@ export default async function handler(req, res) {
 
         if (acc.cursor) {
           // Ran out of time mid-quotes. Save and ask to continue.
-          await kvSet("backbone_ops_partial", acc);
+          await saveOpsPartial(acc);
+          const chained = await continueOps();
           return res.status(200).json({
-            ok: true, mode: "ops", status: "partial", phase: "quotes",
+            ok: true, mode: "ops", status: "partial", phase: "quotes", chained,
             quotesScanned: acc.quotesScanned, quotePages: acc.quotePages,
             nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
@@ -1993,7 +2041,7 @@ export default async function handler(req, res) {
 
         acc.phase = "invoices";
         acc.cursor = null;
-        await kvSet("backbone_ops_partial", acc);
+        await saveOpsPartial(acc);
       }
 
       // ---------- PHASE 2: current-year invoices (outstanding + sales-by-month) ----------
@@ -2043,9 +2091,10 @@ export default async function handler(req, res) {
 
         if (acc.cursor) {
           // Ran out of time mid-invoices. Save and ask to continue.
-          await kvSet("backbone_ops_partial", acc);
+          await saveOpsPartial(acc);
+          const chained = await continueOps();
           return res.status(200).json({
-            ok: true, mode: "ops", status: "partial", phase: "invoices",
+            ok: true, mode: "ops", status: "partial", phase: "invoices", chained,
             invoicePages: acc.invoicePages, outstandingSoFar: acc.outstanding.length,
             nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
@@ -2053,7 +2102,7 @@ export default async function handler(req, res) {
 
         acc.phase = "cash";
         acc.cursor = null;
-        await kvSet("backbone_ops_partial", acc);
+        await saveOpsPartial(acc);
       }
 
       // ---------- PHASE 3: cash collected per month (payment transactions) ----------
@@ -2068,7 +2117,7 @@ export default async function handler(req, res) {
       if (acc.phase === "cash") {
         if (!acc.cashProbe) {
           acc.cashProbe = await probeTransactions();
-          await kvSet("backbone_ops_partial", acc);
+          await saveOpsPartial(acc);
           await rlPause();
         }
         const probe = acc.cashProbe;
@@ -2128,9 +2177,10 @@ export default async function handler(req, res) {
 
           if (acc.cursor) {
             // Ran out of time mid-transactions. Save and ask to continue.
-            await kvSet("backbone_ops_partial", acc);
+            await saveOpsPartial(acc);
+            const chained = await continueOps();
             return res.status(200).json({
-              ok: true, mode: "ops", status: "partial", phase: "cash",
+              ok: true, mode: "ops", status: "partial", phase: "cash", chained,
               cashPages: acc.cashPages, cashScanned: acc.cashScanned,
               nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
             });
