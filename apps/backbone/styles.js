@@ -52,6 +52,8 @@ export default `
 .chip-existing{background:var(--success-tint);color:var(--success)}
 .chip-new{background:var(--hue-indigo-tint);color:var(--hue-indigo)}
 .chip-internal{background:var(--hue-violet-tint);color:var(--hue-violet)}
+.chip-bot{background:var(--danger-tint);color:var(--danger)}
+.chip-caution{background:var(--amber-tint);color:var(--amber)}
 .page{display:none}.page.active{display:block}
 /* Full available width. The standalone app capped this at 1440px and centered
    it, which read as heavy white margins on a wide screen. The shell already
@@ -317,11 +319,16 @@ textarea.field{min-height:60px;resize:vertical}
 .qt-lowpriority{background:var(--danger-tint);color:var(--danger)}
 .lead-status-pill{display:inline-flex;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600;background:var(--line-soft);color:var(--ink)}
 .lead-status-Won{background:var(--success-tint);color:var(--success)}
-.lead-status-Dead{background:var(--danger-tint);color:var(--faint)}
+.lead-status-Lost{background:var(--danger-tint);color:var(--faint)}
+.lead-status-Dead{background:var(--danger-tint);color:var(--faint)} /* legacy records mid-save */
+.lead-status-ReachBackOut{background:var(--hue-clay-tint);color:var(--hue-clay)}
 .lead-status-Qualified{background:var(--hue-blue-tint);color:var(--hue-blue)}
 .lead-status-Contacted{background:var(--hue-violet-tint);color:var(--hue-violet)}
 .lead-status-AMNotified{background:var(--amber-tint);color:var(--amber)}
 .lead-status-Researching{background:var(--hue-sky-tint);color:var(--hue-sky)}
+.lead-age-chip{display:inline-flex;margin-left:6px;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:var(--amber-tint);color:var(--amber);white-space:nowrap}
+.lead-wait-chip{display:inline-flex;margin-left:6px;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:600;background:var(--line-soft);color:var(--muted);white-space:nowrap}
+.info-i{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font-size:9px;font-style:italic;font-weight:700;cursor:help;vertical-align:1px;user-select:none}
 
 /* --- Lead funnel ------------------------------------------------------------ */
 .funnel{display:flex;align-items:stretch;gap:6px;flex-wrap:nowrap;margin-bottom:14px}
