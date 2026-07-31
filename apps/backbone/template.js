@@ -76,8 +76,12 @@ export default `
             <input class="field" id="leadWebsite" placeholder="https://"/>
           </div>
           <div>
-            <label class="field-lbl">Contact name</label>
-            <input class="field" id="leadContactName"/>
+            <label class="field-lbl">Contact first name</label>
+            <input class="field" id="leadContactFirst"/>
+          </div>
+          <div>
+            <label class="field-lbl">Contact last name</label>
+            <input class="field" id="leadContactLast"/>
           </div>
           <div>
             <label class="field-lbl">Contact email</label>
@@ -95,9 +99,18 @@ export default `
               <option>Website form</option>
               <option>Outbound prospecting</option>
               <option>Trade show</option>
+              <option>Event</option>
               <option>Referral</option>
               <option>Existing account expansion</option>
             </select>
+          </div>
+          <div>
+            <label class="field-lbl">Event of origin (if from an event)</label>
+            <input class="field" id="leadSourceEvent" placeholder="e.g. Catch Des Moines expo, June 2026"/>
+          </div>
+          <div>
+            <label class="field-lbl">Marketing initiative</label>
+            <select class="field" id="leadMarketingInitiative"></select>
           </div>
           <div>
             <label class="field-lbl">Industry (if known — the agent will verify)</label>
@@ -145,6 +158,7 @@ export default `
         <div class="funnel" id="leadsFunnel"></div>
         <div class="toolbar">
           <input class="search" id="leadsSearchBox" placeholder="Search company name"/>
+          <button class="btn btn-gray btn-sm" id="myLeadsBtn" title="Show only leads routed to you, hiding everyone else's assignments. Click again to show all.">My leads</button>
           <span id="leadsFilterNote" class="help" style="margin:0 0 0 10px"></span>
         </div>
         <div id="leadsTableWrap"></div>
