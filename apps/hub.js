@@ -271,6 +271,26 @@ export default {
       })());
     }
 
+    // ---- TravelTrack: trip count, pending expenses awaiting approval. ----
+    if (has('traveltrack')) {
+      jobs.push((async () => {
+        try {
+          const d = await api.get(ENDPOINTS.ttTrips);
+          const trips = listOf(d, ['trips']) || [];
+          let pending = 0;
+          try {
+            const ex = await api.get(ENDPOINTS.ttExpenses);
+            const expenses = listOf(ex, ['expenses']) || [];
+            pending = expenses.filter((e) => e && e.status === 'pending').length;
+          } catch (e) { /* expenses optional for the card */ }
+          setCard('traveltrack',
+            [[String(trips.length), 'Trips']].concat(pending ? [[String(pending), 'Pending expenses']] : []),
+            pending ? pending + ' expense' + (pending === 1 ? '' : 's') + ' awaiting approval' : 'Nothing awaiting approval');
+          if (pending) { stats.push(['Pending reimbursements', String(pending), '']); renderStats(); }
+        } catch (e) { setCard('traveltrack', [], 'Could not load trips.'); }
+      })());
+    }
+
     await Promise.allSettled(jobs);
     if (!stats.length) {
       // Nothing headline-worthy loaded; keep the strip empty rather than fake.
