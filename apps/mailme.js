@@ -58,9 +58,33 @@ const STATUS_META = {
 
 const SUPPRESSED = ['unsubscribed', 'bounced', 'complained'];
 
+// Where a view's refresh feedback goes. Dashboard has no message strip of its
+// own, so its refresh reports through the stamp alone.
+const MSG_TARGET = {
+  contacts: '#mmContactsMsg',
+  lists: '#mmListMsg',
+  campaigns: '#mmCampaignMsg',
+  import: '#mmImportMsg',
+  settings: '#mmSettingsMsg'
+};
+
 const SOURCE_META = {
   client:   { label: 'Client',   note: 'From the BackBone roster' },
+  lead:     { label: 'Lead',     note: "From BackBone's qualified pipeline" },
+  giving:   { label: 'Giving',   note: 'Asked P&M for a donation or sponsorship' },
   prospect: { label: 'Prospect', note: 'Imported for cold outreach' }
+};
+
+// Only imported prospects are genuinely cold. Leads and giving contacts were
+// already in conversation with the shop, so they send from the warm domain.
+const COLD_SOURCES = ['prospect'];
+
+const REORDER_META = {
+  'not-due': { label: 'On schedule', cls: 'mute' },
+  due:       { label: 'Due',         cls: 'ok' },
+  overdue:   { label: 'Overdue',     cls: 'warn' },
+  lapsed:    { label: 'Lapsed',      cls: 'bad' },
+  unknown:   { label: '',            cls: 'mute' }
 };
 
 export default {
@@ -174,6 +198,8 @@ export default {
     padding:11px 14px;font-size:12.5px;color:var(--accent-deep);
     font-weight:600;margin-bottom:14px;line-height:1.5}
   .mm-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .mm-refresh{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .mm-refresh .stamp{font-size:11.5px;color:var(--faint);white-space:nowrap}
 
   .mm-empty{text-align:center;padding:34px 20px;color:var(--muted);font-size:13px;line-height:1.6}
   .mm-empty h4{font-size:14px;color:var(--ink);margin-bottom:6px;font-weight:700}
@@ -199,6 +225,10 @@ export default {
           <div>
             <h1>MailMe<span class="dot">.</span></h1>
             <div class="sub">Who you can email, and who you can't.</div>
+          </div>
+          <div class="mm-refresh">
+            <span class="stamp" data-mm-stamp></span>
+            <button class="mm-btn ghost sm" data-mm-refresh="dashboard">Refresh</button>
           </div>
         </div>
         <div class="mm-notice" id="mmSendNotice"></div>
@@ -236,7 +266,11 @@ export default {
             <h1>Contacts<span class="dot">.</span></h1>
             <div class="sub" id="mmContactsSub"></div>
           </div>
-          <button class="mm-btn ghost" id="mmSaveAsList">Save view as list</button>
+          <div class="mm-refresh">
+            <span class="stamp" data-mm-stamp></span>
+            <button class="mm-btn ghost sm" data-mm-refresh="contacts">Refresh</button>
+            <button class="mm-btn ghost" id="mmSaveAsList">Save view as list</button>
+          </div>
         </div>
         <div id="mmContactsMsg"></div>
         <div class="mm-filters" id="mmContactFilters"></div>
@@ -252,7 +286,11 @@ export default {
             <h1>Lists<span class="dot">.</span></h1>
             <div class="sub">Saved segments. Dynamic lists stay current on their own.</div>
           </div>
-          <button class="mm-btn" id="mmNewList">New list</button>
+          <div class="mm-refresh">
+            <span class="stamp" data-mm-stamp></span>
+            <button class="mm-btn ghost sm" data-mm-refresh="lists">Refresh</button>
+            <button class="mm-btn" id="mmNewList">New list</button>
+          </div>
         </div>
         <div id="mmListMsg"></div>
         <div id="mmListEditor" hidden></div>
@@ -309,6 +347,23 @@ export default {
         <div id="mmImportPreview"></div>
       </section>
 
+      <!-- Settings -->
+      <section id="mmSettingsView" hidden>
+        <div class="mm-hd">
+          <div>
+            <h1>Settings<span class="dot">.</span></h1>
+            <div class="sub">Sending identity, compliance, and the rules that decide who gets mailed.</div>
+          </div>
+          <div class="mm-refresh">
+            <span class="stamp" data-mm-stamp></span>
+            <button class="mm-btn ghost sm" data-mm-refresh="settings">Refresh</button>
+          </div>
+        </div>
+        <div id="mmSettingsMsg"></div>
+        <div id="mmBlockers"></div>
+        <div id="mmSettingsForm"></div>
+      </section>
+
       <!-- Campaigns -->
       <section id="mmCampaignsView" hidden>
         <div class="mm-hd">
@@ -316,7 +371,11 @@ export default {
             <h1>Campaigns<span class="dot">.</span></h1>
             <div class="sub">Drafts. Sending is not switched on yet.</div>
           </div>
-          <button class="mm-btn" id="mmNewCampaign">New draft</button>
+          <div class="mm-refresh">
+            <span class="stamp" data-mm-stamp></span>
+            <button class="mm-btn ghost sm" data-mm-refresh="campaigns">Refresh</button>
+            <button class="mm-btn" id="mmNewCampaign">New draft</button>
+          </div>
         </div>
         <div id="mmCampaignMsg"></div>
         <div id="mmComposer" hidden></div>
@@ -344,9 +403,12 @@ export default {
       sort: 'company_name', dir: 'asc',
       editingList: null, editingCampaign: null,
       importPreview: null, importCsv: '',
+      settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
       viewingResults: null
     };
     this._state = state;
+    state.lastLoaded = null;
+    state.refreshing = false;
 
     const msg = (sel, html, cls) => {
       const el = $(sel);
@@ -410,11 +472,21 @@ export default {
         ? '<div class="mm-notice danger"><b>Deliverability.</b> ' + warn.map(esc).join(' ') + '</div>'
         : '';
 
+      // Reorder-due clients are the highest-value audience in the app: they
+      // already buy, and they are past their own normal cadence. Surfaced on
+      // the dashboard rather than buried behind a filter.
+      const dueNow = state.contacts.filter((x) =>
+        x.source === 'client' && x.reorder && x.reorder.confident &&
+        (x.reorder.state === 'due' || x.reorder.state === 'overdue')).length;
+
       const tiles = [
+        { v: dueNow, l: 'Due to reorder', cls: dueNow ? 'ok' : '',
+          n: 'Clients past their own normal gap. Your warmest list.' },
         { v: c.mailable || 0, l: 'Mailable', cls: 'ok',
-          n: (c.client || 0) + ' client, ' + (c.prospect || 0) + ' prospect' },
-        { v: c.client || 0, l: 'Clients', cls: '',
-          n: 'From the BackBone roster' },
+          n: (c.client || 0) + ' client, ' + (c.lead || 0) + ' lead, ' +
+             (c.giving || 0) + ' giving, ' + (c.prospect || 0) + ' prospect' },
+        { v: (c.lead || 0) + (c.giving || 0), l: 'Leads and giving', cls: '',
+          n: 'Warmer than anything you could buy' },
         { v: c.prospect || 0, l: 'Prospects', cls: '',
           n: 'Imported for cold outreach' },
         { v: c.unsubscribed || 0, l: 'Unsubscribed', cls: (c.unsubscribed ? 'warn' : ''),
@@ -440,6 +512,8 @@ export default {
       const srcOpts = [
         ['all', 'All sources', c.total || 0],
         ['client', 'Clients', c.client || 0],
+        ['lead', 'Leads', c.lead || 0],
+        ['giving', 'Giving', c.giving || 0],
         ['prospect', 'Prospects', c.prospect || 0]
       ];
       const statOpts = [
@@ -491,6 +565,7 @@ export default {
       ['email', 'Email'],
       ['source', 'Source'],
       ['status', 'Status'],
+      ['reorder', 'Reorder'],
       ['tags', 'Tags']
     ];
 
@@ -501,6 +576,21 @@ export default {
       else { state.sort = key; state.dir = 'asc'; }
       await loadContacts();
       renderContactsTable();
+    }
+
+    // Reorder timing only means anything for clients, and only when they
+    // have enough order history for a median gap to be a real pattern.
+    function reorderCell(ct) {
+      const r = ct.reorder;
+      if (!r || !r.confident || r.state === 'unknown') {
+        return ct.source === 'client'
+          ? '<span class="who">not enough history</span>' : '';
+      }
+      const m = REORDER_META[r.state] || REORDER_META.unknown;
+      const detail = r.daysSince != null && r.expectedGap
+        ? `${r.daysSince}d since, usually ${Math.round(r.expectedGap)}d` : '';
+      return `<span class="pill ${m.cls}">${esc(m.label)}</span>` +
+        (detail ? `<div class="who" style="margin-top:3px">${esc(detail)}</div>` : '');
     }
 
     function renderContactsTable() {
@@ -542,7 +632,10 @@ export default {
                 <td class="em">${esc(ct.email)}</td>
                 <td><span class="pill src" title="${esc(src.note)}">${esc(src.label)}</span></td>
                 <td><span class="pill ${meta.cls}">${esc(meta.label)}</span>
-                    ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}</td>
+                    ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}
+                    ${ct.verification === 'invalid'
+                      ? '<div class="who">Failed verification</div>' : ''}</td>
+                <td>${reorderCell(ct)}</td>
                 <td>${ct.tags && ct.tags.length
                   ? ct.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
                   : '<span class="tag-none">none</span>'}</td>
@@ -1000,6 +1093,8 @@ export default {
                 <label for="mmSource">Audience</label>
                 <select id="mmSource">
                   <option value="client"${d.source === 'client' ? ' selected' : ''}>Clients</option>
+                  <option value="lead"${d.source === 'lead' ? ' selected' : ''}>Leads</option>
+                  <option value="giving"${d.source === 'giving' ? ' selected' : ''}>Giving contacts</option>
                   <option value="prospect"${d.source === 'prospect' ? ' selected' : ''}>Prospects (cold)</option>
                 </select>
                 <div class="hint" id="mmIdentityHint"></div>
@@ -1066,9 +1161,9 @@ export default {
 
         // The sending domain is shown because it is the consequence of the
         // audience choice, and it is the thing that protects client mail.
-        $('#mmIdentityHint').textContent = source === 'prospect'
+        $('#mmIdentityHint').textContent = COLD_SOURCES.includes(source)
           ? 'Sends from outreach.pmapparel.com, kept separate so cold complaints cannot hurt client mail.'
-          : 'Sends from mail.pmapparel.com, the client domain.';
+          : 'Sends from mail.pmapparel.com, the warm domain shared by clients, leads and giving contacts.';
       };
       refresh();
       $('#mmSource').addEventListener('change', refresh);
@@ -1155,21 +1250,45 @@ export default {
               ${!sent ? `<div class="mm-notice">This campaign has not been sent, so there is
                 nothing to report yet. These are the figures that will appear once sending is
                 switched on.</div>` : ''}
+              ${(d.blockers || []).length ? `<div class="mm-notice danger">
+                <b>Not legal to send yet.</b> ${esc(d.blockers.map((b) => b.text).join(' '))}
+                Fix these in Settings.</div>` : ''}
+              ${d.sendPlan && d.sendPlan.days > 1 ? `<div class="mm-notice">
+                <b>This send would take ${d.sendPlan.days} days.</b> The
+                ${d.sendPlan.isCold ? 'cold' : 'client'} daily cap is ${d.sendPlan.dailyCap}
+                ${d.sendPlan.isCold ? `(day ${d.sendPlan.rampDay} of the warm-up)` : ''}.
+                Sending it all at once would look like a spam run.</div>` : ''}
+              ${d.heldCount ? `<div class="mm-notice">
+                <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} held back</b> by the
+                frequency cap, an open quote, or failed verification. They are excluded from
+                the recipient count above, not silently dropped: see the list below.
+                </div>
+                <table class="mm-table" style="margin-bottom:14px">
+                  <thead><tr><th>Company</th><th>Why held</th></tr></thead>
+                  <tbody>${(d.held || []).map((h) => `<tr>
+                    <td>${esc(h.company_name || h.email)}</td>
+                    <td class="em">${esc(h.heldReason || '')}</td></tr>`).join('')}</tbody>
+                </table>` : ''}
               <div class="mm-stat-row">
                 <div class="mm-stat"><div class="v">${d.recipientCount}</div><div class="l">Recipients</div></div>
                 <div class="mm-stat"><div class="v">${s.delivered || 0}</div><div class="l">Delivered</div></div>
-                <div class="mm-stat"><div class="v">${s.uniqueOpens || 0}</div><div class="l">Opened (${pct(rates.openRate || 0)})</div></div>
+                <div class="mm-stat"><div class="v">${s.replies || 0}</div><div class="l">Replies</div></div>
                 <div class="mm-stat"><div class="v">${s.uniqueClicks || 0}</div><div class="l">Clicked (${pct(rates.clickRate || 0)})</div></div>
-                <div class="mm-stat"><div class="v">${pct(rates.clickToOpenRate || 0)}</div><div class="l">Click-to-open</div></div>
                 <div class="mm-stat"><div class="v">${s.bounces || 0}</div><div class="l">Bounced (${pct(rates.bounceRate || 0)})</div></div>
                 <div class="mm-stat"><div class="v">${s.complaints || 0}</div><div class="l">Complaints</div></div>
                 <div class="mm-stat"><div class="v">${s.unsubscribes || 0}</div><div class="l">Unsubscribes</div></div>
               </div>
               <div class="hint" style="margin-bottom:14px">
-                Open and click rates use UNIQUE people over delivered. Totals (${s.opens || 0} opens,
-                ${s.clicks || 0} clicks) count repeats, so one keen reader cannot inflate the rate.
-                Click-to-open is the one that says whether the content worked rather than the subject line.
+                Replies and clicks lead here on purpose. Rates use UNIQUE people over
+                delivered, so ${s.clicks || 0} total clicks from ${s.uniqueClicks || 0} people
+                cannot inflate the figure.
               </div>
+              <details style="margin-bottom:14px">
+                <summary style="cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600">
+                  Opens (${s.uniqueOpens || 0}, ${pct(rates.openRate || 0)}) &mdash; why these are unreliable
+                </summary>
+                <div class="hint" style="margin-top:8px">${esc(r.openRateCaveat || '')}</div>
+              </details>
               ${(r.links || []).length ? `
                 <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Links</h3>
                 <table class="mm-table">
@@ -1253,7 +1372,7 @@ export default {
     /* ---------------- boot ---------------- */
 
     try {
-      await Promise.all([loadContacts(), loadLists(), loadCampaigns()]);
+      await Promise.all([loadContacts(), loadLists(), loadCampaigns(), loadSettings()]);
     } catch (e) {
       msg('#mmContactsMsg', 'Could not load contacts: ' + esc(e.message), 'mm-err');
       msg('#mmCampaignMsg', 'Could not load campaigns: ' + esc(e.message), 'mm-err');
@@ -1265,14 +1384,325 @@ export default {
     renderListTable();
     renderCampaignList();
 
-    // Exposed so showView() can re-render a pane on each visit without
-    // re-running mount(), matching TravelTrack's pattern.
-    this._renders = {
-      dashboard: renderDash,
+    /* ---------------- settings ---------------- */
+
+    async function loadSettings() {
+      const d = await api.get(ENDPOINTS.mmSettings);
+      state.settings = (d && d.settings) || null;
+      state.blockers = (d && d.blockers) || [];
+      state.footerPreview = (d && d.footerPreview) || '';
+      state.coldCapToday = (d && d.coldCapToday) || 0;
+    }
+
+    function renderBlockers() {
+      const box = $('#mmBlockers');
+      if (!box) return;
+      if (!state.blockers || !state.blockers.length) {
+        box.innerHTML = '<div class="mm-notice"><b>Compliance looks complete.</b> ' +
+          'Sending is still switched off in code until a provider and the sending ' +
+          'domains are set up.</div>';
+        return;
+      }
+      // These are hard blockers, not suggestions. CAN-SPAM requires a real
+      // postal address and a working opt-out in every commercial message.
+      box.innerHTML = '<div class="mm-notice danger"><b>Not legal to send yet.</b> ' +
+        'Every commercial email needs these, and they are missing:<ul style="margin:8px 0 0 18px">' +
+        state.blockers.map((b) => `<li>${esc(b.text)}</li>`).join('') + '</ul></div>';
+    }
+
+    function renderSettings() {
+      const box = $('#mmSettingsForm');
+      if (!box) return;
+      const st = state.settings;
+      if (!st) { box.innerHTML = '<div class="mm-empty">Could not load settings.</div>'; return; }
+
+      const a = st.postalAddress || {};
+      const p = st.policy || {};
+      const r = st.reorder || {};
+
+      box.innerHTML = `
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Identity and compliance</h3>
+            <span class="meta">Required before any send</span></div>
+          <div class="mm-card-bd">
+            <div class="mm-row">
+              <div class="mm-field"><label for="setCompany">Company name</label>
+                <input id="setCompany" type="text" value="${esc(st.companyName || '')}"></div>
+              <div class="mm-field"><label for="setFromName">From name</label>
+                <input id="setFromName" type="text" value="${esc(st.fromName || '')}"
+                  placeholder="P&amp;M Apparel">
+                <div class="hint">Shown as the sender. A person's name beside the shop's
+                  usually outperforms the shop alone.</div></div>
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setReplyMode">Replies go to</label>
+                <select id="setReplyMode">
+                  <option value="account-manager"${st.replyToMode === 'account-manager' ? ' selected' : ''}>The account manager</option>
+                  <option value="fixed"${st.replyToMode === 'fixed' ? ' selected' : ''}>One fixed address</option>
+                </select>
+                <div class="hint">BackBone already knows who owns each account, so replies
+                  can land with the right person automatically.</div></div>
+              <div class="mm-field"><label for="setReplyFixed">Fixed reply-to</label>
+                <input id="setReplyFixed" type="text" value="${esc(st.replyToFixed || '')}"
+                  placeholder="hello@pmapparel.com">
+                <div class="hint">Used when the mode above is fixed, or when an account has
+                  no manager. Must be a monitored inbox: cold outreach gets replies.</div></div>
+            </div>
+            <div class="mm-field"><label for="setUnsub">Unsubscribe page URL</label>
+              <input id="setUnsub" type="text" value="${esc(st.unsubscribeUrl || '')}"
+                placeholder="https://alliteration-eight.vercel.app/unsubscribe.html">
+              <div class="hint">The public page. Already built and deployed at
+                /unsubscribe.html; paste its full address here.</div></div>
+            <h3 style="font-size:13px;font-weight:700;margin:18px 0 8px">Postal address</h3>
+            <div class="hint" style="margin-bottom:10px">
+              Required by CAN-SPAM in every commercial email. This is the most commonly
+              missed requirement, so nothing can send until it is filled in.
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setLine1">Street</label>
+                <input id="setLine1" type="text" value="${esc(a.line1 || '')}"></div>
+              <div class="mm-field"><label for="setLine2">Suite / unit</label>
+                <input id="setLine2" type="text" value="${esc(a.line2 || '')}"></div>
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setCity">City</label>
+                <input id="setCity" type="text" value="${esc(a.city || '')}"></div>
+              <div class="mm-field"><label for="setState">State</label>
+                <input id="setState" type="text" value="${esc(a.state || '')}"></div>
+            </div>
+            <div class="mm-field" style="max-width:220px"><label for="setZip">ZIP</label>
+              <input id="setZip" type="text" value="${esc(a.postalCode || '')}"></div>
+            ${state.footerPreview ? `<div class="mm-field"><label>Footer preview</label>
+              <div class="mm-recip" style="white-space:pre-wrap">${esc(state.footerPreview)}</div></div>` : ''}
+          </div>
+        </div>
+
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Sending limits</h3>
+            <span class="meta">Protects the sending domains</span></div>
+          <div class="mm-card-bd">
+            <div class="hint" style="margin-bottom:12px">
+              A new sending domain going from zero to hundreds of cold emails a day is
+              itself a spam signal, so the cold cap climbs over the ramp period.
+              Today's cold cap: <b>${state.coldCapToday}</b>.
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setFreq">Days between emails to one person</label>
+                <input id="setFreq" type="number" min="0" value="${p.minDaysBetweenEmails}">
+                <div class="hint">Stops the same contact getting three campaigns in a week
+                  because they match three lists.</div></div>
+              <div class="mm-field"><label for="setClientCap">Client daily cap</label>
+                <input id="setClientCap" type="number" min="1" value="${p.clientDailyCap}"></div>
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setColdStart">Cold cap, day one</label>
+                <input id="setColdStart" type="number" min="1" value="${p.coldDailyCapStart}"></div>
+              <div class="mm-field"><label for="setColdMax">Cold cap, maximum</label>
+                <input id="setColdMax" type="number" min="1" value="${p.coldDailyCapMax}"></div>
+            </div>
+            <div class="mm-field" style="max-width:260px"><label for="setRamp">Ramp length (days)</label>
+              <input id="setRamp" type="number" min="1" value="${p.coldRampDays}"></div>
+            <div class="mm-field">
+              <label><input type="checkbox" id="setSkipQuotes" style="width:auto;margin-right:8px"
+                ${p.skipOpenQuotes ? 'checked' : ''}>Skip accounts with an open quote</label>
+              <div class="hint">Cold-blasting someone an AM is mid-deal with can cost the deal.</div>
+            </div>
+            <div class="mm-field">
+              <label><input type="checkbox" id="setSkipInvalid" style="width:auto;margin-right:8px"
+                ${p.skipInvalidVerification ? 'checked' : ''}>Skip addresses that failed verification</label>
+              <div class="hint">Bought lists run 10-20% undeliverable, and providers throttle
+                a sender at 2% bounce.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Reorder timing</h3>
+            <span class="meta">Multiples of each customer's own cadence</span></div>
+          <div class="mm-card-bd">
+            <div class="hint" style="margin-bottom:12px">
+              Thresholds are multiples of a customer's own median gap, not fixed days. A
+              school ordering twice a year is not late at day 90; a contractor ordering
+              fortnightly very much is.
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setDue">Due at</label>
+                <input id="setDue" type="number" step="0.1" min="0.1" value="${r.dueAt}"></div>
+              <div class="mm-field"><label for="setOverdue">Overdue at</label>
+                <input id="setOverdue" type="number" step="0.1" min="0.1" value="${r.overdueAt}"></div>
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="setLapsed">Lapsed at</label>
+                <input id="setLapsed" type="number" step="0.1" min="0.1" value="${r.lapsedAt}"></div>
+              <div class="mm-field"><label for="setMinOrders">Minimum orders to judge</label>
+                <input id="setMinOrders" type="number" min="1" value="${r.minOrders}"></div>
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmSaveSettings">Save settings</button>
+            </div>
+          </div>
+        </div>`;
+
+      $('#mmSaveSettings').addEventListener('click', saveSettings);
+    }
+
+    async function saveSettings() {
+      const val = (id) => $('#' + id).value;
+      const numv = (id) => Number($('#' + id).value);
+      const payload = {
+        companyName: val('setCompany'),
+        fromName: val('setFromName'),
+        replyToMode: val('setReplyMode'),
+        replyToFixed: val('setReplyFixed'),
+        unsubscribeUrl: val('setUnsub'),
+        postalAddress: {
+          line1: val('setLine1'), line2: val('setLine2'), city: val('setCity'),
+          state: val('setState'), postalCode: val('setZip')
+        },
+        policy: {
+          minDaysBetweenEmails: numv('setFreq'),
+          clientDailyCap: numv('setClientCap'),
+          coldDailyCapStart: numv('setColdStart'),
+          coldDailyCapMax: numv('setColdMax'),
+          coldRampDays: numv('setRamp'),
+          skipOpenQuotes: $('#setSkipQuotes').checked,
+          skipInvalidVerification: $('#setSkipInvalid').checked
+        },
+        reorder: {
+          dueAt: numv('setDue'), overdueAt: numv('setOverdue'),
+          lapsedAt: numv('setLapsed'), minOrders: numv('setMinOrders'),
+          minGapDays: (state.settings.reorder || {}).minGapDays
+        }
+      };
+      try {
+        const d = await api.patch(ENDPOINTS.mmSettings, payload);
+        state.settings = d.settings;
+        state.blockers = d.blockers || [];
+        state.footerPreview = d.footerPreview || '';
+        renderBlockers(); renderSettings();
+        msg('#mmSettingsMsg', 'Settings saved.', 'mm-ok');
+      } catch (e) {
+        msg('#mmSettingsMsg', 'Could not save: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    /* ---------------- refresh ---------------- */
+
+    // WHY THIS EXISTS. mount() runs once; showView() runs on every visit. If
+    // the view renders only repaint whatever mount() loaded, the numbers rot:
+    // tag a contact, come back to Lists, and a dynamic list still shows its
+    // old member count. Worse, a list created on the Lists screen would be
+    // missing from the campaign composer's dropdown until the whole app was
+    // remounted, which looks like the save silently failed.
+    //
+    // So each view REFETCHES what it actually shows on entry, and there is a
+    // manual Refresh alongside a stamp saying how current the numbers are.
+    // Same reasoning as BackBone's "Data through" stamp: a number with no
+    // freshness indicator gets trusted long after it stopped being true.
+
+    const VIEW_LOADERS = {
+      // Dashboard reads contact counts only.
+      dashboard: [loadContacts],
+      // Contacts needs its own rows; list counts do not appear here.
+      contacts: [loadContacts],
+      // Lists shows live member counts, which depend on contacts.
+      lists: [loadContacts, loadLists],
+      // Import compares against existing contacts to flag duplicates.
+      import: [loadContacts],
+      // The composer's dropdown is built from lists, so both are needed.
+      campaigns: [loadContacts, loadLists, loadCampaigns],
+      settings: [loadSettings]
+    };
+
+    function stampText() {
+      if (!state.lastLoaded) return '';
+      const secs = Math.round((Date.now() - state.lastLoaded) / 1000);
+      if (secs < 45) return 'Updated just now';
+      const mins = Math.round(secs / 60);
+      if (mins < 60) return 'Updated ' + mins + ' min ago';
+      return 'Updated ' + new Date(state.lastLoaded).toLocaleTimeString();
+    }
+
+    function paintStamps() {
+      root.querySelectorAll('[data-mm-stamp]').forEach((el) => {
+        el.textContent = state.refreshing ? 'Refreshing...' : stampText();
+      });
+      root.querySelectorAll('[data-mm-refresh]').forEach((b) => {
+        b.disabled = state.refreshing;
+      });
+    }
+
+    // Repaint a view from whatever is already in state, without fetching.
+    const REPAINT = {
+      dashboard: () => renderDash(),
       contacts: () => { renderFilters(); renderContactsTable(); },
-      lists: () => { renderListEditor(); renderListTable(); },
+      lists: () => {
+        // Do NOT re-render the editor while it is open: it rebuilds its
+        // inputs from state, which would wipe out anything half-typed.
+        if (!state.editingList) renderListEditor();
+        renderListTable();
+      },
       import: () => {},
-      campaigns: renderCampaignList
+      campaigns: () => {
+        if (!state.editingCampaign) renderComposer();
+        renderCampaignList();
+      },
+      settings: () => { renderBlockers(); renderSettings(); }
+    };
+
+    async function refreshView(view, opts) {
+      const loaders = VIEW_LOADERS[view] || [];
+      // Repaint immediately so switching views feels instant, then update
+      // once the fetch lands.
+      if (REPAINT[view]) REPAINT[view]();
+
+      if (!loaders.length || state.refreshing) { paintStamps(); return; }
+
+      state.refreshing = true;
+      paintStamps();
+      try {
+        await Promise.all(loaders.map((fn) => fn()));
+        state.lastLoaded = Date.now();
+        if (REPAINT[view]) REPAINT[view]();
+        if (opts && opts.announce) {
+          msg(opts.announce, 'Refreshed.', 'mm-ok');
+        }
+      } catch (e) {
+        // A failed refresh must not blank the screen: the previous numbers
+        // are stale but still better than nothing, and the stamp will say so.
+        if (opts && opts.announce) {
+          msg(opts.announce, 'Could not refresh: ' + esc(e.message), 'mm-err');
+        }
+      } finally {
+        state.refreshing = false;
+        paintStamps();
+      }
+    }
+    this._refreshView = refreshView;
+
+    root.querySelectorAll('[data-mm-refresh]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const view = b.dataset.mmRefresh;
+        refreshView(view, { announce: MSG_TARGET[view] });
+      });
+    });
+
+    // Keep the stamp honest while someone sits on a screen: the text is
+    // relative ("2 min ago"), so it has to tick even when nothing refetches.
+    this._stampTimer = setInterval(paintStamps, 30000);
+
+    state.lastLoaded = Date.now();
+    paintStamps();
+
+    // Exposed so showView() can refresh and repaint a pane on each visit
+    // without re-running mount(), matching TravelTrack's pattern.
+    this._renders = {
+      dashboard: () => refreshView('dashboard'),
+      contacts: () => refreshView('contacts'),
+      lists: () => refreshView('lists'),
+      import: () => refreshView('import'),
+      campaigns: () => refreshView('campaigns'),
+      settings: () => refreshView('settings')
     };
   },
 
@@ -1281,7 +1711,8 @@ export default {
     if (!root) return;
     const ids = {
       dashboard: 'mmDash', contacts: 'mmContactsView', lists: 'mmListsView',
-      import: 'mmImportView', campaigns: 'mmCampaignsView'
+      import: 'mmImportView', campaigns: 'mmCampaignsView',
+      settings: 'mmSettingsView'
     };
     Object.entries(ids).forEach(([v, id]) => {
       const el = root.querySelector('#' + id);
@@ -1291,6 +1722,11 @@ export default {
   },
 
   unmount() {
-    // No document-level listeners were attached; nothing to tear down.
+    // No document-level listeners, but the stamp ticker is a real interval
+    // and would keep firing against a detached root forever.
+    if (this._stampTimer) {
+      clearInterval(this._stampTimer);
+      this._stampTimer = null;
+    }
   }
 };
