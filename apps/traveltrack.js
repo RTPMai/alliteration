@@ -64,15 +64,15 @@ function normStatus(s) {
 // (the standalone did this and Ryan called it out specifically). Hues are
 // token names, never raw hex — see css/tokens.css.
 const CATEGORY_META = {
-  'Airfare':            { hue: 'hue-blue',   icon: 'M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2a1 1 0 0 0-.9 1.7l6 3.4-2.5 2.5-2.6-.6a.8.8 0 0 0-.7 1.3l2 2 2 2a.8.8 0 0 0 1.3-.7l-.6-2.6 2.5-2.5 3.4 6a1 1 0 0 0 1.7-.9Z' },
-  'Lodging':            { hue: 'hue-violet', icon: 'M3 21h18M4 21V8l8-5 8 5v13M9 21v-5h6v5' },
-  'Meals':              { hue: 'hue-clay',   icon: 'M3 2v7a3 3 0 0 0 3 3v10M6 2v7M9 2v7M18 2c-1.7 1.5-2.5 4-2.5 7s.8 4 2.5 4v9' },
-  'Mileage':            { hue: 'hue-forest', icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
-  'Rental Car':         { hue: 'hue-sky',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
-  'Parking & Tolls':    { hue: 'hue-indigo', icon: 'M6 3h6a5 5 0 0 1 0 10H9v8H6V3Zm3 3v4h3a2 2 0 0 0 0-4H9Z' },
-  'Rideshare/Taxi':     { hue: 'hue-sky',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
-  'Registration/Fees':  { hue: 'hue-blue',   icon: 'M4 4h16v6a2 2 0 0 0 0 4v6H4v-6a2 2 0 0 0 0-4V4Zm10 0v16' },
-  'Other':              { hue: 'hue-clay',   icon: 'M4 6h16M4 12h16M4 18h10' }
+  'Airfare':            { hue: 'chart-1',    icon: 'M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2a1 1 0 0 0-.9 1.7l6 3.4-2.5 2.5-2.6-.6a.8.8 0 0 0-.7 1.3l2 2 2 2a.8.8 0 0 0 1.3-.7l-.6-2.6 2.5-2.5 3.4 6a1 1 0 0 0 1.7-.9Z' },
+  'Lodging':            { hue: 'chart-4',    icon: 'M3 21h18M4 21V8l8-5 8 5v13M9 21v-5h6v5' },
+  'Meals':              { hue: 'chart-2',    icon: 'M3 2v7a3 3 0 0 0 3 3v10M6 2v7M9 2v7M18 2c-1.7 1.5-2.5 4-2.5 7s.8 4 2.5 4v9' },
+  'Mileage':            { hue: 'chart-3',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Rental Car':         { hue: 'chart-6',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Parking & Tolls':    { hue: 'chart-9',    icon: 'M6 3h6a5 5 0 0 1 0 10H9v8H6V3Zm3 3v4h3a2 2 0 0 0 0-4H9Z' },
+  'Rideshare/Taxi':     { hue: 'chart-8',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Registration/Fees':  { hue: 'chart-5',    icon: 'M4 4h16v6a2 2 0 0 0 0 4v6H4v-6a2 2 0 0 0 0-4V4Zm10 0v16' },
+  'Other':              { hue: 'chart-7',    icon: 'M4 6h16M4 12h16M4 18h10' }
 };
 
 function categoryMeta(cat) {
@@ -81,7 +81,7 @@ function categoryMeta(cat) {
 
 function categoryIcon(cat) {
   const m = categoryMeta(cat);
-  return '<span class="cat-icon" style="--cat:var(--' + m.hue + ');--cat-tint:var(--' + m.hue + '-tint)">' +
+  return '<span class="cat-icon" style="--cat:var(--' + m.hue + ')">' +
     '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="' + m.icon + '"/></svg>' +
     '</span>';
 }
@@ -196,7 +196,7 @@ function donutSVG(segments) {
  * ------------------------------------------------------------------ */
 
 // Rotating series palette. Distinct hues that already exist as tokens.
-const CHART_HUES = ['hue-blue', 'hue-forest', 'hue-violet', 'hue-clay', 'hue-sky', 'hue-indigo', 'amber', 'accent-deep'];
+const CHART_HUES = ['chart-1', 'chart-2', 'chart-3', 'chart-4', 'chart-5', 'chart-6', 'chart-7', 'chart-8', 'chart-9'];
 
 function hueAt(i) {
   return CHART_HUES[i % CHART_HUES.length];
@@ -620,7 +620,11 @@ export default {
   .cat-icon{
     display:inline-flex;align-items:center;justify-content:center;
     width:28px;height:28px;flex:0 0 28px;border-radius:var(--radius-sm);
-    background:var(--cat-tint);color:var(--cat);
+    color:var(--cat);
+    /* The chart palette has no paired tint token, so the soft background is
+       derived from the same colour. color-mix keeps that in CSS rather than
+       hardcoding nine more hex values. */
+    background:color-mix(in srgb, var(--cat) 13%, var(--card));
   }
   .cat-cell{display:flex;align-items:center;gap:9px}
 
@@ -1689,14 +1693,12 @@ export default {
           const applied = Math.min(milesTotal, spendTotal);
           const oop = Math.max(0, spendTotal - applied);
           if (spendTotal <= 0) return '<div class="empty">No spend in this range.</div>';
-          return `
-            <div class="donut-wrap">
-              ${donutSVG([{ value: oop, varName: 'accent' }, { value: applied, varName: 'success' }])}
-              <div class="donut-legend">
-                <div class="row"><span class="sw spend"></span><span>Out of pocket</span><span class="amt">${fmtMoney(oop)}</span></div>
-                <div class="row"><span class="sw miles"></span><span>${esc(redeemLabel())}</span><span class="amt">${fmtMoney(applied)}</span></div>
-              </div>
-            </div>`;
+          // Blue vs green, NOT accent vs success: TravelTrack's accent is a
+          // green almost identical to --success, so those two together made
+          // one indistinguishable green ring.
+          return donutChart(
+            [['Out of pocket', oop], [redeemLabel(), applied]],
+            { hueFor: (label) => (label === 'Out of pocket' ? 'hue-blue' : 'success') });
         },
         by_category: () => {
           const by = {};
