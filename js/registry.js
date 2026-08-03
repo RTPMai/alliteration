@@ -157,17 +157,22 @@ export const APPS = [
     blurb: 'Email marketing, opens, clicks, unsubscribes.',
     accent: '#85A0C6',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
     views: [
-      ['dashboard', 'Dashboard']
+      ['dashboard', 'Dashboard'],
+      ['contacts', 'Contacts'],
+      ['campaigns', 'Campaigns']
     ],
     defaultView: 'dashboard',
-    // Sends real email to real contacts once built, so it stays off by
-    // default the same way CrewCore does: no role grants 'mailme' until the
-    // sending provider, domain auth, and unsubscribe flow are in place.
-    stub: true,
-    stubNote: 'Planned. Email marketing: contact lists (likely nested near ' +
-      'the BackBone roster) sortable by tag/segment, campaign sends through ' +
-      'a provider (Postmark/Resend/SendGrid), per-contact and per-link ' +
-      'open/click tracking, and unsubscribe handling with a captured reason.'
+    // BUILT, but deliberately still ungranted. stub:false means the real app
+    // mounts; access stays superuser-only because no role's apps[] lists
+    // 'mailme'. That is intentional and should stay that way until sending is
+    // switched on: the app exposes the whole customer email list, and the
+    // suppression ledger is the record that keeps sends CAN-SPAM compliant.
+    //
+    // SENDING IS NOT WIRED. Campaigns save as drafts and api/mailme/campaigns.js
+    // rejects any status but "draft". Three things must land first: a provider
+    // account (Postmark/Resend/SendGrid), a sending domain with SPF/DKIM/DMARC,
+    // and the tokenized unsubscribe page plus its webhook receiver.
+    stub: false
   },
   {
     id: 'teletally',
