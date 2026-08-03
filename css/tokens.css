@@ -187,9 +187,6 @@ body[data-app="traveltrack"] {
   --accent-tint: #EDF6EB;
 }
 
-/* CrewCore's accent matches its logo mark: a lighter, brighter blue than
-   BackBone's #1B5DAB. Distinct enough side by side that the two blues do not
-   read as the same app. */
 /* CrewCore's accent matches its confirmed logo mark: red, sampled from the
    Aug 2026 lineup sheet. (Earlier code had this as a blue placeholder before
    the real logo existed.) */
@@ -199,8 +196,6 @@ body[data-app="crewcore"] {
   --accent-tint: #FAE7E9;
 }
 
-/* MailMe's accent is a warm pink, distinct from every other app's blue,
-   orange, purple, gold, and green so it reads clearly in the rail. */
 /* MailMe's accent matches its confirmed logo mark: slate blue, sampled from
    the Aug 2026 lineup sheet. (Placeholder was pink before the real logo
    existed.) */
@@ -208,6 +203,23 @@ body[data-app="mailme"] {
   --accent:      #85A0C6;
   --accent-deep: #5F738E;
   --accent-tint: #F2F5F9;
+}
+
+/* TeleTally's accent matches its confirmed logo mark: dark navy/indigo,
+   sampled from the Aug 2026 lineup sheet. Icon mark itself uses a shared
+   periwinkle-blue, but the app's brand color is this darker navy. */
+body[data-app="teletally"] {
+  --accent:      #282A72;
+  --accent-deep: #1C1E52;
+  --accent-tint: #E9E9F0;
+}
+
+/* WebsiteWidget's accent matches its confirmed logo mark: teal, sampled from
+   the Aug 2026 lineup sheet. */
+body[data-app="websitewidget"] {
+  --accent:      #02A9A5;
+  --accent-deep: #017976;
+  --accent-tint: #E5F6F6;
 }
 
 /* ==========================================================================
