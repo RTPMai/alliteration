@@ -60,15 +60,6 @@ const EXPENSE_STATUSES = [
   ['reimbursed', 'Reimbursed']
 ];
 
-const LOYALTY_TYPES = [
-  ['airline', 'Airline'],
-  ['hotel', 'Hotel'],
-  ['rental_car', 'Rental car'],
-  ['other', 'Other']
-];
-
-const LOYALTY_UNITS = [['miles', 'Miles'], ['points', 'Points']];
-
 /* ------------------------------------------------------------------ *
  * HELPERS
  * ------------------------------------------------------------------ */
@@ -119,6 +110,22 @@ function statusClass(status) {
 const ICON_PIN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0Z"/><circle cx="12" cy="10" r="3"/></svg>';
 const ICON_CALENDAR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
 const ICON_PEOPLE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+
+// Two-segment donut for the dashboard's spend-vs-redeemed comparison.
+// segments: [{ value, varName }] — varName is a CSS custom property name
+// (e.g. 'accent'), never a raw hex, so this stays token-driven.
+function donutSVG(segments) {
+  const total = segments.reduce((s, p) => s + p.value, 0) || 1;
+  const r = 46, C = 2 * Math.PI * r;
+  let offset = 0;
+  const arcs = segments.map((p) => {
+    const len = Math.max(0, (p.value / total) * C);
+    const arc = `<circle cx="60" cy="60" r="${r}" fill="none" stroke-width="16" style="stroke:var(--${p.varName})" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-offset}" transform="rotate(-90 60 60)"/>`;
+    offset += len;
+    return arc;
+  }).join('');
+  return `<svg width="120" height="120" viewBox="0 0 120 120">${arcs}</svg>`;
+}
 
 function downloadCSV(filename, rows) {
   const csv = rows.map((row) => row.map((cell) => {
@@ -440,15 +447,22 @@ export default {
   .detail-line .v{font-weight:600;text-align:right}
   .section-hd{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:20px 0 8px}
 
-  /* ---------- loyalty cards ---------- */
-  .ly-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px}
-  .ly-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:18px;cursor:pointer;transition:.12s}
-  .ly-card:hover{border-color:var(--faint);box-shadow:var(--shadow-card)}
-  .ly-card .type{font-size:11px;font-weight:700;color:var(--accent-deep);text-transform:uppercase;letter-spacing:.04em}
-  .ly-card h3{font-size:16px;font-weight:700;margin:4px 0 10px}
-  .ly-card .bal{font-size:26px;font-weight:800;letter-spacing:-.02em}
-  .ly-card .unit{font-size:12px;color:var(--muted);font-weight:600}
-  .ly-card .owner{font-size:11.5px;color:var(--muted);margin-top:8px}
+  /* ---------- redeem miles ---------- */
+  .redeem-form{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:20px;max-width:460px;margin-bottom:22px}
+  .redeem-list-row{display:flex;justify-content:space-between;align-items:center;padding:11px 16px;border-bottom:1px solid var(--line-soft)}
+  .redeem-list-row:last-child{border-bottom:none}
+  .redeem-list-row .t{font-size:13px;font-weight:600}
+  .redeem-list-row .s{font-size:11.5px;color:var(--muted);margin-top:1px}
+  .redeem-list-row .v{font-weight:700;font-variant-numeric:tabular-nums}
+
+  /* ---------- donut ---------- */
+  .donut-wrap{display:flex;align-items:center;gap:20px;padding:14px 18px}
+  .donut-legend{display:flex;flex-direction:column;gap:8px;font-size:12.5px}
+  .donut-legend .row{display:flex;align-items:center;gap:7px}
+  .donut-legend .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
+  .donut-legend .sw.spend{background:var(--accent)}
+  .donut-legend .sw.miles{background:var(--success)}
+  .donut-legend .amt{font-weight:700;margin-left:auto}
 
   /* ---------- trip cards ---------- */
   .trip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -494,6 +508,10 @@ export default {
           <div class="card-bd" id="dashExp"></div>
         </div>
       </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-hd"><h3 id="dashDonutHd">Spending vs. Miles</h3></div>
+        <div class="card-bd" id="dashDonut"></div>
+      </div>
     </div>
 
     <div class="page" id="ttTrips" hidden>
@@ -523,10 +541,11 @@ export default {
 
     <div class="page" id="ttMiles" hidden>
       <div class="page-hd">
-        <div><h1>Redeem Miles.</h1><div class="sub" id="milesSub"></div></div>
-        <div class="tools"><button class="btn" id="milesNewBtn">+ Add account</button></div>
+        <div><h1 id="milesTitle">Redeem Miles.</h1><div class="sub" id="milesSub"></div></div>
       </div>
-      <div class="ly-grid" id="milesGrid"></div>
+      <div class="redeem-form" id="redeemForm"></div>
+      <div class="section-hd">By trip</div>
+      <div class="tbl-wrap"><div id="redeemTripList"></div></div>
     </div>
 
     <div class="page" id="ttReports" hidden>
@@ -576,21 +595,19 @@ export default {
     const seesAll = scope === 'all';
     const me = (ctx.user && (ctx.user.username || ctx.user.name)) || '';
 
-    const data = { trips: [], expenses: [], accounts: [], org: null, account: null, canEditOrg: false };
+    const data = { trips: [], expenses: [], org: null, account: null, canEditOrg: false };
     const filters = { trips: 'active', expenses: 'pending', expensesMine: !seesAll };
     let reportsYear = new Date().getFullYear();
 
     async function loadAll() {
-      const [tripsRes, expRes, milesRes, settingsRes] = await Promise.all([
+      const [tripsRes, expRes, settingsRes] = await Promise.all([
         ctx.api.get(ENDPOINTS.ttTrips),
         ctx.api.get(ENDPOINTS.ttExpenses),
-        ctx.api.get(ENDPOINTS.ttMiles),
         ctx.api.get(ENDPOINTS.ttSettings)
       ]);
       data.trips = (tripsRes && tripsRes.trips) || [];
       data.expenses = (expRes && expRes.expenses) || [];
-      data.accounts = (milesRes && milesRes.accounts) || [];
-      data.org = (settingsRes && settingsRes.org) || { mileage_rate: 0.67, per_diem_rate: 0, approval_threshold: 500, policy_notes: '' };
+      data.org = (settingsRes && settingsRes.org) || { mileage_rate: 0.67, per_diem_rate: 0, approval_threshold: 500, policy_notes: '', redemption_label: 'Miles / Rewards' };
       data.account = (settingsRes && settingsRes.account) || { home_airport: '', default_payment_method: 'personal_reimburse' };
       data.canEditOrg = !!(settingsRes && settingsRes.can_edit_org);
     }
@@ -643,7 +660,7 @@ export default {
             <div class="field"><label>Purpose</label><select name="purpose">${TRIP_PURPOSES.map((p) => `<option value="${esc(p)}"${p === t.purpose ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
             <div class="field"><label>Status</label><select name="status">${TRIP_STATUSES.map(([v, l]) => `<option value="${v}"${v === t.status ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
           </div>
-          <div class="field"><label>Miles redeemed (dollar credit)</label><input type="number" step="0.01" min="0" name="miles_value" value="${esc(t.miles_value || 0)}" style="max-width:160px">
+          <div class="field"><label>${esc(redeemLabel())} (dollar credit)</label><input type="number" step="0.01" min="0" name="miles_value" value="${esc(t.miles_value || 0)}" style="max-width:160px">
             <div class="hint">Nets against Total Spent as Net Cost, same as the standalone app's Miles Redeemed figure.</div>
           </div>
           <div class="field"><label>Notes</label><textarea name="notes" placeholder="Optional">${esc(t.notes || '')}</textarea></div>
@@ -870,117 +887,77 @@ export default {
       });
     }
 
-    /* ---------------- Loyalty (miles) form/detail ---------------- */
+    /* ---------------- Redeem Miles ---------------- */
+    // Internal tracking only, no connected accounts. Pick a trip, log a
+    // dollar amount (+ optional note); it adds to that trip's running
+    // total. See lib/traveltrack/schema.js for why this lives on the trip
+    // record rather than a separate loyalty-account entity.
 
-    function loyaltyFormHtml(acc) {
-      const isEdit = !!acc;
-      const a = acc || { program_type: 'airline', program_name: '', account_number: '', balance: 0, balance_unit: 'miles', notes: '' };
-      return `
-        <div class="panel-top">
-          <div><h2>${isEdit ? 'Edit account' : 'Add loyalty account'}</h2><div class="sub">${isEdit ? esc(a.owner_name || '') : 'Track a frequent flyer or hotel program'}</div></div>
-          <button class="x" data-close>&times;</button>
-        </div>
-        <div id="lyFormErr"></div>
-        <form id="lyForm">
-          <div class="field-row">
-            <div class="field"><label>Program type</label><select name="program_type">${LOYALTY_TYPES.map(([v, l]) => `<option value="${v}"${v === a.program_type ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
-            <div class="field"><label>Unit</label><select name="balance_unit">${LOYALTY_UNITS.map(([v, l]) => `<option value="${v}"${v === a.balance_unit ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
-          </div>
-          <div class="field"><label>Program name</label><input name="program_name" value="${esc(a.program_name)}" placeholder="Delta SkyMiles" required></div>
-          <div class="field"><label>Account number</label><input name="account_number" value="${esc(a.account_number || '')}" placeholder="Optional"></div>
-          <div class="field"><label>Balance</label><input type="number" step="1" min="0" name="balance" value="${esc(a.balance)}"></div>
-          <div class="field"><label>Notes</label><textarea name="notes" placeholder="Optional">${esc(a.notes || '')}</textarea></div>
-          <div class="form-actions">
-            <button type="submit" class="btn">${isEdit ? 'Save' : 'Add account'}</button>
-            <button type="button" class="btn ghost" data-close>Cancel</button>
-            ${isEdit ? '<button type="button" class="btn danger" id="lyDeleteBtn" style="margin-left:auto">Delete</button>' : ''}
-          </div>
-        </form>
-        ${isEdit ? loyaltyRedemptionsHtml(a) : ''}
-      `;
+    function redeemLabel() {
+      return (data.org && data.org.redemption_label) || 'Miles / Rewards';
     }
 
-    function loyaltyRedemptionsHtml(a) {
-      const redemptions = a.redemptions || [];
-      return `
-        <div class="section-hd">Log a redemption</div>
-        <form id="redeemForm">
-          <div class="field-row">
-            <div class="field"><label>Amount</label><input type="number" step="1" min="1" name="amount_redeemed" required></div>
-            <div class="field"><label>Est. cash value</label><input type="number" step="0.01" min="0" name="est_value" placeholder="Optional"></div>
-          </div>
-          <div class="field"><label>What for</label><input name="description" placeholder="Companion ticket to Denver" required></div>
-          <button type="submit" class="btn btn-sm">Log redemption</button>
-        </form>
-        <div class="section-hd">History</div>
-        ${redemptions.length ? `
-          <div class="tbl-wrap"><table><tbody>
-            ${redemptions.slice().reverse().map((r) => `
-              <tr><td>${fmtDate(r.date)}</td><td>${esc(r.description)}</td><td class="num">${Number(r.amount_redeemed).toLocaleString()}</td></tr>
-            `).join('')}
-          </tbody></table></div>
-        ` : '<div class="empty" style="padding:20px 0">No redemptions logged yet.</div>'}
-      `;
+    function redeemableTrips() {
+      const rows = seesAll ? data.trips.slice() : data.trips.filter((t) => t.traveler === me);
+      return rows.sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
     }
 
-    function openLoyaltyPanel(acc) {
-      openPanel(loyaltyFormHtml(acc));
-      panelIn.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closePanel));
-
-      const form = panelIn.querySelector('#lyForm');
+    function renderRedeemForm() {
+      const trips = redeemableTrips();
+      $('#redeemForm').innerHTML = `
+        <div class="section-hd" style="margin-top:0">Log a redemption</div>
+        <div id="redeemErr"></div>
+        <form id="redeemFormEl">
+          <div class="field"><label>Trip</label>
+            <select name="trip_id" required>
+              ${trips.map((t) => `<option value="${esc(t.id)}">${esc(t.title)} — ${fmtDate(t.start_date)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="field"><label>Amount ($)</label><input type="number" step="0.01" min="0.01" name="amount" required></div>
+          <div class="field"><label>Note</label><input name="note" placeholder="Optional — e.g. companion ticket"></div>
+          <button type="submit" class="btn btn-sm">Add redemption</button>
+        </form>
+      `;
+      const form = $('#redeemFormEl');
+      if (!form) return;
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const fd = new FormData(form);
         const body = Object.fromEntries(fd.entries());
-        const submitBtn = form.querySelector('button[type="submit"]');
-        submitBtn.disabled = true;
+        const btn = form.querySelector('button[type="submit"]');
+        btn.disabled = true;
         try {
-          if (acc) {
-            await ctx.api.request(ENDPOINTS.ttMiles + '?id=' + encodeURIComponent(acc.id), { method: 'PATCH', body });
-          } else {
-            await ctx.api.post(ENDPOINTS.ttMiles, body);
-          }
+          await ctx.api.post(ENDPOINTS.ttMiles, body);
           await loadAll();
-          closePanel();
           renderMiles();
+          renderDashboard();
         } catch (err) {
-          panelIn.querySelector('#lyFormErr').innerHTML = `<div class="form-err">${esc(err.message || 'Could not save account')}</div>`;
-          submitBtn.disabled = false;
+          $('#redeemErr').innerHTML = `<div class="form-err">${esc(err.message || 'Could not log redemption')}</div>`;
+          btn.disabled = false;
         }
       });
+    }
 
-      const delBtn = panelIn.querySelector('#lyDeleteBtn');
-      if (delBtn) {
-        delBtn.addEventListener('click', async () => {
-          if (!confirm('Delete this loyalty account?')) return;
-          try {
-            await ctx.api.request(ENDPOINTS.ttMiles + '?id=' + encodeURIComponent(acc.id), { method: 'DELETE' });
-            await loadAll();
-            closePanel();
-            renderMiles();
-          } catch (err) {
-            panelIn.querySelector('#lyFormErr').innerHTML = `<div class="form-err">${esc(err.message || 'Could not delete account')}</div>`;
-          }
-        });
+    function renderMiles() {
+      $('#milesTitle').textContent = redeemLabel() + '.';
+      $('#milesSub').textContent = 'Internal tracking only — no accounts connected.';
+      renderRedeemForm();
+
+      const trips = redeemableTrips();
+      if (!trips.length) {
+        $('#redeemTripList').innerHTML = '<div class="empty"><h3>No trips yet</h3><p>Plan a trip first, then redemptions can be logged against it.</p></div>';
+        return;
       }
 
-      const redeemForm = panelIn.querySelector('#redeemForm');
-      if (redeemForm) {
-        redeemForm.addEventListener('submit', async (e) => {
-          e.preventDefault();
-          const fd = new FormData(redeemForm);
-          const body = Object.fromEntries(fd.entries());
-          try {
-            await ctx.api.post(ENDPOINTS.ttMiles + '?id=' + encodeURIComponent(acc.id) + '&action=redeem', body);
-            await loadAll();
-            const fresh = data.accounts.find((x) => x.id === acc.id);
-            openLoyaltyPanel(fresh || acc);
-            renderMiles();
-          } catch (err) {
-            panelIn.querySelector('#lyFormErr').innerHTML = `<div class="form-err">${esc(err.message || 'Could not log redemption')}</div>`;
-          }
-        });
-      }
+      $('#redeemTripList').innerHTML = trips.map((t) => {
+        const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const miles = Number(t.miles_value) || 0;
+        return `
+          <div class="redeem-list-row">
+            <div><div class="t">${esc(t.title)}</div><div class="s">${fmtDate(t.start_date)} · Spent ${fmtMoney(spent)}</div></div>
+            <div class="v" style="color:${miles ? 'var(--success)' : 'var(--muted)'}">${miles ? '-' + fmtMoney(miles) : fmtMoney(0)}</div>
+          </div>`;
+      }).join('');
     }
 
     /* ---------------- Dashboard ---------------- */
@@ -995,12 +972,14 @@ export default {
       const ytdTotal = myExpenses.filter((e) => String(e.date).slice(0, 4) === String(yr)).reduce((s, e) => s + (Number(e.amount) || 0), 0);
       const pending = myExpenses.filter((e) => e.status === 'pending');
       const pendingTotal = pending.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const milesTotal = myTrips.reduce((s, t) => s + (Number(t.miles_value) || 0), 0);
 
       const kpis = [
         [String(upcoming), 'Upcoming trips'],
         [fmtMoney(ytdTotal), 'YTD spend'],
         [String(pending.length), 'Pending expenses'],
-        [fmtMoney(pendingTotal), 'Awaiting approval']
+        [fmtMoney(pendingTotal), 'Awaiting approval'],
+        [fmtMoney(milesTotal), redeemLabel() + ' redeemed']
       ];
       $('#dashKpis').innerHTML = kpis.map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
       $('#dashSub').textContent = seesAll ? "The whole team's trips and expenses." : 'Your trips and expenses.';
@@ -1018,6 +997,23 @@ export default {
         <div class="mini-row"><div><div class="t">${esc(e.category)} · ${fmtMoney(e.amount)}</div><div class="s">${esc(e.description || '—')}</div></div>
         <span class="chip ${statusClass(e.status)}">${esc(labelOf(EXPENSE_STATUSES, e.status))}</span></div>
       `).join('') : '<div class="empty">No expenses yet.</div>';
+
+      $('#dashDonutHd').textContent = 'Spending vs. ' + redeemLabel();
+      const spendTotal = myExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const milesApplied = Math.min(milesTotal, spendTotal);
+      const outOfPocket = Math.max(0, spendTotal - milesApplied);
+      if (spendTotal <= 0) {
+        $('#dashDonut').innerHTML = '<div class="empty">No spend logged yet.</div>';
+      } else {
+        $('#dashDonut').innerHTML = `
+          <div class="donut-wrap">
+            ${donutSVG([{ value: outOfPocket, varName: 'accent' }, { value: milesApplied, varName: 'success' }])}
+            <div class="donut-legend">
+              <div class="row"><span class="sw spend"></span><span>Out of pocket</span><span class="amt">${fmtMoney(outOfPocket)}</span></div>
+              <div class="row"><span class="sw miles"></span><span>${esc(redeemLabel())}</span><span class="amt">${fmtMoney(milesApplied)}</span></div>
+            </div>
+          </div>`;
+      }
     }
 
     /* ---------------- Trips view ---------------- */
@@ -1067,7 +1063,7 @@ export default {
 
       $('#tripsKpis').innerHTML = rows.length ? [
         [fmtMoney(totalSpent), 'Total spent (' + spendingTripCount + ' trip' + (spendingTripCount === 1 ? '' : 's') + ')'],
-        [fmtMoney(totalMiles), 'Miles redeemed'],
+        [fmtMoney(totalMiles), redeemLabel() + ' redeemed'],
         [fmtMoney(totalNet), 'Net cost']
       ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('') : '';
 
@@ -1088,7 +1084,7 @@ export default {
           <div class="trip-figures">
             <div class="figure-row"><span class="k">Total Spent</span><span class="v">${fmtMoney(spent)}</span></div>
             ${miles > 0 ? `
-              <div class="figure-row"><span class="k">Miles</span><span class="v miles-credit">-${fmtMoney(miles)}</span></div>
+              <div class="figure-row"><span class="k">${esc(redeemLabel())}</span><span class="v miles-credit">-${fmtMoney(miles)}</span></div>
               <div class="bar-track"><div class="bar-fill" style="width:${spent ? Math.min(100, Math.round(miles / spent * 100)) : 0}%"></div></div>
             ` : ''}
             <div class="figure-row net"><span class="k">Net Cost</span><span class="v">${fmtMoney(net)}</span></div>
@@ -1104,7 +1100,7 @@ export default {
 
     function exportTripsCSV() {
       const rows = filteredTrips();
-      const header = ['Trip Name', 'Destination', 'Status', 'Start Date', 'End Date', 'Traveler', 'Total Spent', 'Miles Redeemed', 'Net Cost'];
+      const header = ['Trip Name', 'Destination', 'Status', 'Start Date', 'End Date', 'Traveler', 'Total Spent', redeemLabel(), 'Net Cost'];
       const body = rows.map((t) => {
         const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
         const miles = Number(t.miles_value) || 0;
@@ -1174,29 +1170,6 @@ export default {
       const header = ['Date', 'Category', 'Description', 'Submitted by', 'Trip', 'Payment method', 'Amount', 'Status'];
       const body = rows.map((e) => [e.date, e.category, e.description || '', e.submitted_by_name || e.submitted_by, tripLabel(e.trip_id) || '', labelOf(PAYMENT_METHODS, e.payment_method), (Number(e.amount) || 0).toFixed(2), labelOf(EXPENSE_STATUSES, e.status)]);
       downloadCSV('traveltrack-expenses.csv', [header, ...body]);
-    }
-
-    /* ---------------- Miles view ---------------- */
-
-    function renderMiles() {
-      const accounts = seesAll ? data.accounts : data.accounts.filter((a) => a.username === me);
-      $('#milesSub').textContent = accounts.length + (accounts.length === 1 ? ' account' : ' accounts');
-      if (!accounts.length) {
-        $('#milesGrid').innerHTML = '<div class="empty"><h3>No loyalty accounts yet</h3><p>Add a frequent flyer or hotel program to track balances.</p></div>';
-        return;
-      }
-      $('#milesGrid').innerHTML = accounts.map((a) => `
-        <div class="ly-card" data-ly="${esc(a.id)}">
-          <div class="type">${esc(labelOf(LOYALTY_TYPES, a.program_type))}</div>
-          <h3>${esc(a.program_name)}</h3>
-          <div class="bal">${Number(a.balance || 0).toLocaleString()} <span class="unit">${esc(labelOf(LOYALTY_UNITS, a.balance_unit))}</span></div>
-          ${seesAll ? `<div class="owner">${esc(a.owner_name || a.username)}</div>` : ''}
-        </div>
-      `).join('');
-      $$('#milesGrid [data-ly]').forEach((card) => card.addEventListener('click', () => {
-        const acc = data.accounts.find((a) => a.id === card.dataset.ly);
-        if (acc) openLoyaltyPanel(acc);
-      }));
     }
 
     /* ---------------- Reports view ---------------- */
@@ -1312,6 +1285,9 @@ export default {
               <div class="field"><label>Approval threshold ($)</label><input type="number" step="1" min="0" name="approval_threshold" value="${esc(data.org.approval_threshold)}"></div>
             </div>
             <div class="field"><label>Per diem rate ($/day, 0 = unused)</label><input type="number" step="0.01" min="0" name="per_diem_rate" value="${esc(data.org.per_diem_rate)}" style="max-width:200px"></div>
+            <div class="field"><label>Redeem Miles label</label><input name="redemption_label" value="${esc(data.org.redemption_label || 'Miles / Rewards')}" style="max-width:220px">
+              <div class="hint">What this shows as everywhere — trip cards, dashboard, the rail. Some shops call it "Points" or "Rewards" instead.</div>
+            </div>
             <div class="field"><label>Travel policy notes</label><textarea name="policy_notes" placeholder="Optional">${esc(data.org.policy_notes || '')}</textarea></div>
             <button type="submit" class="btn btn-sm">Save org settings</button>
           </form>
@@ -1557,7 +1533,6 @@ export default {
     $('#tripsNewBtn').addEventListener('click', () => openTripPanel(null));
     $('#tripsExportBtn').addEventListener('click', exportTripsCSV);
     $('#expNewBtn').addEventListener('click', () => openExpensePanel(null));
-    $('#milesNewBtn').addEventListener('click', () => openLoyaltyPanel(null));
     $('#expExportBtn').addEventListener('click', exportExpensesCSV);
     $('#reportsExportBtn').addEventListener('click', exportReportsCSV);
     $('#reportsYear').addEventListener('change', (e) => { reportsYear = Number(e.target.value); renderReports(); });
