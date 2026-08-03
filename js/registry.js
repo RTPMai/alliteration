@@ -159,6 +159,8 @@ export const APPS = [
     views: [
       ['dashboard', 'Dashboard'],
       ['contacts', 'Contacts'],
+      ['lists', 'Lists'],
+      ['import', 'Import'],
       ['campaigns', 'Campaigns']
     ],
     defaultView: 'dashboard',
