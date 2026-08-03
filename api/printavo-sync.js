@@ -111,14 +111,44 @@ export default async function handler(req, res) {
       : (cronSecret ? { authorization: "Bearer " + cronSecret } : null);
     if (!authHeaders) return false;
     const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
-    try {
-      // Fire the next chunk and give the request ~1.5s to actually leave
-      // before this invocation responds and gets frozen. The child's
-      // completion is deliberately not awaited — it has its own time budget.
-      const fired = fetch(url, { headers: authHeaders }).catch(function () {});
-      await Promise.race([fired, new Promise(function (r) { setTimeout(r, 1500); })]);
+    // Fire the next chunk and give the request ~1.5s to actually leave
+    // before this invocation responds and gets frozen. The child's
+    // completion is deliberately not awaited — it has its own time budget.
+    // IMPORTANT: we still need to know the fetch itself left successfully
+    // (connected, got a response) rather than failing silently. A run that
+    // reports chained:true but never actually launched the next link looks
+    // identical to a healthy one in the logs (still 200, no error) while the
+    // ops payload never finishes writing. This bit us once already (Jul 27).
+    let chainError = null;
+    const fired = fetch(url, { headers: authHeaders }).catch(function (e) {
+      chainError = (e && e.message) ? e.message : String(e);
+      return null;
+    });
+    const winner = await Promise.race([
+      fired,
+      new Promise(function (r) { setTimeout(function () { r("timeout"); }, 1500); }),
+    ]);
+    if (winner === "timeout") {
+      // Still in flight after 1.5s is fine and expected (fire-and-forget) —
+      // but record that we could not confirm it landed, so a stuck chain is
+      // visible in diagnostics instead of masquerading as healthy.
+      acc.chainUnconfirmed = true;
       return true;
-    } catch (e) { return false; }
+    }
+    if (winner === null || chainError) {
+      // The fetch itself failed (DNS, connection refused, etc.) before the
+      // 1.5s window even elapsed. Do not report chained:true for a link that
+      // never left.
+      acc.chainError = chainError || "chain fetch failed with no response";
+      await saveOpsPartial(acc);
+      return false;
+    }
+    if (winner && typeof winner.status === "number" && winner.status >= 400) {
+      acc.chainError = "chain fetch returned HTTP " + winner.status;
+      await saveOpsPartial(acc);
+      return false;
+    }
+    return true;
   }
 
   // --- Printavo GraphQL --------------------------------------------------
@@ -2233,6 +2263,11 @@ export default async function handler(req, res) {
           cashScanned: acc.cashScanned || 0,
           cashNote: (acc.cashProbe && acc.cashProbe.note) || (cashOk ? "ok" : "not probed"),
           cashFields: (acc.cashProbe && acc.cashProbe.typePlans) || null,
+          // Visibility for the chained-run confirmation fix (Aug 3): if a prior
+          // link in this chain could not confirm the next one actually launched,
+          // that gets flagged here instead of hiding behind an all-green log.
+          chainError: acc.chainError || null,
+          chainUnconfirmed: !!acc.chainUnconfirmed,
           cashTypes: Object.keys(acc.cashTypes || {}).map(function (k) {
             return { type: k, count: acc.cashTypes[k].count, sum: Math.round(acc.cashTypes[k].sum * 100) / 100 };
           }).sort(function (a, b) { return b.sum - a.sum; }),
