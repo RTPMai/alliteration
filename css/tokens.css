@@ -175,10 +175,16 @@ body[data-app="settings"] {
   --accent-tint: #EEF1F4;
 }
 
+/* TravelTrack's accent matches its new logo mark (sampled #51A446 from the
+   icon and wordmark). Note: this reads as effectively the same green as
+   --hub (#52A246, the "All apps" landing view's own color) — the two are
+   1-2 units apart per channel, indistinguishable on screen. Deep/tint below
+   are shared with --hub-deep/--hub-tint rather than a fresh pair, since a
+   second near-identical green would just be noise. */
 body[data-app="traveltrack"] {
-  --accent:      #0E7C86;
-  --accent-deep: #0A5C64;
-  --accent-tint: #E4F2F3;
+  --accent:      #51A446;
+  --accent-deep: #3F8236;
+  --accent-tint: #EDF6EB;
 }
 
 /* CrewCore's accent matches its logo mark: a lighter, brighter blue than
