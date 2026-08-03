@@ -62,7 +62,11 @@ const LIVE_PREFIXES = [
   // TravelTrack: api/traveltrack/{trips,expenses,miles,settings}.js are
   // deployed. Rebuilt from scratch (Base44 had no api/ to point at), so this
   // whole folder is new rather than a port.
-  '/api/traveltrack/'
+  '/api/traveltrack/',
+  // MailMe: api/mailme/{contacts,campaigns}.js are deployed. Contacts are
+  // resolved live from the BackBone roster rather than stored, so this app
+  // has real data the day it ships without an import step.
+  '/api/mailme/'
 ];
 
 function isLive(path) {
@@ -82,7 +86,8 @@ export function appsOnSampleData() {
     givinggauge: [ENDPOINTS.ggRequests],
     backbone:    [ENDPOINTS.bbData],
     errorengine: [ENDPOINTS.eeErrors],
-    traveltrack: [ENDPOINTS.ttTrips]
+    traveltrack: [ENDPOINTS.ttTrips],
+    mailme:      [ENDPOINTS.mmContacts]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -150,7 +155,13 @@ export const ENDPOINTS = {
   ttExpenses:      '/api/traveltrack/expenses',
   ttMiles:         '/api/traveltrack/miles',
   ttSettings:      '/api/traveltrack/settings',
-  ttReceipt:       '/api/traveltrack/receipt'
+  ttReceipt:       '/api/traveltrack/receipt',
+
+  // ---- MailMe ----
+  // No mmContacts POST equivalent by design: contacts are the BackBone
+  // roster, not a list MailMe owns. See api/mailme/contacts.js.
+  mmContacts:      '/api/mailme/contacts',
+  mmCampaigns:     '/api/mailme/campaigns'
 };
 
 /* ------------------------------------------------------------------ *
@@ -256,6 +267,13 @@ export async function request(path, opts = {}) {
 export const get  = (path, query, opts)  => request(path, { ...opts, method: 'GET', query });
 export const post = (path, body, opts)   => request(path, { ...opts, method: 'POST', body });
 export const put  = (path, body, opts)   => request(path, { ...opts, method: 'PUT', body });
+// PATCH was missing until MailMe needed it. ErrorEngine's routes accept PATCH
+// too, so anything there doing a partial update through post() was sending the
+// wrong verb; this is the correct helper for both.
+export const patch = (path, body, opts)  => request(path, { ...opts, method: 'PATCH', body });
+// NOTE the signature: del takes OPTIONS, not a body. To pass an id, use
+// del(path, { query: { id } }). Passing { id } directly does nothing, which
+// fails silently as a request with no id at all.
 export const del  = (path, opts)         => request(path, { ...opts, method: 'DELETE' });
 
 /* ------------------------------------------------------------------ *
@@ -342,7 +360,24 @@ const MOCK_DATA = {
   // Receipt upload/extract needs Blob + the Anthropic API, neither of which
   // exists offline. Mock returns empty fields so the form still opens under
   // MOCK; it just prefills nothing.
-  [ENDPOINTS.ttReceipt]: () => ({ ok: true, fields: { date: '', amount: '', description: '', category: '' }, advisory: true })
+  [ENDPOINTS.ttReceipt]: () => ({ ok: true, fields: { date: '', amount: '', description: '', category: '' }, advisory: true }),
+
+  // MailMe. Shapes mirror api/mailme/*.js. The contacts mock carries a
+  // suppressed contact and a tagged one on purpose: the segment and
+  // suppression logic are the parts worth exercising offline, and a mock
+  // where everyone is subscribed would never catch a broken filter.
+  [ENDPOINTS.mmContacts]: () => ({
+    contacts: [
+      { customer_id: '1042', company_name: 'Johnston Dragons Wrestling Club', contact_name: 'Trent Kolar', email: 'tkolar@johnstonwrestling.org', status: 'subscribed', reason: null, tags: ['booster-club'], updatedAt: null },
+      { customer_id: '3310', company_name: 'Ankeny Miracle League', contact_name: 'Dana Whitmer', email: 'dana@ankenymiracleleague.org', status: 'subscribed', reason: null, tags: ['nonprofit', 'vip'], updatedAt: null },
+      { customer_id: '2015', company_name: 'Saylorville Trail Run', contact_name: 'Marcus Bell', email: 'marcus@saylorvilletrailrun.com', status: 'unsubscribed', reason: 'Too many emails', tags: [], updatedAt: '2026-07-02T14:10:00.000Z' },
+      { customer_id: '4471', company_name: 'Polk County Pickleball', contact_name: 'Ethan Welch', email: 'ethan@polkcountypickleball.org', status: 'bounced', reason: 'Mailbox does not exist', tags: ['nonprofit'], updatedAt: '2026-06-28T09:00:00.000Z' }
+    ],
+    customersWithoutEmail: 2,
+    totalRosterSize: 6,
+    tags: ['booster-club', 'nonprofit', 'vip']
+  }),
+  [ENDPOINTS.mmCampaigns]: () => ({ campaigns: [] })
 };
 
 function mockResponse(path, method, body, query) {
@@ -365,5 +400,5 @@ function mockResponse(path, method, body, query) {
 
 export default {
   MOCK, ENDPOINTS, ERRORS_ENDPOINT, ApiError,
-  request, get, post, put, del, auth, onAuthFailure
+  request, get, post, put, patch, del, auth, onAuthFailure
 };
