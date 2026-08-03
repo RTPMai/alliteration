@@ -70,7 +70,8 @@ const FLOWS = [
   ['errorengine', 'BackBone', 'Remake cost per customer, folded into the tier score'],
   ['errorengine', 'ShopStock', 'Vendor defect rate, for deciding who to keep buying blanks from'],
   ['traveltrack', 'BackBone', 'Cost to service an account, from trip expenses tagged to a client'],
-  ['shopstock', 'ErrorEngine', 'Live supply pricing, so remake cost is stamped accurately']
+  ['shopstock', 'ErrorEngine', 'Live supply pricing, so remake cost is stamped accurately'],
+  ['backbone', 'MailMe', 'The roster itself: MailMe keeps no contact list, it reads this one']
 ];
 
 function flowRow([fromId, to, what]) {
@@ -288,6 +289,25 @@ export default {
             pending ? pending + ' expense' + (pending === 1 ? '' : 's') + ' awaiting approval' : 'Nothing awaiting approval');
           if (pending) { stats.push(['Pending reimbursements', String(pending), '']); renderStats(); }
         } catch (e) { setCard('traveltrack', [], 'Could not load trips.'); }
+      })());
+    }
+
+    // ---- MailMe: mailable contacts, and anything suppressed. ----
+    if (has('mailme')) {
+      jobs.push((async () => {
+        try {
+          const d = await api.get(ENDPOINTS.mmContacts);
+          const contacts = listOf(d, ['contacts']) || [];
+          const suppressed = contacts.filter((c) =>
+            c && ['unsubscribed', 'bounced', 'complained'].includes(c.status)).length;
+          const mailable = contacts.length - suppressed;
+          const noEmail = (d && d.customersWithoutEmail) || 0;
+          setCard('mailme',
+            [[String(mailable), 'Mailable']].concat(
+              suppressed ? [[String(suppressed), 'Suppressed']] : []),
+            noEmail ? noEmail + ' roster customer' + (noEmail === 1 ? '' : 's') + ' with no email'
+                    : 'Every roster customer has an email');
+        } catch (e) { setCard('mailme', [], 'Could not load contacts.'); }
       })());
     }
 
