@@ -162,10 +162,18 @@ t.test('api.js exposes ERRORS_ENDPOINT for the ErrorEngine rename', () => {
   t.assert(src.includes("'/api/errors'"), "ErrorEngine's intake must resolve to /api/errors");
 });
 
-t.test('TravelTrack has no endpoint wired', () => {
+t.test('TravelTrack is wired to its own endpoints', () => {
   const src = read('js/api.js');
-  t.assert(/ttData:\s*null/.test(src),
-    'TravelTrack runs on Base44 and has no api/ folder; its endpoint must stay null');
+  t.assert(/ttTrips:\s*'\/api\/traveltrack\/trips'/.test(src),
+    'TravelTrack trips endpoint is missing or renamed');
+  t.assert(/ttExpenses:\s*'\/api\/traveltrack\/expenses'/.test(src),
+    'TravelTrack expenses endpoint is missing or renamed');
+  t.assert(/ttMiles:\s*'\/api\/traveltrack\/miles'/.test(src),
+    'TravelTrack miles endpoint is missing or renamed');
+  t.assert(/ttSettings:\s*'\/api\/traveltrack\/settings'/.test(src),
+    'TravelTrack settings endpoint is missing or renamed');
+  t.assert(src.includes("'/api/traveltrack/'"),
+    'TravelTrack endpoints must be listed in LIVE_PREFIXES');
 });
 
 t.test('MOCK defaults on so the shell runs offline', () => {
@@ -215,10 +223,43 @@ t.test('index.html carries the rail and header mount points', () => {
     .forEach((k) => t.assert(src.includes(k), 'index.html is missing ' + k));
 });
 
-t.test('traveltrack stub module implements the contract', () => {
+t.test('traveltrack is ported and follows the contract', () => {
+  t.assert(exists('apps/traveltrack.js'), 'apps/traveltrack.js is missing');
   const src = read('apps/traveltrack.js');
-  ['export default', 'id:', 'mount', 'showView']
+  ['export default', "id: 'traveltrack'", 'mount', 'showView', 'styles', 'template']
     .forEach((k) => t.assert(src.includes(k), 'traveltrack.js is missing ' + k));
+});
+
+t.test('traveltrack registry entry is no longer a stub', () => {
+  const src = read('js/registry.js');
+  const entry = src.slice(src.indexOf("id: 'traveltrack'"));
+  const block = entry.slice(0, entry.indexOf("id: 'crewcore'"));
+  t.assert(/stub:\s*false/.test(block), 'traveltrack should be un-stubbed now that it is built');
+  t.assert(!/stubNote:/.test(block), 'a live app should not still carry a stubNote');
+});
+
+t.test('traveltrack fetches through the seam', () => {
+  const src = stripComments(read('apps/traveltrack.js'));
+  t.assert(!src.match(/\bfetch\s*\(/), 'traveltrack.js must not call fetch() directly');
+  t.assert(src.includes("import { ENDPOINTS } from '../js/api.js'"),
+    'traveltrack.js should import ENDPOINTS from the seam');
+});
+
+t.test('traveltrack scopes DOM lookups to its root', () => {
+  const src = read('apps/traveltrack.js');
+  t.assert(!/document\.getElementById/.test(src),
+    'traveltrack.js should use ctx.root, not document.getElementById (other apps are mounted too)');
+});
+
+t.test('traveltrack API routes require auth and scope by data_scope', () => {
+  ['trips', 'expenses', 'miles', 'settings'].forEach((name) => {
+    const src = read('api/traveltrack/' + name + '.js');
+    t.assert(src.includes('requireAuth'), 'api/traveltrack/' + name + '.js must call requireAuth');
+  });
+  const trips = read('api/traveltrack/trips.js');
+  const expenses = read('api/traveltrack/expenses.js');
+  t.assert(trips.includes("data_scope"), 'trips.js should scope by data_scope');
+  t.assert(expenses.includes("data_scope"), 'expenses.js should scope by data_scope');
 });
 
 /* ---- Session ----------------------------------------------------------- */
