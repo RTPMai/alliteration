@@ -181,6 +181,60 @@ t.test('MOCK defaults on so the shell runs offline', () => {
     'DEFAULT_MOCK should be true until the real endpoints are pointed at');
 });
 
+/* ---- browser code must not contain server code ------------------------- */
+
+t.test('no browser file imports a Node builtin', () => {
+  // THE JUL 26 / AUG 3 OUTAGE CLASS. Files are placed by hand during deploy,
+  // and a server file dropped into apps/ or js/ fails only in the browser,
+  // at runtime, with "Failed to resolve module specifier" — a message that
+  // sends you looking at the import map rather than at the file itself.
+  //
+  // A Node builtin import is the cleanest fingerprint of server code sitting
+  // where browser code belongs, so it fails HERE instead.
+  const BUILTINS = ['crypto', 'fs', 'path', 'http', 'https', 'os', 'url',
+    'stream', 'buffer', 'zlib', 'child_process', 'util', 'net'];
+  const offenders = [];
+
+  const scan = (dir) => {
+    fs.readdirSync(path.join(ROOT, dir)).forEach((f) => {
+      const rel = dir + '/' + f;
+      if (fs.statSync(path.join(ROOT, rel)).isDirectory()) return scan(rel);
+      if (!f.endsWith('.js')) return;
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      BUILTINS.forEach((b) => {
+        const re = new RegExp('from\\s+["\'](node:)?' + b + '["\']');
+        if (re.test(src)) offenders.push(rel + ' imports ' + b);
+      });
+    });
+  };
+  scan('apps');
+  scan('js');
+
+  t.equal(offenders.length, 0,
+    'server code appears to have been placed in a browser folder: ' + offenders.join(', '));
+});
+
+t.test('no browser file carries a Vercel handler signature', () => {
+  // The same shuffle, caught a second way: an api/ route dropped into apps/
+  // exports a default request handler and reads process.env.
+  const offenders = [];
+  const scan = (dir) => {
+    fs.readdirSync(path.join(ROOT, dir)).forEach((f) => {
+      const rel = dir + '/' + f;
+      if (fs.statSync(path.join(ROOT, rel)).isDirectory()) return scan(rel);
+      if (!f.endsWith('.js')) return;
+      const src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
+      if (/export default async function handler\s*\(\s*req\s*,\s*res/.test(src)) {
+        offenders.push(rel);
+      }
+    });
+  };
+  scan('apps');
+  scan('js');
+  t.equal(offenders.length, 0,
+    'an API route appears to have been placed in a browser folder: ' + offenders.join(', '));
+});
+
 /* ---- App contract ------------------------------------------------------ */
 
 t.test('every non-stub registered app has a module in apps/', () => {
