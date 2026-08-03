@@ -281,6 +281,165 @@ t.test('bounced and complained addresses cannot be hand-resubscribed', () => {
     'unsuppressEmail must refuse to clear provider-set states');
 });
 
+/* ---- v2.1: view refresh -------------------------------------------------- */
+
+t.test('every view refetches its data on entry', () => {
+  // mount() runs once; showView() runs on every visit. If the view renders
+  // only repaint what mount() loaded, numbers rot: tag a contact, come back
+  // to Lists, and a dynamic list still shows its old count.
+  const src = read('apps/mailme.js');
+  t.assert(/const VIEW_LOADERS = \{/.test(src),
+    'each view must declare which loaders it needs on entry');
+  ['dashboard', 'contacts', 'lists', 'import', 'campaigns'].forEach((v) => {
+    t.assert(new RegExp(v + ':\\s*\\[').test(src),
+      'VIEW_LOADERS is missing an entry for ' + v);
+  });
+  const renders = src.slice(src.indexOf('this._renders = {'));
+  const block = renders.slice(0, renders.indexOf('};'));
+  ['dashboard', 'contacts', 'lists', 'import', 'campaigns'].forEach((v) => {
+    t.assert(block.includes("refreshView('" + v + "')"),
+      v + ' must refresh on entry, not just repaint stale state');
+  });
+});
+
+t.test('the campaigns view reloads lists, so a new list appears in the composer', () => {
+  // A list saved on the Lists screen that is missing from the campaign
+  // dropdown reads as a failed save.
+  const src = read('apps/mailme.js');
+  const loaders = src.slice(src.indexOf('const VIEW_LOADERS'));
+  const campaigns = loaders.slice(loaders.indexOf('campaigns:'), loaders.indexOf('};'));
+  t.assert(campaigns.includes('loadLists'),
+    'entering Campaigns must reload lists for the composer dropdown');
+  const lists = loaders.slice(loaders.indexOf('lists:'), loaders.indexOf('import:'));
+  t.assert(lists.includes('loadContacts'),
+    'list member counts depend on contacts, so Lists must reload them too');
+});
+
+t.test('a refresh never clobbers an open editor', () => {
+  // Re-rendering an editor rebuilds its inputs from state, wiping anything
+  // half-typed. A background refresh must leave it alone.
+  const src = read('apps/mailme.js');
+  t.assert(/if \(!state\.editingList\) renderListEditor\(\)/.test(src),
+    'the list editor must not be re-rendered while it is open');
+  t.assert(/if \(!state\.editingCampaign\) renderComposer\(\)/.test(src),
+    'the composer must not be re-rendered while it is open');
+});
+
+t.test('a failed refresh keeps the previous numbers rather than blanking', () => {
+  const src = stripComments(read('apps/mailme.js'));
+  const fn = src.slice(src.indexOf('async function refreshView'));
+  const body = fn.slice(0, fn.indexOf('\n    }\n'));
+  t.assert(body.includes('catch'), 'refreshView must catch fetch failures');
+  t.assert(body.includes('finally'),
+    'the refreshing flag must clear in a finally, or a failure locks the button forever');
+});
+
+t.test('the stamp ticker is torn down on unmount', () => {
+  // A stray interval would keep firing against a detached root forever.
+  const src = read('apps/mailme.js');
+  t.assert(src.includes('clearInterval(this._stampTimer)'),
+    'unmount must clear the stamp interval');
+});
+
+t.test('freshness is visible, not assumed', () => {
+  // Same reasoning as BackBone's "Data through" stamp: a number with no
+  // freshness indicator gets trusted long after it stopped being true.
+  const src = read('apps/mailme.js');
+  t.assert(src.includes('data-mm-stamp'), 'views must show a freshness stamp');
+  t.assert(src.includes('data-mm-refresh'), 'views must offer a manual refresh');
+});
+
+/* ---- v3: sources, compliance, unsubscribe -------------------------------- */
+
+t.test('the unsubscribe endpoint is public by design and token-verified', () => {
+  // An opt-out behind a login is not an opt-out. It must be reachable without
+  // a session, but every request must still carry a signed token.
+  const src = read('api/mailme/unsubscribe.js');
+  t.assert(src.includes('PUBLIC BY DESIGN'),
+    'the public opt-out must document why it has no session check');
+  t.assert(src.includes('safeEqual'), 'tokens must be compared with safeEqual, not ===');
+  t.assert(/createHmac/.test(src), 'tokens must be HMAC-signed, not guessable ids');
+  t.assert(/if \(!s\) throw new Error\("SESSION_SECRET is not set"\)/.test(src),
+    'a missing secret must fail closed rather than accept unverified tokens');
+});
+
+t.test('the unsubscribe URL never carries an email address', () => {
+  // A raw address in the link lets anyone unsubscribe anyone by editing it,
+  // and turns an intercepted link into an address disclosure.
+  const src = stripComments(read('api/mailme/unsubscribe.js'));
+  const describe = src.slice(src.indexOf('function describe'));
+  const body = describe.slice(0, describe.indexOf('\n}'));
+  t.assert(!/email/.test(body),
+    'the public page payload must not echo the contact email back');
+});
+
+t.test('a public unsubscribe page exists outside the shell', () => {
+  // Loading the whole shell for a logged-out stranger would bounce them to a
+  // login screen, which is a broken opt-out.
+  t.assert(exists('unsubscribe.html'), 'unsubscribe.html must exist at the root');
+  const html = read('unsubscribe.html');
+  t.assert(!/js\/shell\.js|js\/registry\.js/.test(html),
+    'the public page must not load the shell');
+  t.assert(/reason/i.test(html), 'the page should capture an unsubscribe reason');
+});
+
+t.test('all four contact sources are wired', () => {
+  const schema = read('lib/mailme/schema.js');
+  ['client', 'prospect', 'lead', 'giving'].forEach((src) => {
+    t.assert(new RegExp('"' + src + '"').test(schema), 'CONTACT_SOURCES is missing ' + src);
+  });
+  const store = read('lib/mailme/store.js');
+  t.assert(store.includes('backbone_leads'), 'leads must be read from BackBone');
+  t.assert(store.includes('getGivingRequests'), 'giving requests must be read');
+});
+
+t.test('leads and giving contacts are read-only joins, never written back', () => {
+  // They belong to other apps. MailMe stores their tags in its own overrides
+  // map rather than mutating another app's data.
+  const store = read('lib/mailme/store.js');
+  const writes = store.match(/\["SET",\s*"backbone_leads"/g) || [];
+  t.equal(writes.length, 0, 'MailMe must never write backbone_leads');
+});
+
+t.test('a contact appearing in two sources is not duplicated', () => {
+  // A lead that became a customer would otherwise be counted twice and could
+  // receive the same campaign twice.
+  const store = stripComments(read('lib/mailme/store.js'));
+  t.assert(/seen\.has\(key\)/.test(store),
+    'cross-source dedupe by email must exist');
+});
+
+t.test('settings are configurable, and the postal address ships blank', () => {
+  // It is a fact about the business that cannot be guessed, and a wrong
+  // default would be worse than an empty one.
+  const schema = read('lib/mailme/schema.js');
+  const fn = schema.slice(schema.indexOf('export function defaultSettings'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  t.assert(/line1: ""/.test(body), 'postal address must default to blank');
+  ['minDaysBetweenEmails', 'coldDailyCapStart', 'dueAt', 'skipOpenQuotes']
+    .forEach((k) => t.assert(body.includes(k), 'settings should expose ' + k));
+});
+
+t.test('campaigns surface compliance blockers and the send plan', () => {
+  const src = read('api/mailme/campaigns.js');
+  t.assert(src.includes('complianceBlockers'),
+    'a campaign must report what would make it illegal to send');
+  t.assert(src.includes('sendPlan'),
+    'a campaign must report how long the send would take under the daily cap');
+  t.assert(src.includes('applyEligibility'),
+    'the frequency cap and open-quote rules must apply to campaign recipients');
+});
+
+t.test('mixing cold prospects with warm contacts is refused', () => {
+  const schema = stripComments(read('lib/mailme/schema.js'));
+  const fn = schema.slice(schema.indexOf('export function campaignSourceConflict'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  t.assert(body.includes('identityForSource'),
+    'the conflict check must compare sending identity, not raw source');
+});
+
+
+
 import('../lib/mailme/schema.js')
   .then((mod) => {
     t.test('schema exports selectRecipients', () => {
