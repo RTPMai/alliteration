@@ -184,57 +184,132 @@ function parseCSV(text) {
 const IMPORT_STATUS_MAP = { 'attended': 'completed', 'did not attend': 'cancelled' };
 const IMPORT_BUDGET_COLS = ['Travel Budget', 'Lodging Budget', 'Event Budget', 'Onsite Travel Budget', 'Food Budget'];
 
-function mapImportRow(row) {
-  const attendees = String(row['Attendees'] || '').split(';').map((s) => s.trim()).filter(Boolean);
-  const primary = attendees[0] || 'Unknown';
-  const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
+// The standalone's exports come in two shapes, and this importer detects and
+// handles either one:
+//   "summary" — one row per trip: Trip Name, Attendees, five budget columns,
+//     one Total Spent. Collapses to one "Other" expense per trip.
+//   "detailed" — flat Type=Trip/Expense rows (Category, Amount, Trip /
+//     Project, Payment Method, Status, Notes per line item). Far better
+//     fidelity: real categories, real Pending/Approved status, itemized
+//     amounts — used whenever it's available.
+// "detailed" rows lack a trip's End Date and Attendees (only a single Date
+// and a Created By column), so those two fields default to Start Date and
+// "Unknown" and are left EDITABLE in the preview table below, rather than
+// guessed at silently.
 
-  const budgetParts = [];
-  IMPORT_BUDGET_COLS.forEach((k) => {
-    const v = Number(row[k]);
-    if (v) budgetParts.push(k.replace(' Budget', '') + ' ' + fmtMoney(v));
+const IMPORT_CATEGORY_MAP = {
+  hotels: 'Lodging', flights: 'Airfare', registration: 'Registration/Fees',
+  meals: 'Meals', other: 'Other', entertainment: 'Other'
+};
+
+function categorizeTransport(name, notes) {
+  const s = (String(name || '') + ' ' + String(notes || '')).toLowerCase();
+  if (/park/.test(s)) return 'Parking & Tolls';
+  if (/uber|lyft|taxi|cab/.test(s)) return 'Rideshare/Taxi';
+  if (/rental|hertz|avis|enterprise/.test(s)) return 'Rental Car';
+  return 'Rideshare/Taxi';
+}
+
+function tripKeyOf(title) {
+  return String(title || '').trim().toLowerCase();
+}
+
+function buildDetailedPlan(rows) {
+  const trips = [];
+  const expenses = [];
+  rows.forEach((row) => {
+    const type = String(row['Type'] || '').trim().toLowerCase();
+    if (type === 'trip') {
+      const title = String(row['Name'] || '').trim() || 'Imported trip';
+      const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
+      const startDate = String(row['Date'] || '').trim();
+      const traveler = String(row['Created By'] || '').trim() || 'Unknown';
+      trips.push({
+        key: tripKeyOf(title), title, destination: String(row['Destination'] || '').trim(),
+        purpose: 'Other', start_date: startDate, end_date: startDate, status,
+        notes: 'Imported from the standalone TravelTrack export.',
+        traveler, traveler_name: traveler
+      });
+    } else if (type === 'expense') {
+      const tripTitle = String(row['Trip / Project'] || '').trim();
+      const sourceCat = String(row['Category'] || '').trim().toLowerCase();
+      const category = sourceCat === 'transport'
+        ? categorizeTransport(row['Name'], row['Notes'])
+        : (IMPORT_CATEGORY_MAP[sourceCat] || 'Other');
+      const name = String(row['Name'] || '').trim();
+      const notes = String(row['Notes'] || '').trim();
+      const paymentMethod = String(row['Payment Method'] || '').trim().toLowerCase() === 'company card' ? 'company_card' : 'personal_reimburse';
+      const srcStatus = String(row['Status'] || '').trim().toLowerCase();
+      const finalStatus = srcStatus === 'approved' ? 'approved' : (srcStatus === 'rejected' ? 'rejected' : 'pending');
+      expenses.push({
+        tripKey: tripKeyOf(tripTitle), tripTitleForDisplay: tripTitle || '(no trip)',
+        date: String(row['Date'] || '').trim(), category,
+        amount: Number(row['Amount']) || 0, payment_method: paymentMethod,
+        description: notes ? (name ? name + ' — ' + notes : notes) : (name || 'Imported expense'),
+        finalStatus
+      });
+    }
   });
-  const miles = Number(row['Miles Redeemed']) || 0;
-  const totalSpent = Number(row['Total Spent']) || 0;
-  const netCost = Number(row['Net Cost']);
+  return { trips, expenses };
+}
 
-  const startDate = String(row['Start Date'] || '').trim();
-  const endDate = String(row['End Date'] || '').trim() || startDate;
+function buildSummaryPlan(rows) {
+  const trips = [];
+  const expenses = [];
+  rows.forEach((row) => {
+    const attendees = String(row['Attendees'] || '').split(';').map((s) => s.trim()).filter(Boolean);
+    const primary = attendees[0] || 'Unknown';
+    const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
 
-  const notesLines = [];
-  if (attendees.length > 1) notesLines.push('Attendees: ' + attendees.join(', '));
-  if (budgetParts.length) notesLines.push('Budget — ' + budgetParts.join(', '));
-  if (miles) notesLines.push('Miles redeemed: ' + miles.toLocaleString());
-  notesLines.push('Imported from the standalone TravelTrack export.');
+    const budgetParts = [];
+    IMPORT_BUDGET_COLS.forEach((k) => {
+      const v = Number(row[k]);
+      if (v) budgetParts.push(k.replace(' Budget', '') + ' ' + fmtMoney(v));
+    });
+    const miles = Number(row['Miles Redeemed']) || 0;
+    const totalSpent = Number(row['Total Spent']) || 0;
+    const netCost = Number(row['Net Cost']);
+    const startDate = String(row['Start Date'] || '').trim();
+    const endDate = String(row['End Date'] || '').trim() || startDate;
+    const title = String(row['Trip Name'] || '').trim() || 'Imported trip';
 
-  const trip = {
-    title: String(row['Trip Name'] || '').trim() || 'Imported trip',
-    destination: String(row['Destination'] || '').trim(),
-    purpose: 'Other',
-    start_date: startDate,
-    end_date: endDate,
-    status,
-    notes: notesLines.join('\n'),
-    traveler: primary,
-    traveler_name: primary
-  };
+    const notesLines = [];
+    if (attendees.length > 1) notesLines.push('Attendees: ' + attendees.join(', '));
+    if (budgetParts.length) notesLines.push('Budget — ' + budgetParts.join(', '));
+    if (miles) notesLines.push('Miles redeemed: ' + miles.toLocaleString());
+    notesLines.push('Imported from the standalone TravelTrack export.');
 
-  let expense = null;
-  if (totalSpent > 0) {
-    let desc = 'Historical import';
-    if (budgetParts.length) desc += ' — ' + budgetParts.join(', ');
-    if (miles) desc += '. Miles redeemed: ' + miles.toLocaleString() + '.';
-    if (!Number.isNaN(netCost) && netCost !== totalSpent) desc += ' Net cost after miles: ' + fmtMoney(netCost) + '.';
-    expense = {
-      date: endDate || startDate,
-      category: 'Other',
-      amount: totalSpent,
-      payment_method: 'company_card',
-      description: desc
-    };
+    trips.push({
+      key: tripKeyOf(title), title, destination: String(row['Destination'] || '').trim(),
+      purpose: 'Other', start_date: startDate, end_date: endDate, status,
+      notes: notesLines.join('\n'), traveler: primary, traveler_name: primary
+    });
+
+    if (totalSpent > 0) {
+      let desc = 'Historical import';
+      if (budgetParts.length) desc += ' — ' + budgetParts.join(', ');
+      if (miles) desc += '. Miles redeemed: ' + miles.toLocaleString() + '.';
+      if (!Number.isNaN(netCost) && netCost !== totalSpent) desc += ' Net cost after miles: ' + fmtMoney(netCost) + '.';
+      expenses.push({
+        tripKey: tripKeyOf(title), tripTitleForDisplay: title, date: endDate || startDate,
+        category: 'Other', amount: totalSpent, payment_method: 'company_card',
+        description: desc, finalStatus: 'reimbursed'
+      });
+    }
+  });
+  return { trips, expenses };
+}
+
+function buildImportPlan(rows) {
+  if (!rows.length) return { trips: [], expenses: [], format: 'empty' };
+  const keys = Object.keys(rows[0]);
+  if (keys.includes('Type') && keys.includes('Category')) {
+    return Object.assign({ format: 'detailed' }, buildDetailedPlan(rows));
   }
-
-  return { trip, expense, attendeesCount: attendees.length };
+  if (keys.includes('Trip Name')) {
+    return Object.assign({ format: 'summary' }, buildSummaryPlan(rows));
+  }
+  return { trips: [], expenses: [], format: 'unknown' };
 }
 
 export default {
@@ -1188,63 +1263,85 @@ export default {
       if (data.canEditOrg) renderImportPanel();
     }
 
-    async function runImport(mapped, onProgress) {
-      const results = { created: 0, expenses: 0, errors: [] };
+    async function runImport(plan, onProgress) {
+      const results = { tripsCreated: 0, tripsSkipped: 0, expensesCreated: 0, errors: [] };
+      const total = plan.trips.length + plan.expenses.length;
       let done = 0;
-      for (const { trip, expense } of mapped) {
-        let newTrip = null;
+      const tick = () => { done++; if (onProgress) onProgress(done, total); };
+
+      // Existing trips (already in the app before this import) count as
+      // matches too, so re-running an import — or importing the detailed
+      // export after the summary export already created trips — does not
+      // create duplicates.
+      const idByKey = new Map();
+      data.trips.forEach((t) => idByKey.set(tripKeyOf(t.title), t.id));
+
+      for (const trip of plan.trips) {
+        if (idByKey.has(trip.key)) { results.tripsSkipped++; tick(); continue; }
         try {
           const tripRes = await ctx.api.post(ENDPOINTS.ttTrips, trip);
-          newTrip = tripRes && tripRes.trip;
+          const newTrip = tripRes && tripRes.trip;
           if (!newTrip) throw new Error('Server did not return the created trip');
-          results.created++;
+          idByKey.set(trip.key, newTrip.id);
+          results.tripsCreated++;
         } catch (err) {
           console.error('[traveltrack import] trip failed:', trip.title, err);
           results.errors.push((trip.title || 'row') + ': ' + (err && err.message ? err.message : 'could not create trip'));
-          done++;
-          if (onProgress) onProgress(done, mapped.length);
+        }
+        tick();
+      }
+
+      for (const expense of plan.expenses) {
+        const tripId = idByKey.get(expense.tripKey);
+        if (!tripId) {
+          results.errors.push('No trip matched "' + expense.tripTitleForDisplay + '" — expense skipped (' + fmtMoney(expense.amount) + ', ' + expense.date + ')');
+          tick();
           continue;
         }
-        if (expense && newTrip) {
-          try {
-            const expRes = await ctx.api.post(ENDPOINTS.ttExpenses, { ...expense, trip_id: newTrip.id });
-            const newExpense = expRes && expRes.expense;
-            if (newExpense) {
-              // Historical trips are already closed — mark the expense
-              // reimbursed rather than leaving it sitting in "pending".
-              await ctx.api.request(ENDPOINTS.ttExpenses + '?id=' + encodeURIComponent(newExpense.id), {
-                method: 'PATCH', body: { status: 'reimbursed' }
-              });
-            }
-            results.expenses++;
-          } catch (err) {
-            console.error('[traveltrack import] expense failed:', trip.title, err);
-            results.errors.push(trip.title + ' (expense): ' + (err && err.message ? err.message : 'could not create expense'));
+        try {
+          const expRes = await ctx.api.post(ENDPOINTS.ttExpenses, {
+            date: expense.date, category: expense.category, amount: expense.amount,
+            payment_method: expense.payment_method, description: expense.description, trip_id: tripId
+          });
+          const newExpense = expRes && expRes.expense;
+          if (newExpense && expense.finalStatus && expense.finalStatus !== 'pending') {
+            // POST always starts an expense as "pending" (nobody can
+            // self-approve on creation) — the source file's real status is
+            // applied as a follow-up PATCH.
+            await ctx.api.request(ENDPOINTS.ttExpenses + '?id=' + encodeURIComponent(newExpense.id), {
+              method: 'PATCH', body: { status: expense.finalStatus }
+            });
           }
+          results.expensesCreated++;
+        } catch (err) {
+          console.error('[traveltrack import] expense failed:', expense.tripTitleForDisplay, err);
+          results.errors.push(expense.tripTitleForDisplay + ' (' + expense.description + '): ' + (err && err.message ? err.message : 'could not create expense'));
         }
-        done++;
-        if (onProgress) onProgress(done, mapped.length);
+        tick();
       }
+
       return results;
     }
 
     function renderImportPanel() {
       $('#importPanel').innerHTML = `
         <div class="settings-note">
-          Paste or upload a CSV with the same columns as the standalone export
-          (Trip Name, Destination, Status, Start Date, End Date, Attendees,
-          the five budget columns, Total Spent, Miles Redeemed, Net Cost).
-          A trip with more than one attendee is attributed to the first
-          person listed — everyone else is named in the trip's notes, not
-          modeled as their own trip. Each trip with spend gets one "Other"
-          expense for the total, marked reimbursed since these already
-          happened. Nothing is created until you review the preview below
-          and click Import.
+          Paste or upload a CSV or Excel-exported CSV from the standalone app.
+          Two formats are recognized automatically: the trip-summary export
+          (Trip Name, Attendees, budget columns, one Total Spent per trip)
+          and the detailed export (Type, Category, Trip / Project — real
+          itemized expenses with real Pending/Approved status), which is
+          used when available for far better detail. The detailed format
+          doesn't carry a trip's end date or attendee list, so those default
+          to the start date / "Unknown" and are editable right in the
+          preview below before anything is created. Trips matching one
+          already in the app (by title) are not duplicated — only new
+          expenses are added against them.
         </div>
         <div id="importErr"></div>
         <div class="field"><label>CSV file</label><input type="file" id="importFile" accept=".csv,text/csv"></div>
         <div class="field"><label>...or paste CSV</label>
-          <textarea id="importPaste" placeholder="Trip Name,Destination,Status,Start Date,End Date,Attendees,..." style="min-height:90px;font-family:var(--font-mono);font-size:12px"></textarea>
+          <textarea id="importPaste" placeholder="Paste CSV here..." style="min-height:90px;font-family:var(--font-mono);font-size:12px"></textarea>
         </div>
         <button class="btn btn-sm" id="importParseBtn" type="button">Preview</button>
         <div id="importPreview"></div>
@@ -1262,50 +1359,101 @@ export default {
       $('#importParseBtn').addEventListener('click', () => {
         const rows = parseCSV(pasteArea.value);
         $('#importErr').innerHTML = '';
+        $('#importPreview').innerHTML = '';
         if (!rows.length) {
           $('#importErr').innerHTML = '<div class="form-err">No rows found. Check the file has a header row and at least one data row.</div>';
-          $('#importPreview').innerHTML = '';
           return;
         }
 
-        const mapped = rows.map(mapImportRow);
+        const plan = buildImportPlan(rows);
+        if (plan.format === 'unknown') {
+          $('#importErr').innerHTML = '<div class="form-err">Unrecognized columns — expected either "Trip Name" (summary export) or "Type" + "Category" (detailed export).</div>';
+          return;
+        }
+
+        const existingKeys = new Set(data.trips.map((t) => tripKeyOf(t.title)));
+        const expensesByKey = {};
+        plan.expenses.forEach((e) => { (expensesByKey[e.tripKey] = expensesByKey[e.tripKey] || []).push(e); });
+
         $('#importPreview').innerHTML = `
-          <div class="tbl-wrap" style="margin-top:12px">
+          <div class="settings-note">Detected format: ${plan.format === 'detailed' ? 'detailed (itemized expenses)' : 'summary (one total per trip)'}.</div>
+          <div class="tbl-wrap" style="margin-top:8px">
             <table>
-              <thead><tr><th>Trip</th><th>Status</th><th>Dates</th><th>Traveler</th><th class="num">Expense</th></tr></thead>
+              <thead><tr><th>Trip</th><th>Status</th><th>Start date</th><th>End date</th><th>Traveler</th><th class="num">Expenses</th></tr></thead>
               <tbody>
-                ${mapped.map(({ trip, expense, attendeesCount }) => `
-                  <tr>
-                    <td>${esc(trip.title)}${attendeesCount > 1 ? ' <span class="chip muted">+' + (attendeesCount - 1) + ' more</span>' : ''}</td>
-                    <td><span class="chip ${statusClass(trip.status)}">${esc(labelOf(TRIP_STATUSES, trip.status))}</span></td>
-                    <td>${fmtDate(trip.start_date)}${trip.end_date !== trip.start_date ? ' – ' + fmtDate(trip.end_date) : ''}</td>
-                    <td>${esc(trip.traveler)}</td>
-                    <td class="num">${expense ? fmtMoney(expense.amount) : '—'}</td>
-                  </tr>
-                `).join('')}
+                ${plan.trips.map((trip) => {
+                  const already = existingKeys.has(trip.key);
+                  const lineCount = (expensesByKey[trip.key] || []).length;
+                  const lineTotal = (expensesByKey[trip.key] || []).reduce((s, e) => s + e.amount, 0);
+                  return `
+                    <tr data-trip-key="${esc(trip.key)}">
+                      <td>${esc(trip.title)}${already ? ' <span class="chip muted">already exists</span>' : ''}</td>
+                      <td><span class="chip ${statusClass(trip.status)}">${esc(labelOf(TRIP_STATUSES, trip.status))}</span></td>
+                      <td>${fmtDate(trip.start_date)}</td>
+                      <td><input type="date" class="import-end-date" data-key="${esc(trip.key)}" value="${esc(trip.end_date)}" style="padding:4px 6px;font-size:12px;width:130px"></td>
+                      <td><input type="text" class="import-traveler" data-key="${esc(trip.key)}" value="${esc(trip.traveler)}" style="padding:4px 6px;font-size:12px;width:120px"></td>
+                      <td class="num">${lineCount ? lineCount + ' — ' + fmtMoney(lineTotal) : '—'}</td>
+                    </tr>`;
+                }).join('')}
               </tbody>
             </table>
           </div>
+          ${plan.expenses.length ? `
+            <div class="section-hd">Expense lines (${plan.expenses.length})</div>
+            <div class="tbl-wrap">
+              <table>
+                <thead><tr><th>Trip</th><th>Date</th><th>Category</th><th>Description</th><th>Status</th><th class="num">Amount</th></tr></thead>
+                <tbody>
+                  ${plan.expenses.map((e) => `
+                    <tr>
+                      <td>${esc(e.tripTitleForDisplay)}</td><td>${fmtDate(e.date)}</td><td>${esc(e.category)}</td>
+                      <td>${esc(e.description)}</td>
+                      <td><span class="chip ${statusClass(e.finalStatus)}">${esc(labelOf(EXPENSE_STATUSES, e.finalStatus))}</span></td>
+                      <td class="num">${fmtMoney(e.amount)}</td>
+                    </tr>
+                  `).join('')}
+                </tbody>
+              </table>
+            </div>
+          ` : ''}
           <div class="form-actions">
-            <button class="btn" id="importRunBtn" type="button">Import ${mapped.length} trip${mapped.length === 1 ? '' : 's'}</button>
+            <button class="btn" id="importRunBtn" type="button">Import ${plan.trips.length} trip${plan.trips.length === 1 ? '' : 's'}${plan.expenses.length ? ' and ' + plan.expenses.length + ' expense' + (plan.expenses.length === 1 ? '' : 's') : ''}</button>
           </div>
           <div id="importResult"></div>
         `;
 
         $('#importRunBtn').addEventListener('click', async () => {
           const btn = $('#importRunBtn');
+
+          // Pick up any edits made to End date / Traveler in the preview
+          // before locking the plan in.
+          {
+            const container = $('#importPreview');
+            container.querySelectorAll('.import-end-date').forEach((input) => {
+              const t = plan.trips.find((x) => x.key === input.dataset.key);
+              if (t && input.value) t.end_date = input.value;
+            });
+            container.querySelectorAll('.import-traveler').forEach((input) => {
+              const t = plan.trips.find((x) => x.key === input.dataset.key);
+              if (t && input.value.trim()) { t.traveler = input.value.trim(); t.traveler_name = input.value.trim(); }
+            });
+          }
+
+          const total = plan.trips.length + plan.expenses.length;
           btn.disabled = true;
-          btn.textContent = 'Importing 0 of ' + mapped.length + '…';
+          btn.textContent = 'Importing 0 of ' + total + '…';
           $('#importResult').innerHTML = '';
           try {
-            const results = await runImport(mapped, (done, total) => {
-              btn.textContent = 'Importing ' + done + ' of ' + total + '…';
+            const results = await runImport(plan, (done, tot) => {
+              btn.textContent = 'Importing ' + done + ' of ' + tot + '…';
             });
             await loadAll();
             renderDashboard();
             $('#importResult').innerHTML = `
               <div class="settings-note" style="margin-top:12px">
-                Created ${results.created} trip${results.created === 1 ? '' : 's'} and ${results.expenses} expense${results.expenses === 1 ? '' : 's'}.
+                Created ${results.tripsCreated} trip${results.tripsCreated === 1 ? '' : 's'}
+                ${results.tripsSkipped ? '(' + results.tripsSkipped + ' already existed, skipped)' : ''}
+                and ${results.expensesCreated} expense${results.expensesCreated === 1 ? '' : 's'}.
                 ${results.errors.length ? '<br>Errors: ' + results.errors.map((e) => esc(e)).join('; ') : ''}
               </div>`;
             btn.textContent = 'Done';
