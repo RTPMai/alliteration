@@ -208,13 +208,39 @@ body[data-app="traveltrack"] {
   --accent-tint: #EDF6EB;
 }
 
-/* CrewCore's accent matches its logo mark: a lighter, brighter blue than
-   BackBone's #1B5DAB. Distinct enough side by side that the two blues do not
-   read as the same app. */
+/* CrewCore's accent is RED, per the confirmed logo lineup (registry.js
+   accent field). An earlier pass shipped this block with #4A90E2, a blue
+   pulled from a draft mark before the logo was finalized; that blue is gone
+   from the shell now. Corrected Aug 3, 2026. */
 body[data-app="crewcore"] {
-  --accent:      #4A90E2;
-  --accent-deep: #3372BC;
-  --accent-tint: #EDF4FC;
+  --accent:      #D61623;
+  --accent-deep: #AB111C;
+  --accent-tint: #FAE7E9;
+}
+
+/* MailMe's accent matches its confirmed logo mark: a slate/muted blue,
+   deliberately quieter than BackBone's or CrewCore's blues since this app
+   sends real email once built. */
+body[data-app="mailme"] {
+  --accent:      #85A0C6;
+  --accent-deep: #6A809E;
+  --accent-tint: #F2F5F9;
+}
+
+/* TeleTally's accent matches its confirmed logo mark: dark navy/indigo,
+   with the periwinkle-blue icon staying in the SVG mark itself rather than
+   becoming a second CSS variable (only one accent per app in this scale). */
+body[data-app="teletally"] {
+  --accent:      #282A72;
+  --accent-deep: #20215B;
+  --accent-tint: #E9E9F0;
+}
+
+/* WebsiteWidget's accent matches its confirmed logo mark: teal. */
+body[data-app="websitewidget"] {
+  --accent:      #02A9A5;
+  --accent-deep: #018784;
+  --accent-tint: #E5F6F6;
 }
 
 /* ==========================================================================
