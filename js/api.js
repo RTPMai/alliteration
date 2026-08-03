@@ -149,7 +149,8 @@ export const ENDPOINTS = {
   ttTrips:         '/api/traveltrack/trips',
   ttExpenses:      '/api/traveltrack/expenses',
   ttMiles:         '/api/traveltrack/miles',
-  ttSettings:      '/api/traveltrack/settings'
+  ttSettings:      '/api/traveltrack/settings',
+  ttReceipt:       '/api/traveltrack/receipt'
 };
 
 /* ------------------------------------------------------------------ *
@@ -334,10 +335,14 @@ const MOCK_DATA = {
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
   [ENDPOINTS.ttMiles]: () => ({ accounts: [] }),
   [ENDPOINTS.ttSettings]: () => ({
-    org: { mileage_rate: 0.67, per_diem_rate: 0, approval_threshold: 500, policy_notes: '' },
+    org: { mileage_rate: 0.67, per_diem_rate: 0, approval_threshold: 500, policy_notes: '', redemption_label: 'Miles / Rewards' },
     account: { home_airport: '', default_payment_method: 'personal_reimburse' },
     can_edit_org: true
-  })
+  }),
+  // Receipt upload/extract needs Blob + the Anthropic API, neither of which
+  // exists offline. Mock returns empty fields so the form still opens under
+  // MOCK; it just prefills nothing.
+  [ENDPOINTS.ttReceipt]: () => ({ ok: true, fields: { date: '', amount: '', description: '', category: '' }, advisory: true })
 };
 
 function mockResponse(path, method, body, query) {
