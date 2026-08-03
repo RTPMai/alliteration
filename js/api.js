@@ -168,7 +168,10 @@ export const ENDPOINTS = {
   // Not called from the front end: the sending provider POSTs to it directly.
   // Listed so the path has one canonical home rather than being typed into a
   // provider dashboard from memory.
-  mmWebhook:       '/api/mailme/webhook'
+  mmWebhook:       '/api/mailme/webhook',
+  mmSettings:      '/api/mailme/settings',
+  // Public, called from unsubscribe.html rather than the shell.
+  mmUnsubscribe:   '/api/mailme/unsubscribe'
 };
 
 /* ------------------------------------------------------------------ *
@@ -394,6 +397,23 @@ const MOCK_DATA = {
   },
   [ENDPOINTS.mmCampaigns]: () => ({ campaigns: [] }),
   [ENDPOINTS.mmLists]: () => ({ lists: [] }),
+  [ENDPOINTS.mmSettings]: () => ({
+    settings: {
+      companyName: 'P&M Apparel', fromName: '', replyToMode: 'account-manager', replyToFixed: '',
+      postalAddress: { line1: '', line2: '', city: '', state: '', postalCode: '' },
+      unsubscribeUrl: '',
+      policy: { minDaysBetweenEmails: 14, coldDailyCapStart: 20, coldDailyCapMax: 200,
+        coldRampDays: 30, clientDailyCap: 1000, skipOpenQuotes: true, skipInvalidVerification: true },
+      reorder: { dueAt: 1, overdueAt: 1.5, lapsedAt: 3, minOrders: 3, minGapDays: 7 },
+      coldStartedAt: null
+    },
+    blockers: [
+      { field: 'postalAddress', text: 'A physical postal address is required in every commercial email by CAN-SPAM. Missing: line1, city, state, postalCode.' },
+      { field: 'unsubscribeUrl', text: 'Every commercial email needs a working unsubscribe link.' },
+      { field: 'fromName', text: 'A from-name is required so recipients can tell who is writing.' }
+    ],
+    footerPreview: '', coldCapToday: 20, rampDay: 0
+  }),
   [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } })
 };
 
