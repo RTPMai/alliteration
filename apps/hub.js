@@ -292,21 +292,18 @@ export default {
       })());
     }
 
-    // ---- MailMe: mailable contacts, and anything suppressed. ----
+    // ---- MailMe: mailable contacts, split by audience. ----
     if (has('mailme')) {
       jobs.push((async () => {
         try {
           const d = await api.get(ENDPOINTS.mmContacts);
-          const contacts = listOf(d, ['contacts']) || [];
-          const suppressed = contacts.filter((c) =>
-            c && ['unsubscribed', 'bounced', 'complained'].includes(c.status)).length;
-          const mailable = contacts.length - suppressed;
-          const noEmail = (d && d.customersWithoutEmail) || 0;
+          const c = (d && d.counts) || {};
+          const suppressed = (c.unsubscribed || 0) + (c.bounced || 0) + (c.complained || 0);
           setCard('mailme',
-            [[String(mailable), 'Mailable']].concat(
-              suppressed ? [[String(suppressed), 'Suppressed']] : []),
-            noEmail ? noEmail + ' roster customer' + (noEmail === 1 ? '' : 's') + ' with no email'
-                    : 'Every roster customer has an email');
+            [[String(c.mailable || 0), 'Mailable']].concat(
+              c.prospect ? [[String(c.prospect), 'Prospects']] : []),
+            suppressed ? suppressed + ' suppressed, never mailed'
+                       : 'Nobody has opted out yet');
         } catch (e) { setCard('mailme', [], 'Could not load contacts.'); }
       })());
     }
