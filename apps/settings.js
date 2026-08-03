@@ -270,7 +270,7 @@ export default {
 
       $('#userList').innerHTML =
         '<table class="u-table"><thead><tr>' +
-          '<th>Person</th><th>Role</th><th>Last signed in</th><th></th>' +
+          '<th>Person</th><th>Role</th><th>Superuser</th><th>Last signed in</th><th></th>' +
         '</tr></thead><tbody>' +
         users.map((u) => {
           const role = roles[u.role] || {};
@@ -292,6 +292,17 @@ export default {
                   ).join('') +
                 '</select>') +
               '<div class="app-chips">' + appChips(role.apps) + '</div></td>' +
+            // Separate from role on purpose: an account can be "admin" and
+            // still not see stub apps like CrewCore's pay/review data unless
+            // this is checked. Unlike role, editing your own is allowed —
+            // it only changes what stub placeholders you can see, nothing
+            // about sign-in access, so there is no lockout risk.
+            '<td>' +
+              '<label class="su-toggle" title="Sees not-yet-built apps in the rail (CrewCore, MailMe, etc.)">' +
+                '<input type="checkbox" data-superuser-user="' + esc(u.username) + '"' +
+                  (u.superuser ? ' checked' : '') + '>' +
+              '</label>' +
+            '</td>' +
             '<td class="u-sub">' + (u.last_login ? esc(new Date(u.last_login).toLocaleDateString()) : 'Never') + '</td>' +
             '<td class="u-actions">' +
               '<button class="set-btn" data-reset="' + esc(u.username) + '">Reset password</button>' +
@@ -470,23 +481,43 @@ export default {
     // single independent value, so there is no half-made state to batch.
     root.addEventListener('change', async (e) => {
       const sel = e.target.closest('[data-role-user]');
-      if (!sel) return;
-      const username = sel.dataset.roleUser;
-      const next = sel.value;
-      sel.disabled = true;
-      try {
-        await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
-          method: 'PATCH',
-          body: { role: next }
-        });
-        // Sessions carry the role in the cookie, so a signed-in user keeps
-        // their old access until they next sign in. Worth saying out loud.
-        say(username + ' is now ' + (roles[next] ? (roles[next].label || next) : next) +
-            '. Takes effect the next time they sign in.', 'ok');
-        await load();
-      } catch (err) {
-        say(err.message || 'Could not change that role', 'err');
-        await load(); // reload puts the dropdown back on their real role
+      if (sel) {
+        const username = sel.dataset.roleUser;
+        const next = sel.value;
+        sel.disabled = true;
+        try {
+          await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
+            method: 'PATCH',
+            body: { role: next }
+          });
+          // Sessions carry the role in the cookie, so a signed-in user keeps
+          // their old access until they next sign in. Worth saying out loud.
+          say(username + ' is now ' + (roles[next] ? (roles[next].label || next) : next) +
+              '. Takes effect the next time they sign in.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not change that role', 'err');
+          await load(); // reload puts the dropdown back on their real role
+        }
+        return;
+      }
+
+      const su = e.target.closest('[data-superuser-user]');
+      if (su) {
+        const username = su.dataset.superuserUser;
+        const next = su.checked;
+        su.disabled = true;
+        try {
+          await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
+            method: 'PATCH',
+            body: { superuser: next }
+          });
+          say(username + (next ? ' can now see not-yet-built apps.' : ' no longer sees not-yet-built apps.'), 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not change that setting', 'err');
+          await load();
+        }
       }
     });
 
