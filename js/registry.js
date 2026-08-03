@@ -161,7 +161,8 @@ export const APPS = [
       ['contacts', 'Contacts'],
       ['lists', 'Lists'],
       ['import', 'Import'],
-      ['campaigns', 'Campaigns']
+      ['campaigns', 'Campaigns'],
+      ['settings', 'Settings']
     ],
     defaultView: 'dashboard',
     // BUILT, but deliberately still ungranted. stub:false means the real app
