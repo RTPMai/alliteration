@@ -168,6 +168,39 @@ export const APPS = [
       'the BackBone roster) sortable by tag/segment, campaign sends through ' +
       'a provider (Postmark/Resend/SendGrid), per-contact and per-link ' +
       'open/click tracking, and unsubscribe handling with a captured reason.'
+  },
+  {
+    id: 'teletally',
+    name: 'TeleTally',
+    w1: 'Tele', w2: 'Tally', letter: 'T',
+    role: 'Who is on the phone',
+    blurb: 'Call activity, answering performance, team usage.',
+    accent: '#282A72',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    views: [
+      ['dashboard', 'Dashboard']
+    ],
+    defaultView: 'dashboard',
+    stub: true,
+    stubNote: 'Planned. Connects to the shop phones to track call activity: ' +
+      'total calls, duration, and volume, who is answering vs. missing ' +
+      'calls, talk time and response time, and performance comparison ' +
+      'across the team.'
+  },
+  {
+    id: 'websitewidget',
+    name: 'WebsiteWidget',
+    w1: 'Website', w2: 'Widget', letter: 'W',
+    role: 'What the website is doing',
+    blurb: 'Visitors, traffic sources, site performance for PMApparel.com.',
+    accent: '#02A9A5',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    views: [
+      ['dashboard', 'Dashboard']
+    ],
+    defaultView: 'dashboard',
+    stub: true,
+    stubNote: 'Planned. Web analytics for PMApparel.com: visitors, page ' +
+      'views, and sessions, traffic source, which content converts, and ' +
+      'overall site performance and trends.'
   }
 ];
 
