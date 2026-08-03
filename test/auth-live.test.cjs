@@ -73,7 +73,10 @@ t.test('every API endpoint authenticates or is public by documented design', () 
   // why not. A new endpoint with none of these fails here on purpose.
   const AUTH_MARKS = [
     'requireAuth', 'getSession', 'CRON_SECRET', 'SYNC_SECRET',
-    'JOTFORM_WEBHOOK_TOKEN', 'ADMIN_KEY', 'PUBLIC BY DESIGN'
+    'JOTFORM_WEBHOOK_TOKEN', 'ADMIN_KEY', 'PUBLIC BY DESIGN',
+    // MailMe's provider webhook. Not public: it is secret-checked with
+    // safeEqual and fails closed when the secret is unset.
+    'MAILME_WEBHOOK_SECRET'
   ];
   const offenders = [];
   const scan = (dir) => {
