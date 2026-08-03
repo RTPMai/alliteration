@@ -82,6 +82,7 @@ export default async function handler(req, res) {
       if (body.name !== undefined) patch.name = body.name;
       if (body.role !== undefined) patch.role = body.role;
       if (body.password !== undefined) patch.password = body.password;
+      if (body.superuser !== undefined) patch.superuser = body.superuser === true;
       const user = await updateUser(username, patch);
       return res.status(200).json({ ok: true, user });
     }
