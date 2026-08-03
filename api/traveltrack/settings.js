@@ -10,9 +10,40 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
+import { getUser, getRole, listUsers } from "../../lib/users.js";
 import { validateOrgSettings, validateAccountSettings } from "../../lib/traveltrack/schema.js";
 import { getOrgSettings, saveOrgSettings, getAccountSettings, saveAccountSettings } from "../../lib/traveltrack/store.js";
+import { listTrips } from "../../lib/traveltrack/store.js";
+
+// Everyone who can be named on a trip: real shell accounts, plus the org's
+// extra roster (people without logins), plus anyone already sitting on an
+// existing trip so historical names never fall out of the picker.
+// De-duplicated case-insensitively, first spelling wins.
+async function peopleList(org) {
+  const names = [];
+  try {
+    (await listUsers()).forEach((u) => { if (u && u.name) names.push(u.name); });
+  } catch (e) { /* user store unreadable — fall through to the other sources */ }
+  (org.team_members || []).forEach((n) => names.push(n));
+  try {
+    (await listTrips()).forEach((t) => {
+      (t.attendees || []).forEach((n) => names.push(n));
+      if (t.traveler_name) names.push(t.traveler_name);
+    });
+  } catch (e) { /* trips unreadable — the other sources still stand */ }
+
+  const seen = new Set();
+  return names
+    .map((n) => String(n || "").trim())
+    .filter((n) => {
+      if (!n) return false;
+      const k = n.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    })
+    .sort((a, b) => a.localeCompare(b));
+}
 
 function parseBody(req) {
   let b = req.body;
@@ -37,7 +68,8 @@ export default async function handler(req, res) {
     if (req.method === "GET") {
       const org = await getOrgSettings();
       const account = await getAccountSettings(sess.username);
-      return res.status(200).json({ org, account, can_edit_org: canEditOrg });
+      const people = await peopleList(org);
+      return res.status(200).json({ org, account, people, can_edit_org: canEditOrg });
     }
 
     if (req.method === "PATCH") {
