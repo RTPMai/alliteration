@@ -63,9 +63,10 @@ const LIVE_PREFIXES = [
   // deployed. Rebuilt from scratch (Base44 had no api/ to point at), so this
   // whole folder is new rather than a port.
   '/api/traveltrack/',
-  // MailMe: api/mailme/{contacts,campaigns}.js are deployed. Contacts are
-  // resolved live from the BackBone roster rather than stored, so this app
-  // has real data the day it ships without an import step.
+  // MailMe: api/mailme/{contacts,campaigns,lists,import,webhook}.js are
+  // deployed. Client contacts are resolved live from the BackBone roster
+  // rather than stored, so this app has real data the day it ships without an
+  // import step; imported prospects are MailMe's own.
   '/api/mailme/'
 ];
 
@@ -87,7 +88,7 @@ export function appsOnSampleData() {
     backbone:    [ENDPOINTS.bbData],
     errorengine: [ENDPOINTS.eeErrors],
     traveltrack: [ENDPOINTS.ttTrips],
-    mailme:      [ENDPOINTS.mmContacts]
+    mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -161,7 +162,13 @@ export const ENDPOINTS = {
   // No mmContacts POST equivalent by design: contacts are the BackBone
   // roster, not a list MailMe owns. See api/mailme/contacts.js.
   mmContacts:      '/api/mailme/contacts',
-  mmCampaigns:     '/api/mailme/campaigns'
+  mmCampaigns:     '/api/mailme/campaigns',
+  mmLists:         '/api/mailme/lists',
+  mmImport:        '/api/mailme/import',
+  // Not called from the front end: the sending provider POSTs to it directly.
+  // Listed so the path has one canonical home rather than being typed into a
+  // provider dashboard from memory.
+  mmWebhook:       '/api/mailme/webhook'
 };
 
 /* ------------------------------------------------------------------ *
@@ -362,22 +369,32 @@ const MOCK_DATA = {
   // MOCK; it just prefills nothing.
   [ENDPOINTS.ttReceipt]: () => ({ ok: true, fields: { date: '', amount: '', description: '', category: '' }, advisory: true }),
 
-  // MailMe. Shapes mirror api/mailme/*.js. The contacts mock carries a
-  // suppressed contact and a tagged one on purpose: the segment and
-  // suppression logic are the parts worth exercising offline, and a mock
-  // where everyone is subscribed would never catch a broken filter.
-  [ENDPOINTS.mmContacts]: () => ({
-    contacts: [
-      { customer_id: '1042', company_name: 'Johnston Dragons Wrestling Club', contact_name: 'Trent Kolar', email: 'tkolar@johnstonwrestling.org', status: 'subscribed', reason: null, tags: ['booster-club'], updatedAt: null },
-      { customer_id: '3310', company_name: 'Ankeny Miracle League', contact_name: 'Dana Whitmer', email: 'dana@ankenymiracleleague.org', status: 'subscribed', reason: null, tags: ['nonprofit', 'vip'], updatedAt: null },
-      { customer_id: '2015', company_name: 'Saylorville Trail Run', contact_name: 'Marcus Bell', email: 'marcus@saylorvilletrailrun.com', status: 'unsubscribed', reason: 'Too many emails', tags: [], updatedAt: '2026-07-02T14:10:00.000Z' },
-      { customer_id: '4471', company_name: 'Polk County Pickleball', contact_name: 'Ethan Welch', email: 'ethan@polkcountypickleball.org', status: 'bounced', reason: 'Mailbox does not exist', tags: ['nonprofit'], updatedAt: '2026-06-28T09:00:00.000Z' }
-    ],
-    customersWithoutEmail: 2,
-    totalRosterSize: 6,
-    tags: ['booster-club', 'nonprofit', 'vip']
-  }),
-  [ENDPOINTS.mmCampaigns]: () => ({ campaigns: [] })
+  // MailMe. Shapes mirror api/mailme/*.js. The contacts mock carries BOTH
+  // sources plus a suppressed contact on purpose: the source split and the
+  // suppression rule are the parts worth exercising offline, and a mock where
+  // everyone is a subscribed client would never catch a broken filter.
+  [ENDPOINTS.mmContacts]: () => {
+    const contacts = [
+      { id: 'client:1042', source: 'client', customer_id: '1042', company_name: 'Johnston Dragons Wrestling Club', contact_name: 'Trent Kolar', title: 'Club President', email: 'tkolar@johnstonwrestling.org', phone: '', city: 'Johnston', state: 'IA', status: 'subscribed', reason: null, tags: ['booster-club'], updatedAt: null },
+      { id: 'client:3310', source: 'client', customer_id: '3310', company_name: 'Ankeny Miracle League', contact_name: 'Dana Whitmer', title: 'Director', email: 'dana@ankenymiracleleague.org', phone: '', city: 'Ankeny', state: 'IA', status: 'subscribed', reason: null, tags: ['nonprofit', 'vip'], updatedAt: null },
+      { id: 'client:2015', source: 'client', customer_id: '2015', company_name: 'Saylorville Trail Run', contact_name: 'Marcus Bell', title: '', email: 'marcus@saylorvilletrailrun.com', phone: '', city: 'Polk City', state: 'IA', status: 'unsubscribed', reason: 'Too many emails', tags: [], updatedAt: '2026-07-02T14:10:00.000Z' },
+      { id: 'client:4471', source: 'client', customer_id: '4471', company_name: 'Polk County Pickleball', contact_name: 'Ethan Welch', title: '', email: 'ethan@polkcountypickleball.org', phone: '', city: 'Ankeny', state: 'IA', status: 'bounced', reason: 'Mailbox does not exist', tags: ['nonprofit'], updatedAt: '2026-06-28T09:00:00.000Z' },
+      { id: 'prospect:PR-00001', source: 'prospect', prospect_id: 'PR-00001', company_name: 'Waukee Warriors Booster Club', contact_name: 'Sara Lentz', title: 'Merchandise Chair', email: 'slentz@waukeeboosters.org', phone: '', city: 'Waukee', state: 'IA', status: 'subscribed', reason: null, tags: ['booster-club', 'cold-2026-q3'], importedAt: '2026-08-01T12:00:00.000Z', importBatch: 'BATCH-20260801120000', updatedAt: '2026-08-01T12:00:00.000Z' },
+      { id: 'prospect:PR-00002', source: 'prospect', prospect_id: 'PR-00002', company_name: 'Grimes Chamber of Commerce', contact_name: 'Paul Ridge', title: 'Events Coordinator', email: 'pridge@grimeschamber.org', phone: '', city: 'Grimes', state: 'IA', status: 'subscribed', reason: null, tags: ['chamber', 'cold-2026-q3'], importedAt: '2026-08-01T12:00:00.000Z', importBatch: 'BATCH-20260801120000', updatedAt: '2026-08-01T12:00:00.000Z' }
+    ];
+    return {
+      contacts,
+      counts: {
+        total: contacts.length, shown: contacts.length, client: 4, prospect: 2,
+        mailable: 4, unsubscribed: 1, bounced: 1, complained: 0,
+        customersWithoutEmail: 2, totalRosterSize: 6
+      },
+      tags: ['booster-club', 'chamber', 'cold-2026-q3', 'nonprofit', 'vip']
+    };
+  },
+  [ENDPOINTS.mmCampaigns]: () => ({ campaigns: [] }),
+  [ENDPOINTS.mmLists]: () => ({ lists: [] }),
+  [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } })
 };
 
 function mockResponse(path, method, body, query) {
