@@ -438,6 +438,53 @@ t.test('mixing cold prospects with warm contacts is refused', () => {
     'the conflict check must compare sending identity, not raw source');
 });
 
+/* ---- v3.1: regressions from the first live run --------------------------- */
+
+t.test('giving requests are read through GivingGauge own reader', () => {
+  // The first build guessed a key name ("givinggauge_requests") that does not
+  // exist, so Giving silently showed zero. Requests actually live under
+  // alliteration:giving:index plus one key per request.
+  // stripComments so the note explaining this fix does not fail its own test.
+  const store = stripComments(read('lib/mailme/store.js'));
+  t.assert(!/kvGet\(\s*"givinggauge_requests"/.test(store),
+    'the guessed giving key must not be read');
+  t.assert(/from "\.\.\/giving\.js"/.test(store),
+    'giving requests must be read via lib/giving.js listRequests, not a re-derived key');
+});
+
+t.test('placeholder text is never treated as a lead email address', () => {
+  // The qualification agent must emit a value for every field, so a missing
+  // email arrives as "not found" / "N/A" / "unknown". Without filtering,
+  // MailMe would create contacts whose address is literally "not found".
+  const store = read('lib/mailme/store.js');
+  t.assert(/CONTACT_PLACEHOLDER_RE/.test(store),
+    'lead emails must be screened for placeholder text');
+  t.assert(/cleanLeadEmail/.test(store),
+    'a lead email cleaner must exist');
+});
+
+t.test('a lead contact keeps one person intact', () => {
+  // Merging the first name found with a different person's email invents
+  // someone who does not exist. BackBone learned this the hard way.
+  const store = stripComments(read('lib/mailme/store.js'));
+  const fn = store.slice(store.indexOf('function leadContact'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  t.assert(/for \(const c of contacts\)/.test(body),
+    'the name and title must come from whoever owns the email');
+});
+
+t.test('API errors render readable text, never [object Object]', () => {
+  // Vercel platform errors arrive as { error: { code, message } }. Pushing
+  // that object into Error#message produced "[object Object]", which hid a
+  // real deploy fault behind a shrug.
+  const src = read('js/api.js');
+  t.assert(/function errorText/.test(src),
+    'js/api.js must normalize error payload shapes');
+  t.assert(/errorText\(payload\)/.test(src),
+    'the request path must use errorText, not payload.error directly');
+});
+
+
 
 
 import('../lib/mailme/schema.js')
