@@ -186,6 +186,167 @@ function donutSVG(segments) {
   return `<svg width="120" height="120" viewBox="0 0 120 120">${arcs}</svg>`;
 }
 
+/* ------------------------------------------------------------------ *
+ * CHARTS
+ *
+ * Hand-rolled SVG rather than a charting library: the shell has no build
+ * step and one real dependency, and these are four simple shapes. Every
+ * color is a CSS custom property name, never a hex — css/tokens.css owns
+ * color, and the test suite enforces it.
+ * ------------------------------------------------------------------ */
+
+// Rotating series palette. Distinct hues that already exist as tokens.
+const CHART_HUES = ['hue-blue', 'hue-forest', 'hue-violet', 'hue-clay', 'hue-sky', 'hue-indigo', 'amber', 'accent-deep'];
+
+function hueAt(i) {
+  return CHART_HUES[i % CHART_HUES.length];
+}
+
+/**
+ * Donut + legend. entries = [[label, value], ...].
+ * opts.hueFor(label, i) picks a token name, so the category chart can
+ * reuse the same hue as that category's icon in the expense list.
+ */
+function donutChart(entries, opts) {
+  const { money = true, empty = 'Nothing to show yet.', hueFor } = opts || {};
+  const rows = entries.filter((e) => Number(e[1]) > 0);
+  if (!rows.length) return `<div class="empty">${esc(empty)}</div>`;
+
+  const total = rows.reduce((s, e) => s + Number(e[1]), 0);
+  const segs = rows.map(([label, value], i) => ({
+    label, value: Number(value),
+    varName: hueFor ? hueFor(label, i) : hueAt(i)
+  }));
+
+  const fmt = (v) => (money ? fmtMoney(v) : String(v));
+  return `
+    <div class="donut-wrap">
+      ${donutSVG(segs)}
+      <div class="donut-legend">
+        ${segs.map((s) => `
+          <div class="row">
+            <span class="sw" style="background:var(--${s.varName})"></span>
+            <span>${esc(s.label)}</span>
+            <span class="amt">${fmt(s.value)}</span>
+            <span class="pct">${Math.round((s.value / total) * 100)}%</span>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+/**
+ * Single-series area/line chart. points = [[label, value], ...] in order.
+ * Labels are thinned so a 12-month axis stays readable at card width.
+ */
+function lineChart(points, opts) {
+  const { money = true, empty = 'Nothing to show yet.', hue = 'accent' } = opts || {};
+  if (!points.length) return `<div class="empty">${esc(empty)}</div>`;
+  if (points.length === 1) {
+    return `<div class="chart-single">${esc(points[0][0])}<span>${money ? fmtMoney(points[0][1]) : points[0][1]}</span></div>`;
+  }
+
+  const W = 560, H = 200, padL = 52, padR = 12, padT = 14, padB = 28;
+  const max = Math.max(...points.map((p) => Number(p[1]) || 0)) || 1;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const x = (i) => padL + (points.length === 1 ? innerW / 2 : (i / (points.length - 1)) * innerW);
+  const y = (v) => padT + innerH - ((Number(v) || 0) / max) * innerH;
+
+  const line = points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+  const area = `${line} L${x(points.length - 1).toFixed(1)},${(padT + innerH).toFixed(1)} L${x(0).toFixed(1)},${(padT + innerH).toFixed(1)} Z`;
+
+  // Four horizontal gridlines with value labels.
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => {
+    const v = max * f;
+    const yy = y(v);
+    return `<line class="grid" x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}"/>
+            <text class="axis" x="${padL - 8}" y="${(yy + 3.5).toFixed(1)}" text-anchor="end">${money ? fmtMoneyShort(v) : Math.round(v)}</text>`;
+  }).join('');
+
+  const step = Math.ceil(points.length / 7);
+  const xLabels = points.map((p, i) =>
+    (i % step === 0 || i === points.length - 1)
+      ? `<text class="axis" x="${x(i).toFixed(1)}" y="${H - 8}" text-anchor="middle">${esc(p[0])}</text>`
+      : '').join('');
+
+  const dots = points.map((p, i) =>
+    `<circle class="dot" cx="${x(i).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="3" style="fill:var(--${hue})"><title>${esc(p[0])}: ${money ? fmtMoney(p[1]) : p[1]}</title></circle>`).join('');
+
+  return `
+    <div class="chart">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        ${ticks}
+        <path d="${area}" style="fill:var(--${hue});opacity:.10"/>
+        <path d="${line}" fill="none" style="stroke:var(--${hue})" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+        ${dots}
+        ${xLabels}
+      </svg>
+    </div>`;
+}
+
+/**
+ * Multi-series line chart on a shared x axis (year-over-year).
+ * series = [{ name, points: [[label, value], ...] }, ...]; every series is
+ * expected to share the same label sequence.
+ */
+function multiLineChart(series, opts) {
+  const { money = true, empty = 'Nothing to show yet.' } = opts || {};
+  const live = series.filter((s) => s.points.some((p) => Number(p[1]) > 0));
+  if (!live.length) return `<div class="empty">${esc(empty)}</div>`;
+
+  const labels = live[0].points.map((p) => p[0]);
+  const W = 560, H = 210, padL = 52, padR = 12, padT = 14, padB = 40;
+  const max = Math.max(...live.flatMap((s) => s.points.map((p) => Number(p[1]) || 0))) || 1;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const x = (i) => padL + (labels.length === 1 ? innerW / 2 : (i / (labels.length - 1)) * innerW);
+  const y = (v) => padT + innerH - ((Number(v) || 0) / max) * innerH;
+
+  const ticks = [0, 0.5, 1].map((f) => {
+    const yy = y(max * f);
+    return `<line class="grid" x1="${padL}" y1="${yy.toFixed(1)}" x2="${W - padR}" y2="${yy.toFixed(1)}"/>
+            <text class="axis" x="${padL - 8}" y="${(yy + 3.5).toFixed(1)}" text-anchor="end">${money ? fmtMoneyShort(max * f) : Math.round(max * f)}</text>`;
+  }).join('');
+
+  const step = Math.ceil(labels.length / 7);
+  const xLabels = labels.map((l, i) =>
+    (i % step === 0 || i === labels.length - 1)
+      ? `<text class="axis" x="${x(i).toFixed(1)}" y="${H - 20}" text-anchor="middle">${esc(l)}</text>`
+      : '').join('');
+
+  const paths = live.map((s, si) => {
+    const hue = hueAt(si);
+    const d = s.points.map((p, i) => `${i ? 'L' : 'M'}${x(i).toFixed(1)},${y(p[1]).toFixed(1)}`).join(' ');
+    const dots = s.points.map((p, i) =>
+      `<circle cx="${x(i).toFixed(1)}" cy="${y(p[1]).toFixed(1)}" r="2.5" style="fill:var(--${hue})"><title>${esc(s.name)} ${esc(p[0])}: ${money ? fmtMoney(p[1]) : p[1]}</title></circle>`).join('');
+    return `<path d="${d}" fill="none" style="stroke:var(--${hue})" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>${dots}`;
+  }).join('');
+
+  const legend = live.map((s, si) =>
+    `<span class="ck"><span class="sw" style="background:var(--${hueAt(si)})"></span>${esc(s.name)}</span>`).join('');
+
+  return `
+    <div class="chart">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        ${ticks}${paths}${xLabels}
+      </svg>
+      <div class="chart-legend">${legend}</div>
+    </div>`;
+}
+
+const MONTH_ABBR = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+// "2026-03" -> "Mar 26". Kept short so a 12-point axis fits at card width.
+function monthLabel(ym) {
+  const m = /^(\d{4})-(\d{2})$/.exec(String(ym || ''));
+  if (!m) return String(ym || '');
+  return MONTH_ABBR[Number(m[2]) - 1] + ' ' + m[1].slice(2);
+}
+
+function fmtMoneyShort(n) {
+  n = Number(n) || 0;
+  if (Math.abs(n) >= 1000) return '$' + Math.round(n / 1000) + 'k';
+  return '$' + Math.round(n);
+}
+
 function downloadCSV(filename, rows) {
   const csv = rows.map((row) => row.map((cell) => {
     const s = String(cell == null ? '' : cell);
@@ -591,13 +752,26 @@ export default {
   .redeem-list-row .v{font-weight:700;font-variant-numeric:tabular-nums}
 
   /* ---------- donut ---------- */
-  .donut-wrap{display:flex;align-items:center;gap:20px;padding:14px 18px}
-  .donut-legend{display:flex;flex-direction:column;gap:8px;font-size:12.5px}
+  .donut-wrap{display:flex;align-items:center;gap:20px;padding:14px 18px;flex-wrap:wrap}
+  .donut-legend{display:flex;flex-direction:column;gap:8px;font-size:12.5px;flex:1 1 190px;min-width:0}
   .donut-legend .row{display:flex;align-items:center;gap:7px}
   .donut-legend .sw{width:10px;height:10px;border-radius:3px;flex:0 0 auto}
   .donut-legend .sw.spend{background:var(--accent)}
   .donut-legend .sw.miles{background:var(--success)}
-  .donut-legend .amt{font-weight:700;margin-left:auto}
+  .donut-legend .amt{font-weight:700;margin-left:auto;white-space:nowrap}
+  .donut-legend .pct{color:var(--muted);font-size:11.5px;width:34px;text-align:right;flex:0 0 auto}
+
+  /* ---------- line / area charts ---------- */
+  .chart{padding:10px 14px 4px}
+  .chart svg{width:100%;height:auto;display:block;overflow:visible}
+  .chart .grid{stroke:var(--line);stroke-width:1}
+  .chart .axis{fill:var(--muted);font-size:10px;font-family:var(--font)}
+  .chart .dot{stroke:var(--card);stroke-width:1.5}
+  .chart-legend{display:flex;gap:14px;flex-wrap:wrap;padding:4px 4px 8px;font-size:12px;color:var(--muted)}
+  .chart-legend .ck{display:inline-flex;align-items:center;gap:6px}
+  .chart-legend .sw{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .chart-single{padding:22px 18px;font-size:13px;color:var(--muted);display:flex;justify-content:space-between}
+  .chart-single span{font-weight:700;color:var(--ink)}
 
   /* ---------- trip cards ---------- */
   .trip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
@@ -707,6 +881,10 @@ export default {
         <div class="card">
           <div class="card-hd"><h3 id="reportsMilesHd">Redeemed by trip</h3></div>
           <div class="card-bd" id="reportsMiles"></div>
+        </div>
+        <div class="card wide">
+          <div class="card-hd"><h3>Monthly trend</h3></div>
+          <div class="card-bd" id="reportsTrend"></div>
         </div>
         <div class="card wide">
           <div class="card-hd"><h3>Trip summary</h3><span class="meta" id="reportsTableMeta"></span></div>
@@ -1406,7 +1584,9 @@ export default {
       { id: 'spend_vs_miles',  label: 'Spending vs. redeemed' },
       { id: 'by_category',     label: 'Spending by category' },
       { id: 'monthly_trend',   label: 'Monthly trend' },
+      { id: 'year_over_year',  label: 'Year-over-year comparison' },
       { id: 'by_traveler',     label: 'Spending by traveler' },
+      { id: 'by_payment',      label: 'Payment method' },
       { id: 'trips_by_status', label: 'Trips by status' },
       { id: 'top_trips',       label: 'Most expensive trips' }
     ];
@@ -1521,22 +1701,51 @@ export default {
         by_category: () => {
           const by = {};
           countedExpenses.forEach((e) => { by[e.category] = (by[e.category] || 0) + (Number(e.amount) || 0); });
-          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
+          // Donut hues match each category's icon in the expense list, so
+          // the two read as the same colour language.
+          return donutChart(Object.entries(by).sort((a, b) => b[1] - a[1]), {
+            empty: 'No expenses in this range.',
+            hueFor: (label) => categoryMeta(label).hue
+          });
         },
         monthly_trend: () => {
           const by = {};
           countedExpenses.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
-          return barListHtml(Object.entries(by).sort((a, b) => a[0].localeCompare(b[0])), { empty: 'No expenses in this range.' });
+          const pts = Object.entries(by).sort((a, b) => a[0].localeCompare(b[0]))
+            .map(([k, v]) => [monthLabel(k), v]);
+          return lineChart(pts, { empty: 'No expenses in this range.' });
+        },
+        year_over_year: () => {
+          // Always compares full calendar years regardless of the range
+          // filter — comparing a range against itself would say nothing.
+          const byYear = {};
+          allExpenses.filter(expenseCounts).forEach((e) => {
+            const y = String(e.date).slice(0, 4);
+            const m = Number(String(e.date).slice(5, 7));
+            if (!/^\d{4}$/.test(y) || !m) return;
+            (byYear[y] = byYear[y] || new Array(12).fill(0))[m - 1] += Number(e.amount) || 0;
+          });
+          const years = Object.keys(byYear).sort().slice(-3);
+          const series = years.map((y) => ({
+            name: y,
+            points: MONTH_ABBR.map((mn, i) => [mn, byYear[y][i]])
+          }));
+          return multiLineChart(series, { empty: 'Not enough history yet.' });
         },
         by_traveler: () => {
           const by = {};
           countedExpenses.forEach((e) => { const k = e.submitted_by_name || e.submitted_by || 'Unknown'; by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
-          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
+          return donutChart(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
+        },
+        by_payment: () => {
+          const by = {};
+          countedExpenses.forEach((e) => { const k = labelOf(PAYMENT_METHODS, e.payment_method); by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
+          return donutChart(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
         },
         trips_by_status: () => {
           const by = {};
           trips.forEach((t) => { const k = labelOf(TRIP_STATUSES, normStatus(t.status)); by[k] = (by[k] || 0) + 1; });
-          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { money: false, empty: 'No trips in this range.' });
+          return donutChart(Object.entries(by).sort((a, b) => b[1] - a[1]), { money: false, empty: 'No trips in this range.' });
         },
         top_trips: () => {
           const rows = countedTrips.map((t) => [t.title, expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0)])
@@ -1548,7 +1757,7 @@ export default {
       const visible = dashVisible();
       $('#dashCards').innerHTML = DASH_CARDS.filter((c) => visible.includes(c.id)).map((c) => {
         const label = c.id === 'spend_vs_miles' ? 'Spending vs. ' + redeemLabel() : c.label;
-        const wide = ['monthly_trend', 'top_trips'].includes(c.id);
+        const wide = ['monthly_trend', 'year_over_year', 'top_trips'].includes(c.id);
         return `
           <div class="card${wide ? ' wide' : ''}">
             <div class="card-hd"><h3>${esc(label)}</h3></div>
@@ -1902,39 +2111,23 @@ export default {
 
       const byCat = {};
       rows.forEach((e) => { byCat[e.category] = (byCat[e.category] || 0) + (Number(e.amount) || 0); });
-      const catEntries = Object.entries(byCat).sort((a, b) => b[1] - a[1]);
-      const maxCat = catEntries.length ? catEntries[0][1] : 0;
-      $('#reportsByCat').innerHTML = catEntries.length ? catEntries.map(([cat, amt]) => `
-        <div class="bar-row">
-          <div class="top"><span class="lab">${esc(cat)}</span><span>${fmtMoney(amt)}</span></div>
-          <div class="bar-track"><div class="bar-fill" style="width:${maxCat ? Math.round(amt / maxCat * 100) : 0}%"></div></div>
-        </div>
-      `).join('') : '<div class="empty">No expenses in ' + reportsYear + '.</div>';
+      $('#reportsByCat').innerHTML = donutChart(
+        Object.entries(byCat).sort((a, b) => b[1] - a[1]),
+        { empty: 'No expenses in ' + reportsYear + '.', hueFor: (label) => categoryMeta(label).hue });
 
       if (seesAll) {
         $('#reportsByWhoHd').textContent = 'Spend by traveler';
         const byWho = {};
         rows.forEach((e) => { const k = e.submitted_by_name || e.submitted_by; byWho[k] = (byWho[k] || 0) + (Number(e.amount) || 0); });
-        const whoEntries = Object.entries(byWho).sort((a, b) => b[1] - a[1]);
-        const maxWho = whoEntries.length ? whoEntries[0][1] : 0;
-        $('#reportsByWho').innerHTML = whoEntries.length ? whoEntries.map(([who, amt]) => `
-          <div class="bar-row">
-            <div class="top"><span class="lab">${esc(who)}</span><span>${fmtMoney(amt)}</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:${maxWho ? Math.round(amt / maxWho * 100) : 0}%"></div></div>
-          </div>
-        `).join('') : '<div class="empty">No expenses in ' + reportsYear + '.</div>';
+        $('#reportsByWho').innerHTML = donutChart(
+          Object.entries(byWho).sort((a, b) => b[1] - a[1]),
+          { empty: 'No expenses in ' + reportsYear + '.' });
       } else {
         $('#reportsByWhoHd').textContent = 'Spend by month';
         const byMonth = {};
-        rows.forEach((e) => { const k = String(e.date).slice(0, 7); byMonth[k] = (byMonth[k] || 0) + (Number(e.amount) || 0); });
-        const monthEntries = Object.entries(byMonth).sort((a, b) => a[0].localeCompare(b[0]));
-        const maxMonth = monthEntries.length ? Math.max(...monthEntries.map((m) => m[1])) : 0;
-        $('#reportsByWho').innerHTML = monthEntries.length ? monthEntries.map(([m, amt]) => `
-          <div class="bar-row">
-            <div class="top"><span class="lab">${esc(m)}</span><span>${fmtMoney(amt)}</span></div>
-            <div class="bar-track"><div class="bar-fill" style="width:${maxMonth ? Math.round(amt / maxMonth * 100) : 0}%"></div></div>
-          </div>
-        `).join('') : '<div class="empty">No expenses in ' + reportsYear + '.</div>';
+        rows.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) byMonth[k] = (byMonth[k] || 0) + (Number(e.amount) || 0); });
+        const pts = Object.entries(byMonth).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => [monthLabel(k), v]);
+        $('#reportsByWho').innerHTML = lineChart(pts, { empty: 'No expenses in ' + reportsYear + '.' });
       }
 
       // ---- Spend by trip ----
@@ -1953,7 +2146,7 @@ export default {
         const k = labelOf(PAYMENT_METHODS, e.payment_method);
         byPay[k] = (byPay[k] || 0) + (Number(e.amount) || 0);
       });
-      $('#reportsByPayment').innerHTML = barListHtml(
+      $('#reportsByPayment').innerHTML = donutChart(
         Object.entries(byPay).sort((a, b) => b[1] - a[1]),
         { empty: 'No expenses in ' + reportsYear + '.' });
 
@@ -1963,7 +2156,7 @@ export default {
         const k = labelOf(EXPENSE_STATUSES, e.status);
         byStatus[k] = (byStatus[k] || 0) + (Number(e.amount) || 0);
       });
-      $('#reportsByStatus').innerHTML = barListHtml(
+      $('#reportsByStatus').innerHTML = donutChart(
         Object.entries(byStatus).sort((a, b) => b[1] - a[1]),
         { empty: 'No expenses in ' + reportsYear + '.' });
 
@@ -1978,6 +2171,13 @@ export default {
         .map((t) => [t.title, Number(t.miles_value) || 0])
         .filter((r) => r[1] > 0).sort((a, b) => b[1] - a[1]);
       $('#reportsMiles').innerHTML = barListHtml(milesRows, { empty: 'Nothing redeemed in ' + reportsYear + '.' });
+
+      // ---- Monthly trend ----
+      const trendBy = {};
+      rows.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) trendBy[k] = (trendBy[k] || 0) + (Number(e.amount) || 0); });
+      $('#reportsTrend').innerHTML = lineChart(
+        Object.entries(trendBy).sort((a, b) => a[0].localeCompare(b[0])).map(([k, v]) => [monthLabel(k), v]),
+        { empty: 'No expenses in ' + reportsYear + '.' });
 
       // ---- Trip summary table ----
       const summary = tripsInYear.map((t) => {
