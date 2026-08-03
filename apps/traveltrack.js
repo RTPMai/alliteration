@@ -43,11 +43,67 @@ const PAYMENT_METHODS = [
 ];
 
 const TRIP_STATUSES = [
-  ['planned', 'Planned'],
-  ['in_progress', 'In progress'],
-  ['completed', 'Completed'],
+  ['potential', 'Potential'],
+  ['confirmed', 'Confirmed'],
+  ['attended', 'Attended'],
+  ['did_not_attend', 'Did Not Attend'],
   ['cancelled', 'Cancelled']
 ];
+
+// Legacy values from the first build. Normalized on read so an existing
+// record never renders as a blank/unknown status. Mirrors
+// normalizeTripStatus() in lib/traveltrack/schema.js.
+const LEGACY_TRIP_STATUS = { planned: 'potential', in_progress: 'confirmed', completed: 'attended' };
+function normStatus(s) {
+  const k = String(s || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (TRIP_STATUSES.some((p) => p[0] === k)) return k;
+  return LEGACY_TRIP_STATUS[k] || 'potential';
+}
+
+// Per-category icon + hue, so an expense list is scannable at a glance
+// (the standalone did this and Ryan called it out specifically). Hues are
+// token names, never raw hex — see css/tokens.css.
+const CATEGORY_META = {
+  'Airfare':            { hue: 'hue-blue',   icon: 'M17.8 19.2 16 11l3.5-3.5a2.1 2.1 0 0 0-3-3L13 8 4.8 6.2a1 1 0 0 0-.9 1.7l6 3.4-2.5 2.5-2.6-.6a.8.8 0 0 0-.7 1.3l2 2 2 2a.8.8 0 0 0 1.3-.7l-.6-2.6 2.5-2.5 3.4 6a1 1 0 0 0 1.7-.9Z' },
+  'Lodging':            { hue: 'hue-violet', icon: 'M3 21h18M4 21V8l8-5 8 5v13M9 21v-5h6v5' },
+  'Meals':              { hue: 'hue-clay',   icon: 'M3 2v7a3 3 0 0 0 3 3v10M6 2v7M9 2v7M18 2c-1.7 1.5-2.5 4-2.5 7s.8 4 2.5 4v9' },
+  'Mileage':            { hue: 'hue-forest', icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Rental Car':         { hue: 'hue-sky',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Parking & Tolls':    { hue: 'hue-indigo', icon: 'M6 3h6a5 5 0 0 1 0 10H9v8H6V3Zm3 3v4h3a2 2 0 0 0 0-4H9Z' },
+  'Rideshare/Taxi':     { hue: 'hue-sky',    icon: 'M5 17h14M6 17V9l2-4h8l2 4v8M7 13h10M8 20v-3M16 20v-3' },
+  'Registration/Fees':  { hue: 'hue-blue',   icon: 'M4 4h16v6a2 2 0 0 0 0 4v6H4v-6a2 2 0 0 0 0-4V4Zm10 0v16' },
+  'Other':              { hue: 'hue-clay',   icon: 'M4 6h16M4 12h16M4 18h10' }
+};
+
+function categoryMeta(cat) {
+  return CATEGORY_META[cat] || CATEGORY_META['Other'];
+}
+
+function categoryIcon(cat) {
+  const m = categoryMeta(cat);
+  return '<span class="cat-icon" style="--cat:var(--' + m.hue + ');--cat-tint:var(--' + m.hue + '-tint)">' +
+    '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="' + m.icon + '"/></svg>' +
+    '</span>';
+}
+
+/* Date-range filter shared by Dashboard, Trips and Expenses. "ytd" is the
+   current calendar year so far; a bare year string filters to that year. */
+function rangeOptions(rows, dateField) {
+  const years = new Set();
+  rows.forEach((r) => {
+    const y = String(r[dateField] || '').slice(0, 4);
+    if (/^\d{4}$/.test(y)) years.add(y);
+  });
+  const sorted = Array.from(years).sort().reverse();
+  return [['all', 'All time'], ['ytd', 'Year to date']].concat(sorted.map((y) => [y, y]));
+}
+
+function inRange(dateStr, range) {
+  if (range === 'all') return true;
+  const y = String(dateStr || '').slice(0, 4);
+  if (range === 'ytd') return y === String(new Date().getFullYear());
+  return y === range;
+}
 
 const TRIP_PURPOSES = [
   'Client visit', 'Trade show', 'Sales call', 'Training/conference', 'Vendor visit', 'Other'
@@ -97,11 +153,14 @@ function labelOf(pairs, val) {
 }
 
 function statusClass(status) {
-  if (status === 'approved') return 'ok';
-  if (status === 'reimbursed') return 'ok';
+  // Expense statuses
+  if (status === 'approved' || status === 'reimbursed') return 'ok';
   if (status === 'rejected') return 'bad';
-  if (status === 'in_progress') return 'ok';
-  if (status === 'cancelled') return 'bad';
+  // Trip statuses
+  if (status === 'attended') return 'ok';
+  if (status === 'confirmed') return 'info';
+  if (status === 'did_not_attend' || status === 'cancelled') return 'bad';
+  if (status === 'potential') return 'warn';
   return 'muted';
 }
 
@@ -194,7 +253,10 @@ function parseCSV(text) {
     });
 }
 
-const IMPORT_STATUS_MAP = { 'attended': 'completed', 'did not attend': 'cancelled' };
+// The standalone's two statuses map straight onto two of ours now that the
+// status set matches how the shop actually talks about a trip. "Did Not
+// Attend" is its own status here rather than being flattened to cancelled.
+const IMPORT_STATUS_MAP = { 'attended': 'attended', 'did not attend': 'did_not_attend' };
 const IMPORT_BUDGET_COLS = ['Travel Budget', 'Lodging Budget', 'Event Budget', 'Onsite Travel Budget', 'Food Budget'];
 
 // The standalone's exports come in two shapes, and this importer detects and
@@ -234,7 +296,7 @@ function buildDetailedPlan(rows) {
     const type = String(row['Type'] || '').trim().toLowerCase();
     if (type === 'trip') {
       const title = String(row['Name'] || '').trim() || 'Imported trip';
-      const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
+      const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'attended';
       const startDate = String(row['Date'] || '').trim();
       const traveler = String(row['Created By'] || '').trim() || 'Unknown';
       trips.push({
@@ -242,6 +304,10 @@ function buildDetailedPlan(rows) {
         purpose: 'Other', start_date: startDate, end_date: startDate, status,
         notes: 'Imported from the standalone TravelTrack export.',
         traveler, traveler_name: traveler,
+        // The detailed export carries only Created By, not the full
+        // attendee list, so this seeds one name; the import preview lets
+        // it be corrected before anything is written.
+        attendees: traveler && traveler !== 'Unknown' ? [traveler] : [],
         miles_value: Number(row['Miles Redeemed']) || 0
       });
     } else if (type === 'expense') {
@@ -273,7 +339,7 @@ function buildSummaryPlan(rows) {
   rows.forEach((row) => {
     const attendees = String(row['Attendees'] || '').split(';').map((s) => s.trim()).filter(Boolean);
     const primary = attendees[0] || 'Unknown';
-    const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
+    const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'attended';
 
     const budgetParts = [];
     IMPORT_BUDGET_COLS.forEach((k) => {
@@ -297,6 +363,7 @@ function buildSummaryPlan(rows) {
       key: tripKeyOf(title), title, destination: String(row['Destination'] || '').trim(),
       purpose: 'Other', start_date: startDate, end_date: endDate, status,
       notes: notesLines.join('\n'), traveler: primary, traveler_name: primary,
+      attendees: attendees.slice(),
       miles_value: miles
     });
 
@@ -385,6 +452,74 @@ export default {
   .chip.bad{background:var(--danger-tint);color:var(--danger)}
   .chip.muted{background:var(--line-soft);color:var(--muted)}
   .chip.gold{background:var(--accent-tint);color:var(--accent-deep)}
+  .chip.info{background:var(--hue-blue-tint);color:var(--hue-blue-deep)}
+  .chip.warn{background:var(--warn-tint);color:var(--warn)}
+
+  /* ---------- category icons ---------- */
+  .cat-icon{
+    display:inline-flex;align-items:center;justify-content:center;
+    width:28px;height:28px;flex:0 0 28px;border-radius:var(--radius-sm);
+    background:var(--cat-tint);color:var(--cat);
+  }
+  .cat-cell{display:flex;align-items:center;gap:9px}
+
+  /* ---------- inline status select (change without opening the trip) ---------- */
+  .status-select{
+    -webkit-appearance:none;appearance:none;border:1px solid transparent;
+    border-radius:99px;padding:3px 22px 3px 10px;font-size:11.5px;font-weight:700;
+    font-family:inherit;cursor:pointer;
+    background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+    background-position:calc(100% - 11px) 52%,calc(100% - 7px) 52%;
+    background-size:4px 4px,4px 4px;background-repeat:no-repeat;
+  }
+  .status-select:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .status-select.ok{background-color:var(--success-tint);color:var(--success)}
+  .status-select.bad{background-color:var(--danger-tint);color:var(--danger)}
+  .status-select.info{background-color:var(--hue-blue-tint);color:var(--hue-blue-deep)}
+  .status-select.warn{background-color:var(--warn-tint);color:var(--warn)}
+  .status-select.muted{background-color:var(--line-soft);color:var(--muted)}
+
+  /* ---------- typeahead ---------- */
+  .ta{position:relative}
+  .ta-menu{
+    position:absolute;left:0;right:0;top:100%;z-index:30;margin-top:3px;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);
+    box-shadow:var(--shadow-pop);max-height:220px;overflow-y:auto;
+  }
+  .ta-menu[hidden]{display:none}
+  .ta-opt{padding:8px 11px;font-size:13px;cursor:pointer}
+  .ta-opt:hover,.ta-opt.active{background:var(--accent-tint);color:var(--accent-deep)}
+  .ta-empty{padding:8px 11px;font-size:12.5px;color:var(--muted)}
+  .ta-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:7px}
+  .ta-chip{
+    display:inline-flex;align-items:center;gap:5px;padding:3px 6px 3px 10px;
+    border-radius:99px;background:var(--accent-tint);color:var(--accent-deep);
+    font-size:12px;font-weight:600;
+  }
+  .ta-chip button{
+    background:none;border:none;color:inherit;cursor:pointer;font-size:14px;
+    line-height:1;padding:0 2px;opacity:.7;font-family:inherit;
+  }
+  .ta-chip button:hover{opacity:1}
+
+  /* ---------- dashboard grid ---------- */
+  .dash-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;align-items:start}
+  .dash-grid .card.wide{grid-column:1/-1}
+  .dash-customize{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:16px 18px;margin-bottom:16px;
+  }
+  .dash-customize h3{font-size:14px;font-weight:700;margin-bottom:4px}
+  .dash-customize .hint{font-size:12px;color:var(--muted);margin-bottom:12px}
+  .dash-toggles{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:8px}
+  .dash-toggle{display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer}
+  .dash-toggle input{width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+
+  /* ---------- receipt ---------- */
+  .receipt-box{border:1px dashed var(--line);border-radius:var(--radius-sm);padding:12px;text-align:center}
+  .receipt-box img{max-width:100%;max-height:190px;border-radius:var(--radius-sm);display:block;margin:0 auto 9px}
+  .receipt-hint{font-size:11.5px;color:var(--muted);margin-top:6px}
+  .receipt-busy{font-size:12.5px;color:var(--accent-deep);font-weight:600}
 
   /* ---------- dashboard ---------- */
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
@@ -493,25 +628,16 @@ export default {
           <div class="sub" id="dashSub"></div>
         </div>
         <div class="tools">
+          <select class="filt" id="dashRange" style="cursor:pointer"></select>
+          <button class="btn ghost" id="dashCustomize">Customize</button>
           <button class="btn ghost" id="dashNewTrip">+ New trip</button>
+          <button class="btn ghost" id="dashLogMiles">+ Log miles</button>
           <button class="btn" id="dashNewExpense">+ New expense</button>
         </div>
       </div>
       <div class="kpis" id="dashKpis"></div>
-      <div class="grid2">
-        <div class="card">
-          <div class="card-hd"><h3>Recent trips</h3><span class="meta" id="dashTripsMeta"></span></div>
-          <div class="card-bd" id="dashTrips"></div>
-        </div>
-        <div class="card">
-          <div class="card-hd"><h3>Recent expenses</h3><span class="meta" id="dashExpMeta"></span></div>
-          <div class="card-bd" id="dashExp"></div>
-        </div>
-      </div>
-      <div class="card" style="margin-top:16px">
-        <div class="card-hd"><h3 id="dashDonutHd">Spending vs. Miles</h3></div>
-        <div class="card-bd" id="dashDonut"></div>
-      </div>
+      <div id="dashCustomizePanel" hidden></div>
+      <div class="dash-grid" id="dashCards"></div>
     </div>
 
     <div class="page" id="ttTrips" hidden>
@@ -557,7 +683,7 @@ export default {
         </div>
       </div>
       <div class="kpis" id="reportsKpis"></div>
-      <div class="grid2">
+      <div class="dash-grid">
         <div class="card">
           <div class="card-hd"><h3>Spend by category</h3></div>
           <div class="card-bd" id="reportsByCat"></div>
@@ -565,6 +691,26 @@ export default {
         <div class="card">
           <div class="card-hd"><h3 id="reportsByWhoHd">Spend by month</h3></div>
           <div class="card-bd" id="reportsByWho"></div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><h3>Spend by trip</h3></div>
+          <div class="card-bd" id="reportsByTrip"></div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><h3>Payment method</h3></div>
+          <div class="card-bd" id="reportsByPayment"></div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><h3>Approval status</h3></div>
+          <div class="card-bd" id="reportsByStatus"></div>
+        </div>
+        <div class="card">
+          <div class="card-hd"><h3 id="reportsMilesHd">Redeemed by trip</h3></div>
+          <div class="card-bd" id="reportsMiles"></div>
+        </div>
+        <div class="card wide">
+          <div class="card-hd"><h3>Trip summary</h3><span class="meta" id="reportsTableMeta"></span></div>
+          <div class="card-bd"><div id="reportsTable"></div></div>
         </div>
       </div>
     </div>
@@ -596,7 +742,14 @@ export default {
     const me = (ctx.user && (ctx.user.username || ctx.user.name)) || '';
 
     const data = { trips: [], expenses: [], org: null, account: null, canEditOrg: false };
-    const filters = { trips: 'active', expenses: 'pending', expensesMine: !seesAll };
+    const filters = {
+      trips: 'active', expenses: 'pending', expensesMine: !seesAll,
+      // Date-range filters, independent per view so changing one doesn't
+      // silently re-scope another.
+      dashRange: 'all', tripsRange: 'all', expensesRange: 'all',
+      expenseCategory: 'all',
+      expensesByTrip: false
+    };
     let reportsYear = new Date().getFullYear();
 
     async function loadAll() {
@@ -638,11 +791,140 @@ export default {
     }
     scrim.addEventListener('click', closePanel);
 
+    /* ---------------- Typeahead ----------------
+       One implementation shared by "pick a trip" (single) and "add team
+       members" (multi). Type to filter, click or Enter to choose. Built as
+       a plain input + menu rather than a <select> because a select can't be
+       typed into past its first letter, which is the whole ask. */
+
+    function buildTypeahead(hostEl, opts) {
+      const { options, multi = false, placeholder = '', selected = [], onChange } = opts;
+      let chosen = selected.slice();
+      let active = -1;
+
+      hostEl.classList.add('ta');
+      hostEl.innerHTML = `
+        <input type="text" class="ta-input" placeholder="${esc(placeholder)}" autocomplete="off">
+        <div class="ta-menu" hidden></div>
+        ${multi ? '<div class="ta-chips"></div>' : ''}
+      `;
+      const input = hostEl.querySelector('.ta-input');
+      const menu = hostEl.querySelector('.ta-menu');
+      const chips = hostEl.querySelector('.ta-chips');
+
+      const labelFor = (v) => {
+        const hit = options.find((o) => o.value === v);
+        return hit ? hit.label : v;
+      };
+
+      function renderChips() {
+        if (!chips) return;
+        chips.innerHTML = chosen.map((v) => `
+          <span class="ta-chip">${esc(labelFor(v))}<button type="button" data-remove="${esc(v)}" aria-label="Remove">&times;</button></span>
+        `).join('');
+        chips.querySelectorAll('[data-remove]').forEach((b) => b.addEventListener('click', () => {
+          chosen = chosen.filter((v) => v !== b.dataset.remove);
+          renderChips();
+          if (onChange) onChange(chosen);
+        }));
+      }
+
+      function matches() {
+        const q = input.value.trim().toLowerCase();
+        return options
+          .filter((o) => !multi || !chosen.includes(o.value))
+          .filter((o) => !q || o.label.toLowerCase().includes(q))
+          .slice(0, 40);
+      }
+
+      function renderMenu() {
+        const list = matches();
+        active = list.length ? 0 : -1;
+        if (!list.length) {
+          // Multi-select doubles as free entry: the shop's trips include
+          // people who may not have a shell login, so an unmatched name is
+          // still addable rather than a dead end.
+          menu.innerHTML = multi && input.value.trim()
+            ? `<div class="ta-opt active" data-add-raw>Add "${esc(input.value.trim())}"</div>`
+            : '<div class="ta-empty">No matches</div>';
+        } else {
+          menu.innerHTML = list.map((o, i) =>
+            `<div class="ta-opt${i === 0 ? ' active' : ''}" data-value="${esc(o.value)}">${esc(o.label)}</div>`).join('');
+        }
+        menu.hidden = false;
+        menu.querySelectorAll('[data-value]').forEach((el) => {
+          el.addEventListener('mousedown', (e) => { e.preventDefault(); pick(el.dataset.value); });
+        });
+        const rawEl = menu.querySelector('[data-add-raw]');
+        if (rawEl) rawEl.addEventListener('mousedown', (e) => { e.preventDefault(); pick(input.value.trim()); });
+      }
+
+      function pick(value) {
+        if (!value) return;
+        if (multi) {
+          if (!chosen.includes(value)) chosen.push(value);
+          input.value = '';
+          renderChips();
+        } else {
+          chosen = [value];
+          input.value = labelFor(value);
+        }
+        menu.hidden = true;
+        if (onChange) onChange(chosen);
+      }
+
+      input.addEventListener('focus', renderMenu);
+      input.addEventListener('input', renderMenu);
+      input.addEventListener('blur', () => { setTimeout(() => { menu.hidden = true; }, 120); });
+      input.addEventListener('keydown', (e) => {
+        const opts2 = Array.from(menu.querySelectorAll('.ta-opt'));
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (!opts2.length) return;
+          active = e.key === 'ArrowDown'
+            ? Math.min(active + 1, opts2.length - 1)
+            : Math.max(active - 1, 0);
+          opts2.forEach((el, i) => el.classList.toggle('active', i === active));
+          opts2[active].scrollIntoView({ block: 'nearest' });
+        } else if (e.key === 'Enter') {
+          if (menu.hidden) return;
+          e.preventDefault();
+          const el = opts2[active] || opts2[0];
+          if (!el) return;
+          pick(el.dataset.value !== undefined ? el.dataset.value : input.value.trim());
+        } else if (e.key === 'Escape') {
+          menu.hidden = true;
+        }
+      });
+
+      if (!multi && chosen.length) input.value = labelFor(chosen[0]);
+      renderChips();
+
+      return {
+        value: () => (multi ? chosen.slice() : (chosen[0] || '')),
+        set: (v) => { chosen = Array.isArray(v) ? v.slice() : (v ? [v] : []); renderChips(); if (!multi) input.value = chosen[0] ? labelFor(chosen[0]) : ''; }
+      };
+    }
+
+    /* Known people for the attendee picker: everyone already named on a
+       trip, plus the signed-in user. Deliberately not the shell's full user
+       list — trips include people without logins, and the picker accepts
+       free text anyway. */
+    function knownPeople() {
+      const set = new Set();
+      data.trips.forEach((t) => {
+        (t.attendees || []).forEach((n) => { if (n) set.add(n); });
+        if (t.traveler_name) set.add(t.traveler_name);
+      });
+      if (ctx.user && ctx.user.name) set.add(ctx.user.name);
+      return Array.from(set).sort((a, b) => a.localeCompare(b));
+    }
+
     /* ---------------- Trip form/detail ---------------- */
 
     function tripFormHtml(trip) {
       const isEdit = !!trip;
-      const t = trip || { title: '', destination: '', purpose: 'Client visit', start_date: today(), end_date: today(), status: 'planned', notes: '', miles_value: 0 };
+      const t = trip || { title: '', destination: '', purpose: 'Client visit', start_date: today(), end_date: today(), status: 'potential', notes: '', miles_value: 0, attendees: [] };
       return `
         <div class="panel-top">
           <div><h2>${isEdit ? 'Edit trip' : 'New trip'}</h2><div class="sub">${isEdit ? esc(t.id) : 'Plan a trip'}</div></div>
@@ -658,7 +940,10 @@ export default {
           </div>
           <div class="field-row">
             <div class="field"><label>Purpose</label><select name="purpose">${TRIP_PURPOSES.map((p) => `<option value="${esc(p)}"${p === t.purpose ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
-            <div class="field"><label>Status</label><select name="status">${TRIP_STATUSES.map(([v, l]) => `<option value="${v}"${v === t.status ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+            <div class="field"><label>Status</label><select name="status">${TRIP_STATUSES.map(([v, l]) => `<option value="${v}"${v === normStatus(t.status) ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          </div>
+          <div class="field"><label>Team members</label><div id="tripAttendees"></div>
+            <div class="hint">Type to search. A name that isn't on the list yet can be added as typed.</div>
           </div>
           <div class="field"><label>${esc(redeemLabel())} (dollar credit)</label><input type="number" step="0.01" min="0" name="miles_value" value="${esc(t.miles_value || 0)}" style="max-width:160px">
             <div class="hint">Nets against Total Spent as Net Cost, same as the standalone app's Miles Redeemed figure.</div>
@@ -697,10 +982,19 @@ export default {
       const form = panelIn.querySelector('#tripForm');
       panelIn.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closePanel));
 
+      const people = knownPeople();
+      const attendeePicker = buildTypeahead(panelIn.querySelector('#tripAttendees'), {
+        options: people.map((n) => ({ value: n, label: n })),
+        multi: true,
+        placeholder: 'Search team members...',
+        selected: (trip && trip.attendees) || []
+      });
+
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
         const fd = new FormData(form);
         const body = Object.fromEntries(fd.entries());
+        body.attendees = attendeePicker.value();
         const submitBtn = form.querySelector('button[type="submit"]');
         submitBtn.disabled = true;
         try {
@@ -782,6 +1076,16 @@ export default {
             </select>
           </div>
           <div class="field"><label>Description</label><textarea name="description" ${readOnly ? 'disabled' : ''} placeholder="What was this for?">${esc(e.description || '')}</textarea></div>
+          <div class="field"><label>Receipt</label>
+            <div class="receipt-box" id="receiptBox">
+              <div id="receiptPreview">${e.receipt_url ? `<img src="${esc(e.receipt_url)}" alt="Receipt">` : ''}</div>
+              ${readOnly ? (e.receipt_url ? '' : '<div class="receipt-hint">No receipt attached.</div>') : `
+                <input type="file" id="receiptFile" accept="image/*" capture="environment" style="font-size:12px">
+                <div class="receipt-hint" id="receiptHint">Take a photo or choose an image. The date, amount, merchant and category are read from it and filled in below for you to check.</div>
+              `}
+              <input type="hidden" name="receipt_url" id="receiptUrl" value="${esc(e.receipt_url || '')}">
+            </div>
+          </div>
           ${!readOnly ? `
             <div class="form-actions">
               <button type="submit" class="btn">${isEdit ? 'Save' : 'Submit expense'}</button>
@@ -820,6 +1124,79 @@ export default {
       panelIn.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closePanel));
 
       const catSel = panelIn.querySelector('#expCategory');
+      if (catSel) catSel.addEventListener('change', () => { catSel.dataset.touched = '1'; });
+
+      // ---- Receipt: upload the image, then read it for a prefill --------
+      // The two are separate calls on purpose: the upload must stick even
+      // if extraction fails (a photo you can look at later beats no photo
+      // at all), and extraction never overwrites a field you already typed.
+      const fileInput = panelIn.querySelector('#receiptFile');
+      if (fileInput) {
+        fileInput.addEventListener('change', async () => {
+          const file = fileInput.files && fileInput.files[0];
+          if (!file) return;
+          const hint = panelIn.querySelector('#receiptHint');
+          const setHint = (msg, busy) => {
+            if (hint) hint.innerHTML = busy ? `<span class="receipt-busy">${esc(msg)}</span>` : esc(msg);
+          };
+
+          let dataUrl;
+          try {
+            dataUrl = await new Promise((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = () => resolve(r.result);
+              r.onerror = () => reject(new Error('Could not read that file'));
+              r.readAsDataURL(file);
+            });
+          } catch (err) {
+            setHint(err.message, false);
+            return;
+          }
+
+          panelIn.querySelector('#receiptPreview').innerHTML = `<img src="${dataUrl}" alt="Receipt">`;
+          setHint('Uploading...', true);
+
+          try {
+            const up = await ctx.api.post(ENDPOINTS.ttReceipt + '?action=upload', {
+              data_url: dataUrl, filename: file.name
+            });
+            if (up && up.url) panelIn.querySelector('#receiptUrl').value = up.url;
+          } catch (err) {
+            console.error('[traveltrack] receipt upload failed:', err);
+            setHint('Could not upload the photo: ' + (err.message || 'unknown error') + '. You can still fill the expense in by hand.', false);
+            return;
+          }
+
+          setHint('Reading the receipt...', true);
+          try {
+            const out = await ctx.api.post(ENDPOINTS.ttReceipt + '?action=extract', { data_url: dataUrl });
+            const f = (out && out.fields) || {};
+            const setIfEmpty = (sel, val) => {
+              if (!val) return false;
+              const el = panelIn.querySelector(sel);
+              if (!el || (el.value && String(el.value).trim())) return false;
+              el.value = val;
+              return true;
+            };
+            const filled = [];
+            if (setIfEmpty('[name="date"]', f.date)) filled.push('date');
+            if (setIfEmpty('[name="amount"]', f.amount)) filled.push('amount');
+            if (setIfEmpty('[name="description"]', f.description)) filled.push('merchant');
+            if (f.category && catSel && !catSel.dataset.touched) {
+              catSel.value = f.category;
+              catSel.dispatchEvent(new Event('change'));
+              filled.push('category');
+            }
+            setHint(filled.length
+              ? 'Filled in ' + filled.join(', ') + ' from the photo. Check them before submitting.'
+              : 'Receipt saved. Nothing could be read from it automatically, so fill the details in by hand.', false);
+          } catch (err) {
+            console.error('[traveltrack] receipt extract failed:', err);
+            setHint('Receipt saved, but it could not be read automatically: ' + (err.message || 'unknown error') + '. Fill the details in by hand.', false);
+          }
+        });
+      }
+
       if (catSel) {
         catSel.addEventListener('change', () => {
           const isMileage = catSel.value === MILEAGE_CATEGORY;
@@ -902,39 +1279,70 @@ export default {
       return rows.sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
     }
 
-    function renderRedeemForm() {
-      const trips = redeemableTrips();
-      $('#redeemForm').innerHTML = `
-        <div class="section-hd" style="margin-top:0">Log a redemption</div>
-        <div id="redeemErr"></div>
-        <form id="redeemFormEl">
-          <div class="field"><label>Trip</label>
-            <select name="trip_id" required>
-              ${trips.map((t) => `<option value="${esc(t.id)}">${esc(t.title)} — ${fmtDate(t.start_date)}</option>`).join('')}
-            </select>
-          </div>
+    // Shared by the Redeem Miles page and the dashboard's "+ Log miles"
+    // panel, so the two can never drift apart.
+    function redeemFormHtml(idPrefix) {
+      return `
+        <div id="${idPrefix}Err"></div>
+        <form id="${idPrefix}El">
+          <div class="field"><label>Trip</label><div id="${idPrefix}Trip"></div></div>
           <div class="field"><label>Amount ($)</label><input type="number" step="0.01" min="0.01" name="amount" required></div>
           <div class="field"><label>Note</label><input name="note" placeholder="Optional — e.g. companion ticket"></div>
           <button type="submit" class="btn btn-sm">Add redemption</button>
-        </form>
-      `;
-      const form = $('#redeemFormEl');
+        </form>`;
+    }
+
+    function wireRedeemForm(root, idPrefix, onDone) {
+      const trips = redeemableTrips();
+      const picker = buildTypeahead(root.querySelector('#' + idPrefix + 'Trip'), {
+        options: trips.map((t) => ({ value: t.id, label: t.title + ' — ' + fmtDate(t.start_date) })),
+        placeholder: 'Type to search trips...'
+      });
+      const form = root.querySelector('#' + idPrefix + 'El');
       if (!form) return;
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
+        const errEl = root.querySelector('#' + idPrefix + 'Err');
+        const tripId = picker.value();
+        if (!tripId) {
+          errEl.innerHTML = '<div class="form-err">Pick a trip first.</div>';
+          return;
+        }
         const fd = new FormData(form);
         const body = Object.fromEntries(fd.entries());
+        body.trip_id = tripId;
         const btn = form.querySelector('button[type="submit"]');
         btn.disabled = true;
         try {
           await ctx.api.post(ENDPOINTS.ttMiles, body);
           await loadAll();
-          renderMiles();
           renderDashboard();
+          if (onDone) onDone();
         } catch (err) {
-          $('#redeemErr').innerHTML = `<div class="form-err">${esc(err.message || 'Could not log redemption')}</div>`;
+          errEl.innerHTML = `<div class="form-err">${esc(err.message || 'Could not log redemption')}</div>`;
           btn.disabled = false;
         }
+      });
+    }
+
+    function renderRedeemForm() {
+      $('#redeemForm').innerHTML =
+        '<div class="section-hd" style="margin-top:0">Log a redemption</div>' + redeemFormHtml('redeem');
+      wireRedeemForm(root, 'redeem', () => renderMiles());
+    }
+
+    function openRedeemPanel() {
+      openPanel(`
+        <div class="panel-top">
+          <div><h2>Log ${esc(redeemLabel().toLowerCase())}</h2><div class="sub">Applies a dollar credit to a trip</div></div>
+          <button class="x" data-close>&times;</button>
+        </div>
+        ${redeemFormHtml('panelRedeem')}
+      `);
+      panelIn.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closePanel));
+      wireRedeemForm(panelIn, 'panelRedeem', () => {
+        closePanel();
+        renderMiles();
       });
     }
 
@@ -960,87 +1368,235 @@ export default {
       }).join('');
     }
 
-    /* ---------------- Dashboard ---------------- */
+    /* ---------------- Dashboard ----------------
+       Cards are a registry, not hardcoded markup: each entry knows how to
+       render itself from the already-filtered rows, and which cards are
+       visible is a per-user preference. Adding a report later = one entry
+       here, and it shows up in Customize automatically. */
+
+    const DASH_CARDS = [
+      { id: 'recent_trips',    label: 'Recent trips' },
+      { id: 'recent_expenses', label: 'Recent expenses' },
+      { id: 'spend_vs_miles',  label: 'Spending vs. redeemed' },
+      { id: 'by_category',     label: 'Spending by category' },
+      { id: 'monthly_trend',   label: 'Monthly trend' },
+      { id: 'by_traveler',     label: 'Spending by traveler' },
+      { id: 'trips_by_status', label: 'Trips by status' },
+      { id: 'top_trips',       label: 'Most expensive trips' }
+    ];
+
+    const DASH_DEFAULT = ['recent_trips', 'recent_expenses', 'spend_vs_miles', 'by_category', 'monthly_trend', 'trips_by_status'];
+    const DASH_PREF_KEY = 'traveltrack.dashCards';
+
+    function dashVisible() {
+      try {
+        const raw = localStorage.getItem(DASH_PREF_KEY);
+        if (raw) {
+          const list = JSON.parse(raw);
+          if (Array.isArray(list)) return list.filter((id) => DASH_CARDS.some((c) => c.id === id));
+        }
+      } catch (e) { /* blocked storage — fall through to the default set */ }
+      return DASH_DEFAULT.slice();
+    }
+
+    function setDashVisible(list) {
+      try { localStorage.setItem(DASH_PREF_KEY, JSON.stringify(list)); }
+      catch (e) { /* preference simply won't persist */ }
+    }
+
+    // Horizontal bar list, reused by the several "X by Y" cards.
+    function barListHtml(entries, opts) {
+      const { money = true, empty = 'Nothing to show yet.' } = opts || {};
+      if (!entries.length) return `<div class="empty">${esc(empty)}</div>`;
+      const max = Math.max(...entries.map((e) => e[1])) || 1;
+      return entries.map(([label, value]) => `
+        <div class="bar-row">
+          <div class="top"><span class="lab">${esc(label)}</span><span>${money ? fmtMoney(value) : String(value)}</span></div>
+          <div class="bar-track"><div class="bar-fill" style="width:${Math.round((value / max) * 100)}%"></div></div>
+        </div>`).join('');
+    }
 
     function renderDashboard() {
       const mine = (r, field) => seesAll || r[field] === me;
-      const myTrips = data.trips.filter((t) => mine(t, 'traveler'));
-      const myExpenses = data.expenses.filter((e) => mine(e, 'submitted_by'));
+      const allTrips = data.trips.filter((t) => mine(t, 'traveler'));
+      const allExpenses = data.expenses.filter((e) => mine(e, 'submitted_by'));
 
-      const upcoming = myTrips.filter((t) => t.status === 'planned' || t.status === 'in_progress').length;
-      const yr = new Date().getFullYear();
-      const ytdTotal = myExpenses.filter((e) => String(e.date).slice(0, 4) === String(yr)).reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const pending = myExpenses.filter((e) => e.status === 'pending');
+      // Range filter applies to every card and KPI on this screen.
+      const trips = allTrips.filter((t) => inRange(t.start_date, filters.dashRange));
+      const expenses = allExpenses.filter((e) => inRange(e.date, filters.dashRange));
+
+      const ranges = rangeOptions(allExpenses.concat(allTrips.map((t) => ({ date: t.start_date }))), 'date');
+      const rangeSel = $('#dashRange');
+      rangeSel.innerHTML = ranges.map(([v, l]) => `<option value="${esc(v)}"${filters.dashRange === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
+
+      const upcoming = trips.filter((t) => ['potential', 'confirmed'].includes(normStatus(t.status))).length;
+      const spendTotal = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const pending = expenses.filter((e) => e.status === 'pending');
       const pendingTotal = pending.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const milesTotal = myTrips.reduce((s, t) => s + (Number(t.miles_value) || 0), 0);
+      const milesTotal = trips.reduce((s, t) => s + (Number(t.miles_value) || 0), 0);
+      const rangeLabel = (ranges.find((r) => r[0] === filters.dashRange) || ['', 'All time'])[1];
 
-      const kpis = [
+      $('#dashKpis').innerHTML = [
         [String(upcoming), 'Upcoming trips'],
-        [fmtMoney(ytdTotal), 'YTD spend'],
+        [fmtMoney(spendTotal), 'Total spend'],
         [String(pending.length), 'Pending expenses'],
         [fmtMoney(pendingTotal), 'Awaiting approval'],
-        [fmtMoney(milesTotal), redeemLabel() + ' redeemed']
-      ];
-      $('#dashKpis').innerHTML = kpis.map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
-      $('#dashSub').textContent = seesAll ? "The whole team's trips and expenses." : 'Your trips and expenses.';
+        [fmtMoney(milesTotal), redeemLabel() + ' redeemed'],
+        [fmtMoney(Math.max(0, spendTotal - milesTotal)), 'Net cost']
+      ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
 
-      const recentTrips = myTrips.slice().sort((a, b) => String(b.start_date).localeCompare(String(a.start_date))).slice(0, 5);
-      $('#dashTripsMeta').textContent = myTrips.length + ' total';
-      $('#dashTrips').innerHTML = recentTrips.length ? recentTrips.map((t) => `
-        <div class="mini-row"><div><div class="t">${esc(t.title)}</div><div class="s">${esc(t.destination)} · ${fmtDate(t.start_date)}</div></div>
-        <span class="chip ${statusClass(t.status)}">${esc(labelOf(TRIP_STATUSES, t.status))}</span></div>
-      `).join('') : '<div class="empty">No trips yet.</div>';
+      $('#dashSub').textContent = (seesAll ? "The whole team's trips and expenses" : 'Your trips and expenses') + ' · ' + rangeLabel;
 
-      const recentExp = myExpenses.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 5);
-      $('#dashExpMeta').textContent = myExpenses.length + ' total';
-      $('#dashExp').innerHTML = recentExp.length ? recentExp.map((e) => `
-        <div class="mini-row"><div><div class="t">${esc(e.category)} · ${fmtMoney(e.amount)}</div><div class="s">${esc(e.description || '—')}</div></div>
-        <span class="chip ${statusClass(e.status)}">${esc(labelOf(EXPENSE_STATUSES, e.status))}</span></div>
-      `).join('') : '<div class="empty">No expenses yet.</div>';
-
-      $('#dashDonutHd').textContent = 'Spending vs. ' + redeemLabel();
-      const spendTotal = myExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const milesApplied = Math.min(milesTotal, spendTotal);
-      const outOfPocket = Math.max(0, spendTotal - milesApplied);
-      if (spendTotal <= 0) {
-        $('#dashDonut').innerHTML = '<div class="empty">No spend logged yet.</div>';
-      } else {
-        $('#dashDonut').innerHTML = `
-          <div class="donut-wrap">
-            ${donutSVG([{ value: outOfPocket, varName: 'accent' }, { value: milesApplied, varName: 'success' }])}
-            <div class="donut-legend">
-              <div class="row"><span class="sw spend"></span><span>Out of pocket</span><span class="amt">${fmtMoney(outOfPocket)}</span></div>
-              <div class="row"><span class="sw miles"></span><span>${esc(redeemLabel())}</span><span class="amt">${fmtMoney(milesApplied)}</span></div>
+      // ---- card renderers ----
+      const body = {
+        recent_trips: () => {
+          const rows = trips.slice().sort((a, b) => String(b.start_date).localeCompare(String(a.start_date))).slice(0, 6);
+          return rows.length ? rows.map((t) => `
+            <div class="mini-row"><div><div class="t">${esc(t.title)}</div><div class="s">${esc(t.destination)} · ${fmtDate(t.start_date)}</div></div>
+            <span class="chip ${statusClass(normStatus(t.status))}">${esc(labelOf(TRIP_STATUSES, normStatus(t.status)))}</span></div>
+          `).join('') : '<div class="empty">No trips in this range.</div>';
+        },
+        recent_expenses: () => {
+          const rows = expenses.slice().sort((a, b) => String(b.date).localeCompare(String(a.date))).slice(0, 6);
+          return rows.length ? rows.map((e) => `
+            <div class="mini-row">
+              <div style="display:flex;align-items:center;gap:9px">
+                ${categoryIcon(e.category)}
+                <div><div class="t">${esc(e.description || e.category)}</div><div class="s">${esc(e.category)} · ${fmtDate(e.date)}</div></div>
+              </div>
+              <span class="v" style="font-weight:700">${fmtMoney(e.amount)}</span>
             </div>
+          `).join('') : '<div class="empty">No expenses in this range.</div>';
+        },
+        spend_vs_miles: () => {
+          const applied = Math.min(milesTotal, spendTotal);
+          const oop = Math.max(0, spendTotal - applied);
+          if (spendTotal <= 0) return '<div class="empty">No spend in this range.</div>';
+          return `
+            <div class="donut-wrap">
+              ${donutSVG([{ value: oop, varName: 'accent' }, { value: applied, varName: 'success' }])}
+              <div class="donut-legend">
+                <div class="row"><span class="sw spend"></span><span>Out of pocket</span><span class="amt">${fmtMoney(oop)}</span></div>
+                <div class="row"><span class="sw miles"></span><span>${esc(redeemLabel())}</span><span class="amt">${fmtMoney(applied)}</span></div>
+              </div>
+            </div>`;
+        },
+        by_category: () => {
+          const by = {};
+          expenses.forEach((e) => { by[e.category] = (by[e.category] || 0) + (Number(e.amount) || 0); });
+          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
+        },
+        monthly_trend: () => {
+          const by = {};
+          expenses.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
+          return barListHtml(Object.entries(by).sort((a, b) => a[0].localeCompare(b[0])), { empty: 'No expenses in this range.' });
+        },
+        by_traveler: () => {
+          const by = {};
+          expenses.forEach((e) => { const k = e.submitted_by_name || e.submitted_by || 'Unknown'; by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
+          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
+        },
+        trips_by_status: () => {
+          const by = {};
+          trips.forEach((t) => { const k = labelOf(TRIP_STATUSES, normStatus(t.status)); by[k] = (by[k] || 0) + 1; });
+          return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { money: false, empty: 'No trips in this range.' });
+        },
+        top_trips: () => {
+          const rows = trips.map((t) => [t.title, expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0)])
+            .filter((r) => r[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 8);
+          return barListHtml(rows, { empty: 'No trip spend in this range.' });
+        }
+      };
+
+      const visible = dashVisible();
+      $('#dashCards').innerHTML = DASH_CARDS.filter((c) => visible.includes(c.id)).map((c) => {
+        const label = c.id === 'spend_vs_miles' ? 'Spending vs. ' + redeemLabel() : c.label;
+        const wide = ['monthly_trend', 'top_trips'].includes(c.id);
+        return `
+          <div class="card${wide ? ' wide' : ''}">
+            <div class="card-hd"><h3>${esc(label)}</h3></div>
+            <div class="card-bd">${body[c.id]()}</div>
           </div>`;
-      }
+      }).join('') || '<div class="empty">No cards selected. Use Customize to pick some.</div>';
+    }
+
+    function renderDashCustomize() {
+      const visible = dashVisible();
+      const panel = $('#dashCustomizePanel');
+      panel.innerHTML = `
+        <div class="dash-customize">
+          <h3>Dashboard cards</h3>
+          <div class="hint">Pick what shows here. Saved in this browser.</div>
+          <div class="dash-toggles">
+            ${DASH_CARDS.map((c) => `
+              <label class="dash-toggle">
+                <input type="checkbox" data-card="${esc(c.id)}"${visible.includes(c.id) ? ' checked' : ''}>
+                <span>${esc(c.id === 'spend_vs_miles' ? 'Spending vs. ' + redeemLabel() : c.label)}</span>
+              </label>`).join('')}
+          </div>
+          <div class="form-actions"><button class="btn btn-sm ghost" id="dashResetCards">Reset to default</button></div>
+        </div>`;
+      panel.querySelectorAll('[data-card]').forEach((box) => {
+        box.addEventListener('change', () => {
+          const next = Array.from(panel.querySelectorAll('[data-card]'))
+            .filter((b) => b.checked).map((b) => b.dataset.card);
+          setDashVisible(next);
+          renderDashboard();
+        });
+      });
+      panel.querySelector('#dashResetCards').addEventListener('click', () => {
+        setDashVisible(DASH_DEFAULT.slice());
+        renderDashCustomize();
+        renderDashboard();
+      });
     }
 
     /* ---------------- Trips view ---------------- */
 
-    const TRIP_FILTERS = [['active', 'Active'], ['completed', 'Completed'], ['all', 'All']];
+    const TRIP_FILTERS = [
+      ['upcoming', 'Upcoming'],
+      ['attended', 'Attended'],
+      ['all', 'All']
+    ];
 
     function renderTripsFilters() {
-      $('#tripsFilters').innerHTML = TRIP_FILTERS.map(([k, l]) =>
-        `<button class="filt" data-filt="${k}" aria-pressed="${filters.trips === k}">${esc(l)}</button>`).join('');
+      const ranges = rangeOptions(data.trips, 'start_date');
+      $('#tripsFilters').innerHTML =
+        TRIP_FILTERS.map(([k, l]) =>
+          `<button class="filt" data-filt="${k}" aria-pressed="${filters.trips === k}">${esc(l)}</button>`).join('') +
+        `<select class="filt" id="tripsRange" style="margin-left:8px;cursor:pointer">
+          ${ranges.map(([v, l]) => `<option value="${esc(v)}"${filters.tripsRange === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        </select>`;
       $$('#tripsFilters [data-filt]').forEach((b) => b.addEventListener('click', () => {
         filters.trips = b.dataset.filt;
         renderTrips();
       }));
+      const sel = $('#tripsRange');
+      if (sel) sel.addEventListener('change', () => { filters.tripsRange = sel.value; renderTrips(); });
     }
 
-    // A trip imported with several attendees carries them as a line in
-    // notes ("Attendees: A, B, C") since this app models one traveler per
-    // trip. Prefer showing that full list on the card when it's there.
-    function attendeesLabel(t) {
+    // Attendees live on the trip record now. Older imported trips carried
+    // them as a line in notes ("Attendees: A, B, C") before that field
+    // existed, so fall back to parsing that rather than showing one name
+    // for a trip five people went on.
+    function attendeesOf(t) {
+      if (Array.isArray(t.attendees) && t.attendees.length) return t.attendees;
       const m = /Attendees:\s*(.+)/.exec(t.notes || '');
-      return m ? m[1].trim() : (t.traveler_name || t.traveler || 'Unknown');
+      if (m) return m[1].split(',').map((s) => s.trim()).filter(Boolean);
+      const solo = t.traveler_name || t.traveler;
+      return solo ? [solo] : [];
+    }
+
+    function attendeesLabel(t) {
+      const list = attendeesOf(t);
+      return list.length ? list.join(', ') : 'Unknown';
     }
 
     function filteredTrips() {
       let rows = seesAll ? data.trips.slice() : data.trips.filter((t) => t.traveler === me);
-      if (filters.trips === 'active') rows = rows.filter((t) => t.status === 'planned' || t.status === 'in_progress');
-      if (filters.trips === 'completed') rows = rows.filter((t) => t.status === 'completed');
+      if (filters.trips === 'upcoming') rows = rows.filter((t) => ['potential', 'confirmed'].includes(normStatus(t.status)));
+      if (filters.trips === 'attended') rows = rows.filter((t) => normStatus(t.status) === 'attended');
+      rows = rows.filter((t) => inRange(t.start_date, filters.tripsRange));
       rows.sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
       return rows;
     }
@@ -1072,30 +1628,60 @@ export default {
         return;
       }
 
-      $('#tripsTbl').innerHTML = withSpend.map(({ t, spent, miles, net }) => `
+      $('#tripsTbl').innerHTML = withSpend.map(({ t, spent, miles, net }) => {
+        const st = normStatus(t.status);
+        const pct = spent > 0 ? Math.min(100, Math.round((miles / spent) * 100)) : 0;
+        return `
         <div class="trip-card" data-trip="${esc(t.id)}">
           <div class="trip-card-hd">
             <h3>${esc(t.title)}</h3>
-            <span class="chip ${statusClass(t.status)}">${esc(labelOf(TRIP_STATUSES, t.status))}</span>
+            <select class="status-select ${statusClass(st)}" data-status-for="${esc(t.id)}" title="Change status">
+              ${TRIP_STATUSES.map(([v, l]) => `<option value="${v}"${v === st ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+            </select>
           </div>
           <div class="trip-meta">${ICON_PIN}<span>${esc(t.destination || '—')}</span></div>
           <div class="trip-meta">${ICON_CALENDAR}<span>${fmtDate(t.start_date)}${t.end_date && t.end_date !== t.start_date ? ' – ' + fmtDate(t.end_date) : ''}</span></div>
           <div class="trip-meta">${ICON_PEOPLE}<span>${esc(attendeesLabel(t))}</span></div>
           <div class="trip-figures">
             <div class="figure-row"><span class="k">Total Spent</span><span class="v">${fmtMoney(spent)}</span></div>
-            ${miles > 0 ? `
-              <div class="figure-row"><span class="k">${esc(redeemLabel())}</span><span class="v miles-credit">-${fmtMoney(miles)}</span></div>
-              <div class="bar-track"><div class="bar-fill" style="width:${spent ? Math.min(100, Math.round(miles / spent * 100)) : 0}%"></div></div>
+            ${spent > 0 ? `
+              <div class="figure-row"><span class="k">${esc(redeemLabel())}</span><span class="v miles-credit">${miles > 0 ? '-' + fmtMoney(miles) : fmtMoney(0)}</span></div>
+              <div class="bar-track" title="${pct}% of this trip covered"><div class="bar-fill" style="width:${pct}%"></div></div>
             ` : ''}
             <div class="figure-row net"><span class="k">Net Cost</span><span class="v">${fmtMoney(net)}</span></div>
           </div>
-        </div>
-      `).join('');
+        </div>`;
+      }).join('');
 
-      $$('#tripsTbl [data-trip]').forEach((card) => card.addEventListener('click', () => {
+      // Card click opens the trip; the status dropdown is excluded so
+      // changing status never also pops the panel open behind it.
+      $$('#tripsTbl [data-trip]').forEach((card) => card.addEventListener('click', (e) => {
+        if (e.target.closest('.status-select')) return;
         const trip = data.trips.find((t) => t.id === card.dataset.trip);
         if (trip) openTripPanel(trip);
       }));
+
+      $$('#tripsTbl [data-status-for]').forEach((sel) => {
+        sel.addEventListener('click', (e) => e.stopPropagation());
+        sel.addEventListener('change', async () => {
+          const id = sel.dataset.statusFor;
+          const prev = sel.dataset.prev || '';
+          sel.disabled = true;
+          try {
+            await ctx.api.request(ENDPOINTS.ttTrips + '?id=' + encodeURIComponent(id), {
+              method: 'PATCH', body: { status: sel.value }
+            });
+            await loadAll();
+            renderTrips();
+            renderDashboard();
+          } catch (err) {
+            console.error('[traveltrack] status change failed:', err);
+            sel.disabled = false;
+            if (prev) sel.value = prev;
+            alert('Could not change status: ' + (err.message || 'unknown error'));
+          }
+        });
+      });
     }
 
     function exportTripsCSV() {
@@ -1104,7 +1690,7 @@ export default {
       const body = rows.map((t) => {
         const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
         const miles = Number(t.miles_value) || 0;
-        return [t.title, t.destination, labelOf(TRIP_STATUSES, t.status), t.start_date, t.end_date, t.traveler_name || t.traveler, spent.toFixed(2), miles.toFixed(2), Math.max(0, spent - miles).toFixed(2)];
+        return [t.title, t.destination, labelOf(TRIP_STATUSES, normStatus(t.status)), t.start_date, t.end_date, t.traveler_name || t.traveler, spent.toFixed(2), miles.toFixed(2), Math.max(0, spent - miles).toFixed(2)];
       });
       downloadCSV('traveltrack-trips.csv', [header, ...body]);
     }
@@ -1114,13 +1700,28 @@ export default {
     const EXP_FILTERS = [['pending', 'Pending'], ['approved', 'Approved'], ['reimbursed', 'Reimbursed'], ['rejected', 'Rejected'], ['all', 'All']];
 
     function renderExpFilters() {
+      const ranges = rangeOptions(data.expenses, 'date');
       let html = EXP_FILTERS.map(([k, l]) =>
         `<button class="filt" data-filt="${k}" aria-pressed="${filters.expenses === k}">${esc(l)}</button>`).join('');
+      html += `<select class="filt" id="expCategoryFilter" style="margin-left:8px;cursor:pointer">
+          <option value="all"${filters.expenseCategory === 'all' ? ' selected' : ''}>All categories</option>
+          ${EXPENSE_CATEGORIES.map((c) => `<option value="${esc(c)}"${filters.expenseCategory === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+        </select>`;
+      html += `<select class="filt" id="expRange" style="cursor:pointer">
+          ${ranges.map(([v, l]) => `<option value="${esc(v)}"${filters.expensesRange === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+        </select>`;
+      html += `<button class="filt" data-bytrip aria-pressed="${filters.expensesByTrip}" style="margin-left:8px">Group by trip</button>`;
       if (seesAll) {
-        html += `<button class="filt" data-mine aria-pressed="${filters.expensesMine}" style="margin-left:8px">My expenses only</button>`;
+        html += `<button class="filt" data-mine aria-pressed="${filters.expensesMine}">My expenses only</button>`;
       }
       $('#expFilters').innerHTML = html;
       $$('#expFilters [data-filt]').forEach((b) => b.addEventListener('click', () => { filters.expenses = b.dataset.filt; renderExpenses(); }));
+      const catSel = $('#expCategoryFilter');
+      if (catSel) catSel.addEventListener('change', () => { filters.expenseCategory = catSel.value; renderExpenses(); });
+      const rangeSel = $('#expRange');
+      if (rangeSel) rangeSel.addEventListener('change', () => { filters.expensesRange = rangeSel.value; renderExpenses(); });
+      const byTripBtn = $('#expFilters [data-bytrip]');
+      if (byTripBtn) byTripBtn.addEventListener('click', () => { filters.expensesByTrip = !filters.expensesByTrip; renderExpenses(); });
       const mineBtn = $('#expFilters [data-mine]');
       if (mineBtn) mineBtn.addEventListener('click', () => { filters.expensesMine = !filters.expensesMine; renderExpenses(); });
     }
@@ -1129,8 +1730,32 @@ export default {
       let rows = seesAll ? data.expenses.slice() : data.expenses.filter((e) => e.submitted_by === me);
       if (seesAll && filters.expensesMine) rows = rows.filter((e) => e.submitted_by === me);
       if (filters.expenses !== 'all') rows = rows.filter((e) => e.status === filters.expenses);
+      if (filters.expenseCategory !== 'all') rows = rows.filter((e) => e.category === filters.expenseCategory);
+      rows = rows.filter((e) => inRange(e.date, filters.expensesRange));
       rows.sort((a, b) => String(b.date).localeCompare(String(a.date)));
       return rows;
+    }
+
+    function expenseRowHtml(e) {
+      return `
+        <tr class="clickable" data-exp="${esc(e.id)}">
+          <td>${fmtDate(e.date)}</td>
+          <td><div class="cat-cell">${categoryIcon(e.category)}<span>${esc(e.category)}</span></div></td>
+          <td>${esc(e.description || '—')}${e.receipt_url ? ' <span class="chip muted">receipt</span>' : ''}</td>
+          ${seesAll ? `<td>${esc(e.submitted_by_name || e.submitted_by)}</td>` : ''}
+          ${filters.expensesByTrip ? '' : `<td>${esc(tripLabel(e.trip_id) || '—')}</td>`}
+          <td>${esc(labelOf(PAYMENT_METHODS, e.payment_method))}</td>
+          <td class="num">${fmtMoney(e.amount)}</td>
+          <td><span class="chip ${statusClass(e.status)}">${esc(labelOf(EXPENSE_STATUSES, e.status))}</span></td>
+        </tr>`;
+    }
+
+    function expenseTableHtml(rows) {
+      return `
+        <table>
+          <thead><tr><th>Date</th><th>Category</th><th>Description</th>${seesAll ? '<th>Submitted by</th>' : ''}${filters.expensesByTrip ? '' : '<th>Trip</th>'}<th>Payment</th><th class="num">Amount</th><th>Status</th></tr></thead>
+          <tbody>${rows.map(expenseRowHtml).join('')}</tbody>
+        </table>`;
     }
 
     function renderExpenses() {
@@ -1143,21 +1768,36 @@ export default {
         return;
       }
 
-      $('#expTbl').innerHTML = `
-        <table>
-          <thead><tr><th>Date</th><th>Category</th><th>Description</th>${seesAll ? '<th>Submitted by</th>' : ''}<th>Trip</th><th>Payment</th><th class="num">Amount</th><th>Status</th></tr></thead>
-          <tbody>
-            ${rows.map((e) => `
-              <tr class="clickable" data-exp="${esc(e.id)}">
-                <td>${fmtDate(e.date)}</td><td>${esc(e.category)}</td><td>${esc(e.description || '—')}</td>
-                ${seesAll ? `<td>${esc(e.submitted_by_name || e.submitted_by)}</td>` : ''}
-                <td>${esc(tripLabel(e.trip_id) || '—')}</td>
-                <td>${esc(labelOf(PAYMENT_METHODS, e.payment_method))}</td>
-                <td class="num">${fmtMoney(e.amount)}</td>
-                <td><span class="chip ${statusClass(e.status)}">${esc(labelOf(EXPENSE_STATUSES, e.status))}</span></td>
-              </tr>`).join('')}
-          </tbody>
-        </table>`;
+      if (filters.expensesByTrip) {
+        // Grouped view: one block per trip, each with its own subtotal.
+        // Unassigned expenses collect under a final "No trip" group rather
+        // than being dropped.
+        const groups = new Map();
+        rows.forEach((e) => {
+          const key = e.trip_id || '__none__';
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(e);
+        });
+        const ordered = Array.from(groups.entries()).sort((a, b) => {
+          if (a[0] === '__none__') return 1;
+          if (b[0] === '__none__') return -1;
+          const ta = data.trips.find((t) => t.id === a[0]);
+          const tb = data.trips.find((t) => t.id === b[0]);
+          return String((tb && tb.start_date) || '').localeCompare(String((ta && ta.start_date) || ''));
+        });
+        $('#expTbl').innerHTML = ordered.map(([key, list]) => {
+          const total = list.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+          const title = key === '__none__' ? 'No trip' : (tripLabel(key) || key);
+          return `
+            <div class="card-hd" style="border-top:1px solid var(--line)">
+              <h3>${esc(title)}</h3>
+              <span class="meta">${list.length} item${list.length === 1 ? '' : 's'} · ${fmtMoney(total)}</span>
+            </div>
+            ${expenseTableHtml(list)}`;
+        }).join('');
+      } else {
+        $('#expTbl').innerHTML = expenseTableHtml(rows);
+      }
 
       $$('#expTbl [data-exp]').forEach((row) => row.addEventListener('click', () => {
         const exp = data.expenses.find((e) => e.id === row.dataset.exp);
@@ -1238,6 +1878,72 @@ export default {
           </div>
         `).join('') : '<div class="empty">No expenses in ' + reportsYear + '.</div>';
       }
+
+      // ---- Spend by trip ----
+      const byTrip = {};
+      rows.forEach((e) => {
+        const k = e.trip_id ? (tripLabel(e.trip_id) || e.trip_id) : 'No trip';
+        byTrip[k] = (byTrip[k] || 0) + (Number(e.amount) || 0);
+      });
+      $('#reportsByTrip').innerHTML = barListHtml(
+        Object.entries(byTrip).sort((a, b) => b[1] - a[1]),
+        { empty: 'No expenses in ' + reportsYear + '.' });
+
+      // ---- Payment method ----
+      const byPay = {};
+      rows.forEach((e) => {
+        const k = labelOf(PAYMENT_METHODS, e.payment_method);
+        byPay[k] = (byPay[k] || 0) + (Number(e.amount) || 0);
+      });
+      $('#reportsByPayment').innerHTML = barListHtml(
+        Object.entries(byPay).sort((a, b) => b[1] - a[1]),
+        { empty: 'No expenses in ' + reportsYear + '.' });
+
+      // ---- Approval status ----
+      const byStatus = {};
+      rows.forEach((e) => {
+        const k = labelOf(EXPENSE_STATUSES, e.status);
+        byStatus[k] = (byStatus[k] || 0) + (Number(e.amount) || 0);
+      });
+      $('#reportsByStatus').innerHTML = barListHtml(
+        Object.entries(byStatus).sort((a, b) => b[1] - a[1]),
+        { empty: 'No expenses in ' + reportsYear + '.' });
+
+      // ---- Redeemed by trip ----
+      // Trips are scoped by their own start date, not the expense dates, so
+      // this counts a redemption in the year the trip happened.
+      $('#reportsMilesHd').textContent = redeemLabel() + ' by trip';
+      const tripsInYear = (seesAll ? data.trips : data.trips.filter((t) => t.traveler === me))
+        .filter((t) => String(t.start_date).slice(0, 4) === String(reportsYear));
+      const milesRows = tripsInYear
+        .map((t) => [t.title, Number(t.miles_value) || 0])
+        .filter((r) => r[1] > 0).sort((a, b) => b[1] - a[1]);
+      $('#reportsMiles').innerHTML = barListHtml(milesRows, { empty: 'Nothing redeemed in ' + reportsYear + '.' });
+
+      // ---- Trip summary table ----
+      const summary = tripsInYear.map((t) => {
+        const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const miles = Number(t.miles_value) || 0;
+        return { t, spent, miles, net: Math.max(0, spent - miles) };
+      }).sort((a, b) => b.spent - a.spent);
+
+      $('#reportsTableMeta').textContent = summary.length + (summary.length === 1 ? ' trip' : ' trips');
+      $('#reportsTable').innerHTML = summary.length ? `
+        <table>
+          <thead><tr><th>Trip</th><th>Dates</th><th>Status</th>${seesAll ? '<th>Team</th>' : ''}<th class="num">Spent</th><th class="num">${esc(redeemLabel())}</th><th class="num">Net</th></tr></thead>
+          <tbody>
+            ${summary.map(({ t, spent, miles, net }) => `
+              <tr>
+                <td>${esc(t.title)}</td>
+                <td>${fmtDate(t.start_date)}${t.end_date && t.end_date !== t.start_date ? ' – ' + fmtDate(t.end_date) : ''}</td>
+                <td><span class="chip ${statusClass(normStatus(t.status))}">${esc(labelOf(TRIP_STATUSES, normStatus(t.status)))}</span></td>
+                ${seesAll ? `<td>${esc(attendeesLabel(t))}</td>` : ''}
+                <td class="num">${fmtMoney(spent)}</td>
+                <td class="num">${miles > 0 ? '-' + fmtMoney(miles) : '—'}</td>
+                <td class="num">${fmtMoney(net)}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>` : '<div class="empty">No trips in ' + reportsYear + '.</div>';
     }
 
     function exportReportsCSV() {
@@ -1436,7 +2142,7 @@ export default {
                   return `
                     <tr data-trip-key="${esc(trip.key)}">
                       <td>${esc(trip.title)}${already ? ' <span class="chip muted">already exists</span>' : ''}</td>
-                      <td><span class="chip ${statusClass(trip.status)}">${esc(labelOf(TRIP_STATUSES, trip.status))}</span></td>
+                      <td><span class="chip ${statusClass(normStatus(trip.status))}">${esc(labelOf(TRIP_STATUSES, normStatus(trip.status)))}</span></td>
                       <td>${fmtDate(trip.start_date)}</td>
                       <td><input type="date" class="import-end-date" data-key="${esc(trip.key)}" value="${esc(trip.end_date)}" style="padding:4px 6px;font-size:12px;width:130px"></td>
                       <td><input type="text" class="import-traveler" data-key="${esc(trip.key)}" value="${esc(trip.traveler)}" style="padding:4px 6px;font-size:12px;width:120px"></td>
@@ -1530,6 +2236,13 @@ export default {
 
     $('#dashNewTrip').addEventListener('click', () => openTripPanel(null));
     $('#dashNewExpense').addEventListener('click', () => openExpensePanel(null));
+    $('#dashLogMiles').addEventListener('click', () => openRedeemPanel());
+    $('#dashRange').addEventListener('change', (e) => { filters.dashRange = e.target.value; renderDashboard(); });
+    $('#dashCustomize').addEventListener('click', () => {
+      const panel = $('#dashCustomizePanel');
+      panel.hidden = !panel.hidden;
+      if (!panel.hidden) renderDashCustomize();
+    });
     $('#tripsNewBtn').addEventListener('click', () => openTripPanel(null));
     $('#tripsExportBtn').addEventListener('click', exportTripsCSV);
     $('#expNewBtn').addEventListener('click', () => openExpensePanel(null));
