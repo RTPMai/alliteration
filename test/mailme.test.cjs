@@ -484,6 +484,20 @@ t.test('API errors render readable text, never [object Object]', () => {
     'the request path must use errorText, not payload.error directly');
 });
 
+t.test('every contact source gets a count, derived not hand-listed', () => {
+  // The first version listed client and prospect by hand, so Leads and Giving
+  // showed 0 in the filter tabs while their rows loaded fine underneath: a
+  // count that disagreed with its own table. Deriving from CONTACT_SOURCES
+  // means adding a source cannot silently miss its counter.
+  const src = read('api/mailme/contacts.js');
+  t.assert(/CONTACT_SOURCES\.map\(/.test(src),
+    'per-source counts must be derived from CONTACT_SOURCES');
+  const counts = src.slice(src.indexOf('counts: {'), src.indexOf('tags:'));
+  t.assert(!/client:\s*resolved\.clientCount/.test(counts),
+    'counts must not be hand-listed per source');
+});
+
+
 
 
 
