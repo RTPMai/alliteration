@@ -741,7 +741,7 @@ export default {
     const seesAll = scope === 'all';
     const me = (ctx.user && (ctx.user.username || ctx.user.name)) || '';
 
-    const data = { trips: [], expenses: [], org: null, account: null, canEditOrg: false };
+    const data = { trips: [], expenses: [], people: [], org: null, account: null, canEditOrg: false };
     const filters = {
       trips: 'active', expenses: 'pending', expensesMine: !seesAll,
       // Date-range filters, independent per view so changing one doesn't
@@ -762,6 +762,7 @@ export default {
       data.expenses = (expRes && expRes.expenses) || [];
       data.org = (settingsRes && settingsRes.org) || { mileage_rate: 0.67, per_diem_rate: 0, approval_threshold: 500, policy_notes: '', redemption_label: 'Miles / Rewards' };
       data.account = (settingsRes && settingsRes.account) || { home_airport: '', default_payment_method: 'personal_reimburse' };
+      data.people = (settingsRes && settingsRes.people) || [];
       data.canEditOrg = !!(settingsRes && settingsRes.can_edit_org);
     }
 
@@ -772,6 +773,25 @@ export default {
 
     function expensesForTrip(id) {
       return data.expenses.filter((e) => e.trip_id === id);
+    }
+
+    /* Only trips we actually attended count toward spend totals (Ryan's
+       rule, and what the standalone did: its header read "Total Spent (11
+       trips)" across 12 trips, excluding the Did Not Attend one).
+       Money on a trip that didn't happen is still real, so it is never
+       hidden — the KPI strip reports it on its own line instead of
+       silently folding it into the total. */
+    function countsTowardSpend(trip) {
+      return trip && normStatus(trip.status) === 'attended';
+    }
+
+    // An expense counts if its trip counts. Expenses with no trip attached
+    // count too — there's no trip status to disqualify them.
+    function expenseCounts(e) {
+      if (!e.trip_id) return true;
+      const t = data.trips.find((x) => x.id === e.trip_id);
+      if (!t) return true;
+      return countsTowardSpend(t);
     }
 
     /* ---------------- panel plumbing (shared by trip/expense/loyalty forms) ---------------- */
@@ -911,11 +931,17 @@ export default {
        list — trips include people without logins, and the picker accepts
        free text anyway. */
     function knownPeople() {
-      const set = new Set();
-      data.trips.forEach((t) => {
-        (t.attendees || []).forEach((n) => { if (n) set.add(n); });
-        if (t.traveler_name) set.add(t.traveler_name);
-      });
+      // The server merges shell accounts, the org's extra roster, and every
+      // name already on a trip (api/traveltrack/settings.js). Fall back to
+      // deriving it locally if that list didn't come through, so the picker
+      // is never empty.
+      const set = new Set(data.people || []);
+      if (!set.size) {
+        data.trips.forEach((t) => {
+          (t.attendees || []).forEach((n) => { if (n) set.add(n); });
+          if (t.traveler_name) set.add(t.traveler_name);
+        });
+      }
       if (ctx.user && ctx.user.name) set.add(ctx.user.name);
       return Array.from(set).sort((a, b) => a.localeCompare(b));
     }
@@ -1430,20 +1456,31 @@ export default {
       rangeSel.innerHTML = ranges.map(([v, l]) => `<option value="${esc(v)}"${filters.dashRange === v ? ' selected' : ''}>${esc(l)}</option>`).join('');
 
       const upcoming = trips.filter((t) => ['potential', 'confirmed'].includes(normStatus(t.status))).length;
-      const spendTotal = expenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      // Spend totals count only trips we attended (see countsTowardSpend).
+      // countedExpenses is what every money figure on this screen uses;
+      // `expenses` stays the full set for the recent-activity list, which
+      // should still show what was logged regardless of trip outcome.
+      const countedExpenses = expenses.filter(expenseCounts);
+      const countedTrips = trips.filter(countsTowardSpend);
+      const spendTotal = countedExpenses.reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const excludedTotal = expenses.filter((e) => !expenseCounts(e)).reduce((s, e) => s + (Number(e.amount) || 0), 0);
       const pending = expenses.filter((e) => e.status === 'pending');
       const pendingTotal = pending.reduce((s, e) => s + (Number(e.amount) || 0), 0);
-      const milesTotal = trips.reduce((s, t) => s + (Number(t.miles_value) || 0), 0);
+      const milesTotal = countedTrips.reduce((s, t) => s + (Number(t.miles_value) || 0), 0);
       const rangeLabel = (ranges.find((r) => r[0] === filters.dashRange) || ['', 'All time'])[1];
 
-      $('#dashKpis').innerHTML = [
+      const dashKpiRows = [
         [String(upcoming), 'Upcoming trips'],
         [fmtMoney(spendTotal), 'Total spend'],
         [String(pending.length), 'Pending expenses'],
         [fmtMoney(pendingTotal), 'Awaiting approval'],
         [fmtMoney(milesTotal), redeemLabel() + ' redeemed'],
         [fmtMoney(Math.max(0, spendTotal - milesTotal)), 'Net cost']
-      ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
+      ];
+      if (excludedTotal > 0) dashKpiRows.push([fmtMoney(excludedTotal), 'On trips not attended']);
+
+      $('#dashKpis').innerHTML = dashKpiRows
+        .map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
 
       $('#dashSub').textContent = (seesAll ? "The whole team's trips and expenses" : 'Your trips and expenses') + ' · ' + rangeLabel;
 
@@ -1483,17 +1520,17 @@ export default {
         },
         by_category: () => {
           const by = {};
-          expenses.forEach((e) => { by[e.category] = (by[e.category] || 0) + (Number(e.amount) || 0); });
+          countedExpenses.forEach((e) => { by[e.category] = (by[e.category] || 0) + (Number(e.amount) || 0); });
           return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
         },
         monthly_trend: () => {
           const by = {};
-          expenses.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
+          countedExpenses.forEach((e) => { const k = String(e.date).slice(0, 7); if (k) by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
           return barListHtml(Object.entries(by).sort((a, b) => a[0].localeCompare(b[0])), { empty: 'No expenses in this range.' });
         },
         by_traveler: () => {
           const by = {};
-          expenses.forEach((e) => { const k = e.submitted_by_name || e.submitted_by || 'Unknown'; by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
+          countedExpenses.forEach((e) => { const k = e.submitted_by_name || e.submitted_by || 'Unknown'; by[k] = (by[k] || 0) + (Number(e.amount) || 0); });
           return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { empty: 'No expenses in this range.' });
         },
         trips_by_status: () => {
@@ -1502,7 +1539,7 @@ export default {
           return barListHtml(Object.entries(by).sort((a, b) => b[1] - a[1]), { money: false, empty: 'No trips in this range.' });
         },
         top_trips: () => {
-          const rows = trips.map((t) => [t.title, expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0)])
+          const rows = countedTrips.map((t) => [t.title, expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0)])
             .filter((r) => r[1] > 0).sort((a, b) => b[1] - a[1]).slice(0, 8);
           return barListHtml(rows, { empty: 'No trip spend in this range.' });
         }
@@ -1610,18 +1647,27 @@ export default {
       const withSpend = rows.map((t) => {
         const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
         const miles = Number(t.miles_value) || 0;
-        return { t, spent, miles, net: Math.max(0, spent - miles) };
+        return { t, spent, miles, net: Math.max(0, spent - miles), counts: countsTowardSpend(t) };
       });
-      const totalSpent = withSpend.reduce((s, r) => s + r.spent, 0);
-      const totalMiles = withSpend.reduce((s, r) => s + r.miles, 0);
-      const totalNet = withSpend.reduce((s, r) => s + r.net, 0);
-      const spendingTripCount = withSpend.filter((r) => r.spent > 0).length;
+      const counted = withSpend.filter((r) => r.counts);
+      const totalSpent = counted.reduce((s, r) => s + r.spent, 0);
+      const totalMiles = counted.reduce((s, r) => s + r.miles, 0);
+      const totalNet = counted.reduce((s, r) => s + r.net, 0);
+      const spendingTripCount = counted.filter((r) => r.spent > 0).length;
+      const excluded = withSpend.filter((r) => !r.counts).reduce((s, r) => s + r.spent, 0);
 
-      $('#tripsKpis').innerHTML = rows.length ? [
+      const tripKpis = [
         [fmtMoney(totalSpent), 'Total spent (' + spendingTripCount + ' trip' + (spendingTripCount === 1 ? '' : 's') + ')'],
         [fmtMoney(totalMiles), redeemLabel() + ' redeemed'],
         [fmtMoney(totalNet), 'Net cost']
-      ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('') : '';
+      ];
+      // Never hide money: spend on trips that weren't attended gets its own
+      // tile rather than quietly vanishing from the total.
+      if (excluded > 0) tripKpis.push([fmtMoney(excluded), 'On trips not attended']);
+
+      $('#tripsKpis').innerHTML = rows.length
+        ? tripKpis.map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('')
+        : '';
 
       if (!rows.length) {
         $('#tripsTbl').innerHTML = '<div class="empty"><h3>No trips here</h3><p>Try a different filter, or plan a new one.</p></div>';
@@ -1821,9 +1867,16 @@ export default {
       $('#reportsYear').innerHTML = sorted.map((y) => `<option value="${y}"${Number(y) === reportsYear ? ' selected' : ''}>${y}</option>`).join('');
     }
 
-    function reportRows() {
+    // Every money figure in Reports counts only trips we attended. The
+    // unfiltered set is kept separate so the excluded amount can still be
+    // reported rather than disappearing.
+    function reportRowsAll() {
       const scoped = seesAll ? data.expenses : data.expenses.filter((e) => e.submitted_by === me);
       return scoped.filter((e) => String(e.date).slice(0, 4) === String(reportsYear));
+    }
+
+    function reportRows() {
+      return reportRowsAll().filter(expenseCounts);
     }
 
     function renderReports() {
@@ -1835,12 +1888,17 @@ export default {
       const tripCount = new Set(rows.map((e) => e.trip_id).filter(Boolean)).size;
 
       $('#reportsSub').textContent = seesAll ? "Team spend for " + reportsYear + "." : "Your spend for " + reportsYear + ".";
-      $('#reportsKpis').innerHTML = [
+      const excludedReport = reportRowsAll().filter((e) => !expenseCounts(e))
+        .reduce((s, e) => s + (Number(e.amount) || 0), 0);
+      const reportKpis = [
         [fmtMoney(total), 'Total spend'],
         [fmtMoney(pending), 'Awaiting approval'],
         [fmtMoney(reimbursed), 'Reimbursed'],
         [String(tripCount), 'Trips with expenses']
-      ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
+      ];
+      if (excludedReport > 0) reportKpis.push([fmtMoney(excludedReport), 'On trips not attended']);
+      $('#reportsKpis').innerHTML = reportKpis
+        .map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('');
 
       const byCat = {};
       rows.forEach((e) => { byCat[e.category] = (byCat[e.category] || 0) + (Number(e.amount) || 0); });
@@ -1914,7 +1972,8 @@ export default {
       // this counts a redemption in the year the trip happened.
       $('#reportsMilesHd').textContent = redeemLabel() + ' by trip';
       const tripsInYear = (seesAll ? data.trips : data.trips.filter((t) => t.traveler === me))
-        .filter((t) => String(t.start_date).slice(0, 4) === String(reportsYear));
+        .filter((t) => String(t.start_date).slice(0, 4) === String(reportsYear))
+        .filter(countsTowardSpend);
       const milesRows = tripsInYear
         .map((t) => [t.title, Number(t.miles_value) || 0])
         .filter((r) => r[1] > 0).sort((a, b) => b[1] - a[1]);
@@ -1993,6 +2052,10 @@ export default {
             <div class="field"><label>Per diem rate ($/day, 0 = unused)</label><input type="number" step="0.01" min="0" name="per_diem_rate" value="${esc(data.org.per_diem_rate)}" style="max-width:200px"></div>
             <div class="field"><label>Redeem Miles label</label><input name="redemption_label" value="${esc(data.org.redemption_label || 'Miles / Rewards')}" style="max-width:220px">
               <div class="hint">What this shows as everywhere — trip cards, dashboard, the rail. Some shops call it "Points" or "Rewards" instead.</div>
+            </div>
+            <div class="field"><label>Team members</label>
+              <textarea name="team_members" placeholder="One name per line" style="min-height:110px">${esc((data.org.team_members || []).join('\n'))}</textarea>
+              <div class="hint">Extra people who can be added to a trip but don't have a login here. Anyone with a shell account is already in the picker; this is only for the difference.</div>
             </div>
             <div class="field"><label>Travel policy notes</label><textarea name="policy_notes" placeholder="Optional">${esc(data.org.policy_notes || '')}</textarea></div>
             <button type="submit" class="btn btn-sm">Save org settings</button>
