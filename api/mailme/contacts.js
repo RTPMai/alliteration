@@ -17,7 +17,9 @@
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
 import { resolveContacts, setContactStatus, deleteProspect } from "../../lib/mailme/store.js";
-import { SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts } from "../../lib/mailme/schema.js";
+import {
+  SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts, CONTACT_SOURCES,
+} from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -73,8 +75,14 @@ export default async function handler(req, res) {
         counts: {
           total: all.length,
           shown: contacts.length,
-          client: resolved.clientCount,
-          prospect: resolved.prospectCount,
+          // Derived from CONTACT_SOURCES rather than listed by hand. The
+          // hand-written version shipped with only client and prospect, so
+          // Leads and Giving read 0 in the UI while their rows loaded fine
+          // underneath — a count that disagreed with its own table. Adding a
+          // source now cannot silently miss its counter.
+          ...Object.fromEntries(
+            CONTACT_SOURCES.map((src) => [src, countBy((c) => c.source === src)])
+          ),
           mailable: countBy((c) => !SUPPRESSED_STATUSES.includes(c.status)),
           unsubscribed: countBy((c) => c.status === "unsubscribed"),
           bounced: countBy((c) => c.status === "bounced"),
