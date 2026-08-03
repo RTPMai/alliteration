@@ -1188,16 +1188,21 @@ export default {
       if (data.canEditOrg) renderImportPanel();
     }
 
-    async function runImport(mapped) {
+    async function runImport(mapped, onProgress) {
       const results = { created: 0, expenses: 0, errors: [] };
+      let done = 0;
       for (const { trip, expense } of mapped) {
         let newTrip = null;
         try {
           const tripRes = await ctx.api.post(ENDPOINTS.ttTrips, trip);
           newTrip = tripRes && tripRes.trip;
+          if (!newTrip) throw new Error('Server did not return the created trip');
           results.created++;
         } catch (err) {
-          results.errors.push((trip.title || 'row') + ': ' + (err.message || 'could not create trip'));
+          console.error('[traveltrack import] trip failed:', trip.title, err);
+          results.errors.push((trip.title || 'row') + ': ' + (err && err.message ? err.message : 'could not create trip'));
+          done++;
+          if (onProgress) onProgress(done, mapped.length);
           continue;
         }
         if (expense && newTrip) {
@@ -1213,9 +1218,12 @@ export default {
             }
             results.expenses++;
           } catch (err) {
-            results.errors.push(trip.title + ' (expense): ' + (err.message || 'could not create expense'));
+            console.error('[traveltrack import] expense failed:', trip.title, err);
+            results.errors.push(trip.title + ' (expense): ' + (err && err.message ? err.message : 'could not create expense'));
           }
         }
+        done++;
+        if (onProgress) onProgress(done, mapped.length);
       }
       return results;
     }
@@ -1287,18 +1295,32 @@ export default {
         $('#importRunBtn').addEventListener('click', async () => {
           const btn = $('#importRunBtn');
           btn.disabled = true;
-          btn.textContent = 'Importing…';
-          const results = await runImport(mapped);
-          await loadAll();
-          renderDashboard();
-          $('#importResult').innerHTML = `
-            <div class="settings-note" style="margin-top:12px">
-              Created ${results.created} trip${results.created === 1 ? '' : 's'} and ${results.expenses} expense${results.expenses === 1 ? '' : 's'}.
-              ${results.errors.length ? '<br>Errors: ' + results.errors.map((e) => esc(e)).join('; ') : ''}
-            </div>`;
-          btn.textContent = 'Done';
-          renderTrips();
-          renderExpenses();
+          btn.textContent = 'Importing 0 of ' + mapped.length + '…';
+          $('#importResult').innerHTML = '';
+          try {
+            const results = await runImport(mapped, (done, total) => {
+              btn.textContent = 'Importing ' + done + ' of ' + total + '…';
+            });
+            await loadAll();
+            renderDashboard();
+            $('#importResult').innerHTML = `
+              <div class="settings-note" style="margin-top:12px">
+                Created ${results.created} trip${results.created === 1 ? '' : 's'} and ${results.expenses} expense${results.expenses === 1 ? '' : 's'}.
+                ${results.errors.length ? '<br>Errors: ' + results.errors.map((e) => esc(e)).join('; ') : ''}
+              </div>`;
+            btn.textContent = 'Done';
+            renderTrips();
+            renderExpenses();
+          } catch (err) {
+            // Should not happen — runImport catches per-row — but if
+            // something outside that loop throws (a network drop mid-reload,
+            // for instance), show it instead of leaving the button stuck on
+            // "Importing…" with no explanation.
+            console.error('[traveltrack import] unexpected failure:', err);
+            $('#importResult').innerHTML = `<div class="form-err">Import stopped unexpectedly: ${esc(err && err.message ? err.message : String(err))}. Check the browser console for detail, and check the Trips tab — some rows may have been created before this happened.</div>`;
+            btn.disabled = false;
+            btn.textContent = 'Retry';
+          }
         });
       });
     }
