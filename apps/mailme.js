@@ -1,24 +1,31 @@
 /**
  * MailMe — email marketing.
  *
- * Built fresh (no standalone predecessor to port). Three views:
+ * Built fresh (no standalone predecessor to port). Five views:
  *
- *   Dashboard  list health at a glance: mailable, unsubscribed, bounced,
- *              and how much of the roster has no email on file at all.
- *   Contacts   the BackBone roster joined with subscribe state and tags.
- *   Campaigns  draft composer with a live recipient count.
+ *   Dashboard  list health, split by audience, with deliverability warnings.
+ *   Contacts   both sources in one sortable table, with filters and tagging.
+ *   Lists      saved segments: dynamic (a rule) or static (a fixed set).
+ *   Import     CSV import of cold-outreach prospects, preview before commit.
+ *   Campaigns  draft composer with live recipient counts, and results.
  *
- * THE CONTACT LIST IS NOT STORED HERE. It is resolved server-side from
- * backbone_data every time (see lib/mailme/store.js resolveContacts). MailMe
- * stores only what BackBone has no concept of: subscribe status and tags.
- * The practical effect is that there is no "import contacts" button and no
- * list that can drift out of date against the roster.
+ * TWO CONTACT SOURCES:
+ *   client   — the BackBone roster, resolved live server-side, never stored
+ *              here. Fix an email in BackBone and it is fixed here.
+ *   prospect — imported cold-outreach records that MailMe owns, because
+ *              nothing else in the shell knows about them.
+ *
+ * The two are kept apart for a concrete reason, not tidiness: cold outreach
+ * bounces and draws spam complaints at rates a customer list never does, and
+ * mailbox providers score sender reputation per DOMAIN. Mixing the streams
+ * would put quotes and invoices at risk of landing in customers' spam. Each
+ * source therefore sends from its own domain, and a campaign targets exactly
+ * one of them.
  *
  * SENDING IS NOT WIRED. Campaigns save as drafts and the API refuses any
  * status but "draft". The UI says so plainly rather than showing a Send
- * button that fails, because a marketing tool where you are unsure whether
- * something went out is worse than one that clearly cannot send yet. See the
- * header comment in api/mailme/campaigns.js for the three prerequisites.
+ * button that fails: a marketing tool where you are unsure whether something
+ * went out is worse than one that clearly cannot send yet.
  *
  * No fetch() here: everything goes through ctx.api and ENDPOINTS, per the
  * seam rule. No hex colors: tokens.css owns theming via data-app="mailme".
@@ -38,16 +45,23 @@ function fmtDate(iso) {
   return isNaN(d) ? '' : d.toLocaleDateString();
 }
 
-// Status presentation. Kept as one table so the pill, the dashboard tile and
-// the filter buttons can never disagree about what a status is called.
+function pct(n) { return (Math.round(n * 10) / 10) + '%'; }
+
+// Status presentation, kept as one table so the pill, the tiles and the
+// filters can never disagree about what a status is called.
 const STATUS_META = {
-  subscribed:  { label: 'Subscribed',  cls: 'ok' },
-  unsubscribed:{ label: 'Unsubscribed',cls: 'warn' },
-  bounced:     { label: 'Bounced',     cls: 'bad' },
-  complained:  { label: 'Complained',  cls: 'bad' }
+  subscribed:   { label: 'Subscribed',   cls: 'ok' },
+  unsubscribed: { label: 'Unsubscribed', cls: 'warn' },
+  bounced:      { label: 'Bounced',      cls: 'bad' },
+  complained:   { label: 'Complained',   cls: 'bad' }
 };
 
 const SUPPRESSED = ['unsubscribed', 'bounced', 'complained'];
+
+const SOURCE_META = {
+  client:   { label: 'Client',   note: 'From the BackBone roster' },
+  prospect: { label: 'Prospect', note: 'Imported for cold outreach' }
+};
 
 export default {
   id: 'mailme',
@@ -59,27 +73,25 @@ export default {
   .mm-hd h1{font-size:26px;font-weight:800;letter-spacing:-.02em}
   .mm-hd .sub{font-size:13px;color:var(--muted);margin-top:3px}
 
-  .mm-notice{
-    background:var(--warn-tint);border:1px solid var(--warn-tint);
+  .mm-notice{background:var(--warn-tint);border:1px solid var(--warn-tint);
     border-left:3px solid var(--warn);border-radius:var(--radius-sm);
     padding:11px 14px;font-size:12.5px;color:var(--warn-dk);
-    line-height:1.55;margin-bottom:18px;
-  }
+    line-height:1.55;margin-bottom:18px}
   .mm-notice b{font-weight:700}
+  .mm-notice.danger{background:var(--danger-tint);border-color:var(--danger-line);
+    border-left-color:var(--danger);color:var(--danger-dk)}
 
-  /* ---------- tiles ---------- */
-  .mm-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));
+  .mm-tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));
     gap:14px;margin-bottom:22px}
   .mm-tile{background:var(--card);border:1px solid var(--line);
     border-radius:var(--radius-md);padding:16px 18px}
-  .mm-tile .v{font-size:26px;font-weight:800;letter-spacing:-.02em;line-height:1.1}
+  .mm-tile .v{font-size:25px;font-weight:800;letter-spacing:-.02em;line-height:1.1}
   .mm-tile .l{font-size:12px;color:var(--muted);margin-top:5px;font-weight:600}
   .mm-tile .n{font-size:11.5px;color:var(--faint);margin-top:3px;line-height:1.45}
   .mm-tile.ok .v{color:var(--success-dk)}
   .mm-tile.warn .v{color:var(--warn-dk)}
   .mm-tile.bad .v{color:var(--danger-dk)}
 
-  /* ---------- card ---------- */
   .mm-card{background:var(--card);border:1px solid var(--line);
     border-radius:var(--radius-md);margin-bottom:18px;overflow:hidden}
   .mm-card-hd{display:flex;justify-content:space-between;align-items:center;
@@ -87,8 +99,8 @@ export default {
   .mm-card-hd h3{font-size:14px;font-weight:700}
   .mm-card-hd .meta{font-size:12px;color:var(--muted)}
   .mm-card-bd{padding:18px}
+  .mm-card-bd.flush{padding:0}
 
-  /* ---------- filters ---------- */
   .mm-filters{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
   .mm-filt{background:var(--card);border:1px solid var(--line);
     border-radius:var(--radius-sm);padding:6px 12px;font-size:12.5px;font-weight:600;
@@ -99,28 +111,34 @@ export default {
   .mm-filt:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
   .mm-filt .n{opacity:.6;margin-left:5px;font-weight:700}
   .mm-filt[aria-pressed="true"] .n{opacity:.85}
-  .mm-search{flex:1;min-width:180px;max-width:320px;padding:7px 11px;
+  .mm-sep{width:1px;height:22px;background:var(--line);margin:0 4px}
+  .mm-search{flex:1;min-width:170px;max-width:300px;padding:7px 11px;
     border:1px solid var(--line);border-radius:var(--radius-sm);
     font-family:inherit;font-size:13px;color:var(--ink);background:var(--card)}
   .mm-search:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
 
-  /* ---------- table ---------- */
   .mm-table{width:100%;border-collapse:collapse;font-size:13px}
   .mm-table th{text-align:left;font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted);font-weight:700;padding:9px 12px;
     background:var(--head-bg);border-bottom:1px solid var(--line);white-space:nowrap}
-  .mm-table td{padding:10px 12px;border-bottom:1px solid var(--line-soft);
-    vertical-align:middle}
+  .mm-table th.sortable{cursor:pointer;user-select:none}
+  .mm-table th.sortable:hover{color:var(--ink)}
+  .mm-table th .arrow{opacity:.4;margin-left:4px}
+  .mm-table th[aria-sort] .arrow{opacity:1;color:var(--accent-deep)}
+  .mm-table td{padding:10px 12px;border-bottom:1px solid var(--line-soft);vertical-align:middle}
   .mm-table tr:hover td{background:var(--row-hover)}
   .mm-table .co{font-weight:600;color:var(--ink)}
   .mm-table .em{color:var(--muted);font-size:12.5px}
   .mm-table .who{color:var(--faint);font-size:12px}
+  .mm-table td.num{text-align:right;font-variant-numeric:tabular-nums}
 
   .pill{display:inline-block;padding:2px 9px;border-radius:var(--radius-pill);
     font-size:11px;font-weight:700;white-space:nowrap}
   .pill.ok{background:var(--success-tint);color:var(--success-dk)}
   .pill.warn{background:var(--warn-tint);color:var(--warn-dk)}
   .pill.bad{background:var(--danger-tint);color:var(--danger-dk)}
+  .pill.src{background:var(--accent-tint);color:var(--accent-deep)}
+  .pill.mute{background:var(--line-soft);color:var(--muted)}
 
   .tag{display:inline-block;padding:2px 8px;border-radius:var(--radius-pill);
     background:var(--accent-tint);color:var(--accent-deep);font-size:11px;
@@ -136,36 +154,41 @@ export default {
   .mm-btn.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
   .mm-btn.ghost:hover{color:var(--ink);background:var(--row-hover)}
   .mm-btn.sm{padding:4px 10px;font-size:12px}
+  .mm-btn.danger{background:var(--danger);border-color:var(--danger)}
+  .mm-btn.danger:hover{background:var(--danger-dk);border-color:var(--danger-dk)}
 
-  /* ---------- composer ---------- */
   .mm-field{margin-bottom:14px}
   .mm-field label{display:block;font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:5px}
-  .mm-field input,.mm-field textarea{width:100%;padding:9px 11px;
+  .mm-field input,.mm-field textarea,.mm-field select{width:100%;padding:9px 11px;
     border:1px solid var(--line);border-radius:var(--radius-sm);
     font-family:inherit;font-size:13px;color:var(--ink);background:var(--card)}
-  .mm-field textarea{min-height:170px;resize:vertical;line-height:1.6}
-  .mm-field input:focus,.mm-field textarea:focus{outline:2px solid var(--accent);
-    outline-offset:-1px;border-color:var(--accent)}
+  .mm-field textarea{min-height:150px;resize:vertical;line-height:1.6}
+  .mm-field textarea.csv{min-height:200px;font-family:var(--font-mono);font-size:12px}
+  .mm-field input:focus,.mm-field textarea:focus,.mm-field select:focus{
+    outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
   .mm-field .hint{font-size:11.5px;color:var(--faint);margin-top:4px;line-height:1.5}
+  .mm-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 
   .mm-recip{background:var(--accent-tint);border-radius:var(--radius-sm);
     padding:11px 14px;font-size:12.5px;color:var(--accent-deep);
     font-weight:600;margin-bottom:14px;line-height:1.5}
-
   .mm-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 
-  .mm-empty{text-align:center;padding:34px 20px;color:var(--muted);font-size:13px;
-    line-height:1.6}
+  .mm-empty{text-align:center;padding:34px 20px;color:var(--muted);font-size:13px;line-height:1.6}
   .mm-empty h4{font-size:14px;color:var(--ink);margin-bottom:6px;font-weight:700}
-
   .mm-err{background:var(--danger-tint);border:1px solid var(--danger-line);
     border-radius:var(--radius-sm);padding:11px 14px;font-size:12.5px;
     color:var(--danger-dk);margin-bottom:14px;line-height:1.5}
-
   .mm-ok{background:var(--success-tint);border-radius:var(--radius-sm);
     padding:11px 14px;font-size:12.5px;color:var(--success-dk);
     margin-bottom:14px;font-weight:600}
+
+  .mm-stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+    gap:12px;margin-bottom:16px}
+  .mm-stat{background:var(--head-bg);border-radius:var(--radius-sm);padding:12px 14px}
+  .mm-stat .v{font-size:20px;font-weight:800;letter-spacing:-.02em}
+  .mm-stat .l{font-size:11px;color:var(--muted);margin-top:3px;font-weight:600}
   `,
 
   template: `
@@ -179,43 +202,115 @@ export default {
           </div>
         </div>
         <div class="mm-notice" id="mmSendNotice"></div>
+        <div id="mmDeliverability"></div>
         <div class="mm-tiles" id="mmTiles"></div>
         <div class="mm-card">
           <div class="mm-card-hd">
-            <h3>Where this list comes from</h3>
-            <span class="meta">BackBone roster</span>
+            <h3>Two audiences, two sending domains</h3>
+            <span class="meta">Why the split matters</span>
           </div>
           <div class="mm-card-bd">
+            <p style="font-size:13px;color:var(--muted);line-height:1.65;margin:0 0 10px">
+              <b style="color:var(--ink)">Clients</b> come from the BackBone roster and are
+              resolved fresh every time this page loads. MailMe keeps no copy, so fixing an
+              email in BackBone fixes it here.
+            </p>
+            <p style="font-size:13px;color:var(--muted);line-height:1.65;margin:0 0 10px">
+              <b style="color:var(--ink)">Prospects</b> are imported for cold outreach and are
+              MailMe's own records, because nothing else in the shell knows about them.
+            </p>
             <p style="font-size:13px;color:var(--muted);line-height:1.65;margin:0">
-              MailMe does not keep its own contact list. Every contact here is a
-              BackBone customer with an email on file, resolved fresh each time
-              this page loads. Fix an email in BackBone and it is fixed here.
-              MailMe stores only what BackBone has no field for: whether someone
-              unsubscribed, and any tags you have put them in.
+              They send from different domains on purpose. Cold outreach bounces and draws
+              spam complaints far more than a customer list does, and mailbox providers judge
+              reputation per domain. Keeping them apart means a rough cold campaign cannot
+              push your quotes and invoices into customers' spam folders.
             </p>
           </div>
         </div>
       </section>
 
       <!-- Contacts -->
-      <section id="mmContacts" hidden>
+      <section id="mmContactsView" hidden>
         <div class="mm-hd">
           <div>
             <h1>Contacts<span class="dot">.</span></h1>
             <div class="sub" id="mmContactsSub"></div>
           </div>
+          <button class="mm-btn ghost" id="mmSaveAsList">Save view as list</button>
         </div>
         <div id="mmContactsMsg"></div>
         <div class="mm-filters" id="mmContactFilters"></div>
         <div class="mm-card">
-          <div class="mm-card-bd" style="padding:0">
-            <div id="mmContactsTable"></div>
-          </div>
+          <div class="mm-card-bd flush"><div id="mmContactsTable"></div></div>
         </div>
       </section>
 
+      <!-- Lists -->
+      <section id="mmListsView" hidden>
+        <div class="mm-hd">
+          <div>
+            <h1>Lists<span class="dot">.</span></h1>
+            <div class="sub">Saved segments. Dynamic lists stay current on their own.</div>
+          </div>
+          <button class="mm-btn" id="mmNewList">New list</button>
+        </div>
+        <div id="mmListMsg"></div>
+        <div id="mmListEditor" hidden></div>
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Saved lists</h3><span class="meta" id="mmListCount"></span>
+          </div>
+          <div class="mm-card-bd flush"><div id="mmListTable"></div></div>
+        </div>
+      </section>
+
+      <!-- Import -->
+      <section id="mmImportView" hidden>
+        <div class="mm-hd">
+          <div>
+            <h1>Import<span class="dot">.</span></h1>
+            <div class="sub">Add cold-outreach prospects from a CSV.</div>
+          </div>
+        </div>
+        <div id="mmImportMsg"></div>
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Paste or upload a CSV</h3>
+            <span class="meta">Preview first, import second</span>
+          </div>
+          <div class="mm-card-bd">
+            <div class="mm-field">
+              <label for="mmCsvFile">CSV file</label>
+              <input type="file" id="mmCsvFile" accept=".csv,text/csv">
+              <div class="hint">
+                Needs an email column. Company, Name, Title, Phone, City and State are picked
+                up automatically if present, under most common column names.
+              </div>
+            </div>
+            <div class="mm-field">
+              <label for="mmCsvText">Or paste the rows</label>
+              <textarea id="mmCsvText" class="csv" placeholder="Email,Company,Name,Title"></textarea>
+            </div>
+            <div class="mm-field">
+              <label for="mmImportTags">Tag this batch</label>
+              <input id="mmImportTags" type="text" placeholder="cold-2026-q3, school-districts">
+              <div class="hint">
+                Comma separated, applied to every imported row. This is how a cold list stays
+                segmentable later, so it is worth filling in.
+              </div>
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmPreviewImport">Preview</button>
+              <button class="mm-btn" id="mmCommitImport" hidden>Import them</button>
+              <button class="mm-btn ghost" id="mmClearImport">Clear</button>
+            </div>
+          </div>
+        </div>
+        <div id="mmImportPreview"></div>
+      </section>
+
       <!-- Campaigns -->
-      <section id="mmCampaigns" hidden>
+      <section id="mmCampaignsView" hidden>
         <div class="mm-hd">
           <div>
             <h1>Campaigns<span class="dot">.</span></h1>
@@ -225,14 +320,12 @@ export default {
         </div>
         <div id="mmCampaignMsg"></div>
         <div id="mmComposer" hidden></div>
+        <div id="mmResults" hidden></div>
         <div class="mm-card">
           <div class="mm-card-hd">
-            <h3>Saved drafts</h3>
-            <span class="meta" id="mmCampaignCount"></span>
+            <h3>Saved drafts</h3><span class="meta" id="mmCampaignCount"></span>
           </div>
-          <div class="mm-card-bd" style="padding:0">
-            <div id="mmCampaignList"></div>
-          </div>
+          <div class="mm-card-bd flush"><div id="mmCampaignList"></div></div>
         </div>
       </section>
     </div>
@@ -242,33 +335,44 @@ export default {
     const root = ctx.root;
     const $ = (sel) => root.querySelector(sel);
     const api = ctx.api;
-
     this._root = root;
 
-    // ---- state ----
     const state = {
-      contacts: [],
-      tags: [],
-      customersWithoutEmail: 0,
-      totalRosterSize: 0,
-      campaigns: [],
-      filter: 'all',
-      search: '',
-      editing: null,      // campaign being composed, or null
-      loaded: false
+      contacts: [], counts: {}, tags: [],
+      lists: [], campaigns: [],
+      source: 'all', status: 'all', search: '',
+      sort: 'company_name', dir: 'asc',
+      editingList: null, editingCampaign: null,
+      importPreview: null, importCsv: '',
+      viewingResults: null
     };
     this._state = state;
 
-    /* ------------------------------------------------------------------ *
-     * DATA
-     * ------------------------------------------------------------------ */
+    const msg = (sel, html, cls) => {
+      const el = $(sel);
+      if (el) el.innerHTML = html ? `<div class="${cls}">${html}</div>` : '';
+    };
+
+    /* ---------------- data ---------------- */
 
     async function loadContacts() {
-      const d = await api.get(ENDPOINTS.mmContacts);
+      // Filtering and sorting are done SERVER-side so this view and a send
+      // agree on the same rule. The client re-sorting locally would be a
+      // second implementation to keep in step.
+      const q = { sort: state.sort, dir: state.dir };
+      if (state.source !== 'all') q.source = state.source;
+      if (state.status !== 'all') q.status = state.status;
+      if (state.search.trim()) q.q = state.search.trim();
+
+      const d = await api.get(ENDPOINTS.mmContacts, q);
       state.contacts = Array.isArray(d && d.contacts) ? d.contacts : [];
+      state.counts = (d && d.counts) || {};
       state.tags = Array.isArray(d && d.tags) ? d.tags : [];
-      state.customersWithoutEmail = (d && d.customersWithoutEmail) || 0;
-      state.totalRosterSize = (d && d.totalRosterSize) || 0;
+    }
+
+    async function loadLists() {
+      const d = await api.get(ENDPOINTS.mmLists);
+      state.lists = Array.isArray(d && d.lists) ? d.lists : [];
     }
 
     async function loadCampaigns() {
@@ -276,37 +380,49 @@ export default {
       state.campaigns = Array.isArray(d && d.campaigns) ? d.campaigns : [];
     }
 
-    const counts = () => {
-      const c = { subscribed: 0, unsubscribed: 0, bounced: 0, complained: 0 };
-      state.contacts.forEach((x) => { if (c[x.status] !== undefined) c[x.status]++; });
-      return c;
-    };
-
-    const mailable = () => state.contacts.filter((c) => !SUPPRESSED.includes(c.status));
-
-    /* ------------------------------------------------------------------ *
-     * DASHBOARD
-     * ------------------------------------------------------------------ */
+    /* ---------------- dashboard ---------------- */
 
     function renderDash() {
-      const c = counts();
-      const total = state.contacts.length;
+      const c = state.counts;
 
       $('#mmSendNotice').innerHTML =
         '<b>Sending is not switched on.</b> Campaigns save as drafts only. ' +
-        'Before real email can go out this needs a sending provider account, ' +
-        'a sending domain authenticated with SPF, DKIM and DMARC, and the ' +
-        'unsubscribe page wired up. Until then nothing here can email anyone.';
+        'Before real email goes out this needs a sending provider, two authenticated ' +
+        'sending domains (one for clients, one for cold outreach), and the unsubscribe ' +
+        'page wired up. Until then nothing here can email anyone.';
+
+      // Bounce/complaint rates are the early warning that a sending domain is
+      // in trouble. Surfaced on the dashboard because by the time someone
+      // notices mail "feels slow", filtering has usually already started.
+      const bounced = c.bounced || 0;
+      const complained = c.complained || 0;
+      const totalOnce = (c.total || 0) || 1;
+      const warn = [];
+      if (bounced / totalOnce >= 0.02) {
+        warn.push('Bounced addresses are over 2% of your list. Clean them out before the next send: ' +
+          'mailbox providers start throttling senders at that level.');
+      }
+      if (complained > 0) {
+        warn.push(complained + ' contact' + (complained === 1 ? ' has' : 's have') +
+          ' marked your mail as spam. Complaints above 0.1% of a send get a sender filtered.');
+      }
+      $('#mmDeliverability').innerHTML = warn.length
+        ? '<div class="mm-notice danger"><b>Deliverability.</b> ' + warn.map(esc).join(' ') + '</div>'
+        : '';
 
       const tiles = [
-        { v: c.subscribed, l: 'Mailable', cls: 'ok',
-          n: total ? Math.round((c.subscribed / total) * 100) + '% of contacts with an email' : '' },
-        { v: c.unsubscribed, l: 'Unsubscribed', cls: c.unsubscribed ? 'warn' : '',
+        { v: c.mailable || 0, l: 'Mailable', cls: 'ok',
+          n: (c.client || 0) + ' client, ' + (c.prospect || 0) + ' prospect' },
+        { v: c.client || 0, l: 'Clients', cls: '',
+          n: 'From the BackBone roster' },
+        { v: c.prospect || 0, l: 'Prospects', cls: '',
+          n: 'Imported for cold outreach' },
+        { v: c.unsubscribed || 0, l: 'Unsubscribed', cls: (c.unsubscribed ? 'warn' : ''),
           n: 'Opted out. Never included in a send.' },
-        { v: c.bounced + c.complained, l: 'Bounced or complained', cls: (c.bounced + c.complained) ? 'bad' : '',
+        { v: bounced + complained, l: 'Bounced / complained', cls: ((bounced + complained) ? 'bad' : ''),
           n: 'Set by the mail provider, not by hand.' },
-        { v: state.customersWithoutEmail, l: 'No email on file', cls: '',
-          n: 'Roster customers MailMe cannot reach. Add an email in BackBone.' }
+        { v: c.customersWithoutEmail || 0, l: 'No email on file', cls: '',
+          n: 'Roster customers MailMe cannot reach.' }
       ];
 
       $('#mmTiles').innerHTML = tiles.map((t) => `
@@ -317,198 +433,558 @@ export default {
         </div>`).join('');
     }
 
-    /* ------------------------------------------------------------------ *
-     * CONTACTS
-     * ------------------------------------------------------------------ */
-
-    function visibleContacts() {
-      const q = state.search.trim().toLowerCase();
-      return state.contacts.filter((c) => {
-        if (state.filter === 'mailable' && SUPPRESSED.includes(c.status)) return false;
-        if (state.filter !== 'all' && state.filter !== 'mailable' && c.status !== state.filter) return false;
-        if (!q) return true;
-        return (c.company_name + ' ' + c.email + ' ' + c.contact_name + ' ' + c.tags.join(' '))
-          .toLowerCase().includes(q);
-      });
-    }
+    /* ---------------- contacts ---------------- */
 
     function renderFilters() {
-      const c = counts();
-      const opts = [
-        ['all', 'All', state.contacts.length],
-        ['mailable', 'Mailable', c.subscribed],
-        ['unsubscribed', 'Unsubscribed', c.unsubscribed],
-        ['bounced', 'Bounced', c.bounced]
+      const c = state.counts;
+      const srcOpts = [
+        ['all', 'All sources', c.total || 0],
+        ['client', 'Clients', c.client || 0],
+        ['prospect', 'Prospects', c.prospect || 0]
       ];
-      $('#mmContactFilters').innerHTML =
-        opts.map(([k, label, n]) =>
-          `<button class="mm-filt" data-filt="${k}" aria-pressed="${state.filter === k}">
-             ${esc(label)}<span class="n">${n}</span></button>`).join('') +
-        `<input class="mm-search" id="mmSearch" type="search"
-                placeholder="Search company, email or tag" value="${esc(state.search)}">`;
+      const statOpts = [
+        ['all', 'Any status', null],
+        ['mailable', 'Mailable', c.mailable || 0],
+        ['unsubscribed', 'Unsubscribed', c.unsubscribed || 0],
+        ['bounced', 'Bounced', c.bounced || 0]
+      ];
 
-      $('#mmContactFilters').querySelectorAll('[data-filt]').forEach((b) => {
-        b.addEventListener('click', () => {
-          state.filter = b.dataset.filt;
-          renderFilters();
-          renderContactsTable();
+      $('#mmContactFilters').innerHTML =
+        srcOpts.map(([k, label, n]) =>
+          `<button class="mm-filt" data-src="${k}" aria-pressed="${state.source === k}">
+             ${esc(label)}<span class="n">${n}</span></button>`).join('') +
+        '<span class="mm-sep"></span>' +
+        statOpts.map(([k, label, n]) =>
+          `<button class="mm-filt" data-stat="${k}" aria-pressed="${state.status === k}">
+             ${esc(label)}${n === null ? '' : `<span class="n">${n}</span>`}</button>`).join('') +
+        `<input class="mm-search" id="mmSearch" type="search"
+                placeholder="Search company, email, title or tag" value="${esc(state.search)}">`;
+
+      $('#mmContactFilters').querySelectorAll('[data-src]').forEach((b) => {
+        b.addEventListener('click', async () => {
+          state.source = b.dataset.src;
+          await loadContacts(); renderFilters(); renderContactsTable();
+        });
+      });
+      $('#mmContactFilters').querySelectorAll('[data-stat]').forEach((b) => {
+        b.addEventListener('click', async () => {
+          state.status = b.dataset.stat;
+          await loadContacts(); renderFilters(); renderContactsTable();
         });
       });
 
+      // Debounced so typing does not fire a request per keystroke.
       const search = $('#mmSearch');
+      let timer = null;
       search.addEventListener('input', (e) => {
         state.search = e.target.value;
-        renderContactsTable();
+        clearTimeout(timer);
+        timer = setTimeout(async () => {
+          await loadContacts(); renderContactsTable();
+        }, 250);
       });
     }
 
-    function renderContactsTable() {
-      const rows = visibleContacts();
-      $('#mmContactsSub').textContent =
-        state.contacts.length + ' contact' + (state.contacts.length === 1 ? '' : 's') +
-        ' from a roster of ' + state.totalRosterSize +
-        (state.customersWithoutEmail ? ' · ' + state.customersWithoutEmail + ' with no email' : '');
+    const COLUMNS = [
+      ['company_name', 'Company'],
+      ['contact_name', 'Contact'],
+      ['email', 'Email'],
+      ['source', 'Source'],
+      ['status', 'Status'],
+      ['tags', 'Tags']
+    ];
 
-      if (!rows.length) {
+    async function setSort(key) {
+      // Third click on the same column does not cycle back to unsorted: a
+      // table with no order is not a useful state to land on by accident.
+      if (state.sort === key) state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+      else { state.sort = key; state.dir = 'asc'; }
+      await loadContacts();
+      renderContactsTable();
+    }
+
+    function renderContactsTable() {
+      const c = state.counts;
+      $('#mmContactsSub').textContent =
+        (c.shown != null ? c.shown : state.contacts.length) + ' shown of ' + (c.total || 0) +
+        ' · ' + (c.client || 0) + ' client, ' + (c.prospect || 0) + ' prospect' +
+        (c.customersWithoutEmail ? ' · ' + c.customersWithoutEmail + ' roster customers with no email' : '');
+
+      if (!state.contacts.length) {
         $('#mmContactsTable').innerHTML =
-          '<div class="mm-empty"><h4>Nothing matches</h4>' +
-          '<div>Try a different filter or search.</div></div>';
+          '<div class="mm-empty"><h4>Nothing matches</h4><div>Try a different filter or search.</div></div>';
         return;
       }
 
+      const head = COLUMNS.map(([key, label]) => {
+        const active = state.sort === key;
+        // Literal glyphs, not HTML entities: an entity like &#9650; matches
+        // the repo's hex-color test regex and fails the no-hex rule.
+        const arrow = active ? (state.dir === 'asc' ? '\u25B2' : '\u25BC') : '\u25C6';
+        return `<th class="sortable" data-sort="${key}"${active ? ` aria-sort="${state.dir === 'asc' ? 'ascending' : 'descending'}"` : ''}>
+                  ${esc(label)}<span class="arrow">${arrow}</span></th>`;
+      }).join('');
+
       $('#mmContactsTable').innerHTML = `
         <table class="mm-table">
-          <thead>
-            <tr>
-              <th>Company</th><th>Email</th><th>Status</th>
-              <th>Tags</th><th style="text-align:right">Actions</th>
-            </tr>
-          </thead>
+          <thead><tr>${head}<th style="text-align:right">Actions</th></tr></thead>
           <tbody>
-            ${rows.map((c) => {
-              const meta = STATUS_META[c.status] || STATUS_META.subscribed;
-              const locked = c.status === 'bounced' || c.status === 'complained';
+            ${state.contacts.map((ct) => {
+              const meta = STATUS_META[ct.status] || STATUS_META.subscribed;
+              const src = SOURCE_META[ct.source] || SOURCE_META.client;
+              const locked = ct.status === 'bounced' || ct.status === 'complained';
               return `
               <tr>
-                <td>
-                  <div class="co">${esc(c.company_name)}</div>
-                  ${c.contact_name ? `<div class="who">${esc(c.contact_name)}</div>` : ''}
-                </td>
-                <td class="em">${esc(c.email)}</td>
-                <td>
-                  <span class="pill ${meta.cls}">${esc(meta.label)}</span>
-                  ${c.reason ? `<div class="who" style="margin-top:3px">${esc(c.reason)}</div>` : ''}
-                </td>
-                <td>
-                  ${c.tags.length
-                    ? c.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
-                    : '<span class="tag-none">none</span>'}
-                </td>
+                <td><div class="co">${esc(ct.company_name || '(no company)')}</div>
+                    ${ct.city ? `<div class="who">${esc([ct.city, ct.state].filter(Boolean).join(', '))}</div>` : ''}</td>
+                <td>${esc(ct.contact_name || '')}
+                    ${ct.title ? `<div class="who">${esc(ct.title)}</div>` : ''}</td>
+                <td class="em">${esc(ct.email)}</td>
+                <td><span class="pill src" title="${esc(src.note)}">${esc(src.label)}</span></td>
+                <td><span class="pill ${meta.cls}">${esc(meta.label)}</span>
+                    ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}</td>
+                <td>${ct.tags && ct.tags.length
+                  ? ct.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
+                  : '<span class="tag-none">none</span>'}</td>
                 <td style="text-align:right;white-space:nowrap">
-                  ${locked
-                    ? '<span class="who">provider-set</span>'
-                    : `<button class="mm-btn ghost sm" data-toggle="${esc(c.customer_id)}">
-                         ${c.status === 'unsubscribed' ? 'Resubscribe' : 'Unsubscribe'}
-                       </button>`}
-                  <button class="mm-btn ghost sm" data-tags="${esc(c.customer_id)}">Tags</button>
+                  ${locked ? '<span class="who">provider-set</span>'
+                    : `<button class="mm-btn ghost sm" data-toggle="${esc(ct.id)}">${
+                        ct.status === 'unsubscribed' ? 'Resubscribe' : 'Unsubscribe'}</button>`}
+                  <button class="mm-btn ghost sm" data-tags="${esc(ct.id)}">Tags</button>
+                  ${ct.source === 'prospect'
+                    ? `<button class="mm-btn ghost sm" data-del="${esc(ct.id)}">Delete</button>` : ''}
                 </td>
               </tr>`;
             }).join('')}
           </tbody>
         </table>`;
 
+      $('#mmContactsTable').querySelectorAll('[data-sort]').forEach((th) => {
+        th.addEventListener('click', () => setSort(th.dataset.sort));
+      });
       $('#mmContactsTable').querySelectorAll('[data-toggle]').forEach((b) => {
         b.addEventListener('click', () => toggleSub(b.dataset.toggle));
       });
       $('#mmContactsTable').querySelectorAll('[data-tags]').forEach((b) => {
         b.addEventListener('click', () => editTags(b.dataset.tags));
       });
-    }
-
-    function contactMsg(html, cls) {
-      $('#mmContactsMsg').innerHTML = html ? `<div class="${cls}">${html}</div>` : '';
+      $('#mmContactsTable').querySelectorAll('[data-del]').forEach((b) => {
+        b.addEventListener('click', () => deleteProspect(b.dataset.del));
+      });
     }
 
     async function toggleSub(id) {
-      const c = state.contacts.find((x) => String(x.customer_id) === String(id));
-      if (!c) return;
-
+      const ct = state.contacts.find((x) => x.id === id);
+      if (!ct) return;
       let payload;
-      if (c.status === 'unsubscribed') {
-        payload = { customer_id: id, status: 'subscribed' };
+      if (ct.status === 'unsubscribed') {
+        payload = { id, status: 'subscribed' };
       } else {
-        // Capturing WHY someone opted out is the whole reason MailMe keeps a
-        // reason field: providers report the unsubscribe but not the cause.
+        // Capturing WHY is the reason MailMe keeps a reason field at all:
+        // providers report the unsubscribe but never the cause.
         const reason = window.prompt(
-          'Unsubscribe ' + c.company_name + '.\n\nReason (optional, for your own reporting):', '');
-        if (reason === null) return;   // cancelled
-        payload = { customer_id: id, status: 'unsubscribed', reason };
+          'Unsubscribe ' + (ct.company_name || ct.email) +
+          '.\n\nReason (optional, for your own reporting):', '');
+        if (reason === null) return;
+        payload = { id, status: 'unsubscribed', reason };
       }
-
       try {
         await api.patch(ENDPOINTS.mmContacts, payload);
         await loadContacts();
-        renderFilters();
-        renderContactsTable();
-        renderDash();
-        contactMsg('Updated ' + esc(c.company_name) + '.', 'mm-ok');
+        renderFilters(); renderContactsTable(); renderDash();
+        msg('#mmContactsMsg', 'Updated ' + esc(ct.company_name || ct.email) + '.', 'mm-ok');
       } catch (e) {
-        contactMsg('Could not update: ' + esc(e.message), 'mm-err');
+        msg('#mmContactsMsg', 'Could not update: ' + esc(e.message), 'mm-err');
       }
     }
 
     async function editTags(id) {
-      const c = state.contacts.find((x) => String(x.customer_id) === String(id));
-      if (!c) return;
+      const ct = state.contacts.find((x) => x.id === id);
+      if (!ct) return;
       const next = window.prompt(
-        'Tags for ' + c.company_name + '.\n\nComma separated. These are your segments, ' +
-        'so a campaign can go to just this group.',
-        c.tags.join(', '));
+        'Tags for ' + (ct.company_name || ct.email) +
+        '.\n\nComma separated. These are your segments.', (ct.tags || []).join(', '));
       if (next === null) return;
-
       const tags = next.split(',').map((t) => t.trim()).filter(Boolean);
       try {
-        await api.patch(ENDPOINTS.mmContacts, { customer_id: id, tags });
-        await loadContacts();
-        renderFilters();
-        renderContactsTable();
-        contactMsg('Tags updated for ' + esc(c.company_name) + '.', 'mm-ok');
+        await api.patch(ENDPOINTS.mmContacts, { id, tags });
+        await loadContacts(); renderFilters(); renderContactsTable();
+        msg('#mmContactsMsg', 'Tags updated.', 'mm-ok');
       } catch (e) {
-        contactMsg('Could not update tags: ' + esc(e.message), 'mm-err');
+        msg('#mmContactsMsg', 'Could not update tags: ' + esc(e.message), 'mm-err');
       }
     }
 
-    /* ------------------------------------------------------------------ *
-     * CAMPAIGNS
-     * ------------------------------------------------------------------ */
-
-    function campaignMsg(html, cls) {
-      $('#mmCampaignMsg').innerHTML = html ? `<div class="${cls}">${html}</div>` : '';
+    async function deleteProspect(id) {
+      const ct = state.contacts.find((x) => x.id === id);
+      if (!ct) return;
+      if (!window.confirm('Delete ' + (ct.company_name || ct.email) + ' from prospects?\n\n' +
+        'If they ever unsubscribed, that stays on record: deleting and re-importing ' +
+        'will not start mailing them again.')) return;
+      try {
+        await api.del(ENDPOINTS.mmContacts, { query: { id } });
+        await loadContacts(); renderFilters(); renderContactsTable(); renderDash();
+        msg('#mmContactsMsg', 'Prospect deleted.', 'mm-ok');
+      } catch (e) {
+        msg('#mmContactsMsg', 'Could not delete: ' + esc(e.message), 'mm-err');
+      }
     }
 
-    // Recipient preview, computed client-side with the SAME rule the server
-    // uses (suppression first, then tags). It is a preview only; the server
-    // recomputes before any send would ever happen.
-    function previewRecipients(segmentTags) {
-      const base = mailable();
-      if (!segmentTags || !segmentTags.length) return base;
-      // Normalized the same way lib/mailme/schema.js selectRecipients does.
-      // If these two drifted, the count shown here would not match who
-      // actually received the email, which is the kind of mismatch nobody
-      // notices until after a send.
-      const want = new Set(
-        segmentTags.map((t) => String(t).trim().toLowerCase()).filter(Boolean));
-      if (!want.size) return base;
-      return base.filter((c) => Array.isArray(c.tags) &&
-        c.tags.some((t) => want.has(String(t).trim().toLowerCase())));
+    /* ---------------- lists ---------------- */
+
+    function renderListEditor() {
+      const box = $('#mmListEditor');
+      const l = state.editingList;
+      if (!l) { box.hidden = true; box.innerHTML = ''; return; }
+
+      const rule = l.rule || { source: '', statuses: [], tags: [], tagMatch: 'any', search: '' };
+      box.hidden = false;
+      box.innerHTML = `
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>${l.id ? 'Edit ' + esc(l.id) : 'New list'}</h3>
+            <span class="meta">${l.kind === 'static' ? 'Fixed set' : 'Rule, re-evaluated each time'}</span>
+          </div>
+          <div class="mm-card-bd">
+            <div class="mm-field">
+              <label for="mmListName">Name</label>
+              <input id="mmListName" type="text" value="${esc(l.name || '')}"
+                     placeholder="Cold prospects, central Iowa schools">
+            </div>
+            ${l.kind === 'static' ? `
+              <div class="mm-recip">${(l.members || []).length} contacts, fixed at the time it was saved.</div>
+            ` : `
+              <div class="mm-row">
+                <div class="mm-field">
+                  <label for="mmRuleSource">Source</label>
+                  <select id="mmRuleSource">
+                    <option value=""${!rule.source ? ' selected' : ''}>Any source</option>
+                    <option value="client"${rule.source === 'client' ? ' selected' : ''}>Clients only</option>
+                    <option value="prospect"${rule.source === 'prospect' ? ' selected' : ''}>Prospects only</option>
+                  </select>
+                </div>
+                <div class="mm-field">
+                  <label for="mmRuleTagMatch">Tag match</label>
+                  <select id="mmRuleTagMatch">
+                    <option value="any"${rule.tagMatch !== 'all' ? ' selected' : ''}>Any of these tags</option>
+                    <option value="all"${rule.tagMatch === 'all' ? ' selected' : ''}>All of these tags</option>
+                  </select>
+                </div>
+              </div>
+              <div class="mm-field">
+                <label for="mmRuleTags">Tags</label>
+                <input id="mmRuleTags" type="text" value="${esc((rule.tags || []).join(', '))}"
+                       placeholder="Leave blank for no tag filter">
+                <div class="hint">${state.tags.length
+                  ? 'Tags in use: ' + esc(state.tags.join(', ')) : 'No tags created yet.'}</div>
+              </div>
+              <div class="mm-field">
+                <label for="mmRuleSearch">Text match</label>
+                <input id="mmRuleSearch" type="text" value="${esc(rule.search || '')}"
+                       placeholder="Matches company, name, email or title">
+              </div>
+            `}
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmSaveList">Save list</button>
+              <button class="mm-btn ghost" id="mmCancelList">Cancel</button>
+              ${l.id ? '<button class="mm-btn ghost" id="mmDeleteList">Delete</button>' : ''}
+            </div>
+          </div>
+        </div>`;
+
+      $('#mmSaveList').addEventListener('click', saveList);
+      $('#mmCancelList').addEventListener('click', () => { state.editingList = null; renderListEditor(); });
+      const del = $('#mmDeleteList');
+      if (del) del.addEventListener('click', () => removeList(l.id));
     }
+
+    async function saveList() {
+      const l = state.editingList;
+      const payload = { name: $('#mmListName').value, kind: l.kind };
+
+      if (l.kind === 'static') {
+        payload.members = l.members || [];
+      } else {
+        payload.rule = {
+          source: $('#mmRuleSource').value || null,
+          statuses: [],
+          tags: $('#mmRuleTags').value.split(',').map((t) => t.trim()).filter(Boolean),
+          tagMatch: $('#mmRuleTagMatch').value,
+          search: $('#mmRuleSearch').value
+        };
+      }
+
+      if (!payload.name.trim()) {
+        msg('#mmListMsg', 'A list needs a name.', 'mm-err');
+        return;
+      }
+      try {
+        if (l.id) await api.patch(ENDPOINTS.mmLists, { id: l.id, ...payload });
+        else await api.post(ENDPOINTS.mmLists, payload);
+        state.editingList = null;
+        await loadLists();
+        renderListEditor(); renderListTable();
+        msg('#mmListMsg', 'List saved.', 'mm-ok');
+      } catch (e) {
+        msg('#mmListMsg', 'Could not save: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    async function removeList(id) {
+      if (!window.confirm('Delete this list? The contacts in it are not affected.')) return;
+      try {
+        await api.del(ENDPOINTS.mmLists, { query: { id } });
+        state.editingList = null;
+        await loadLists(); renderListEditor(); renderListTable();
+        msg('#mmListMsg', 'List deleted.', 'mm-ok');
+      } catch (e) {
+        msg('#mmListMsg', 'Could not delete: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    function renderListTable() {
+      $('#mmListCount').textContent =
+        state.lists.length + ' list' + (state.lists.length === 1 ? '' : 's');
+
+      if (!state.lists.length) {
+        $('#mmListTable').innerHTML =
+          '<div class="mm-empty"><h4>No lists yet</h4>' +
+          '<div>A dynamic list is a saved rule, so it stays current as contacts change. ' +
+          'Filter the Contacts view and use "Save view as list" for the quickest start.</div></div>';
+        return;
+      }
+
+      $('#mmListTable').innerHTML = `
+        <table class="mm-table">
+          <thead><tr><th>Name</th><th>Kind</th><th>Rule</th>
+            <th class="num">Members</th><th class="num">Mailable</th>
+            <th style="text-align:right"></th></tr></thead>
+          <tbody>
+            ${state.lists.map((l) => {
+              const r = l.rule || {};
+              const bits = [];
+              if (r.source) bits.push(SOURCE_META[r.source] ? SOURCE_META[r.source].label + 's' : r.source);
+              if ((r.tags || []).length) bits.push((r.tagMatch === 'all' ? 'all of ' : 'any of ') + r.tags.join(', '));
+              if (r.search) bits.push('matching "' + r.search + '"');
+              return `
+              <tr>
+                <td><div class="co">${esc(l.name)}</div><div class="who">${esc(l.id)}</div></td>
+                <td><span class="pill ${l.kind === 'static' ? 'mute' : 'src'}">${esc(l.kind)}</span></td>
+                <td class="em">${l.kind === 'static'
+                  ? 'Fixed set' : (bits.length ? esc(bits.join(' · ')) : 'Everyone')}</td>
+                <td class="num">${l.memberCount != null ? l.memberCount : '—'}</td>
+                <td class="num">${l.mailableCount != null ? l.mailableCount : '—'}</td>
+                <td style="text-align:right">
+                  <button class="mm-btn ghost sm" data-editlist="${esc(l.id)}">Edit</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>`;
+
+      $('#mmListTable').querySelectorAll('[data-editlist]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const l = state.lists.find((x) => x.id === b.dataset.editlist);
+          if (!l) return;
+          state.editingList = { ...l };
+          renderListEditor();
+        });
+      });
+    }
+
+    $('#mmNewList').addEventListener('click', () => {
+      state.editingList = { name: '', kind: 'dynamic', rule: { source: '', tags: [], tagMatch: 'any', search: '' } };
+      renderListEditor(); msg('#mmListMsg', '', '');
+    });
+
+    // Turn the current Contacts filters straight into a dynamic list. The
+    // filters ARE a rule, so making someone re-enter them in the list editor
+    // would be asking twice for the same thing.
+    $('#mmSaveAsList').addEventListener('click', () => {
+      state.editingList = {
+        name: '',
+        kind: 'dynamic',
+        rule: {
+          source: state.source === 'all' ? '' : state.source,
+          tags: [],
+          tagMatch: 'any',
+          search: state.search.trim()
+        }
+      };
+      ctx.go('lists');
+    });
+
+    /* ---------------- import ---------------- */
+
+    // Reading the file in the browser keeps a large CSV off the network until
+    // it has been parsed and previewed.
+    $('#mmCsvFile').addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        $('#mmCsvText').value = String(reader.result || '');
+        msg('#mmImportMsg', 'Loaded ' + esc(file.name) + '. Preview it before importing.', 'mm-ok');
+      };
+      reader.onerror = () => msg('#mmImportMsg', 'Could not read that file.', 'mm-err');
+      reader.readAsText(file);
+    });
+
+    $('#mmClearImport').addEventListener('click', () => {
+      $('#mmCsvText').value = '';
+      $('#mmCsvFile').value = '';
+      $('#mmImportTags').value = '';
+      state.importPreview = null;
+      $('#mmImportPreview').innerHTML = '';
+      $('#mmCommitImport').hidden = true;
+      msg('#mmImportMsg', '', '');
+    });
+
+    const importTags = () =>
+      $('#mmImportTags').value.split(',').map((t) => t.trim()).filter(Boolean);
+
+    $('#mmPreviewImport').addEventListener('click', async () => {
+      const csv = $('#mmCsvText').value;
+      if (!csv.trim()) {
+        msg('#mmImportMsg', 'Paste some rows or choose a file first.', 'mm-err');
+        return;
+      }
+      msg('#mmImportMsg', 'Checking the file...', 'mm-ok');
+      try {
+        const d = await api.post(ENDPOINTS.mmImport, { csv, tags: importTags() });
+        state.importPreview = d;
+        state.importCsv = csv;
+        renderImportPreview();
+        msg('#mmImportMsg', '', '');
+      } catch (e) {
+        state.importPreview = null;
+        $('#mmImportPreview').innerHTML = '';
+        $('#mmCommitImport').hidden = true;
+        msg('#mmImportMsg', esc(e.message), 'mm-err');
+      }
+    });
+
+    $('#mmCommitImport').addEventListener('click', async () => {
+      if (!state.importPreview) return;
+      const n = state.importPreview.summary.importable;
+      if (!window.confirm('Import ' + n + ' new prospect' + (n === 1 ? '' : 's') + '?')) return;
+      try {
+        const d = await api.post(ENDPOINTS.mmImport, {
+          csv: state.importCsv, tags: importTags(), commit: true
+        });
+        await Promise.all([loadContacts(), loadLists()]);
+        renderDash(); renderFilters(); renderContactsTable();
+        state.importPreview = null;
+        $('#mmImportPreview').innerHTML = '';
+        $('#mmCommitImport').hidden = true;
+        $('#mmCsvText').value = '';
+        $('#mmCsvFile').value = '';
+        msg('#mmImportMsg',
+          'Imported ' + d.imported + ' prospect' + (d.imported === 1 ? '' : 's') +
+          '. Batch ' + esc(d.batchId) + '.', 'mm-ok');
+      } catch (e) {
+        msg('#mmImportMsg', 'Import failed: ' + esc(e.message), 'mm-err');
+      }
+    });
+
+    function rejectTable(title, rows, tone) {
+      if (!rows || !rows.length) return '';
+      return `
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>${esc(title)}</h3>
+            <span class="meta">${rows.length} shown</span>
+          </div>
+          <div class="mm-card-bd flush">
+            <table class="mm-table">
+              <thead><tr><th>Line</th><th>Email</th><th>Company</th><th>Why</th></tr></thead>
+              <tbody>${rows.map((r) => `
+                <tr>
+                  <td class="who">${esc(r.lineNumber)}</td>
+                  <td class="em">${esc(r.email || '(blank)')}</td>
+                  <td>${esc(r.company_name || '')}</td>
+                  <td><span class="pill ${tone}">${esc(r.problem || '')}</span></td>
+                </tr>`).join('')}</tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    function renderImportPreview() {
+      const d = state.importPreview;
+      if (!d) { $('#mmImportPreview').innerHTML = ''; return; }
+      const s = d.summary;
+      const rej = d.rejected || {};
+
+      $('#mmCommitImport').hidden = !s.importable;
+
+      const unmapped = (s.unmappedColumns || []).length
+        ? `<div class="mm-notice"><b>Columns not recognized:</b> ${esc(s.unmappedColumns.join(', '))}.
+             These are ignored. If one of them holds the company or contact name, rename it and
+             preview again.</div>` : '';
+
+      // A cold list dominated by one domain is usually a scrape of a single
+      // directory, and is worth a second look before it goes out.
+      const domains = (s.topDomains || []).length
+        ? `<div class="mm-field"><label>Top domains in this batch</label>
+             <div>${s.topDomains.map((t) =>
+               `<span class="tag">${esc(t.domain)} \u00D7${t.count}</span>`).join('')}</div>
+             <div class="hint">A batch heavily weighted to one domain is often a scrape of a
+               single directory. Worth a look before sending.</div></div>` : '';
+
+      $('#mmImportPreview').innerHTML = `
+        ${unmapped}
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Preview</h3>
+            <span class="meta">Nothing has been imported yet</span>
+          </div>
+          <div class="mm-card-bd">
+            <div class="mm-stat-row">
+              <div class="mm-stat"><div class="v">${s.parsed}</div><div class="l">Rows read</div></div>
+              <div class="mm-stat"><div class="v">${s.importable}</div><div class="l">Importable</div></div>
+              <div class="mm-stat"><div class="v">${s.duplicate}</div><div class="l">Duplicates</div></div>
+              <div class="mm-stat"><div class="v">${s.existingClients}</div><div class="l">Already clients</div></div>
+              <div class="mm-stat"><div class="v">${s.suppressed}</div><div class="l">Opted out before</div></div>
+              <div class="mm-stat"><div class="v">${s.invalid}</div><div class="l">Invalid</div></div>
+            </div>
+            ${domains}
+            ${(s.tags || []).length
+              ? `<div class="mm-field"><label>Tags to apply</label>
+                   <div>${s.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div></div>`
+              : `<div class="hint">No batch tags set. Adding one now makes this list far easier
+                   to segment later.</div>`}
+          </div>
+        </div>
+        ${(d.preview || []).length ? `
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Will be imported</h3>
+            <span class="meta">first ${Math.min(25, d.preview.length)} of ${s.importable}</span></div>
+          <div class="mm-card-bd flush">
+            <table class="mm-table">
+              <thead><tr><th>Email</th><th>Company</th><th>Contact</th><th>Title</th></tr></thead>
+              <tbody>${d.preview.map((r) => `
+                <tr><td class="em">${esc(r.email)}</td><td>${esc(r.company_name || '')}</td>
+                    <td>${esc(r.contact_name || '')}</td><td class="who">${esc(r.title || '')}</td></tr>`).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>` : ''}
+        ${rejectTable('Already opted out — will not be imported', rej.suppressed, 'bad')}
+        ${rejectTable('Already clients in BackBone', rej.existingClients, 'warn')}
+        ${rejectTable('Duplicates', rej.duplicate, 'mute')}
+        ${rejectTable('Invalid rows', rej.invalid, 'bad')}
+      `;
+    }
+
+    /* ---------------- campaigns ---------------- */
 
     function renderComposer() {
       const box = $('#mmComposer');
-      if (!state.editing) { box.hidden = true; box.innerHTML = ''; return; }
+      const d = state.editingCampaign;
+      if (!d) { box.hidden = true; box.innerHTML = ''; return; }
 
-      const d = state.editing;
-      const recips = previewRecipients(d.segmentTags);
+      const listOpts = state.lists
+        .filter((l) => !d.source || !l.rule || !l.rule.source || l.rule.source === d.source);
 
       box.hidden = false;
       box.innerHTML = `
@@ -519,6 +995,25 @@ export default {
           </div>
           <div class="mm-card-bd">
             <div class="mm-recip" id="mmRecipCount"></div>
+            <div class="mm-row">
+              <div class="mm-field">
+                <label for="mmSource">Audience</label>
+                <select id="mmSource">
+                  <option value="client"${d.source === 'client' ? ' selected' : ''}>Clients</option>
+                  <option value="prospect"${d.source === 'prospect' ? ' selected' : ''}>Prospects (cold)</option>
+                </select>
+                <div class="hint" id="mmIdentityHint"></div>
+              </div>
+              <div class="mm-field">
+                <label for="mmList">Send to list</label>
+                <select id="mmList">
+                  <option value="">No list, use tags below</option>
+                  ${listOpts.map((l) =>
+                    `<option value="${esc(l.id)}"${d.listId === l.id ? ' selected' : ''}>
+                       ${esc(l.name)} (${l.mailableCount != null ? l.mailableCount : '?'})</option>`).join('')}
+                </select>
+              </div>
+            </div>
             <div class="mm-field">
               <label for="mmSubject">Subject</label>
               <input id="mmSubject" type="text" value="${esc(d.subject)}"
@@ -530,19 +1025,16 @@ export default {
                      placeholder="The short line inboxes show next to the subject">
             </div>
             <div class="mm-field">
-              <label for="mmSegment">Send to</label>
+              <label for="mmSegment">Tags</label>
               <input id="mmSegment" type="text" value="${esc((d.segmentTags || []).join(', '))}"
-                     placeholder="Leave blank for everyone mailable">
-              <div class="hint">
-                Comma-separated tags. A contact matching any one of them is included.
-                ${state.tags.length ? 'Tags in use: ' + esc(state.tags.join(', ')) : 'No tags created yet.'}
-              </div>
+                     placeholder="Leave blank for everyone mailable in this audience">
+              <div class="hint">Ignored when a list is chosen above.</div>
             </div>
             <div class="mm-field">
               <label for="mmBody">Body</label>
               <textarea id="mmBody" placeholder="Write the email here.">${esc(d.body)}</textarea>
               <div class="hint">
-                {{first_name}} and {{company_name}} will fill in per recipient once sending is wired.
+                {{first_name}} and {{company_name}} fill in per recipient once sending is wired.
               </div>
             </div>
             <div class="mm-actions">
@@ -553,71 +1045,148 @@ export default {
           </div>
         </div>`;
 
-      const updateRecipLine = () => {
+      const refresh = () => {
+        const source = $('#mmSource').value;
+        const listId = $('#mmList').value;
         const tags = $('#mmSegment').value.split(',').map((t) => t.trim()).filter(Boolean);
-        const n = previewRecipients(tags).length;
-        const suppressed = state.contacts.length - mailable().length;
+
+        let n;
+        if (listId) {
+          const l = state.lists.find((x) => x.id === listId);
+          n = l && l.mailableCount != null ? l.mailableCount : 0;
+        } else {
+          n = previewRecipients(source, tags).length;
+        }
+
         $('#mmRecipCount').textContent =
           n + ' recipient' + (n === 1 ? '' : 's') +
-          (tags.length ? ' matching ' + tags.join(', ') : ' (everyone mailable)') +
-          (suppressed ? ' · ' + suppressed + ' suppressed and excluded' : '');
+          (listId ? ' from the chosen list'
+            : tags.length ? ' matching ' + tags.join(', ') : ' (everyone mailable)') +
+          ' · suppressed contacts are always excluded';
+
+        // The sending domain is shown because it is the consequence of the
+        // audience choice, and it is the thing that protects client mail.
+        $('#mmIdentityHint').textContent = source === 'prospect'
+          ? 'Sends from outreach.pmapparel.com, kept separate so cold complaints cannot hurt client mail.'
+          : 'Sends from mail.pmapparel.com, the client domain.';
       };
-      updateRecipLine();
-      $('#mmSegment').addEventListener('input', updateRecipLine);
+      refresh();
+      $('#mmSource').addEventListener('change', refresh);
+      $('#mmList').addEventListener('change', refresh);
+      $('#mmSegment').addEventListener('input', refresh);
 
       $('#mmSaveDraft').addEventListener('click', saveDraft);
-      $('#mmCancelDraft').addEventListener('click', () => {
-        state.editing = null;
-        renderComposer();
-      });
+      $('#mmCancelDraft').addEventListener('click', () => { state.editingCampaign = null; renderComposer(); });
       const del = $('#mmDeleteDraft');
       if (del) del.addEventListener('click', () => deleteDraft(d.id));
+    }
 
-      void recips;
+    // Client-side estimate only. The server recomputes with the same rule
+    // before anything would ever send; this exists so the number moves as you
+    // type instead of after a round trip.
+    function previewRecipients(source, tags) {
+      let base = state.contacts.filter((c) => !SUPPRESSED.includes(c.status));
+      if (source) base = base.filter((c) => c.source === source);
+      if (!tags || !tags.length) return base;
+      const want = new Set(tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean));
+      if (!want.size) return base;
+      return base.filter((c) => Array.isArray(c.tags) &&
+        c.tags.some((t) => want.has(String(t).trim().toLowerCase())));
     }
 
     async function saveDraft() {
-      const d = state.editing;
+      const d = state.editingCampaign;
       const payload = {
         subject: $('#mmSubject').value,
         preheader: $('#mmPreheader').value,
         body: $('#mmBody').value,
+        source: $('#mmSource').value,
+        listId: $('#mmList').value || null,
         segmentTags: $('#mmSegment').value.split(',').map((t) => t.trim()).filter(Boolean)
       };
-
       if (!payload.subject.trim() || !payload.body.trim()) {
-        campaignMsg('A draft needs both a subject and a body.', 'mm-err');
+        msg('#mmCampaignMsg', 'A draft needs both a subject and a body.', 'mm-err');
         return;
       }
-
       try {
-        if (d.id) {
-          await api.patch(ENDPOINTS.mmCampaigns, { id: d.id, ...payload });
-        } else {
-          await api.post(ENDPOINTS.mmCampaigns, payload);
-        }
-        state.editing = null;
+        if (d.id) await api.patch(ENDPOINTS.mmCampaigns, { id: d.id, ...payload });
+        else await api.post(ENDPOINTS.mmCampaigns, payload);
+        state.editingCampaign = null;
         await loadCampaigns();
-        renderComposer();
-        renderCampaignList();
-        campaignMsg('Draft saved.', 'mm-ok');
+        renderComposer(); renderCampaignList();
+        msg('#mmCampaignMsg', 'Draft saved.', 'mm-ok');
       } catch (e) {
-        campaignMsg('Could not save: ' + esc(e.message), 'mm-err');
+        msg('#mmCampaignMsg', 'Could not save: ' + esc(e.message), 'mm-err');
       }
     }
 
     async function deleteDraft(id) {
       if (!window.confirm('Delete this draft?')) return;
       try {
-        // del() takes options, not a body — the id rides as a query param.
         await api.del(ENDPOINTS.mmCampaigns, { query: { id } });
-        state.editing = null;
-        await loadCampaigns();
-        renderComposer();
-        renderCampaignList();
-        campaignMsg('Draft deleted.', 'mm-ok');
+        state.editingCampaign = null;
+        await loadCampaigns(); renderComposer(); renderCampaignList();
+        msg('#mmCampaignMsg', 'Draft deleted.', 'mm-ok');
       } catch (e) {
-        campaignMsg('Could not delete: ' + esc(e.message), 'mm-err');
+        msg('#mmCampaignMsg', 'Could not delete: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    async function showResults(id) {
+      const box = $('#mmResults');
+      try {
+        const d = await api.get(ENDPOINTS.mmCampaigns, { id });
+        const r = d.results || {};
+        const s = r.stats || {};
+        const rates = r.rates || {};
+        const warnings = r.warnings || [];
+        const sent = d.campaign && d.campaign.sentAt;
+
+        box.hidden = false;
+        box.innerHTML = `
+          <div class="mm-card">
+            <div class="mm-card-hd">
+              <h3>Results: ${esc(d.campaign.subject)}</h3>
+              <span class="meta">${esc(d.campaign.id)} · ${sent ? 'sent ' + esc(fmtDate(sent)) : 'not sent'}</span>
+            </div>
+            <div class="mm-card-bd">
+              ${warnings.map((w) =>
+                `<div class="mm-notice ${w.level === 'danger' ? 'danger' : ''}">${esc(w.text)}</div>`).join('')}
+              ${!sent ? `<div class="mm-notice">This campaign has not been sent, so there is
+                nothing to report yet. These are the figures that will appear once sending is
+                switched on.</div>` : ''}
+              <div class="mm-stat-row">
+                <div class="mm-stat"><div class="v">${d.recipientCount}</div><div class="l">Recipients</div></div>
+                <div class="mm-stat"><div class="v">${s.delivered || 0}</div><div class="l">Delivered</div></div>
+                <div class="mm-stat"><div class="v">${s.uniqueOpens || 0}</div><div class="l">Opened (${pct(rates.openRate || 0)})</div></div>
+                <div class="mm-stat"><div class="v">${s.uniqueClicks || 0}</div><div class="l">Clicked (${pct(rates.clickRate || 0)})</div></div>
+                <div class="mm-stat"><div class="v">${pct(rates.clickToOpenRate || 0)}</div><div class="l">Click-to-open</div></div>
+                <div class="mm-stat"><div class="v">${s.bounces || 0}</div><div class="l">Bounced (${pct(rates.bounceRate || 0)})</div></div>
+                <div class="mm-stat"><div class="v">${s.complaints || 0}</div><div class="l">Complaints</div></div>
+                <div class="mm-stat"><div class="v">${s.unsubscribes || 0}</div><div class="l">Unsubscribes</div></div>
+              </div>
+              <div class="hint" style="margin-bottom:14px">
+                Open and click rates use UNIQUE people over delivered. Totals (${s.opens || 0} opens,
+                ${s.clicks || 0} clicks) count repeats, so one keen reader cannot inflate the rate.
+                Click-to-open is the one that says whether the content worked rather than the subject line.
+              </div>
+              ${(r.links || []).length ? `
+                <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Links</h3>
+                <table class="mm-table">
+                  <thead><tr><th>URL</th><th class="num">Clicks</th><th class="num">Unique</th></tr></thead>
+                  <tbody>${r.links.map((l) => `
+                    <tr><td class="em">${esc(l.url)}</td>
+                        <td class="num">${l.clicks}</td>
+                        <td class="num">${l.uniqueClicks}</td></tr>`).join('')}</tbody>
+                </table>` : ''}
+              <div class="mm-actions" style="margin-top:14px">
+                <button class="mm-btn ghost" id="mmCloseResults">Close</button>
+              </div>
+            </div>
+          </div>`;
+        $('#mmCloseResults').addEventListener('click', () => { box.hidden = true; box.innerHTML = ''; });
+      } catch (e) {
+        msg('#mmCampaignMsg', 'Could not load results: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -635,27 +1204,26 @@ export default {
 
       $('#mmCampaignList').innerHTML = `
         <table class="mm-table">
-          <thead>
-            <tr><th>Subject</th><th>Segment</th><th>Recipients</th>
-                <th>Updated</th><th style="text-align:right"></th></tr>
-          </thead>
+          <thead><tr><th>Subject</th><th>Audience</th><th>Target</th>
+            <th class="num">Recipients</th><th>Updated</th><th style="text-align:right"></th></tr></thead>
           <tbody>
             ${state.campaigns.map((c) => {
-              const n = previewRecipients(c.segmentTags).length;
+              const list = c.listId ? state.lists.find((l) => l.id === c.listId) : null;
+              const src = SOURCE_META[c.source] || SOURCE_META.client;
               return `
               <tr>
-                <td>
-                  <div class="co">${esc(c.subject)}</div>
-                  <div class="who">${esc(c.id)} · ${esc(c.status)}</div>
-                </td>
-                <td>${(c.segmentTags && c.segmentTags.length)
-                  ? c.segmentTags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
-                  : '<span class="tag-none">everyone mailable</span>'}</td>
-                <td>${n}</td>
+                <td><div class="co">${esc(c.subject)}</div>
+                    <div class="who">${esc(c.id)} · ${esc(c.status)}</div></td>
+                <td><span class="pill src">${esc(src.label)}</span></td>
+                <td class="em">${list ? esc(list.name)
+                  : (c.segmentTags && c.segmentTags.length
+                    ? c.segmentTags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
+                    : '<span class="tag-none">everyone mailable</span>')}</td>
+                <td class="num">${c.recipientCount != null ? c.recipientCount : '—'}</td>
                 <td class="em">${esc(fmtDate(c.updatedAt))}</td>
-                <td style="text-align:right">
-                  <button class="mm-btn ghost sm" data-edit="${esc(c.id)}">Edit</button>
-                </td>
+                <td style="text-align:right;white-space:nowrap">
+                  <button class="mm-btn ghost sm" data-results="${esc(c.id)}">Results</button>
+                  <button class="mm-btn ghost sm" data-edit="${esc(c.id)}">Edit</button></td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -665,34 +1233,36 @@ export default {
         b.addEventListener('click', () => {
           const c = state.campaigns.find((x) => x.id === b.dataset.edit);
           if (!c) return;
-          state.editing = { ...c, segmentTags: c.segmentTags || [] };
+          state.editingCampaign = { ...c, segmentTags: c.segmentTags || [] };
           renderComposer();
         });
+      });
+      $('#mmCampaignList').querySelectorAll('[data-results]').forEach((b) => {
+        b.addEventListener('click', () => showResults(b.dataset.results));
       });
     }
 
     $('#mmNewCampaign').addEventListener('click', () => {
-      state.editing = { subject: '', preheader: '', body: '', segmentTags: [] };
-      renderComposer();
-      campaignMsg('', '');
+      state.editingCampaign = {
+        subject: '', preheader: '', body: '',
+        source: 'client', listId: null, segmentTags: []
+      };
+      renderComposer(); msg('#mmCampaignMsg', '', '');
     });
 
-    /* ------------------------------------------------------------------ *
-     * BOOT
-     * ------------------------------------------------------------------ */
+    /* ---------------- boot ---------------- */
 
     try {
-      await Promise.all([loadContacts(), loadCampaigns()]);
-      state.loaded = true;
+      await Promise.all([loadContacts(), loadLists(), loadCampaigns()]);
     } catch (e) {
-      // A failed load must not leave blank panes with no explanation.
-      contactMsg('Could not load contacts: ' + esc(e.message), 'mm-err');
-      campaignMsg('Could not load campaigns: ' + esc(e.message), 'mm-err');
+      msg('#mmContactsMsg', 'Could not load contacts: ' + esc(e.message), 'mm-err');
+      msg('#mmCampaignMsg', 'Could not load campaigns: ' + esc(e.message), 'mm-err');
     }
 
     renderDash();
     renderFilters();
     renderContactsTable();
+    renderListTable();
     renderCampaignList();
 
     // Exposed so showView() can re-render a pane on each visit without
@@ -700,6 +1270,8 @@ export default {
     this._renders = {
       dashboard: renderDash,
       contacts: () => { renderFilters(); renderContactsTable(); },
+      lists: () => { renderListEditor(); renderListTable(); },
+      import: () => {},
       campaigns: renderCampaignList
     };
   },
@@ -707,7 +1279,10 @@ export default {
   showView(view) {
     const root = this._root;
     if (!root) return;
-    const ids = { dashboard: 'mmDash', contacts: 'mmContacts', campaigns: 'mmCampaigns' };
+    const ids = {
+      dashboard: 'mmDash', contacts: 'mmContactsView', lists: 'mmListsView',
+      import: 'mmImportView', campaigns: 'mmCampaignsView'
+    };
     Object.entries(ids).forEach(([v, id]) => {
       const el = root.querySelector('#' + id);
       if (el) el.hidden = v !== view;
