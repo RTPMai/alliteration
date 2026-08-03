@@ -111,7 +111,7 @@ export const APPS = [
     w1: 'Travel', w2: 'Track', letter: 'T',
     role: 'What it costs to get there',
     blurb: 'Trips, expenses, mileage, miles.',
-    accent: '#0E7C86',
+    accent: '#51A446',           // display only (rail dot / app mark); tokens.css owns theming — matches the new logo
     // Rebuilt from scratch (Base44 had no api/ to point at). Trip Form and
     // Expense Form aren't separate rail entries: both live inline on their
     // list view, matching how the rest of the shell handles create panels.
