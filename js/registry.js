@@ -110,21 +110,24 @@ export const APPS = [
     name: 'TravelTrack',
     w1: 'Travel', w2: 'Track', letter: 'T',
     role: 'What it costs to get there',
-    blurb: 'Travel and expense tracking.',
+    blurb: 'Trips, expenses, mileage, miles.',
     accent: '#0E7C86',
+    // Rebuilt from scratch (Base44 had no api/ to point at). Trip Form and
+    // Expense Form aren't separate rail entries: both live inline on their
+    // list view, matching how the rest of the shell handles create panels.
+    // Org Settings and Account Settings from the Base44 page list are one
+    // "Settings" view here; the Org section only renders for data_scope
+    // "all" + can_edit, everyone gets their own Account section.
     views: [
-      ['dashboard', 'Dashboard']
+      ['dashboard', 'Dashboard'],
+      ['trips', 'Trips'],
+      ['expenses', 'Expenses'],
+      ['miles', 'Redeem Miles'],
+      ['reports', 'Reports'],
+      ['settings', 'Settings']
     ],
     defaultView: 'dashboard',
-    // Runs on Base44. There is no api/ folder to point at, so the data model
-    // gets rebuilt rather than reconnected. Ships as a placeholder until then.
-    stub: true,
-    // Shown on the shell's "not built yet" page. Each stub carries its own
-    // note; renderStub() used to hardcode this text, which was fine with one
-    // stub and wrong with two.
-    stubNote: 'Confirmed for rebuild. This app runs on Base44, so there is ' +
-      'no api/ folder to point at. The data model gets rebuilt here rather ' +
-      'than reconnected.'
+    stub: false
   },
   {
     id: 'crewcore',
