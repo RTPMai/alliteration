@@ -190,10 +190,24 @@ body[data-app="traveltrack"] {
 /* CrewCore's accent matches its logo mark: a lighter, brighter blue than
    BackBone's #1B5DAB. Distinct enough side by side that the two blues do not
    read as the same app. */
+/* CrewCore's accent matches its confirmed logo mark: red, sampled from the
+   Aug 2026 lineup sheet. (Earlier code had this as a blue placeholder before
+   the real logo existed.) */
 body[data-app="crewcore"] {
-  --accent:      #4A90E2;
-  --accent-deep: #3372BC;
-  --accent-tint: #EDF4FC;
+  --accent:      #D61623;
+  --accent-deep: #9A0F19;
+  --accent-tint: #FAE7E9;
+}
+
+/* MailMe's accent is a warm pink, distinct from every other app's blue,
+   orange, purple, gold, and green so it reads clearly in the rail. */
+/* MailMe's accent matches its confirmed logo mark: slate blue, sampled from
+   the Aug 2026 lineup sheet. (Placeholder was pink before the real logo
+   existed.) */
+body[data-app="mailme"] {
+  --accent:      #85A0C6;
+  --accent-deep: #5F738E;
+  --accent-tint: #F2F5F9;
 }
 
 /* ==========================================================================
