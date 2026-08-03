@@ -34,6 +34,9 @@ import {
   validateCampaignPatch, selectRecipients, resolveList,
   computeRates, deliverabilityWarnings, identityForSource, campaignSourceConflict,
 } from "../../lib/mailme/schema.js";
+import {
+  applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
+} from "../../lib/mailme/audience.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -47,21 +50,27 @@ function parseBody(req) {
  * through this function can return an opted-out address.
  */
 async function recipientsFor(campaign) {
-  const { contacts } = await resolveContacts();
+  const { contacts, settings } = await resolveContacts();
 
+  let pool;
+  let list = null;
   if (campaign.listId) {
-    const list = await getList(campaign.listId);
-    if (!list) return { recipients: [], missingList: true };
-    const members = resolveList(list, contacts);
-    return { recipients: selectRecipients(members, { source: campaign.source }), list };
-  }
-
-  return {
-    recipients: selectRecipients(contacts, {
+    list = await getList(campaign.listId);
+    if (!list) return { recipients: [], held: [], missingList: true, settings };
+    pool = selectRecipients(resolveList(list, contacts), { source: campaign.source });
+  } else {
+    pool = selectRecipients(contacts, {
       source: campaign.source,
       segmentTags: campaign.segmentTags,
-    }),
-  };
+    });
+  }
+
+  // Suppression has already been applied by selectRecipients and is absolute.
+  // Eligibility is the SOFTER layer on top: frequency cap, open quotes,
+  // failed verification. Held contacts are returned rather than silently
+  // dropped so "why is this person not in my send?" is answerable.
+  const { send, held } = applyEligibility(pool, { policy: settings.policy });
+  return { recipients: send, held, list, settings };
 }
 
 export default async function handler(req, res) {
@@ -80,21 +89,41 @@ export default async function handler(req, res) {
         const campaign = await getCampaign(id);
         if (!campaign) return res.status(404).json({ error: "Campaign not found" });
 
-        const { recipients, list, missingList } = await recipientsFor(campaign);
+        const { recipients, held, list, missingList, settings } = await recipientsFor(campaign);
         const { stats, links } = await campaignResults(id, recipients.length);
+
+        // The cold ramp: a brand-new sending domain must not go from zero to
+        // hundreds of cold emails in a day, which is itself a spam signal.
+        const isCold = identityForSource(campaign.source).key === "cold";
+        const rampDay = settings.coldStartedAt
+          ? Math.floor((Date.now() - new Date(settings.coldStartedAt)) / 86400000) : 0;
+        const dailyCap = isCold
+          ? coldDailyCap(rampDay, settings.policy)
+          : settings.policy.clientDailyCap;
 
         return res.status(200).json({
           campaign,
           list: list || null,
           missingList: !!missingList,
           recipientCount: recipients.length,
+          heldCount: (held || []).length,
+          held: (held || []).slice(0, 50),
           identity: identityForSource(campaign.source),
           conflict: campaignSourceConflict(recipients),
+          blockers: complianceBlockers(settings),
+          sendPlan: {
+            dailyCap,
+            isCold,
+            rampDay,
+            days: dailyCap > 0 ? Math.ceil(recipients.length / dailyCap) : 0,
+          },
           results: {
             stats,
             links,
             rates: computeRates(stats),
             warnings: deliverabilityWarnings(stats),
+            primary: primaryMetric(stats),
+            openRateCaveat: OPEN_RATE_CAVEAT,
           },
         });
       }
@@ -102,7 +131,7 @@ export default async function handler(req, res) {
       // The list view needs a recipient count per campaign, but not the full
       // event aggregation for each — that stays on the detail read.
       const campaigns = await listCampaigns();
-      const { contacts } = await resolveContacts();
+      const { contacts, settings } = await resolveContacts();
       const withCounts = await Promise.all(campaigns.map(async (c) => {
         let recipients;
         if (c.listId) {
@@ -111,7 +140,8 @@ export default async function handler(req, res) {
         } else {
           recipients = selectRecipients(contacts, { source: c.source, segmentTags: c.segmentTags });
         }
-        return { ...c, recipientCount: recipients.length };
+        const { send } = applyEligibility(recipients, { policy: settings.policy });
+        return { ...c, recipientCount: send.length, heldCount: recipients.length - send.length };
       }));
 
       return res.status(200).json({ campaigns: withCounts });
