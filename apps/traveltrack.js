@@ -130,6 +130,113 @@ function downloadCSV(filename, rows) {
   URL.revokeObjectURL(url);
 }
 
+/* ------------------------------------------------------------------ *
+ * IMPORT — bringing trips over from the standalone Base44 export.
+ *
+ * That export is TRIP-centric with a shared budget across every attendee
+ * (Travel/Lodging/Event/Onsite Travel/Food Budget columns, one Total Spent,
+ * one Miles Redeemed, one Net Cost per trip). This app's data model is
+ * PERSON-centric (one traveler per trip, itemized expenses per person),
+ * so an import is a lossy translation, not a straight copy:
+ *   - Multiple attendees -> the trip is attributed to the FIRST listed
+ *     person; everyone else is named in the trip's notes, not modeled
+ *     as their own trip or expense.
+ *   - The five budget columns + Total Spent collapse into ONE "Other"
+ *     expense per trip (the budget breakdown survives as free text in
+ *     the expense description, not as separate line items).
+ *   - Since every row is a trip that already happened, the expense is
+ *     created and immediately marked "reimbursed" rather than "pending"
+ *     — there is no live approval to do on a closed historical trip.
+ * ------------------------------------------------------------------ */
+
+function parseCSV(text) {
+  const rows = [];
+  let i = 0, field = '', row = [], inQuotes = false;
+  const pushField = () => { row.push(field); field = ''; };
+  const pushRow = () => { rows.push(row); row = []; };
+  while (i < text.length) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQuotes = true; i++; continue; }
+    if (c === ',') { pushField(); i++; continue; }
+    if (c === '\r') { i++; continue; }
+    if (c === '\n') { pushField(); pushRow(); i++; continue; }
+    field += c; i++;
+  }
+  if (field.length || row.length) { pushField(); pushRow(); }
+  if (!rows.length) return [];
+  const header = rows[0].map((h) => h.trim());
+  return rows.slice(1)
+    .filter((r) => r.some((c) => c.trim() !== ''))
+    .map((r) => {
+      const obj = {};
+      header.forEach((h, idx) => { obj[h] = r[idx] !== undefined ? r[idx].trim() : ''; });
+      return obj;
+    });
+}
+
+const IMPORT_STATUS_MAP = { 'attended': 'completed', 'did not attend': 'cancelled' };
+const IMPORT_BUDGET_COLS = ['Travel Budget', 'Lodging Budget', 'Event Budget', 'Onsite Travel Budget', 'Food Budget'];
+
+function mapImportRow(row) {
+  const attendees = String(row['Attendees'] || '').split(';').map((s) => s.trim()).filter(Boolean);
+  const primary = attendees[0] || 'Unknown';
+  const status = IMPORT_STATUS_MAP[String(row['Status'] || '').trim().toLowerCase()] || 'completed';
+
+  const budgetParts = [];
+  IMPORT_BUDGET_COLS.forEach((k) => {
+    const v = Number(row[k]);
+    if (v) budgetParts.push(k.replace(' Budget', '') + ' ' + fmtMoney(v));
+  });
+  const miles = Number(row['Miles Redeemed']) || 0;
+  const totalSpent = Number(row['Total Spent']) || 0;
+  const netCost = Number(row['Net Cost']);
+
+  const startDate = String(row['Start Date'] || '').trim();
+  const endDate = String(row['End Date'] || '').trim() || startDate;
+
+  const notesLines = [];
+  if (attendees.length > 1) notesLines.push('Attendees: ' + attendees.join(', '));
+  if (budgetParts.length) notesLines.push('Budget — ' + budgetParts.join(', '));
+  if (miles) notesLines.push('Miles redeemed: ' + miles.toLocaleString());
+  notesLines.push('Imported from the standalone TravelTrack export.');
+
+  const trip = {
+    title: String(row['Trip Name'] || '').trim() || 'Imported trip',
+    destination: String(row['Destination'] || '').trim(),
+    purpose: 'Other',
+    start_date: startDate,
+    end_date: endDate,
+    status,
+    notes: notesLines.join('\n'),
+    traveler: primary,
+    traveler_name: primary
+  };
+
+  let expense = null;
+  if (totalSpent > 0) {
+    let desc = 'Historical import';
+    if (budgetParts.length) desc += ' — ' + budgetParts.join(', ');
+    if (miles) desc += '. Miles redeemed: ' + miles.toLocaleString() + '.';
+    if (!Number.isNaN(netCost) && netCost !== totalSpent) desc += ' Net cost after miles: ' + fmtMoney(netCost) + '.';
+    expense = {
+      date: endDate || startDate,
+      category: 'Other',
+      amount: totalSpent,
+      payment_method: 'company_card',
+      description: desc
+    };
+  }
+
+  return { trip, expense, attendeesCount: attendees.length };
+}
+
 export default {
   id: 'traveltrack',
 
@@ -347,6 +454,8 @@ export default {
         <div class="card"><div class="panel-in" id="acctForm"></div></div>
         <div class="section-hd" id="orgHd" hidden>Org settings</div>
         <div class="card" id="orgCard" hidden><div class="panel-in" id="orgForm"></div></div>
+        <div class="section-hd" id="importHd" hidden>Import trips</div>
+        <div class="card" id="importCard" hidden><div class="panel-in" id="importPanel"></div></div>
       </div>
     </div>
 
@@ -1073,6 +1182,125 @@ export default {
           }
         });
       }
+
+      $('#importHd').hidden = !data.canEditOrg;
+      $('#importCard').hidden = !data.canEditOrg;
+      if (data.canEditOrg) renderImportPanel();
+    }
+
+    async function runImport(mapped) {
+      const results = { created: 0, expenses: 0, errors: [] };
+      for (const { trip, expense } of mapped) {
+        let newTrip = null;
+        try {
+          const tripRes = await ctx.api.post(ENDPOINTS.ttTrips, trip);
+          newTrip = tripRes && tripRes.trip;
+          results.created++;
+        } catch (err) {
+          results.errors.push((trip.title || 'row') + ': ' + (err.message || 'could not create trip'));
+          continue;
+        }
+        if (expense && newTrip) {
+          try {
+            const expRes = await ctx.api.post(ENDPOINTS.ttExpenses, { ...expense, trip_id: newTrip.id });
+            const newExpense = expRes && expRes.expense;
+            if (newExpense) {
+              // Historical trips are already closed — mark the expense
+              // reimbursed rather than leaving it sitting in "pending".
+              await ctx.api.request(ENDPOINTS.ttExpenses + '?id=' + encodeURIComponent(newExpense.id), {
+                method: 'PATCH', body: { status: 'reimbursed' }
+              });
+            }
+            results.expenses++;
+          } catch (err) {
+            results.errors.push(trip.title + ' (expense): ' + (err.message || 'could not create expense'));
+          }
+        }
+      }
+      return results;
+    }
+
+    function renderImportPanel() {
+      $('#importPanel').innerHTML = `
+        <div class="settings-note">
+          Paste or upload a CSV with the same columns as the standalone export
+          (Trip Name, Destination, Status, Start Date, End Date, Attendees,
+          the five budget columns, Total Spent, Miles Redeemed, Net Cost).
+          A trip with more than one attendee is attributed to the first
+          person listed — everyone else is named in the trip's notes, not
+          modeled as their own trip. Each trip with spend gets one "Other"
+          expense for the total, marked reimbursed since these already
+          happened. Nothing is created until you review the preview below
+          and click Import.
+        </div>
+        <div id="importErr"></div>
+        <div class="field"><label>CSV file</label><input type="file" id="importFile" accept=".csv,text/csv"></div>
+        <div class="field"><label>...or paste CSV</label>
+          <textarea id="importPaste" placeholder="Trip Name,Destination,Status,Start Date,End Date,Attendees,..." style="min-height:90px;font-family:var(--font-mono);font-size:12px"></textarea>
+        </div>
+        <button class="btn btn-sm" id="importParseBtn" type="button">Preview</button>
+        <div id="importPreview"></div>
+      `;
+
+      const fileInput = $('#importFile');
+      const pasteArea = $('#importPaste');
+
+      fileInput.addEventListener('change', async () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        pasteArea.value = await file.text();
+      });
+
+      $('#importParseBtn').addEventListener('click', () => {
+        const rows = parseCSV(pasteArea.value);
+        $('#importErr').innerHTML = '';
+        if (!rows.length) {
+          $('#importErr').innerHTML = '<div class="form-err">No rows found. Check the file has a header row and at least one data row.</div>';
+          $('#importPreview').innerHTML = '';
+          return;
+        }
+
+        const mapped = rows.map(mapImportRow);
+        $('#importPreview').innerHTML = `
+          <div class="tbl-wrap" style="margin-top:12px">
+            <table>
+              <thead><tr><th>Trip</th><th>Status</th><th>Dates</th><th>Traveler</th><th class="num">Expense</th></tr></thead>
+              <tbody>
+                ${mapped.map(({ trip, expense, attendeesCount }) => `
+                  <tr>
+                    <td>${esc(trip.title)}${attendeesCount > 1 ? ' <span class="chip muted">+' + (attendeesCount - 1) + ' more</span>' : ''}</td>
+                    <td><span class="chip ${statusClass(trip.status)}">${esc(labelOf(TRIP_STATUSES, trip.status))}</span></td>
+                    <td>${fmtDate(trip.start_date)}${trip.end_date !== trip.start_date ? ' – ' + fmtDate(trip.end_date) : ''}</td>
+                    <td>${esc(trip.traveler)}</td>
+                    <td class="num">${expense ? fmtMoney(expense.amount) : '—'}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>
+          <div class="form-actions">
+            <button class="btn" id="importRunBtn" type="button">Import ${mapped.length} trip${mapped.length === 1 ? '' : 's'}</button>
+          </div>
+          <div id="importResult"></div>
+        `;
+
+        $('#importRunBtn').addEventListener('click', async () => {
+          const btn = $('#importRunBtn');
+          btn.disabled = true;
+          btn.textContent = 'Importing…';
+          const results = await runImport(mapped);
+          await loadAll();
+          renderDashboard();
+          $('#importResult').innerHTML = `
+            <div class="settings-note" style="margin-top:12px">
+              Created ${results.created} trip${results.created === 1 ? '' : 's'} and ${results.expenses} expense${results.expenses === 1 ? '' : 's'}.
+              ${results.errors.length ? '<br>Errors: ' + results.errors.map((e) => esc(e)).join('; ') : ''}
+            </div>`;
+          btn.textContent = 'Done';
+          renderTrips();
+          renderExpenses();
+        });
+      });
     }
 
     /* ---------------- Wiring ---------------- */
