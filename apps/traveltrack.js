@@ -114,6 +114,12 @@ function statusClass(status) {
   return 'muted';
 }
 
+// Small line icons for the trip cards. currentColor so they follow
+// .trip-meta's --muted text color without a token of their own.
+const ICON_PIN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0Z"/><circle cx="12" cy="10" r="3"/></svg>';
+const ICON_CALENDAR = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>';
+const ICON_PEOPLE = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>';
+
 function downloadCSV(filename, rows) {
   const csv = rows.map((row) => row.map((cell) => {
     const s = String(cell == null ? '' : cell);
@@ -228,7 +234,8 @@ function buildDetailedPlan(rows) {
         key: tripKeyOf(title), title, destination: String(row['Destination'] || '').trim(),
         purpose: 'Other', start_date: startDate, end_date: startDate, status,
         notes: 'Imported from the standalone TravelTrack export.',
-        traveler, traveler_name: traveler
+        traveler, traveler_name: traveler,
+        miles_value: Number(row['Miles Redeemed']) || 0
       });
     } else if (type === 'expense') {
       const tripTitle = String(row['Trip / Project'] || '').trim();
@@ -282,7 +289,8 @@ function buildSummaryPlan(rows) {
     trips.push({
       key: tripKeyOf(title), title, destination: String(row['Destination'] || '').trim(),
       purpose: 'Other', start_date: startDate, end_date: endDate, status,
-      notes: notesLines.join('\n'), traveler: primary, traveler_name: primary
+      notes: notesLines.join('\n'), traveler: primary, traveler_name: primary,
+      miles_value: miles
     });
 
     if (totalSpent > 0) {
@@ -442,6 +450,22 @@ export default {
   .ly-card .unit{font-size:12px;color:var(--muted);font-weight:600}
   .ly-card .owner{font-size:11.5px;color:var(--muted);margin-top:8px}
 
+  /* ---------- trip cards ---------- */
+  .trip-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px}
+  .trip-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:18px;cursor:pointer;transition:.12s}
+  .trip-card:hover{border-color:var(--faint);box-shadow:var(--shadow-card)}
+  .trip-card-hd{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;margin-bottom:10px}
+  .trip-card-hd h3{font-size:16px;font-weight:700;letter-spacing:-.01em;line-height:1.3}
+  .trip-meta{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--muted);margin-bottom:5px}
+  .trip-meta svg{flex:0 0 auto;opacity:.7}
+  .trip-figures{margin-top:14px;padding-top:12px;border-top:1px solid var(--line-soft)}
+  .figure-row{display:flex;justify-content:space-between;font-size:13px;padding:3px 0}
+  .figure-row .k{color:var(--muted)}
+  .figure-row .v{font-weight:600;font-variant-numeric:tabular-nums}
+  .figure-row.net .k, .figure-row.net .v{font-weight:700;color:var(--ink)}
+  .figure-row .miles-credit{color:var(--success)}
+  .trip-card .bar-track{margin:4px 0 8px}
+
   /* ---------- settings ---------- */
   .settings-wrap{max-width:640px}
   .settings-note{font-size:12.5px;color:var(--muted);background:var(--line-soft);border-radius:var(--radius-sm);padding:10px 14px;margin-bottom:16px}
@@ -475,10 +499,14 @@ export default {
     <div class="page" id="ttTrips" hidden>
       <div class="page-hd">
         <div><h1>Trips.</h1><div class="sub" id="tripsSub"></div></div>
-        <div class="tools"><button class="btn" id="tripsNewBtn">+ New trip</button></div>
+        <div class="tools">
+          <button class="btn ghost" id="tripsExportBtn">Export CSV</button>
+          <button class="btn" id="tripsNewBtn">+ New trip</button>
+        </div>
       </div>
+      <div class="kpis" id="tripsKpis"></div>
       <div class="filters" id="tripsFilters"></div>
-      <div class="tbl-wrap"><div id="tripsTbl"></div></div>
+      <div class="trip-grid" id="tripsTbl"></div>
     </div>
 
     <div class="page" id="ttExpenses" hidden>
@@ -597,7 +625,7 @@ export default {
 
     function tripFormHtml(trip) {
       const isEdit = !!trip;
-      const t = trip || { title: '', destination: '', purpose: 'Client visit', start_date: today(), end_date: today(), status: 'planned', notes: '' };
+      const t = trip || { title: '', destination: '', purpose: 'Client visit', start_date: today(), end_date: today(), status: 'planned', notes: '', miles_value: 0 };
       return `
         <div class="panel-top">
           <div><h2>${isEdit ? 'Edit trip' : 'New trip'}</h2><div class="sub">${isEdit ? esc(t.id) : 'Plan a trip'}</div></div>
@@ -614,6 +642,9 @@ export default {
           <div class="field-row">
             <div class="field"><label>Purpose</label><select name="purpose">${TRIP_PURPOSES.map((p) => `<option value="${esc(p)}"${p === t.purpose ? ' selected' : ''}>${esc(p)}</option>`).join('')}</select></div>
             <div class="field"><label>Status</label><select name="status">${TRIP_STATUSES.map(([v, l]) => `<option value="${v}"${v === t.status ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          </div>
+          <div class="field"><label>Miles redeemed (dollar credit)</label><input type="number" step="0.01" min="0" name="miles_value" value="${esc(t.miles_value || 0)}" style="max-width:160px">
+            <div class="hint">Nets against Total Spent as Net Cost, same as the standalone app's Miles Redeemed figure.</div>
           </div>
           <div class="field"><label>Notes</label><textarea name="notes" placeholder="Optional">${esc(t.notes || '')}</textarea></div>
           <div class="form-actions">
@@ -1002,43 +1033,84 @@ export default {
       }));
     }
 
-    function renderTrips() {
-      renderTripsFilters();
+    // A trip imported with several attendees carries them as a line in
+    // notes ("Attendees: A, B, C") since this app models one traveler per
+    // trip. Prefer showing that full list on the card when it's there.
+    function attendeesLabel(t) {
+      const m = /Attendees:\s*(.+)/.exec(t.notes || '');
+      return m ? m[1].trim() : (t.traveler_name || t.traveler || 'Unknown');
+    }
+
+    function filteredTrips() {
       let rows = seesAll ? data.trips.slice() : data.trips.filter((t) => t.traveler === me);
       if (filters.trips === 'active') rows = rows.filter((t) => t.status === 'planned' || t.status === 'in_progress');
       if (filters.trips === 'completed') rows = rows.filter((t) => t.status === 'completed');
       rows.sort((a, b) => String(b.start_date).localeCompare(String(a.start_date)));
+      return rows;
+    }
+
+    function renderTrips() {
+      renderTripsFilters();
+      const rows = filteredTrips();
 
       $('#tripsSub').textContent = rows.length + (rows.length === 1 ? ' trip' : ' trips');
+
+      const withSpend = rows.map((t) => {
+        const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const miles = Number(t.miles_value) || 0;
+        return { t, spent, miles, net: Math.max(0, spent - miles) };
+      });
+      const totalSpent = withSpend.reduce((s, r) => s + r.spent, 0);
+      const totalMiles = withSpend.reduce((s, r) => s + r.miles, 0);
+      const totalNet = withSpend.reduce((s, r) => s + r.net, 0);
+      const spendingTripCount = withSpend.filter((r) => r.spent > 0).length;
+
+      $('#tripsKpis').innerHTML = rows.length ? [
+        [fmtMoney(totalSpent), 'Total spent (' + spendingTripCount + ' trip' + (spendingTripCount === 1 ? '' : 's') + ')'],
+        [fmtMoney(totalMiles), 'Miles redeemed'],
+        [fmtMoney(totalNet), 'Net cost']
+      ].map(([v, l]) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div></div>`).join('') : '';
 
       if (!rows.length) {
         $('#tripsTbl').innerHTML = '<div class="empty"><h3>No trips here</h3><p>Try a different filter, or plan a new one.</p></div>';
         return;
       }
 
-      $('#tripsTbl').innerHTML = `
-        <table>
-          <thead><tr><th>Trip</th><th>Destination</th><th>Dates</th><th>Purpose</th>${seesAll ? '<th>Traveler</th>' : ''}<th>Status</th><th class="num">Spent</th></tr></thead>
-          <tbody>
-            ${rows.map((t) => {
-              const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
-              return `
-                <tr class="clickable" data-trip="${esc(t.id)}">
-                  <td>${esc(t.title)}</td><td>${esc(t.destination)}</td>
-                  <td>${fmtDate(t.start_date)}${t.end_date && t.end_date !== t.start_date ? ' – ' + fmtDate(t.end_date) : ''}</td>
-                  <td>${esc(t.purpose)}</td>
-                  ${seesAll ? `<td>${esc(t.traveler_name || t.traveler)}</td>` : ''}
-                  <td><span class="chip ${statusClass(t.status)}">${esc(labelOf(TRIP_STATUSES, t.status))}</span></td>
-                  <td class="num">${fmtMoney(spent)}</td>
-                </tr>`;
-            }).join('')}
-          </tbody>
-        </table>`;
+      $('#tripsTbl').innerHTML = withSpend.map(({ t, spent, miles, net }) => `
+        <div class="trip-card" data-trip="${esc(t.id)}">
+          <div class="trip-card-hd">
+            <h3>${esc(t.title)}</h3>
+            <span class="chip ${statusClass(t.status)}">${esc(labelOf(TRIP_STATUSES, t.status))}</span>
+          </div>
+          <div class="trip-meta">${ICON_PIN}<span>${esc(t.destination || '—')}</span></div>
+          <div class="trip-meta">${ICON_CALENDAR}<span>${fmtDate(t.start_date)}${t.end_date && t.end_date !== t.start_date ? ' – ' + fmtDate(t.end_date) : ''}</span></div>
+          <div class="trip-meta">${ICON_PEOPLE}<span>${esc(attendeesLabel(t))}</span></div>
+          <div class="trip-figures">
+            <div class="figure-row"><span class="k">Total Spent</span><span class="v">${fmtMoney(spent)}</span></div>
+            ${miles > 0 ? `
+              <div class="figure-row"><span class="k">Miles</span><span class="v miles-credit">-${fmtMoney(miles)}</span></div>
+              <div class="bar-track"><div class="bar-fill" style="width:${spent ? Math.min(100, Math.round(miles / spent * 100)) : 0}%"></div></div>
+            ` : ''}
+            <div class="figure-row net"><span class="k">Net Cost</span><span class="v">${fmtMoney(net)}</span></div>
+          </div>
+        </div>
+      `).join('');
 
-      $$('#tripsTbl [data-trip]').forEach((row) => row.addEventListener('click', () => {
-        const trip = data.trips.find((t) => t.id === row.dataset.trip);
+      $$('#tripsTbl [data-trip]').forEach((card) => card.addEventListener('click', () => {
+        const trip = data.trips.find((t) => t.id === card.dataset.trip);
         if (trip) openTripPanel(trip);
       }));
+    }
+
+    function exportTripsCSV() {
+      const rows = filteredTrips();
+      const header = ['Trip Name', 'Destination', 'Status', 'Start Date', 'End Date', 'Traveler', 'Total Spent', 'Miles Redeemed', 'Net Cost'];
+      const body = rows.map((t) => {
+        const spent = expensesForTrip(t.id).reduce((s, e) => s + (Number(e.amount) || 0), 0);
+        const miles = Number(t.miles_value) || 0;
+        return [t.title, t.destination, labelOf(TRIP_STATUSES, t.status), t.start_date, t.end_date, t.traveler_name || t.traveler, spent.toFixed(2), miles.toFixed(2), Math.max(0, spent - miles).toFixed(2)];
+      });
+      downloadCSV('traveltrack-trips.csv', [header, ...body]);
     }
 
     /* ---------------- Expenses view ---------------- */
@@ -1379,7 +1451,7 @@ export default {
           <div class="settings-note">Detected format: ${plan.format === 'detailed' ? 'detailed (itemized expenses)' : 'summary (one total per trip)'}.</div>
           <div class="tbl-wrap" style="margin-top:8px">
             <table>
-              <thead><tr><th>Trip</th><th>Status</th><th>Start date</th><th>End date</th><th>Traveler</th><th class="num">Expenses</th></tr></thead>
+              <thead><tr><th>Trip</th><th>Status</th><th>Start date</th><th>End date</th><th>Traveler</th><th>Miles</th><th class="num">Expenses</th></tr></thead>
               <tbody>
                 ${plan.trips.map((trip) => {
                   const already = existingKeys.has(trip.key);
@@ -1392,6 +1464,7 @@ export default {
                       <td>${fmtDate(trip.start_date)}</td>
                       <td><input type="date" class="import-end-date" data-key="${esc(trip.key)}" value="${esc(trip.end_date)}" style="padding:4px 6px;font-size:12px;width:130px"></td>
                       <td><input type="text" class="import-traveler" data-key="${esc(trip.key)}" value="${esc(trip.traveler)}" style="padding:4px 6px;font-size:12px;width:120px"></td>
+                      <td><input type="number" step="0.01" min="0" class="import-miles" data-key="${esc(trip.key)}" value="${esc(trip.miles_value || 0)}" style="padding:4px 6px;font-size:12px;width:80px"></td>
                       <td class="num">${lineCount ? lineCount + ' — ' + fmtMoney(lineTotal) : '—'}</td>
                     </tr>`;
                 }).join('')}
@@ -1425,8 +1498,8 @@ export default {
         $('#importRunBtn').addEventListener('click', async () => {
           const btn = $('#importRunBtn');
 
-          // Pick up any edits made to End date / Traveler in the preview
-          // before locking the plan in.
+          // Pick up any edits made to End date / Traveler / Miles in the
+          // preview before locking the plan in.
           {
             const container = $('#importPreview');
             container.querySelectorAll('.import-end-date').forEach((input) => {
@@ -1436,6 +1509,10 @@ export default {
             container.querySelectorAll('.import-traveler').forEach((input) => {
               const t = plan.trips.find((x) => x.key === input.dataset.key);
               if (t && input.value.trim()) { t.traveler = input.value.trim(); t.traveler_name = input.value.trim(); }
+            });
+            container.querySelectorAll('.import-miles').forEach((input) => {
+              const t = plan.trips.find((x) => x.key === input.dataset.key);
+              if (t) { const v = Number(input.value); t.miles_value = Number.isNaN(v) || v < 0 ? 0 : v; }
             });
           }
 
@@ -1478,6 +1555,7 @@ export default {
     $('#dashNewTrip').addEventListener('click', () => openTripPanel(null));
     $('#dashNewExpense').addEventListener('click', () => openExpensePanel(null));
     $('#tripsNewBtn').addEventListener('click', () => openTripPanel(null));
+    $('#tripsExportBtn').addEventListener('click', exportTripsCSV);
     $('#expNewBtn').addEventListener('click', () => openExpensePanel(null));
     $('#milesNewBtn').addEventListener('click', () => openLoyaltyPanel(null));
     $('#expExportBtn').addEventListener('click', exportExpensesCSV);
