@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unsubscribe</title>
+<!--
+  The PUBLIC unsubscribe page. Recipients land here from an email, so it must
+  work with no login, no shell, and no app rail.
+
+  Deliberately standalone rather than a view inside alliteration: loading the
+  whole shell (registry, api seam, auth bounce) for a logged-out stranger
+  would redirect them to a login screen, which is a broken opt-out and a
+  CAN-SPAM problem.
+
+  It carries its own minimal styles for the same reason. tokens.css is the
+  shell's file and this page is not part of the shell, so the small palette
+  below is intentional rather than a violation of the no-hex rule.
+-->
+<style>
+  :root {
+    --ink: #1C2430; --muted: #6B7684; --line: #E4E8EC;
+    --bg: #F4F6F8; --card: #FFFFFF; --accent: #85A0C6; --accent-deep: #6A809E;
+    --success-tint: #EAF5EE; --success-dk: #2F7A48; --danger-dk: #96271B;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 24px; background: var(--bg); color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 32px; max-width: 460px; width: 100%;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; letter-spacing: -.02em; }
+  p { font-size: 14px; line-height: 1.6; color: var(--muted); margin: 0 0 16px; }
+  label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+  select, textarea {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+    border-radius: 8px; font-family: inherit; font-size: 14px; margin-bottom: 14px;
+  }
+  textarea { min-height: 80px; resize: vertical; }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+    font-family: inherit; width: 100%;
+  }
+  button:hover { background: var(--accent-deep); }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  .done { background: var(--success-tint); color: var(--success-dk);
+    padding: 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+  .err { color: var(--danger-dk); font-size: 14px; line-height: 1.5; }
+  .who { font-weight: 600; color: var(--ink); }
+</style>
+</head>
+<body>
+<div class="card" id="root"><p>Loading...</p></div>
+
+<script>
+(function () {
+  var root = document.getElementById('root');
+  var params = new URLSearchParams(location.search);
+  var token = params.get('t');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function fail(text) {
+    root.innerHTML = '<h1>Unsubscribe</h1><p class="err">' + esc(text) + '</p>';
+  }
+
+  if (!token) return fail('This link is missing its code. Please use the unsubscribe link from the email.');
+
+  fetch('/api/mailme/unsubscribe?t=' + encodeURIComponent(token))
+    .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+    .then(function (res) {
+      if (!res.ok) return fail(res.j.error || 'This unsubscribe link is not valid.');
+
+      if (res.j.alreadyUnsubscribed) {
+        root.innerHTML = '<h1>Already unsubscribed</h1>' +
+          '<div class="done">You are already off this list and will not receive further ' +
+          'marketing email. Nothing more to do.</div>';
+        return;
+      }
+
+      var who = res.j.contact && res.j.contact.company_name;
+      root.innerHTML =
+        '<h1>Unsubscribe</h1>' +
+        '<p>' + (who ? 'Unsubscribing <span class="who">' + esc(who) + '</span> from ' : 'Unsubscribing from ') +
+        esc(res.j.companyName || 'our') + ' marketing email. ' +
+        'You will still receive messages about orders and quotes you have with us.</p>' +
+        '<label for="reason">Mind telling us why? (optional)</label>' +
+        '<select id="reason">' +
+          '<option value="">Prefer not to say</option>' +
+          '<option>Too many emails</option>' +
+          '<option>Not relevant to me</option>' +
+          '<option>I never signed up</option>' +
+          '<option>No longer with this organization</option>' +
+          '<option>Other</option>' +
+        '</select>' +
+        '<textarea id="note" placeholder="Anything else you would like us to know"></textarea>' +
+        '<button id="go">Unsubscribe me</button>';
+
+      document.getElementById('go').addEventListener('click', function () {
+        var btn = this;
+        btn.disabled = true;
+        btn.textContent = 'Unsubscribing...';
+        var reason = document.getElementById('reason').value;
+        var note = document.getElementById('note').value;
+        var full = [reason, note].filter(Boolean).join(' - ');
+
+        fetch('/api/mailme/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ token: token, reason: full })
+        })
+          .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+          .then(function (res2) {
+            if (!res2.ok) {
+              btn.disabled = false;
+              btn.textContent = 'Unsubscribe me';
+              return fail(res2.j.error || 'Something went wrong.');
+            }
+            root.innerHTML = '<h1>Unsubscribed</h1>' +
+              '<div class="done">Done. You will not receive further marketing email from us. ' +
+              'Thanks for letting us know.</div>';
+          })
+          .catch(function () {
+            btn.disabled = false;
+            btn.textContent = 'Unsubscribe me';
+            fail('Could not reach the server. Please try again, or reply to the email.');
+          });
+      });
+    })
+    .catch(function () { fail('Could not reach the server. Please try again shortly.'); });
+})();
+</script>
+</body>
+</html>
