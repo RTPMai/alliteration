@@ -123,7 +123,7 @@ function runSelectRecipientsTests(selectRecipients) {
   const ids = (rows) => rows.map((r) => r.customer_id).sort().join(',');
 
   t.test('an empty segment means everyone MAILABLE, not everyone', () => {
-    const out = selectRecipients(makeContacts(), []);
+    const out = selectRecipients(makeContacts(), { segmentTags: [] });
     t.equal(ids(out), '1,2,6', 'suppressed contacts must never be included');
   });
 
@@ -131,24 +131,24 @@ function runSelectRecipientsTests(selectRecipients) {
     // Contacts 3, 4 and 5 all carry the "vip" tag AND are suppressed. A tag
     // filter applied before suppression would return them; this is the exact
     // regression the ordering exists to prevent.
-    const out = selectRecipients(makeContacts(), ['vip']);
+    const out = selectRecipients(makeContacts(), { segmentTags: ['vip'] });
     t.equal(ids(out), '1,6', 'unsubscribed/bounced/complained must stay excluded');
   });
 
   t.test('tag matching is case and whitespace insensitive', () => {
     // Contact 6 carries "VIP  ". Without normalizing, segmenting on "vip"
     // would silently drop them from a send they belong in.
-    const out = selectRecipients(makeContacts(), ['VIP']);
+    const out = selectRecipients(makeContacts(), { segmentTags: ['VIP'] });
     t.equal(ids(out), '1,6', 'tags should match regardless of case/padding');
   });
 
   t.test('a segment of only blank tags falls back to everyone mailable', () => {
-    const out = selectRecipients(makeContacts(), ['', '   ']);
+    const out = selectRecipients(makeContacts(), { segmentTags: ['', '   '] });
     t.equal(ids(out), '1,2,6', 'blank tags must not produce an empty send list');
   });
 
   t.test('selectRecipients tolerates junk input without throwing', () => {
-    t.equal(selectRecipients(null, ['vip']).length, 0, 'null contacts should yield none');
+    t.equal(selectRecipients(null, { segmentTags: ['vip'] }).length, 0, 'null contacts should yield none');
     t.equal(selectRecipients(undefined).length, 0, 'undefined contacts should yield none');
   });
 }
@@ -176,13 +176,14 @@ t.test('bounce and complaint states cannot be set by hand', () => {
 });
 
 t.test('sending is refused while it is unwired', () => {
-  const src = read('api/mailme/campaigns.js');
-  const matches = src.match(/Sending is not enabled yet/g) || [];
-  t.assert(matches.length >= 2,
-    'both POST and PATCH must refuse a non-draft status while sending is unwired');
-  t.assert(!/provider|postmark|resend|sendgrid/i.test(stripComments(src).replace(/error:/g, '')) ||
-    !/\bawait\s+send\w*\(/.test(src),
-    'no send call should exist yet');
+  const src = stripComments(read('api/mailme/campaigns.js'));
+  t.assert(/Sending is not enabled yet/.test(src),
+    'campaigns route must refuse a non-draft status while sending is unwired');
+  // Both write paths must consult the refusal, not just one.
+  const guards = src.match(/refuseSend\(body\)/g) || [];
+  t.assert(guards.length >= 2,
+    'POST and PATCH must each call the send refusal guard');
+  t.assert(!/\bawait\s+send\w*\(/.test(src), 'no send call should exist yet');
 });
 
 t.test('contacts cannot be created in MailMe', () => {
@@ -191,7 +192,8 @@ t.test('contacts cannot be created in MailMe', () => {
   const src = stripComments(read('api/mailme/contacts.js'));
   t.assert(!/req\.method === "POST"/.test(src),
     'api/mailme/contacts.js must not accept POST: contacts come from the roster');
-  t.assert(/"GET, PATCH"/.test(src), 'contacts route should allow only GET and PATCH');
+  t.assert(/"GET, PATCH, DELETE"/.test(src),
+    'contacts route should allow GET, PATCH and DELETE (prospect removal) but never POST');
 });
 
 t.test('mailme never writes the backbone_data key', () => {
@@ -199,10 +201,14 @@ t.test('mailme never writes the backbone_data key', () => {
   // Reading it is the whole point; writing it would corrupt BackBone's roster.
   const writes = store.match(/\["SET",\s*"backbone_data"/g) || [];
   t.equal(writes.length, 0, 'MailMe must treat backbone_data as read-only');
-  const setCalls = store.match(/\["SET",\s*([^\]]+)\]/g) || [];
-  setCalls.forEach((c) => {
+  // Writes funnel through writeKey(key, value); every CALLER must pass a
+  // keys.* helper, so no raw key string can reach storage.
+  // `await writeKey(` excludes the helper's own definition line.
+  const writeCalls = store.match(/await writeKey\(\s*([^,]+),/g) || [];
+  t.assert(writeCalls.length > 0, 'expected writeKey() callers in the store');
+  writeCalls.forEach((c) => {
     t.assert(c.includes('keys.'),
-      'every MailMe write must go through a keys.* helper (found: ' + c + ')');
+      'every MailMe write must pass a keys.* helper (found: ' + c + ')');
   });
 });
 
@@ -215,6 +221,66 @@ t.test('mailme storage stays under its own key prefix', () => {
 /* schema.js is an ES module and this harness is CommonJS, so the functional
    tests run after a dynamic import. Everything above is synchronous and has
    already registered by the time this resolves. */
+
+/* ---- v2: import, lists, sorting, results ------------------------------- */
+
+t.test('import and lists routes require auth AND app-level access', () => {
+  ['import', 'lists', 'contacts', 'campaigns'].forEach((name) => {
+    const src = read('api/mailme/' + name + '.js');
+    t.assert(src.includes('requireAuth'), 'api/mailme/' + name + '.js must call requireAuth');
+    t.assert(src.includes('requireMailMe'),
+      'api/mailme/' + name + '.js must gate on MailMe access server-side');
+  });
+});
+
+t.test('the webhook fails closed when its secret is unset', () => {
+  // The one unauthenticated-by-cookie route. An unset secret must DENY, not
+  // allow: `undefined === undefined` would otherwise let anyone forge
+  // unsubscribes and fake open counts.
+  const src = read('api/mailme/webhook.js');
+  t.assert(/if \(!expected\) return false/.test(src),
+    'webhook must deny when MAILME_WEBHOOK_SECRET is unset');
+  t.assert(src.includes('safeEqual'),
+    'webhook must compare the secret with safeEqual, not ===');
+});
+
+t.test('the webhook suppresses on unsubscribe, bounce and complaint', () => {
+  const src = stripComments(read('api/mailme/webhook.js'));
+  ['unsubscribe', 'bounce', 'complaint'].forEach((type) => {
+    t.assert(src.includes("'" + type + "'") || src.includes('"' + type + '"'),
+      'webhook must act on ' + type + ' events');
+  });
+  t.assert(src.includes('suppressEmail'),
+    'webhook must write the suppression list, not just store the event');
+});
+
+t.test('import is a dry run unless explicitly committed', () => {
+  const src = stripComments(read('api/mailme/import.js'));
+  t.assert(/if \(!body\.commit\)/.test(src),
+    'import must preview by default and write only when commit is set');
+});
+
+t.test('suppression survives deleting and re-importing a prospect', () => {
+  // The compliance backstop. Contact records come and go; an opt-out must
+  // not. Keyed by email in its own store, so a deleted-and-re-imported
+  // prospect stays suppressed.
+  const store = read('lib/mailme/store.js');
+  t.assert(/suppressionList: \(\)/.test(read('lib/mailme/schema.js')),
+    'a dedicated email-keyed suppression key must exist');
+  t.assert(store.includes('suppressEmail'), 'store must expose suppressEmail');
+  const contacts = read('api/mailme/contacts.js');
+  t.assert(!/unsuppress/.test(contacts.split('DELETE')[1] || ''),
+    'deleting a prospect must NOT clear their suppression entry');
+});
+
+t.test('bounced and complained addresses cannot be hand-resubscribed', () => {
+  const store = stripComments(read('lib/mailme/store.js'));
+  const fn = store.slice(store.indexOf('export async function unsuppressEmail'));
+  const body = fn.slice(0, fn.indexOf('\n}'));
+  t.assert(/bounced/.test(body) && /complained/.test(body),
+    'unsuppressEmail must refuse to clear provider-set states');
+});
+
 import('../lib/mailme/schema.js')
   .then((mod) => {
     t.test('schema exports selectRecipients', () => {
