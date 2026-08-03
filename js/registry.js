@@ -135,7 +135,7 @@ export const APPS = [
     w1: 'Crew', w2: 'Core', letter: 'C',
     role: 'Who does the work',
     blurb: 'Employees, PTO, reviews, anniversaries.',
-    accent: '#4A90E2',           // display only (rail dot / app mark); tokens.css owns theming
+    accent: '#D61623',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
     views: [
       ['dashboard', 'Dashboard']
     ],
@@ -148,6 +148,26 @@ export const APPS = [
     stubNote: 'Planned. Employee management for the whole team: roster ' +
       '(role, start date, hourly rate, apparel stipend), PTO balances and ' +
       'requests, one-on-one review history, and anniversaries. Admin only.'
+  },
+  {
+    id: 'mailme',
+    name: 'MailMe',
+    w1: 'Mail', w2: 'Me', letter: 'M',
+    role: 'What we tell them',
+    blurb: 'Email marketing, opens, clicks, unsubscribes.',
+    accent: '#85A0C6',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    views: [
+      ['dashboard', 'Dashboard']
+    ],
+    defaultView: 'dashboard',
+    // Sends real email to real contacts once built, so it stays off by
+    // default the same way CrewCore does: no role grants 'mailme' until the
+    // sending provider, domain auth, and unsubscribe flow are in place.
+    stub: true,
+    stubNote: 'Planned. Email marketing: contact lists (likely nested near ' +
+      'the BackBone roster) sortable by tag/segment, campaign sends through ' +
+      'a provider (Postmark/Resend/SendGrid), per-contact and per-link ' +
+      'open/click tracking, and unsubscribe handling with a captured reason.'
   }
 ];
 
