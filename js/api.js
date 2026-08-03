@@ -178,6 +178,36 @@ export const ENDPOINTS = {
  * ERRORS
  * ------------------------------------------------------------------ */
 
+/**
+ * Best human-readable message from any error payload shape we might get:
+ *   { error: "text" }                     our own routes
+ *   { error: { code, message } }          Vercel platform errors
+ *   { message: "text" } / { msg: "..." }  assorted middleware
+ * Falls back to a compact JSON dump rather than "[object Object]", because a
+ * dump you can read beats a shrug you cannot.
+ */
+function errorText(payload) {
+  if (!payload) return null;
+  if (typeof payload === 'string') return payload;
+
+  const e = payload.error !== undefined ? payload.error : payload;
+  if (typeof e === 'string') return e;
+
+  if (e && typeof e === 'object') {
+    if (typeof e.message === 'string') {
+      return e.code ? e.message + ' (' + e.code + ')' : e.message;
+    }
+    if (typeof e.code === 'string') return e.code;
+    try {
+      const dump = JSON.stringify(e);
+      if (dump && dump !== '{}') return dump.slice(0, 300);
+    } catch (err) { /* fall through */ }
+  }
+
+  if (typeof payload.message === 'string') return payload.message;
+  return null;
+}
+
 export class ApiError extends Error {
   constructor(message, status, body) {
     super(message);
@@ -265,7 +295,12 @@ export async function request(path, opts = {}) {
       console.warn('[api] ' + path + ' is not deployed yet; using mock data.');
       return mockResponse(path, method, body, query);
     }
-    const msg = (payload && payload.error) || res.statusText || ('HTTP ' + res.status);
+    // Error payloads are not always { error: "a string" }. Vercel's own
+    // platform errors (a crashed function, a missing module) come back as
+    // { error: { code, message } }, and pushing that object straight into
+    // Error#message renders as the useless "[object Object]" — which is
+    // exactly what it did, hiding a real deploy fault behind a shrug.
+    const msg = errorText(payload) || res.statusText || ('HTTP ' + res.status);
     const err = new ApiError(msg, res.status, payload);
     if (err.isAuth) announceAuthFailure(err);
     throw err;
