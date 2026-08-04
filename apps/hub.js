@@ -308,6 +308,38 @@ export default {
       })());
     }
 
+    // ---- CrewCore: active headcount, upcoming anniversaries. ----
+    // Self-serve ("employee" role) accounts get a narrower employees response
+    // (their own record only, see api/crewcore/employees.js) with no
+    // "employees" array — has('crewcore') is still true for them since the
+    // app itself is visible, so this branch degrades to notWired() rather
+    // than showing someone else's headcount from a payload shape it can't
+    // read. Admin/superuser accounts get the real array and the real card.
+    if (has('crewcore')) {
+      jobs.push((async () => {
+        try {
+          const d = await api.get(ENDPOINTS.ccEmployees);
+          const employees = listOf(d, ['employees']);
+          if (!employees) return notWired('crewcore');
+          const active = employees.filter((e) => e && e.status === 'active').length;
+          const soon = employees.filter((e) => {
+            if (!e || !e.start_date) return false;
+            const start = new Date(e.start_date + 'T00:00:00');
+            if (Number.isNaN(start.getTime())) return false;
+            const now = new Date();
+            const next = new Date(now.getFullYear(), start.getMonth(), start.getDate());
+            if (next < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
+              next.setFullYear(next.getFullYear() + 1);
+            }
+            return Math.round((next - now) / 86400000) <= 60;
+          }).length;
+          setCard('crewcore',
+            [[String(active), 'Active']].concat(soon ? [[String(soon), 'Anniversaries soon']] : []),
+            soon ? soon + ' in the next 60 days' : 'Nothing coming up');
+        } catch (e) { setCard('crewcore', [], 'Could not load the roster.'); }
+      })());
+    }
+
     await Promise.allSettled(jobs);
     if (!stats.length) {
       // Nothing headline-worthy loaded; keep the strip empty rather than fake.
