@@ -504,7 +504,12 @@ const MOCK_DATA = {
     // offline/mock experience matches production exactly for read-only
     // static content instead of duplicating it here.
     sections: HANDBOOK_SECTIONS_FOR_MOCK,
-    updated: '2026-08'
+    updated: '2026-08',
+    // Mocked as NOT yet acknowledged so the offline/sample experience shows
+    // the acknowledgment interstitial too, not just the real deployment.
+    acknowledged: false,
+    ack_version: null,
+    ack_at: null
   }),
   [ENDPOINTS.ccReviews]: () => ({
     reviews: [
