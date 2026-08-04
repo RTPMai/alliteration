@@ -1,31 +1,42 @@
 /**
  * CrewCore — employee management for the whole team.
  *
- * REAL BUILD, Aug 2026, replacing the earlier stub. No standalone to port
- * from: the closest prior art was the P&M internal Wix site
- * (ryan7339.wixsite.com/pminternal), specifically Company Structure (org
- * chart) and Contact List (roster seed). Neither is a system with data to
- * migrate, just reference pages.
+ * v2, Aug 2026. No standalone to port from: the closest prior art was the
+ * P&M internal Wix site (ryan7339.wixsite.com/pminternal), specifically
+ * Company Structure (org chart) and Contact List (roster seed).
+ *
+ * PTO REMOVED this version — Ryan's call. Time off tracking stays in
+ * QuickBooks, not duplicated here. There is no 'pto' view anymore; it isn't
+ * hidden, it's gone, along with api/crewcore/pto.js.
+ *
+ * ADDED this version: apparel STIPEND tracking (an allotment per employee,
+ * defaulted by department per the Handbook's Dress Code policy — $250
+ * Front Office, $150 Production — plus a spend log an admin maintains), and
+ * a read-only HANDBOOK view sourced from lib/crewcore/handbook-content.js,
+ * itself sourced from the real Employee_Handbook.docx.
  *
  * SELF-SERVE, decided Aug 3 2026: an "employee" role (data_scope "own") can
- * see their own roster entry (minus pay/stipend/notes), request PTO and see
- * their own balance, and read their own review history. Everyone else with
- * the app granted (data_scope "all", or any superuser account) gets the full
- * admin views. The split is enforced server-side in api/crewcore/*.js — this
- * file adapts what it RENDERS based on ctx.perms, but never trusts the client
- * to be the actual gate.
+ * see their own roster entry (minus hourly rate and admin notes), their own
+ * stipend allotment and spend history, their own review history read-only,
+ * and the full Handbook (open to everyone with CrewCore access, not scoped).
+ * Everyone else with the app granted (data_scope "all", or any superuser
+ * account) gets the full admin views. The split is enforced server-side in
+ * api/crewcore/*.js — this file adapts what it RENDERS based on ctx.perms,
+ * but never trusts the client to be the actual gate.
  *
- * Four views: Dashboard (admin: anniversaries + pending PTO queue; self-serve
- * callers land on Roster instead, see showView), Roster (admin: full list +
- * add/edit; self-serve: your own profile card), PTO (both: request + your
- * balance; admin also gets the approve/deny queue), Reviews (admin: full
- * history + add; self-serve: read-only own history).
+ * Six views: Dashboard (admin only; anniversaries + headline numbers —
+ * self-serve callers land on Roster instead, see showView), Roster (admin:
+ * full list + add/edit; self-serve: your own profile card), Stipend (both:
+ * your allotment, spend log, and remaining balance; admin also logs new
+ * spend entries for anyone), Reviews (admin: full history + add; self-serve:
+ * read-only own history), Handbook (everyone; read-only), Settings
+ * (admin only; hidden from self-serve rails by lib/users.js's per-view tabs).
  */
 
 import { ENDPOINTS } from '../js/api.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
-const PTO_TYPES = ['vacation', 'sick', 'personal', 'unpaid'];
+const STIPEND_CATEGORIES = ['apparel', 'other'];
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -97,9 +108,7 @@ export default {
   .cc-empty{padding:30px;text-align:center;color:var(--muted);font-size:13px}
 
   .chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600;background:var(--line-soft);color:var(--ink)}
-  .chip.pending{background:var(--accent-tint);color:var(--accent-deep)}
-  .chip.approved{background:var(--success-tint);color:var(--success)}
-  .chip.denied,.chip.terminated{background:var(--danger-tint);color:var(--danger)}
+  .chip.terminated{background:var(--danger-tint);color:var(--danger)}
   .chip.on_leave{background:var(--line-soft);color:var(--muted)}
 
   .cc-table{width:100%;border-collapse:collapse;font-size:13px}
@@ -146,6 +155,25 @@ export default {
 
   .cc-locked{padding:60px 20px;text-align:center;color:var(--muted)}
   .cc-locked h2{color:var(--ink);font-size:17px;margin-bottom:8px}
+
+  .cc-balance-bar{
+    height:8px;border-radius:99px;background:var(--line-soft);overflow:hidden;margin-top:6px;
+  }
+  .cc-balance-bar .fill{height:100%;background:var(--accent);border-radius:99px}
+
+  .cc-hb-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
+  .cc-hb-navbtn{
+    border:1px solid var(--line);background:var(--card);border-radius:var(--radius-pill);
+    padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;font-family:inherit;
+  }
+  .cc-hb-navbtn:hover{color:var(--ink)}
+  .cc-hb-section{margin-bottom:32px;scroll-margin-top:16px}
+  .cc-hb-section h2{font-size:18px;font-weight:800;margin-bottom:12px;letter-spacing:-.01em}
+  .cc-hb-section h3{font-size:13.5px;font-weight:700;margin:16px 0 6px}
+  .cc-hb-section p{font-size:13.5px;line-height:1.65;color:var(--ink);margin-bottom:10px}
+  .cc-hb-section ul{margin:0 0 10px 20px;padding:0}
+  .cc-hb-section li{font-size:13.5px;line-height:1.65;margin-bottom:4px}
+  .cc-hb-updated{font-size:12px;color:var(--muted);margin-bottom:20px}
   `,
 
   template: `
@@ -173,15 +201,16 @@ export default {
     this._employees = isAdmin ? (empPayload.employees || []) : [];
     this._own = isAdmin ? null : (empPayload.employee || null);
 
-    this._ptoRequests = [];
-    this._ptoBalance = null;
+    this._stipendSpends = [];
+    this._stipendBalance = null;
     this._reviews = [];
+    this._handbook = null;
   },
 
-  async _loadPto() {
-    const payload = await this._ctx.api.get(ENDPOINTS.ccPto);
-    this._ptoRequests = payload.requests || [];
-    this._ptoBalance = payload.balance || null;
+  async _loadStipend() {
+    const payload = await this._ctx.api.get(ENDPOINTS.ccStipend);
+    this._stipendSpends = payload.spends || [];
+    this._stipendBalance = payload.balance || null;
   },
 
   async _loadReviews() {
@@ -189,9 +218,17 @@ export default {
     this._reviews = payload.reviews || [];
   },
 
+  async _loadHandbook() {
+    if (this._handbook) return; // static content, fetch once per mount
+    const payload = await this._ctx.api.get(ENDPOINTS.ccHandbook);
+    this._handbook = payload;
+  },
+
   async _loadSettings() {
     const payload = await this._ctx.api.get(ENDPOINTS.ccSettings);
-    this._settings = payload.settings || { default_pto_days: 10, self_serve_enabled: true };
+    this._settings = payload.settings || {
+      default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true
+    };
   },
 
   async showView(view) {
@@ -214,8 +251,7 @@ export default {
 
     if (view === 'dashboard') {
       title.textContent = 'Dashboard.';
-      sub.textContent = 'Anniversaries and what needs your attention.';
-      await this._loadPto();
+      sub.textContent = 'Anniversaries and headline numbers.';
       body.innerHTML = this._renderDashboard();
       return;
     }
@@ -236,15 +272,17 @@ export default {
       return;
     }
 
-    if (view === 'pto') {
-      title.textContent = 'PTO.';
-      sub.textContent = isAdmin ? 'Requests and balances across the team.' : 'Your time off.';
-      await this._loadPto();
-      actions.innerHTML = `<button class="cc-btn" id="ccRequestBtn">Request time off</button>`;
-      const reqBtn = $('#ccRequestBtn');
-      if (reqBtn) reqBtn.onclick = () => this._openPtoForm();
-      body.innerHTML = this._renderPto();
-      this._wirePto();
+    if (view === 'stipend') {
+      title.textContent = 'Stipend.';
+      sub.textContent = isAdmin ? 'Apparel allotments and spend across the team.' : 'Your apparel allotment and spend.';
+      await this._loadStipend();
+      if (isAdmin) {
+        actions.innerHTML = `<button class="cc-btn" id="ccLogSpendBtn">Log a purchase</button>`;
+        const btn = $('#ccLogSpendBtn');
+        if (btn) btn.onclick = () => this._openStipendForm();
+      }
+      body.innerHTML = this._renderStipend();
+      this._wireStipend();
       return;
     }
 
@@ -261,11 +299,21 @@ export default {
       return;
     }
 
+    if (view === 'handbook') {
+      title.textContent = 'Handbook.';
+      sub.textContent = 'P&M Apparel Employee Handbook.';
+      await this._loadHandbook();
+      body.innerHTML = this._renderHandbook();
+      this._wireHandbook();
+      return;
+    }
+
     if (view === 'settings') {
       // Not reachable by a self-serve caller — allowedViews() in
-      // js/registry.js scopes the "employee" role to dashboard/roster/pto/
-      // reviews only, so this view never appears in their rail. Still guard
-      // here rather than trust the rail alone, same as every other app.
+      // js/registry.js scopes the "employee" role to dashboard/roster/
+      // stipend/reviews/handbook only, so this view never appears in their
+      // rail. Still guard here rather than trust the rail alone, same as
+      // every other app.
       if (!isAdmin) {
         title.textContent = 'Settings.';
         sub.textContent = '';
@@ -289,19 +337,20 @@ export default {
       .filter((x) => x.ann && x.ann.days <= 60)
       .sort((a, b) => a.ann.days - b.ann.days);
 
-    const pending = this._ptoRequests.filter((r) => r.status === 'pending');
+    const active = this._employees.filter((e) => e.status === 'active');
+    const totalStipendAllotted = active.reduce((sum, e) => sum + (Number(e.apparel_stipend) || 0), 0);
 
     return `
       <div class="cc-grid">
         <div class="cc-card">
           <h3>Team</h3>
-          <div class="big">${this._employees.filter((e) => e.status === 'active').length}</div>
+          <div class="big">${active.length}</div>
           <div class="note">active employees</div>
         </div>
         <div class="cc-card">
-          <h3>Pending PTO</h3>
-          <div class="big">${pending.length}</div>
-          <div class="note">${pending.length ? 'needs a decision' : 'all caught up'}</div>
+          <h3>Apparel stipends</h3>
+          <div class="big">${fmtMoney(totalStipendAllotted)}</div>
+          <div class="note">total allotted this year</div>
         </div>
         <div class="cc-card">
           <h3>Upcoming anniversaries</h3>
@@ -322,23 +371,6 @@ export default {
               <div class="meta">${x.ann.years + 1} ${x.ann.years + 1 === 1 ? 'year' : 'years'} · ${x.ann.days === 0 ? 'today' : x.ann.days + 'd'}</div>
             </div>
           `).join('') : `<div class="cc-empty">Nothing in the next 60 days.</div>`}
-        </div>
-      </div>
-
-      <div class="cc-section">
-        <h2>Pending PTO requests</h2>
-        <div class="cc-list">
-          ${pending.length ? pending.map((r) => {
-            const emp = this._employees.find((e) => e.id === r.employee_id);
-            return `
-            <div class="cc-row">
-              <div>
-                <div class="who">${esc(emp ? emp.name : r.employee_id)}</div>
-                <div class="meta">${esc(r.type)} · ${fmtDate(r.start_date)}${r.end_date && r.end_date !== r.start_date ? ' – ' + fmtDate(r.end_date) : ''} · ${r.days}d</div>
-              </div>
-              <span class="chip pending">pending</span>
-            </div>`;
-          }).join('') : `<div class="cc-empty">No pending requests.</div>`}
         </div>
       </div>
     `;
@@ -380,7 +412,7 @@ export default {
       }
       list.innerHTML = `
         <table class="cc-table">
-          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th></tr></thead>
+          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th><th>Stipend</th></tr></thead>
           <tbody>
             ${rows.map((e) => `
               <tr class="clickable" data-id="${esc(e.id)}">
@@ -390,6 +422,7 @@ export default {
                 <td>${fmtDate(e.start_date)}</td>
                 <td><span class="chip ${esc(e.status)}">${esc(e.status)}</span></td>
                 <td>${e.hourly_rate != null ? fmtMoney(e.hourly_rate) + '/hr' : '—'}</td>
+                <td>${fmtMoney(e.apparel_stipend)}/yr</td>
               </tr>
             `).join('')}
           </tbody>
@@ -434,8 +467,10 @@ export default {
           <div><label>Email</label><input id="fEmail" value="${esc(emp ? emp.email : '')}"></div>
           <div><label>Shell username (optional)</label><input id="fUsername" value="${esc(emp && emp.username ? emp.username : '')}" placeholder="links self-serve login"></div>
           <div><label>Hourly rate</label><input id="fRate" type="number" step="0.01" value="${emp && emp.hourly_rate != null ? emp.hourly_rate : ''}"></div>
-          <div><label>Apparel stipend</label><input id="fStipend" type="number" step="0.01" value="${emp ? emp.apparel_stipend : 0}"></div>
-          <div><label>PTO days / year</label><input id="fPtoDays" type="number" step="0.5" value="${emp ? emp.pto_days_per_year : 0}"></div>
+          <div>
+            <label>Apparel stipend / year</label>
+            <input id="fStipend" type="number" step="0.01" value="${emp && emp.apparel_stipend != null ? emp.apparel_stipend : ''}" placeholder="defaults by department">
+          </div>
           <div class="full"><label>Notes</label><textarea id="fNotes" rows="2">${esc(emp ? emp.notes : '')}</textarea></div>
         </div>
         <div class="cc-err" id="fErr" hidden></div>
@@ -467,6 +502,7 @@ export default {
     }
 
     $('#fSave').onclick = async () => {
+      const stipendRaw = $('#fStipend').value;
       const payload = {
         name: $('#fName').value,
         department: $('#fDept').value,
@@ -477,10 +513,14 @@ export default {
         email: $('#fEmail').value,
         username: $('#fUsername').value || null,
         hourly_rate: $('#fRate').value === '' ? null : Number($('#fRate').value),
-        apparel_stipend: $('#fStipend').value === '' ? 0 : Number($('#fStipend').value),
-        pto_days_per_year: $('#fPtoDays').value === '' ? 0 : Number($('#fPtoDays').value),
         notes: $('#fNotes').value
       };
+      // Only send apparel_stipend if the admin actually typed something —
+      // leaving it blank on a NEW employee lets the server apply the
+      // department default (see lib/crewcore/store.js saveEmployee); on an
+      // EDIT, omitting it here means "leave whatever is already stored."
+      if (stipendRaw !== '') payload.apparel_stipend = Number(stipendRaw);
+
       try {
         if (isEdit) {
           const out = await this._ctx.api.request(ENDPOINTS.ccEmployees + '?id=' + encodeURIComponent(emp.id), { method: 'PATCH', body: payload });
@@ -530,151 +570,134 @@ export default {
     `;
   },
 
-  /* ---------------- PTO ---------------- */
+  /* ---------------- Stipend ---------------- */
 
-  _renderPto() {
+  _renderStipend() {
     const isAdmin = this._isAdmin;
+    const nameFor = (id) => {
+      const e = this._employees.find((x) => x.id === id);
+      return e ? e.name : id;
+    };
 
     if (isAdmin) {
-      const pending = this._ptoRequests.filter((r) => r.status === 'pending');
-      const rest = this._ptoRequests.filter((r) => r.status !== 'pending');
-      const nameFor = (id) => {
-        const e = this._employees.find((x) => x.id === id);
-        return e ? e.name : id;
-      };
-      const rowHtml = (r, showActions) => `
-        <div class="cc-row" data-id="${esc(r.id)}">
-          <div>
-            <div class="who">${esc(nameFor(r.employee_id))}</div>
-            <div class="meta">${esc(r.type)} · ${fmtDate(r.start_date)}${r.end_date && r.end_date !== r.start_date ? ' – ' + fmtDate(r.end_date) : ''} · ${r.days}d${r.note ? ' · ' + esc(r.note) : ''}</div>
-          </div>
-          ${showActions
-            ? `<div><button class="cc-btn sm" data-act="approved">Approve</button> <button class="cc-btn sm ghost" data-act="denied">Deny</button></div>`
-            : `<span class="chip ${esc(r.status)}">${esc(r.status)}</span>`
-          }
-        </div>
-      `;
+      if (!this._employees.length) {
+        return `<div class="cc-empty">No employees on the roster yet.</div>`;
+      }
       return `
-        <div class="cc-section">
-          <h2>Pending</h2>
-          <div class="cc-list" id="ccPtoPending">
-            ${pending.length ? pending.map((r) => rowHtml(r, true)).join('') : `<div class="cc-empty">Nothing pending.</div>`}
-          </div>
+        <div class="cc-grid">
+          ${this._employees.map((e) => {
+            const spent = this._stipendSpends
+              .filter((s) => s.employee_id === e.id)
+              .filter((s) => String(s.date || '').slice(0, 4) === String(new Date().getFullYear()))
+              .reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+            const allotted = Number(e.apparel_stipend) || 0;
+            const pct = allotted > 0 ? Math.min(100, Math.round((spent / allotted) * 100)) : 0;
+            return `
+              <div class="cc-card">
+                <h3>${esc(e.name)}</h3>
+                <div class="big">${fmtMoney(Math.max(0, allotted - spent))}</div>
+                <div class="note">of ${fmtMoney(allotted)} remaining</div>
+                <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+              </div>
+            `;
+          }).join('')}
         </div>
         <div class="cc-section">
-          <h2>History</h2>
+          <h2>Spend log</h2>
           <div class="cc-list">
-            ${rest.length ? rest.map((r) => rowHtml(r, false)).join('') : `<div class="cc-empty">No history yet.</div>`}
+            ${this._stipendSpends.length ? this._stipendSpends.map((s) => `
+              <div class="cc-row" data-id="${esc(s.id)}">
+                <div>
+                  <div class="who">${esc(nameFor(s.employee_id))}</div>
+                  <div class="meta">${fmtDate(s.date)} · ${esc(s.category)}${s.description ? ' · ' + esc(s.description) : ''}</div>
+                </div>
+                <div>
+                  <span class="meta">${fmtMoney(s.amount)}</span>
+                  <button class="cc-btn sm ghost" data-act="delete">Remove</button>
+                </div>
+              </div>
+            `).join('') : `<div class="cc-empty">Nothing logged yet.</div>`}
           </div>
         </div>
       `;
     }
 
-    const bal = this._ptoBalance;
+    const bal = this._stipendBalance;
+    const pct = bal && bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
     return `
       <div class="cc-grid">
         <div class="cc-card">
           <h3>Allotted (${bal ? bal.year : ''})</h3>
-          <div class="big">${bal ? bal.allotted : '—'}</div>
-          <div class="note">days</div>
+          <div class="big">${bal ? fmtMoney(bal.allotted) : '—'}</div>
         </div>
         <div class="cc-card">
           <h3>Used</h3>
-          <div class="big">${bal ? bal.used : '—'}</div>
-          <div class="note">days</div>
+          <div class="big">${bal ? fmtMoney(bal.used) : '—'}</div>
         </div>
         <div class="cc-card">
           <h3>Remaining</h3>
-          <div class="big">${bal ? bal.remaining : '—'}</div>
-          <div class="note">days</div>
+          <div class="big">${bal ? fmtMoney(bal.remaining) : '—'}</div>
+          ${bal ? `<div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>` : ''}
         </div>
       </div>
       <div class="cc-section">
-        <h2>Your requests</h2>
+        <h2>Your purchases</h2>
         <div class="cc-list">
-          ${this._ptoRequests.length ? this._ptoRequests.map((r) => `
-            <div class="cc-row" data-id="${esc(r.id)}">
+          ${this._stipendSpends.length ? this._stipendSpends.map((s) => `
+            <div class="cc-row">
               <div>
-                <div class="who">${esc(r.type)}</div>
-                <div class="meta">${fmtDate(r.start_date)}${r.end_date && r.end_date !== r.start_date ? ' – ' + fmtDate(r.end_date) : ''} · ${r.days}d${r.note ? ' · ' + esc(r.note) : ''}</div>
+                <div class="who">${esc(s.category)}</div>
+                <div class="meta">${fmtDate(s.date)}${s.description ? ' · ' + esc(s.description) : ''}</div>
               </div>
-              <div>
-                <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
-                ${r.status === 'pending' ? ` <button class="cc-btn sm ghost" data-act="cancel">Cancel</button>` : ''}
-              </div>
+              <span class="meta">${fmtMoney(s.amount)}</span>
             </div>
-          `).join('') : `<div class="cc-empty">No requests yet.</div>`}
+          `).join('') : `<div class="cc-empty">Nothing logged yet.</div>`}
         </div>
       </div>
     `;
   },
 
-  _wirePto() {
+  _wireStipend() {
+    if (!this._isAdmin) return;
     const root = this._root;
     const body = root.querySelector('#ccBody');
-    const isAdmin = this._isAdmin;
-
-    if (isAdmin) {
-      const pendingList = body.querySelector('#ccPtoPending');
-      if (pendingList) {
-        pendingList.querySelectorAll('button[data-act]').forEach((btn) => {
-          btn.onclick = async () => {
-            const row = btn.closest('.cc-row');
-            const id = row.dataset.id;
-            try {
-              await this._ctx.api.request(ENDPOINTS.ccPto + '?id=' + encodeURIComponent(id), {
-                method: 'PATCH', body: { status: btn.dataset.act }
-              });
-              this.showView('pto');
-            } catch (e) {
-              alert(e.message || 'Could not update the request.');
-            }
-          };
-        });
-      }
-      return;
-    }
-
-    body.querySelectorAll('button[data-act="cancel"]').forEach((btn) => {
+    body.querySelectorAll('button[data-act="delete"]').forEach((btn) => {
       btn.onclick = async () => {
         const row = btn.closest('.cc-row');
         const id = row.dataset.id;
+        if (!confirm('Remove this spend entry?')) return;
         try {
-          await this._ctx.api.request(ENDPOINTS.ccPto + '?id=' + encodeURIComponent(id), {
-            method: 'PATCH', body: { status: 'cancelled' }
-          });
-          this.showView('pto');
+          await this._ctx.api.request(ENDPOINTS.ccStipend + '?id=' + encodeURIComponent(id), { method: 'DELETE' });
+          this.showView('stipend');
         } catch (e) {
-          alert(e.message || 'Could not cancel the request.');
+          alert(e.message || 'Could not remove the entry.');
         }
       };
     });
   },
 
-  _openPtoForm() {
+  _openStipendForm() {
     const root = this._root;
     const body = root.querySelector('#ccBody');
-    const isAdmin = this._isAdmin;
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div class="cc-form">
-        <h3>Request time off</h3>
+        <h3>Log a purchase</h3>
         <div class="cc-form-grid">
-          ${isAdmin ? `<div class="full"><label>Employee</label>
+          <div class="full"><label>Employee</label>
             <select id="fEmp">${this._employees.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</select>
-          </div>` : ''}
-          <div><label>Start date</label><input id="fStart" type="date"></div>
-          <div><label>End date</label><input id="fEnd" type="date"></div>
-          <div><label>Type</label>
-            <select id="fType">${PTO_TYPES.map((t) => `<option value="${t}">${t}</option>`).join('')}</select>
           </div>
-          <div><label>Days</label><input id="fDays" type="number" step="0.5" value="1"></div>
-          <div class="full"><label>Note (optional)</label><input id="fNote"></div>
+          <div><label>Date</label><input id="fDate" type="date"></div>
+          <div><label>Amount</label><input id="fAmount" type="number" step="0.01"></div>
+          <div><label>Category</label>
+            <select id="fCategory">${STIPEND_CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join('')}</select>
+          </div>
+          <div class="full"><label>Description</label><input id="fDescription" placeholder="e.g. branded quarter-zip"></div>
         </div>
         <div class="cc-err" id="fErr" hidden></div>
         <div class="cc-form-actions">
           <button class="cc-btn ghost" id="fCancel">Cancel</button>
-          <button class="cc-btn" id="fSubmit">Submit</button>
+          <button class="cc-btn" id="fSubmit">Save</button>
         </div>
       </div>
     `;
@@ -685,20 +708,18 @@ export default {
     $('#fCancel').onclick = () => wrap.remove();
     $('#fSubmit').onclick = async () => {
       const payload = {
-        start_date: $('#fStart').value,
-        end_date: $('#fEnd').value || $('#fStart').value,
-        type: $('#fType').value,
-        days: Number($('#fDays').value)
+        employee_id: $('#fEmp').value,
+        date: $('#fDate').value,
+        amount: Number($('#fAmount').value),
+        category: $('#fCategory').value,
+        description: $('#fDescription').value
       };
-      if ($('#fNote')) payload.note = $('#fNote').value;
-      if (isAdmin) payload.employee_id = $('#fEmp').value;
-
       try {
-        await this._ctx.api.request(ENDPOINTS.ccPto, { method: 'POST', body: payload });
+        await this._ctx.api.request(ENDPOINTS.ccStipend, { method: 'POST', body: payload });
         wrap.remove();
-        this.showView('pto');
+        this.showView('stipend');
       } catch (e) {
-        err.hidden = false; err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not submit.';
+        err.hidden = false; err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
       }
     };
   },
@@ -779,19 +800,61 @@ export default {
     };
   },
 
+  /* ---------------- Handbook ---------------- */
+
+  _renderHandbook() {
+    const hb = this._handbook;
+    if (!hb || !Array.isArray(hb.sections)) {
+      return `<div class="cc-empty">Handbook content isn't available right now.</div>`;
+    }
+    const blockHtml = (b) => {
+      if (b.h) return `<h3>${esc(b.h)}</h3>`;
+      if (b.p) return `<p>${esc(b.p)}</p>`;
+      if (b.list) return `<ul>${b.list.map((li) => `<li>${esc(li)}</li>`).join('')}</ul>`;
+      return '';
+    };
+    return `
+      <div class="cc-hb-updated">Last updated ${esc(hb.updated || '')}</div>
+      <div class="cc-hb-nav">
+        ${hb.sections.map((s) => `<button class="cc-hb-navbtn" data-jump="${esc(s.id)}">${esc(s.title)}</button>`).join('')}
+      </div>
+      ${hb.sections.map((s) => `
+        <div class="cc-hb-section" id="hb-${esc(s.id)}">
+          <h2>${esc(s.title)}</h2>
+          ${s.blocks.map(blockHtml).join('')}
+        </div>
+      `).join('')}
+    `;
+  },
+
+  _wireHandbook() {
+    const root = this._root;
+    const body = root.querySelector('#ccBody');
+    body.querySelectorAll('button[data-jump]').forEach((btn) => {
+      btn.onclick = () => {
+        const target = body.querySelector('#hb-' + btn.dataset.jump);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+    });
+  },
+
   /* ---------------- Settings (admin only) ---------------- */
 
   _renderSettings() {
     const s = this._settings || {};
     return `
       <div class="cc-form" style="max-width:480px">
-        <h3>Defaults</h3>
+        <h3>Apparel stipend defaults</h3>
         <div class="cc-form-grid">
           <div>
-            <label>Default PTO days / year</label>
-            <input id="sDefaultPto" type="number" step="0.5" value="${s.default_pto_days != null ? s.default_pto_days : 10}">
+            <label>Front Office ($/year)</label>
+            <input id="sFrontOffice" type="number" step="0.01" value="${s.default_stipend_front_office != null ? s.default_stipend_front_office : 250}">
           </div>
           <div>
+            <label>Production ($/year)</label>
+            <input id="sProduction" type="number" step="0.01" value="${s.default_stipend_production != null ? s.default_stipend_production : 150}">
+          </div>
+          <div class="full">
             <label>Self-serve</label>
             <select id="sSelfServe">
               <option value="true" ${s.self_serve_enabled !== false ? 'selected' : ''}>Enabled</option>
@@ -805,12 +868,13 @@ export default {
         </div>
       </div>
       <p style="font-size:12.5px;color:var(--muted);max-width:480px">
+        These figures set the default when a NEW employee is added — they
+        don't retroactively change anyone already on the roster. Per the
+        Handbook's Dress Code policy, Sales and Office count as Front
+        Office; Screen Printing, Embroidery, and Art count as Production.
         Disabling self-serve does not remove the "employee" role or revoke
-        anyone's login. It's a soft switch an admin can flip off if
-        self-service turns out to need a rethink, without touching account
-        setup. Employees already assigned the role keep their CrewCore access
-        either way; this only governs whether new self-serve behavior is
-        expected to be on.
+        anyone's login, it's a soft switch for whether new self-serve
+        behavior is expected to be on.
       </p>
     `;
   },
@@ -823,7 +887,8 @@ export default {
 
     $('#sSave').onclick = async () => {
       const payload = {
-        default_pto_days: Number($('#sDefaultPto').value),
+        default_stipend_front_office: Number($('#sFrontOffice').value),
+        default_stipend_production: Number($('#sProduction').value),
         self_serve_enabled: $('#sSelfServe').value === 'true'
       };
       try {
