@@ -134,25 +134,32 @@ export const APPS = [
     name: 'CrewCore',
     w1: 'Crew', w2: 'Core', letter: 'C',
     role: 'Who does the work',
-    blurb: 'Employees, PTO, reviews, anniversaries.',
+    blurb: 'Employees, stipends, reviews, handbook.',
     accent: '#D61623',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
     // Real build, Aug 2026. Roster and Reviews render an admin view (roles
     // with data_scope "all", or any superuser account) and a self-serve "my
     // profile" view otherwise, from the SAME route — see apps/crewcore.js.
-    // PTO is where self-serve actually does something: request time off and
-    // see your own balance. Dashboard is admin-only (anniversaries, pending
-    // approvals) and folds into Roster for a self-serve caller.
+    // Stipend is where self-serve actually does something: see your own
+    // apparel allotment and spend history. Handbook is read-only and open to
+    // both views — see api/crewcore/handbook.js. Dashboard is admin-only
+    // (anniversaries, headline numbers) and folds into Roster for a
+    // self-serve caller.
+    //
+    // PTO REMOVED, Aug 2026 (Ryan's call): time off tracking stays in
+    // QuickBooks, not duplicated here. The old 'pto' view, and everything
+    // behind it, is gone — not hidden, gone. See DEPLOY-NOTES.md.
     views: [
       ['dashboard', 'Dashboard'],
       ['roster', 'Roster'],
-      ['pto', 'PTO'],
+      ['stipend', 'Stipend'],
       ['reviews', 'Reviews'],
+      ['handbook', 'Handbook'],
       ['settings', 'Settings']
     ],
     defaultView: 'dashboard',
     // Still the most sensitive app in the shell: hourly rates and review
     // notes. No role is granted 'crewcore' by registry default — the only
-    // grant path is an explicit role assignment in lib/users.js (the new
+    // grant path is an explicit role assignment in lib/users.js (the
     // "employee" role for self-serve, or admin/manager for the full view) or
     // the per-account superuser flag. See js/registry.js canAccess() and
     // test/scope.test.cjs, which asserts the registry itself stays
