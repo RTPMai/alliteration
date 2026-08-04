@@ -136,18 +136,28 @@ export const APPS = [
     role: 'Who does the work',
     blurb: 'Employees, PTO, reviews, anniversaries.',
     accent: '#D61623',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    // Real build, Aug 2026. Roster and Reviews render an admin view (roles
+    // with data_scope "all", or any superuser account) and a self-serve "my
+    // profile" view otherwise, from the SAME route — see apps/crewcore.js.
+    // PTO is where self-serve actually does something: request time off and
+    // see your own balance. Dashboard is admin-only (anniversaries, pending
+    // approvals) and folds into Roster for a self-serve caller.
     views: [
-      ['dashboard', 'Dashboard']
+      ['dashboard', 'Dashboard'],
+      ['roster', 'Roster'],
+      ['pto', 'PTO'],
+      ['reviews', 'Reviews'],
+      ['settings', 'Settings']
     ],
     defaultView: 'dashboard',
-    // The most sensitive app in the shell: hourly rates and review notes.
-    // No role should be granted 'crewcore' until the real build lands, so it
-    // is visible only to superusers for now. That is canAccess()'s default
-    // for an app id no role carries; nothing extra to enforce here.
-    stub: true,
-    stubNote: 'Planned. Employee management for the whole team: roster ' +
-      '(role, start date, hourly rate, apparel stipend), PTO balances and ' +
-      'requests, one-on-one review history, and anniversaries. Admin only.'
+    // Still the most sensitive app in the shell: hourly rates and review
+    // notes. No role is granted 'crewcore' by registry default — the only
+    // grant path is an explicit role assignment in lib/users.js (the new
+    // "employee" role for self-serve, or admin/manager for the full view) or
+    // the per-account superuser flag. See js/registry.js canAccess() and
+    // test/scope.test.cjs, which asserts the registry itself stays
+    // deny-by-default even though the app is real now.
+    stub: false
   },
   {
     id: 'mailme',
