@@ -57,12 +57,16 @@ import(path.join(ROOT, 'js/registry.js')).then((reg) => {
     t.equal(canAccess(perms, 'errorengine'), false, 'legacy role must not see errorengine');
   });
 
-  t.test('crewcore ships locked: no registry default grants it', () => {
-    // The registry must not mark crewcore as granted-by-default anywhere.
+  t.test('crewcore: no registry default grants it, even though it is now real', () => {
+    // Real build as of Aug 2026 (stub: false), but the registry itself must
+    // still contain no default-grant mechanism. The only ways in are an
+    // explicit role assignment in lib/users.js (admin/manager, or the
+    // self-serve "employee" role) or the per-account superuser flag — both
+    // opt-in, both outside this file.
     const src = read('js/registry.js');
     const cc = APPS.find((a) => a.id === 'crewcore');
     t.assert(cc, 'crewcore is missing from the registry');
-    t.assert(cc.stub === true, 'crewcore must stay a stub until the real build');
+    t.assert(cc.stub === false, 'crewcore is a real app now; stub should be false');
     t.assert(!/defaultGrant|grantAll|public:\s*true/.test(src),
       'registry gained a default-grant mechanism; crewcore relies on deny-by-default');
   });
