@@ -67,7 +67,11 @@ const LIVE_PREFIXES = [
   // deployed. Client contacts are resolved live from the BackBone roster
   // rather than stored, so this app has real data the day it ships without an
   // import step; imported prospects are MailMe's own.
-  '/api/mailme/'
+  '/api/mailme/',
+  // CrewCore: api/crewcore/{employees,pto,reviews,settings}.js are deployed.
+  // The most sensitive app in the shell (pay, review notes), so every route
+  // enforces scope server-side regardless of what MOCK shows on the client.
+  '/api/crewcore/'
 ];
 
 function isLive(path) {
@@ -88,7 +92,8 @@ export function appsOnSampleData() {
     backbone:    [ENDPOINTS.bbData],
     errorengine: [ENDPOINTS.eeErrors],
     traveltrack: [ENDPOINTS.ttTrips],
-    mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists]
+    mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists],
+    crewcore:    [ENDPOINTS.ccEmployees]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -171,7 +176,16 @@ export const ENDPOINTS = {
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
   // Public, called from unsubscribe.html rather than the shell.
-  mmUnsubscribe:   '/api/mailme/unsubscribe'
+  mmUnsubscribe:   '/api/mailme/unsubscribe',
+
+  // ---- CrewCore ----
+  // Fresh build, no standalone to port: the P&M internal Wix site (Company
+  // Structure, Contact List, New Hire Onboarding pages) was the only prior
+  // art, not a system with an API of its own.
+  ccEmployees:     '/api/crewcore/employees',
+  ccPto:           '/api/crewcore/pto',
+  ccReviews:       '/api/crewcore/reviews',
+  ccSettings:      '/api/crewcore/settings'
 };
 
 /* ------------------------------------------------------------------ *
@@ -449,7 +463,36 @@ const MOCK_DATA = {
     ],
     footerPreview: '', coldCapToday: 20, rampDay: 0
   }),
-  [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } })
+  [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } }),
+
+  // CrewCore. Shapes mirror api/crewcore/*.js. MOCK_USER (below) is admin, so
+  // the admin-view shape is what renders offline by default; the self-serve
+  // shape (own record, own PTO/reviews only) only shows up against the real
+  // server for an "employee"-role account. A handful of seeded names carried
+  // over from the same Wix Contact List used for the real seed, so the mock
+  // roster isn't just placeholder rows.
+  [ENDPOINTS.ccEmployees]: () => ({
+    employees: [
+      { id: 'EMP-00001', name: 'Kim Taylor', username: null, department: 'Embroidery', title: 'Embroidery Production Manager', start_date: '2013-03-01', status: 'active', phone: '206-817-1151', email: '', hourly_rate: 26.5, apparel_stipend: 150, pto_days_per_year: 15, notes: '' },
+      { id: 'EMP-00002', name: 'Margo Niemeyer', username: null, department: 'Screen Printing', title: 'Screen Printing Production Manager', start_date: '2018-06-01', status: 'active', phone: '605-690-1126', email: '', hourly_rate: 25, apparel_stipend: 150, pto_days_per_year: 12, notes: '' },
+      { id: 'EMP-00003', name: 'Jacob Whitman', username: 'jacob', department: 'Sales', title: 'Sales Director', start_date: '2019-01-01', status: 'active', phone: '616-307-7612', email: '', hourly_rate: null, apparel_stipend: 150, pto_days_per_year: 15, notes: '' },
+      { id: 'EMP-00004', name: 'Amanda Clark', username: 'amanda', department: 'Office', title: 'Bookkeeper', start_date: '2022-02-01', status: 'active', phone: '402-366-9695', email: '', hourly_rate: 24, apparel_stipend: 100, pto_days_per_year: 10, notes: '' },
+      { id: 'EMP-00005', name: 'Alexis Davis', username: 'alexis', department: 'Sales', title: 'Account Manager', start_date: '2021-04-01', status: 'active', phone: '515-868-1519', email: '', hourly_rate: 21, apparel_stipend: 100, pto_days_per_year: 10, notes: '' }
+    ]
+  }),
+  [ENDPOINTS.ccPto]: () => ({
+    requests: [
+      { id: 'PTO-00001', employee_id: 'EMP-00003', start_date: '2026-08-17', end_date: '2026-08-19', type: 'vacation', days: 3, status: 'approved', note: 'Family trip', requested_by: 'jacob', decided_by: 'ryan' },
+      { id: 'PTO-00002', employee_id: 'EMP-00005', start_date: '2026-08-25', end_date: '2026-08-25', type: 'sick', days: 1, status: 'pending', note: '', requested_by: 'alexis' }
+    ],
+    balance: { year: 2026, allotted: 15, used: 3, remaining: 12 }
+  }),
+  [ENDPOINTS.ccReviews]: () => ({
+    reviews: [
+      { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
+    ]
+  }),
+  [ENDPOINTS.ccSettings]: () => ({ settings: { default_pto_days: 10, self_serve_enabled: true } })
 };
 
 function mockResponse(path, method, body, query) {
