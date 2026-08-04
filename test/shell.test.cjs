@@ -424,14 +424,18 @@ t.test('shopstock tears its namespace down on unmount', () => {
     'a stale namespace would survive a remount');
 });
 
-t.test('shopstock QR labels point at the shell route', () => {
+t.test('shopstock QR labels point at the public no-login scan route', () => {
   const src = read('apps/shopstock.js');
-  // Printed labels are PERMANENT. A QR pointing at the old standalone /item/:id
-  // path would scan to a 404 once that deployment is retired.
-  t.assert(src.includes('#/shopstock/item/'),
-    'QR urls must target the shell route, not the old standalone path');
+  // Aug 2026: Ryan wants scanning a label to flip status with no sign-in
+  // step, so newly generated QR codes target the public /scan/:id page
+  // (scan.html) instead of the logged-in #/shopstock/item/:id shell route.
+  // Labels already printed before this change keep working unaffected: they
+  // have the old URL baked into the physical QR image already, and that
+  // route still exists in the app for logged-in viewing.
+  t.assert(src.includes('/scan/'),
+    'QR urls must target the public no-login scan route');
   t.assert(!/\$\{window\.location\.origin\}\/item\//.test(src),
-    'the old /item/:id path must not survive');
+    'the old standalone /item/:id path must not survive');
 });
 
 t.test('shopstock namespaces its localStorage key', () => {
