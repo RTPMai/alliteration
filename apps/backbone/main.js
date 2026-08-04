@@ -1,3 +1,4 @@
+// PUT IN: apps/backbone/main.js
 /**
  * BackBone — application code.
  *
@@ -6446,11 +6447,21 @@ export async function start(ctx) {
   // Single source of truth for lead pipeline statuses.
   // Exit buckets by design decision (sales director, Jul 2026): a lead ends in
   // exactly one of "Reach Back Out" (with a date), "Won", or "Lost". Never deleted.
-  const LEAD_STATUSES = ["New", "Researching", "Qualified", "AM Notified", "Contacted", "Reach Back Out", "Won", "Lost"];
+  const LEAD_STATUSES = ["New", "Researching", "Qualified", "AM Notified", "Contacted 1st", "Contacted 2nd", "Death Call", "Reach Back Out", "Won", "Lost"];
 
-  // Old records may still say "Dead" — map on read so nothing displays a retired name.
+  // Outreach stages: everything between the AM getting the lead and it
+  // resolving to Won/Lost. Grouped here so the dashboard KPI can roll them
+  // into one "In Outreach" number without hardcoding the list twice.
+  const OUTREACH_STAGES = ["AM Notified", "Contacted 1st", "Contacted 2nd", "Death Call"];
+
+  // Old records may still say "Dead" or the old single "Contacted" stage —
+  // map on read so nothing displays a retired name. "Contacted" (pre-Aug 2026)
+  // becomes "Contacted 1st": it can't know which call it represented, and
+  // 1st is the safer under-count (won't skip a lead past 2nd/Death Call).
   function normalizeLeadStatus(status) {
-    return status === "Dead" ? "Lost" : (status || "New");
+    if (status === "Dead") return "Lost";
+    if (status === "Contacted") return "Contacted 1st";
+    return status || "New";
   }
 
   // EVERY status change goes through here so the lead keeps a timestamped trail.
@@ -6484,16 +6495,26 @@ export async function start(ctx) {
     return new Date(lead.reach_back_at) <= new Date();
   }
 
-  // How many days an AM Notified lead can sit before it's flagged as stalled.
+  // How many days a lead can sit in each outreach stage before it's flagged
+  // as stalled. Same pattern as the original AM Notified check, extended to
+  // the two Contacted stages and Death Call so a quiet lead never hides
+  // silently in any of them.
   const AM_NOTIFIED_STALE_DAYS = 5;
+  const STAGE_STALE_DAYS = {
+    "AM Notified": AM_NOTIFIED_STALE_DAYS,
+    "Contacted 1st": 5,
+    "Contacted 2nd": 5,
+    "Death Call": 3
+  };
 
   // Chip rendered beside the status pill: makes a stalled handoff or a due
   // reach-back visible in the list without opening the lead.
   function statusAgeChip(lead) {
-    if (lead.status === "AM Notified") {
+    const staleDays = STAGE_STALE_DAYS[lead.status];
+    if (staleDays != null) {
       const d = daysInCurrentStage(lead);
-      if (d !== null && d >= AM_NOTIFIED_STALE_DAYS) {
-        return ' <span class="lead-age-chip" title="Notified ' + d + ' days ago with no status change — check whether the AM made contact.">' + d + 'd, no action</span>';
+      if (d !== null && d >= staleDays) {
+        return ' <span class="lead-age-chip" title="' + lead.status + ' for ' + d + ' days with no status change — check whether the AM followed up.">' + d + 'd, no action</span>';
       }
     }
     if (lead.status === "Reach Back Out") {
@@ -6520,12 +6541,15 @@ export async function start(ctx) {
 
   // Funnel: the ordered flow stages, plus Dead parked at the end as an exit bucket.
   // Colors mirror the existing lead-status pills so the two views read as one system.
+  // "In Outreach" rolls up the four outreach stages (AM Notified through Death
+  // Call) into one segment, by Ryan's call: the top-level funnel stays clean,
+  // and the stage-by-stage breakdown is still available via the status filter
+  // dropdown and on each lead's own record.
   const FUNNEL_STAGES = [
     { name: "New",         color: "var(--muted)" },
     { name: "Researching", color: "var(--hue-sky)" },
     { name: "Qualified",   color: "var(--hue-blue)" },
-    { name: "AM Notified", color: "var(--amber)" },
-    { name: "Contacted",   color: "var(--hue-violet)" },
+    { name: "In Outreach", color: "var(--amber)", statuses: OUTREACH_STAGES },
     { name: "Reach Back Out", color: "var(--hue-clay)" },
     { name: "Won",         color: "var(--success)" },
     { name: "Lost",        color: "var(--danger)" }
@@ -6583,7 +6607,13 @@ export async function start(ctx) {
       });
     }
     if (!ignoreStage && leadsStageFilter) {
-      rows = rows.filter(function(r) { return r.status === leadsStageFilter; });
+      // "In Outreach" is a rolled-up funnel segment, not a real status — it
+      // matches any of the four outreach statuses instead of one exact name.
+      if (leadsStageFilter === "In Outreach") {
+        rows = rows.filter(function(r) { return OUTREACH_STAGES.indexOf(r.status) !== -1; });
+      } else {
+        rows = rows.filter(function(r) { return r.status === leadsStageFilter; });
+      }
     }
     // "My leads": only rows routed to the signed-in user, so an AM can weed out
     // everyone else's assignments with one click.
@@ -7630,11 +7660,20 @@ export async function start(ctx) {
     // Funnel counts respect the search box but ignore the stage filter.
     const pool = getLeadsRows(true);
 
+    // Map an actual lead status to the funnel segment it displays under.
+    // Grouped segments (like "In Outreach") list their member statuses in
+    // .statuses; ungrouped segments match on their own name.
+    function segmentFor(status) {
+      return FUNNEL_STAGES.find(function(s) {
+        return s.statuses ? s.statuses.indexOf(status) !== -1 : s.name === status;
+      });
+    }
+
     const buckets = {};
     FUNNEL_STAGES.forEach(function(s) { buckets[s.name] = []; });
     pool.forEach(function(r) {
-      if (buckets[r.status]) buckets[r.status].push(r);
-      else (buckets["New"] = buckets["New"] || []).push(r); // unknown/legacy status lands at the top
+      const seg = segmentFor(r.status);
+      (buckets[seg ? seg.name : "New"] = buckets[seg ? seg.name : "New"] || []).push(r); // unknown/legacy status lands at the top
     });
 
     // Bar width is relative to the biggest stage, so the tallest stage always fills.
@@ -8083,6 +8122,11 @@ export async function start(ctx) {
       industry: $id("leadIndustry").value,
       inquiry_notes: $id("leadInquiryNotes").value.trim(),
       existing_crm_notes: $id("leadCrmNotes").value.trim(),
+      // How the RECORD entered the pipeline (manual entry today; "prospecting"
+      // once a scraped-list intake exists). Separate from source_type, which
+      // is how the CUSTOMER heard about P&M. Defaults to manual since this
+      // form is the only intake path that exists right now.
+      intake_source: "manual",
       status: "New",
       status_history: [{ status: "New", at: new Date().toISOString() }],
       created_at: new Date().toISOString(),
