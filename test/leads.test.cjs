@@ -1,3 +1,4 @@
+// PUT IN: test/leads.test.cjs
 /**
  * Leads pipeline contract tests.
  *
@@ -177,6 +178,80 @@ t.test('bot screening never auto-deletes', () => {
 t.test('the qualification agent is barred from unverified relationship claims', () => {
   t.assert(qualify.includes('NEVER state ownership, family, or relationship claims'),
     'anti-confabulation instruction missing from the qualification prompt');
+});
+
+/* ---- outreach stages (Aug 2026 rework: Contacted split into a cadence) ---- */
+
+t.test('the single Contacted stage is replaced by a three-step outreach cadence', () => {
+  const m = main.match(/const LEAD_STATUSES = \[([^\]]+)\]/);
+  t.assert(m, 'LEAD_STATUSES not found');
+  t.assert(m[1].includes('"Contacted 1st"'), 'Contacted 1st missing from LEAD_STATUSES');
+  t.assert(m[1].includes('"Contacted 2nd"'), 'Contacted 2nd missing from LEAD_STATUSES');
+  t.assert(m[1].includes('"Death Call"'), 'Death Call missing from LEAD_STATUSES');
+  t.assert(!/"Contacted"/.test(m[1]), 'the old single "Contacted" status must not be offered as a choice anymore');
+});
+
+t.test('OUTREACH_STAGES groups AM Notified through Death Call for the funnel rollup', () => {
+  const m = main.match(/const OUTREACH_STAGES = \[([^\]]+)\]/);
+  t.assert(m, 'OUTREACH_STAGES not found');
+  ['AM Notified', 'Contacted 1st', 'Contacted 2nd', 'Death Call'].forEach((s) => {
+    t.assert(m[1].includes('"' + s + '"'), `${s} missing from OUTREACH_STAGES`);
+  });
+  t.assert(!m[1].includes('Reach Back Out'), 'Reach Back Out is a separate exit bucket, not part of outreach');
+  t.assert(!m[1].includes('"Won"') && !m[1].includes('"Lost"'), 'Won/Lost are exit buckets, not outreach stages');
+});
+
+t.test('legacy "Contacted" records normalize to Contacted 1st, not lost or miscounted', () => {
+  t.assert(/status === "Contacted"\)\s*return "Contacted 1st"/.test(main),
+    'normalizeLeadStatus must map the old single Contacted stage to Contacted 1st');
+});
+
+t.test('the funnel rolls the four outreach stages into one "In Outreach" segment', () => {
+  const m = main.match(/const FUNNEL_STAGES = \[([\s\S]*?)\];/);
+  t.assert(m, 'FUNNEL_STAGES not found');
+  t.assert(m[1].includes('"In Outreach"'), 'In Outreach segment missing from FUNNEL_STAGES');
+  t.assert(m[1].includes('statuses: OUTREACH_STAGES'), 'In Outreach segment must group OUTREACH_STAGES, not just match its own name');
+  t.assert(!/name: "AM Notified"/.test(m[1]) && !/name: "Contacted/.test(m[1]) && !/name: "Death Call"/.test(m[1]),
+    'individual outreach stages must not also appear as their own funnel segments (would double-count)');
+});
+
+t.test('funnel bucketing resolves grouped segments via segmentFor, not exact name match alone', () => {
+  t.assert(main.includes('function segmentFor'), 'segmentFor helper missing');
+  t.assert(/s\.statuses\s*\?\s*s\.statuses\.indexOf\(status\)/.test(main),
+    'segmentFor must check a grouped segment\'s statuses list, not just its own name');
+});
+
+t.test('clicking the In Outreach funnel segment filters to all four outreach statuses', () => {
+  t.assert(/leadsStageFilter === "In Outreach"/.test(main), 'In Outreach filter branch missing from getLeadsRows');
+  t.assert(/OUTREACH_STAGES\.indexOf\(r\.status\) !== -1/.test(main),
+    'In Outreach filter must match any outreach status, not a literal status named "In Outreach"');
+});
+
+t.test('every outreach stage has its own staleness clock', () => {
+  const m = main.match(/const STAGE_STALE_DAYS = \{([\s\S]*?)\};/);
+  t.assert(m, 'STAGE_STALE_DAYS not found');
+  ['AM Notified', 'Contacted 1st', 'Contacted 2nd', 'Death Call'].forEach((s) => {
+    t.assert(m[1].includes('"' + s + '"'), `${s} missing a staleness threshold`);
+  });
+});
+
+t.test('statusAgeChip flags any stale outreach stage, not just AM Notified', () => {
+  t.assert(main.includes('STAGE_STALE_DAYS[lead.status]'),
+    'statusAgeChip must look up the threshold per-stage instead of hardcoding AM Notified only');
+});
+
+t.test('new lead status pills exist for the split outreach stages', () => {
+  t.assert(styles.includes('.lead-status-Contacted1st'), 'Contacted 1st pill style missing');
+  t.assert(styles.includes('.lead-status-Contacted2nd'), 'Contacted 2nd pill style missing');
+  t.assert(styles.includes('.lead-status-DeathCall'), 'Death Call pill style missing');
+});
+
+t.test('new leads are tagged with an intake_source, distinct from source_type', () => {
+  t.assert(main.includes('intake_source: "manual"'),
+    'new leads must record how the RECORD entered the pipeline (manual today, prospecting later)');
+  // source_type (how the CUSTOMER heard about us) must still exist separately.
+  t.assert(main.includes('source_type: $id("leadSourceType").value'),
+    'source_type must remain a separate field from intake_source');
 });
 
 process.exit(t.report());
