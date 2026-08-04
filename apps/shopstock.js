@@ -969,7 +969,12 @@ export default {
       await loadQRCode();
       const item = allItems.find(i=>i.id===id);
       if(!item) return;
-      const url = `${window.location.origin}/#/shopstock/item/${id}`;
+      // Points at the PUBLIC no-login scan page (scan.html via the /scan/:id
+      // rewrite), not the logged-in item route, so a scan flips status with
+      // no sign-in step. Labels printed before this change still point at
+      // #/shopstock/item/<id> and keep working unchanged; only newly printed
+      // labels use this URL.
+      const url = `${window.location.origin}/scan/${id}`;
       $id("qr-title").textContent = item.name;
       $id("qr-url").textContent = url;
       $id("qr-code").innerHTML = "";
@@ -986,8 +991,10 @@ export default {
     // TOKEN-EXEMPT: see showQR — a generated image needs a literal color.
     async function getQRDataUrl(id) {
       await loadQRCode();
-      // Generate a fresh QR canvas for any item by id
-      const url = `${window.location.origin}/#/shopstock/item/${id}`;
+      // Generate a fresh QR canvas for any item by id. Same public no-login
+      // scan URL as showQR() above, so bulk-printed labels behave the same
+      // as single-printed ones.
+      const url = `${window.location.origin}/scan/${id}`;
       const div = document.createElement("div");
       div.style.display = "none";
       document.body.appendChild(div);
