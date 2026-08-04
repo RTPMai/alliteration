@@ -216,6 +216,18 @@ export default {
   .cc-hb-section ul{margin:0 0 10px 20px;padding:0;max-width:640px}
   .cc-hb-section li{font-size:13.5px;line-height:1.7;margin-bottom:5px}
   .cc-hb-updated{font-size:12px;color:var(--muted);margin-top:10px}
+
+  .cc-hb-ack{
+    display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    border-radius:var(--radius-md);padding:16px 20px;margin-bottom:28px;
+  }
+  .cc-hb-ack-pending{background:var(--accent-tint);border:1px solid var(--accent)}
+  .cc-hb-ack-done{background:var(--success-tint);border:1px solid var(--success)}
+  .cc-hb-ack-text{font-size:13px;line-height:1.5;color:var(--ink)}
+  .cc-hb-ack-text strong{display:block;font-size:14px;margin-bottom:2px}
+  .cc-hb-ack-pending .cc-hb-ack-text strong{color:var(--accent-deep)}
+  .cc-hb-ack-done .cc-hb-ack-text strong{color:var(--success-dk)}
+  .cc-hb-ack-bottom{margin-top:8px;margin-bottom:0}
   `,
 
   template: `
@@ -247,6 +259,17 @@ export default {
     this._stipendBalance = null;
     this._reviews = [];
     this._handbook = null;
+
+    // Self-serve callers with a linked employee record need to know their
+    // acknowledgment status up front, before routing to any view — that's
+    // what the showView() gate below checks. Admins and unlinked self-serve
+    // callers (no employee record yet) skip this: an admin isn't gated, and
+    // an unlinked caller already sees the "ask an admin to link you" screen
+    // on Roster, which takes priority over a handbook prompt they can't
+    // meaningfully act on differently.
+    if (!isAdmin && this._own) {
+      await this._loadHandbook();
+    }
   },
 
   async _loadStipend() {
@@ -284,6 +307,17 @@ export default {
     const isAdmin = this._isAdmin;
 
     actions.innerHTML = '';
+
+    // GATE: a self-serve caller with a linked record who hasn't agreed to
+    // the CURRENT handbook version gets sent here regardless of which view
+    // they asked for, with one deliberate exception — 'handbook' itself,
+    // since they need to be able to read it in order to agree to it. This
+    // mirrors the "unlinked record" screen's precedent (apps/crewcore.js
+    // _renderProfileSelf): block, but don't leave the person stuck with no
+    // path forward.
+    if (!isAdmin && this._own && this._handbook && this._handbook.acknowledged === false && view !== 'handbook') {
+      view = 'handbook';
+    }
 
     // Self-serve callers have no meaningful admin Dashboard — send them to
     // their own Roster/profile view instead of an empty screen.
@@ -874,6 +908,33 @@ export default {
     // numbers.
     const policyNumbered = policy.map((s, i) => ({ ...s, num: i + 1 }));
 
+    // Acknowledgment banner: only rendered for a self-serve caller (hb.
+    // acknowledged is only ever present in the self-serve response shape —
+    // see api/crewcore/handbook.js GET, which omits it entirely for admins).
+    // Admins reading the handbook never see this at all.
+    let ackHtml = '';
+    if (hb.acknowledged === false) {
+      ackHtml = `
+        <div class="cc-hb-ack cc-hb-ack-pending">
+          <div class="cc-hb-ack-text">
+            <strong>Please read and agree to the handbook.</strong>
+            You'll need to agree before you can use the rest of CrewCore.
+          </div>
+          <button class="cc-btn" id="ccHbAckBtn">I've read and agree</button>
+        </div>
+      `;
+    } else if (hb.acknowledged === true) {
+      const when = hb.ack_at ? new Date(hb.ack_at).toLocaleDateString() : '';
+      ackHtml = `
+        <div class="cc-hb-ack cc-hb-ack-done">
+          <div class="cc-hb-ack-text">
+            <strong>You're up to date.</strong>
+            Agreed to this version${when ? ' on ' + esc(when) : ''}.
+          </div>
+        </div>
+      `;
+    }
+
     return `
       <div class="cc-hb-cover">
         <div class="cc-hb-cover-mark">
@@ -883,6 +944,8 @@ export default {
         <div class="cc-hb-cover-sub">P&amp;M Apparel &middot; est. 1987 &middot; Polk City, Iowa</div>
         <div class="cc-hb-updated">Last updated ${esc(hb.updated || '')}</div>
       </div>
+
+      ${ackHtml}
 
       <div class="cc-hb-nav">
         ${story.map((s) => `<button class="cc-hb-navbtn cc-hb-navbtn-story" data-jump="${esc(s.id)}">${esc(s.title)}</button>`).join('')}
@@ -911,6 +974,16 @@ export default {
           </div>
         `).join('')}
       ` : ''}
+
+      ${hb.acknowledged === false ? `
+        <div class="cc-hb-ack cc-hb-ack-pending cc-hb-ack-bottom">
+          <div class="cc-hb-ack-text">
+            <strong>That's the whole handbook.</strong>
+            If you've read it, agree below to continue.
+          </div>
+          <button class="cc-btn" id="ccHbAckBtnBottom">I've read and agree</button>
+        </div>
+      ` : ''}
     `;
   },
 
@@ -921,6 +994,30 @@ export default {
       btn.onclick = () => {
         const target = body.querySelector('#hb-' + btn.dataset.jump);
         if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      };
+    });
+
+    const ackBtns = [body.querySelector('#ccHbAckBtn'), body.querySelector('#ccHbAckBtnBottom')].filter(Boolean);
+    ackBtns.forEach((btn) => {
+      btn.onclick = async () => {
+        ackBtns.forEach((b) => { b.disabled = true; b.textContent = 'Saving\u2026'; });
+        try {
+          const out = await this._ctx.api.request(ENDPOINTS.ccHandbook, { method: 'POST', body: {} });
+          this._handbook = {
+            ...this._handbook,
+            acknowledged: true,
+            ack_version: out.ack_version,
+            ack_at: out.ack_at,
+          };
+          // Re-render the handbook view in place so the banner flips to
+          // "You're up to date" — the person stays right where they were
+          // reading rather than being bounced anywhere.
+          body.innerHTML = this._renderHandbook();
+          this._wireHandbook();
+        } catch (e) {
+          ackBtns.forEach((b) => { b.disabled = false; b.textContent = "I've read and agree"; });
+          alert('Could not save your agreement: ' + (e.message || 'unknown error') + '. Please try again.');
+        }
       };
     });
   },
