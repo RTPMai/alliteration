@@ -48,6 +48,10 @@
     {
       "source": "/item/:id",
       "destination": "/item.html"
+    },
+    {
+      "source": "/scan/:id",
+      "destination": "/scan.html"
     }
   ]
 }
