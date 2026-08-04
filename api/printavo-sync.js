@@ -111,40 +111,33 @@ export default async function handler(req, res) {
       : (cronSecret ? { authorization: "Bearer " + cronSecret } : null);
     if (!authHeaders) return false;
     const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
-    // Fire the next chunk and give the request ~1.5s to actually leave
-    // before this invocation responds and gets frozen. The child's
-    // completion is deliberately not awaited — it has its own time budget.
-    // IMPORTANT: we still need to know the fetch itself left successfully
-    // (connected, got a response) rather than failing silently. A run that
-    // reports chained:true but never actually launched the next link looks
-    // identical to a healthy one in the logs (still 200, no error) while the
-    // ops payload never finishes writing. This bit us once already (Jul 27).
-    let chainError = null;
-    const fired = fetch(url, { headers: authHeaders }).catch(function (e) {
-      chainError = (e && e.message) ? e.message : String(e);
-      return null;
-    });
-    const winner = await Promise.race([
-      fired,
-      new Promise(function (r) { setTimeout(function () { r("timeout"); }, 1500); }),
-    ]);
-    if (winner === "timeout") {
-      // Still in flight after 1.5s is fine and expected (fire-and-forget) —
-      // but record that we could not confirm it landed, so a stuck chain is
-      // visible in diagnostics instead of masquerading as healthy.
-      acc.chainUnconfirmed = true;
-      return true;
-    }
-    if (winner === null || chainError) {
-      // The fetch itself failed (DNS, connection refused, etc.) before the
-      // 1.5s window even elapsed. Do not report chained:true for a link that
-      // never left.
-      acc.chainError = chainError || "chain fetch failed with no response";
+    // Actually wait for the next chunk to confirm it landed, instead of
+    // racing a fire-and-forget fetch against a timer and treating "still in
+    // flight" as success. That approach (used before this fix, and in the
+    // first attempt at this fix) can silently drop the chain: if the fetch
+    // takes longer than the race window to connect, the function returns
+    // before ever knowing whether the request reached the network, reports
+    // chained:true anyway, and no second invocation ever shows up in the
+    // logs. This happened twice (Jul 27, and again Aug 3-4 despite the
+    // first "fix"). We give the handoff a real budget (8s, comfortably more
+    // than a cold start) and only report chained:true once we have an
+    // actual HTTP response confirming the child was accepted.
+    let result;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(function () { controller.abort(); }, 8000);
+      try {
+        result = await fetch(url, { headers: authHeaders, signal: controller.signal });
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch (e) {
+      acc.chainError = (e && e.message) ? e.message : String(e);
       await saveOpsPartial(acc);
       return false;
     }
-    if (winner && typeof winner.status === "number" && winner.status >= 400) {
-      acc.chainError = "chain fetch returned HTTP " + winner.status;
+    if (!result || typeof result.status !== "number" || result.status >= 400) {
+      acc.chainError = "chain fetch returned HTTP " + (result ? result.status : "no response");
       await saveOpsPartial(acc);
       return false;
     }
@@ -2267,7 +2260,6 @@ export default async function handler(req, res) {
           // link in this chain could not confirm the next one actually launched,
           // that gets flagged here instead of hiding behind an all-green log.
           chainError: acc.chainError || null,
-          chainUnconfirmed: !!acc.chainUnconfirmed,
           cashTypes: Object.keys(acc.cashTypes || {}).map(function (k) {
             return { type: k, count: acc.cashTypes[k].count, sum: Math.round(acc.cashTypes[k].sum * 100) / 100 };
           }).sort(function (a, b) { return b.sum - a.sum; }),
