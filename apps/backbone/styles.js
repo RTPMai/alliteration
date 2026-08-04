@@ -1,3 +1,4 @@
+// PUT IN: apps/backbone/styles.js
 /**
  * BackBone — styles.
  *
@@ -323,7 +324,10 @@ textarea.field{min-height:60px;resize:vertical}
 .lead-status-Dead{background:var(--danger-tint);color:var(--faint)} /* legacy records mid-save */
 .lead-status-ReachBackOut{background:var(--hue-clay-tint);color:var(--hue-clay)}
 .lead-status-Qualified{background:var(--hue-blue-tint);color:var(--hue-blue)}
-.lead-status-Contacted{background:var(--hue-violet-tint);color:var(--hue-violet)}
+.lead-status-Contacted{background:var(--hue-violet-tint);color:var(--hue-violet)} /* legacy records mid-save, pre-Aug 2026 */
+.lead-status-Contacted1st{background:var(--hue-violet-tint);color:var(--hue-violet)}
+.lead-status-Contacted2nd{background:var(--hue-indigo-tint);color:var(--hue-indigo)}
+.lead-status-DeathCall{background:var(--danger-tint);color:var(--danger)}
 .lead-status-AMNotified{background:var(--amber-tint);color:var(--amber)}
 .lead-status-Researching{background:var(--hue-sky-tint);color:var(--hue-sky)}
 .lead-age-chip{display:inline-flex;margin-left:6px;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:var(--amber-tint);color:var(--amber);white-space:nowrap}
