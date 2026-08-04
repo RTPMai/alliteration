@@ -243,6 +243,45 @@ t.test('employees route never returns another employee\'s record to a self-serve
     'self-serve reads should resolve by the caller\'s own session username');
 });
 
+/* ---- shell username link (self-serve linking) --------------------------
+ * ADDED Aug 2026: the "Shell username (optional)" field on the Roster form
+ * lets an admin link an employee record to a real Alliteration login. That
+ * link used to save with no validation at all — a typo would silently save
+ * and leave the employee stuck on "ask an admin to link your account" with
+ * no error telling the admin why. checkUsernameLink() closes that gap.
+ */
+t.test('employees route validates the shell username against a real account before saving', () => {
+  const src = read('api/crewcore/employees.js');
+  t.assert(src.includes('checkUsernameLink'),
+    'employees.js should run the username through checkUsernameLink before saving');
+  t.assert(src.includes('await getUser(username)'),
+    'checkUsernameLink should look the username up against real shell accounts via getUser');
+});
+
+t.test('checkUsernameLink treats a blank username as valid (the link is optional)', () => {
+  const src = read('api/crewcore/employees.js');
+  t.assert(/if\s*\(!username\)\s*return null/.test(src),
+    'a blank/null username should short-circuit to no error, since linking is optional');
+});
+
+t.test('checkUsernameLink refuses a username already claimed by a different employee', () => {
+  const src = read('api/crewcore/employees.js');
+  t.assert(src.includes('e.id !== ownEmployeeId'),
+    'the duplicate-claim check should exclude the record being saved itself, or editing an employee would always flag its own username as taken');
+  t.assert(/already linked to/.test(src),
+    'a duplicate claim should surface a specific, readable error rather than a generic validation failure');
+});
+
+t.test('POST and PATCH both run the username check, not just one of them', () => {
+  const src = read('api/crewcore/employees.js');
+  const postIdx = src.indexOf('req.method === "POST"');
+  const patchIdx = src.indexOf('req.method === "PATCH"');
+  const postBlock = src.slice(postIdx, patchIdx);
+  const patchBlock = src.slice(patchIdx);
+  t.assert(postBlock.includes('checkUsernameLink'), 'POST (creating a new employee) should validate the username link');
+  t.assert(patchBlock.includes('checkUsernameLink'), 'PATCH (editing an employee) should validate the username link');
+});
+
 t.test('stipend route lets a self-serve caller read their own balance', () => {
   const src = read('api/crewcore/stipend.js');
   t.assert(src.includes('getEmployeeByUsername(sess.username)'),
