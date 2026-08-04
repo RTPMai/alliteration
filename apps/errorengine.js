@@ -57,6 +57,7 @@ export default {
   .dash-controls label { font-size: 13px; font-weight: 600; color: var(--muted); }
   .dash-controls select { font-family: inherit; font-size: 14px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); font-weight: 600; }
   .dash-controls select:focus { outline: 2px solid var(--accent); border-color: var(--accent); }
+  .dash-controls select:disabled { opacity: .5; cursor: not-allowed; }
   .panel-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; flex-wrap: wrap; gap: 10px; }
   .panel-head h2 { margin-bottom: 0; }
   .toggle { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
@@ -235,6 +236,8 @@ export default {
       <div class="dash-controls">
         <label for="ee-year-select">Year</label>
         <select id="ee-year-select"></select>
+        <label for="ee-month-select">Month</label>
+        <select id="ee-month-select"></select>
       </div>
       <div class="grid">
         <div class="stat clickable" data-drill="all" role="button" tabindex="0">
@@ -933,6 +936,7 @@ export default {
     const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     let ALL_ERRORS = [];
     let selectedYear = new Date().getFullYear();
+    let selectedMonth = 'all'; // 'all' or 0-11
     let monthMetric = 'count';
     let vendorMetric = 'count';
     let typeMetric = 'count';
@@ -959,6 +963,15 @@ export default {
         + '<option value="all"' + (selectedYear==='all'?' selected':'') + '>All years</option>';
     }
 
+    function populateMonthSelect() {
+      const sel = $('ee-month-select');
+      const disabled = selectedYear === 'all';
+      if (disabled) selectedMonth = 'all'; // a single month across every year is not a coherent filter
+      sel.disabled = disabled;
+      sel.innerHTML = '<option value="all"' + (selectedMonth==='all'?' selected':'') + '>All months</option>'
+        + MONTHS.map((name, m) => '<option value="' + m + '"' + (Number(selectedMonth)===m?' selected':'') + '>' + name + '</option>').join('');
+    }
+
     function renderMonthChart(yearErrors) {
       const el = $('ee-by-month');
       const vals = MONTHS.map((_, m) => {
@@ -979,17 +992,29 @@ export default {
     async function render() {
       ALL_ERRORS = await loadErrors();
       populateYearSelect();
+      populateMonthSelect();
       draw();
+    }
+
+    // Errors matching the year filter alone (month chart still needs the full
+    // year's spread even when a single month is selected elsewhere).
+    function errorsForYear() {
+      return selectedYear === 'all'
+        ? ALL_ERRORS
+        : ALL_ERRORS.filter(e => errorYear(e) === Number(selectedYear));
+    }
+
+    // Errors matching year + month, the actual scope for stats/records.
+    function errorsForPeriod() {
+      const yearErrors = errorsForYear();
+      if (selectedMonth === 'all') return yearErrors;
+      return yearErrors.filter(e => errorMonth(e) === Number(selectedMonth));
     }
 
     // Draw from the cached set — no refetch. Every filter change routes through
     // here, so the dashboard and records table can never disagree about the data.
     function draw() {
-      const yearErrors = selectedYear === 'all'
-        ? ALL_ERRORS
-        : ALL_ERRORS.filter(e => errorYear(e) === Number(selectedYear));
-
-      renderDashboard(yearErrors);
+      renderDashboard(errorsForPeriod());
       renderRecords();
     }
 
@@ -1064,8 +1089,7 @@ export default {
     function renderRecords() {
       const body = $('ee-records-body');
 
-      let list = [...ALL_ERRORS];
-      if (selectedYear !== 'all') list = list.filter(e => errorYear(e) === Number(selectedYear));
+      let list = errorsForPeriod();
       if (statusFilter !== 'all') list = list.filter(e => e.status === statusFilter);
 
       $('ee-records-title').textContent =
@@ -1128,6 +1152,12 @@ export default {
     /* ---------------- dashboard wiring ---------------- */
     $('ee-year-select').addEventListener('change', (e) => {
       selectedYear = e.target.value === 'all' ? 'all' : Number(e.target.value);
+      populateMonthSelect(); // "All years" disables and clears the month filter
+      draw();
+    });
+
+    $('ee-month-select').addEventListener('change', (e) => {
+      selectedMonth = e.target.value === 'all' ? 'all' : Number(e.target.value);
       draw();
     });
 
