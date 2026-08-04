@@ -13,6 +13,12 @@
  *   - editing the default below
  */
 
+// Static handbook content, shared with api/crewcore/handbook.js. Safe to
+// import into browser code: it's plain data with no Node builtins, same as
+// js/registry.js importing DEPARTMENTS-style constants from lib/ elsewhere
+// in this codebase.
+import { HANDBOOK_SECTIONS as HANDBOOK_SECTIONS_FOR_MOCK } from '../lib/crewcore/handbook-content.js';
+
 /* ------------------------------------------------------------------ *
  * MODE
  * ------------------------------------------------------------------ */
@@ -68,7 +74,10 @@ const LIVE_PREFIXES = [
   // rather than stored, so this app has real data the day it ships without an
   // import step; imported prospects are MailMe's own.
   '/api/mailme/',
-  // CrewCore: api/crewcore/{employees,pto,reviews,settings}.js are deployed.
+  // CrewCore: api/crewcore/{employees,stipend,reviews,handbook,settings}.js
+  // are deployed. PTO's api/crewcore/pto.js was removed Aug 2026 (PTO stays
+  // in QuickBooks) — the /api/crewcore/ prefix below still needs to be live
+  // for everything else, that removal isn't a route to un-list here.
   // The most sensitive app in the shell (pay, review notes), so every route
   // enforces scope server-side regardless of what MOCK shows on the client.
   '/api/crewcore/'
@@ -183,8 +192,9 @@ export const ENDPOINTS = {
   // Structure, Contact List, New Hire Onboarding pages) was the only prior
   // art, not a system with an API of its own.
   ccEmployees:     '/api/crewcore/employees',
-  ccPto:           '/api/crewcore/pto',
+  ccStipend:       '/api/crewcore/stipend',
   ccReviews:       '/api/crewcore/reviews',
+  ccHandbook:      '/api/crewcore/handbook',
   ccSettings:      '/api/crewcore/settings'
 };
 
@@ -467,32 +477,41 @@ const MOCK_DATA = {
 
   // CrewCore. Shapes mirror api/crewcore/*.js. MOCK_USER (below) is admin, so
   // the admin-view shape is what renders offline by default; the self-serve
-  // shape (own record, own PTO/reviews only) only shows up against the real
-  // server for an "employee"-role account. A handful of seeded names carried
-  // over from the same Wix Contact List used for the real seed, so the mock
-  // roster isn't just placeholder rows.
+  // shape (own record, own stipend/reviews only) only shows up against the
+  // real server for an "employee"-role account. A handful of seeded names
+  // carried over from the same Wix Contact List used for the real seed, so
+  // the mock roster isn't just placeholder rows. Stipend figures follow the
+  // Handbook's Dress Code split: $250 Front Office (Sales, Office), $150
+  // Production (Screen Printing, Embroidery, Art).
   [ENDPOINTS.ccEmployees]: () => ({
     employees: [
-      { id: 'EMP-00001', name: 'Kim Taylor', username: null, department: 'Embroidery', title: 'Embroidery Production Manager', start_date: '2013-03-01', status: 'active', phone: '206-817-1151', email: '', hourly_rate: 26.5, apparel_stipend: 150, pto_days_per_year: 15, notes: '' },
-      { id: 'EMP-00002', name: 'Margo Niemeyer', username: null, department: 'Screen Printing', title: 'Screen Printing Production Manager', start_date: '2018-06-01', status: 'active', phone: '605-690-1126', email: '', hourly_rate: 25, apparel_stipend: 150, pto_days_per_year: 12, notes: '' },
-      { id: 'EMP-00003', name: 'Jacob Whitman', username: 'jacob', department: 'Sales', title: 'Sales Director', start_date: '2019-01-01', status: 'active', phone: '616-307-7612', email: '', hourly_rate: null, apparel_stipend: 150, pto_days_per_year: 15, notes: '' },
-      { id: 'EMP-00004', name: 'Amanda Clark', username: 'amanda', department: 'Office', title: 'Bookkeeper', start_date: '2022-02-01', status: 'active', phone: '402-366-9695', email: '', hourly_rate: 24, apparel_stipend: 100, pto_days_per_year: 10, notes: '' },
-      { id: 'EMP-00005', name: 'Alexis Davis', username: 'alexis', department: 'Sales', title: 'Account Manager', start_date: '2021-04-01', status: 'active', phone: '515-868-1519', email: '', hourly_rate: 21, apparel_stipend: 100, pto_days_per_year: 10, notes: '' }
+      { id: 'EMP-00001', name: 'Kim Taylor', username: null, department: 'Embroidery', title: 'Embroidery Production Manager', start_date: '2013-03-01', status: 'active', phone: '206-817-1151', email: '', hourly_rate: 26.5, apparel_stipend: 150, notes: '' },
+      { id: 'EMP-00002', name: 'Margo Niemeyer', username: null, department: 'Screen Printing', title: 'Screen Printing Production Manager', start_date: '2018-06-01', status: 'active', phone: '605-690-1126', email: '', hourly_rate: 25, apparel_stipend: 150, notes: '' },
+      { id: 'EMP-00003', name: 'Jacob Whitman', username: 'jacob', department: 'Sales', title: 'Sales Director', start_date: '2019-01-01', status: 'active', phone: '616-307-7612', email: '', hourly_rate: null, apparel_stipend: 250, notes: '' },
+      { id: 'EMP-00004', name: 'Amanda Clark', username: 'amanda', department: 'Office', title: 'Bookkeeper', start_date: '2022-02-01', status: 'active', phone: '402-366-9695', email: '', hourly_rate: 24, apparel_stipend: 250, notes: '' },
+      { id: 'EMP-00005', name: 'Alexis Davis', username: 'alexis', department: 'Sales', title: 'Account Manager', start_date: '2021-04-01', status: 'active', phone: '515-868-1519', email: '', hourly_rate: 21, apparel_stipend: 250, notes: '' }
     ]
   }),
-  [ENDPOINTS.ccPto]: () => ({
-    requests: [
-      { id: 'PTO-00001', employee_id: 'EMP-00003', start_date: '2026-08-17', end_date: '2026-08-19', type: 'vacation', days: 3, status: 'approved', note: 'Family trip', requested_by: 'jacob', decided_by: 'ryan' },
-      { id: 'PTO-00002', employee_id: 'EMP-00005', start_date: '2026-08-25', end_date: '2026-08-25', type: 'sick', days: 1, status: 'pending', note: '', requested_by: 'alexis' }
+  [ENDPOINTS.ccStipend]: () => ({
+    spends: [
+      { id: 'STP-00001', employee_id: 'EMP-00003', date: '2026-03-14', amount: 85, category: 'apparel', description: 'Branded quarter-zip', logged_by: 'ryan' },
+      { id: 'STP-00002', employee_id: 'EMP-00003', date: '2026-06-02', amount: 40, category: 'apparel', description: 'P&M tee, 2-pack', logged_by: 'ryan' }
     ],
-    balance: { year: 2026, allotted: 15, used: 3, remaining: 12 }
+    balance: { year: 2026, allotted: 250, used: 125, remaining: 125 }
+  }),
+  [ENDPOINTS.ccHandbook]: () => ({
+    // The full section list is real (not mocked) — imported directly so the
+    // offline/mock experience matches production exactly for read-only
+    // static content instead of duplicating it here.
+    sections: HANDBOOK_SECTIONS_FOR_MOCK,
+    updated: '2026-08'
   }),
   [ENDPOINTS.ccReviews]: () => ({
     reviews: [
       { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
     ]
   }),
-  [ENDPOINTS.ccSettings]: () => ({ settings: { default_pto_days: 10, self_serve_enabled: true } })
+  [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true } })
 };
 
 function mockResponse(path, method, body, query) {
