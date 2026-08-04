@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Update Status</title>
+<!--
+  PUBLIC ShopStock QR scan page. No login, no shell.
+
+  New QR codes printed by ShopStock point here: /scan/<id>. Scanning a label
+  should let anyone flip that item's status right away, staff or not, with no
+  sign-in step (Ryan's call, Aug 2026). Old labels printed before this existed
+  still point at /#/shopstock/item/<id> and are untouched; this page only
+  affects newly printed labels.
+
+  Standalone on purpose, same reasoning as unsubscribe.html: loading the full
+  shell would hit the login gate in shell.js and defeat the point. Carries its
+  own small palette for the same reason tokens.css is skipped there.
+
+  Public by id alone, not by secret token. Ryan chose the simpler option
+  knowing it means a guessed or shared item id could flip status from outside
+  the shop. This endpoint (api/scan-status.js) can only change status on an
+  item that already exists: no read of other fields, no create, no delete.
+-->
+<style>
+  :root {
+    --ink: #1C2430; --muted: #6B7684; --line: #E4E8EC;
+    --bg: #F4F6F8; --card: #FFFFFF;
+    --danger: #C0392B; --danger-tint: #FBEAE8;
+    --amber: #B8860B; --amber-tint: #FBF3DF;
+    --green: #2F7A48; --green-tint: #EAF5EE;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 24px; background: var(--bg); color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 28px; max-width: 380px; width: 100%; text-align: center;
+  }
+  h1 { font-size: 18px; margin: 0 0 4px; letter-spacing: -.02em; }
+  .sub { font-size: 13px; color: var(--muted); margin: 0 0 22px; }
+  .status-pill {
+    display: inline-block; font-size: 12px; font-weight: 700; padding: 5px 12px;
+    border-radius: 999px; margin-bottom: 22px;
+  }
+  .btn {
+    display: block; width: 100%; border: none; border-radius: 10px;
+    padding: 16px; font-size: 15px; font-weight: 700; cursor: pointer;
+    font-family: inherit; margin-bottom: 10px;
+  }
+  .btn:last-child { margin-bottom: 0; }
+  .btn[disabled] { opacity: .5; cursor: not-allowed; }
+  .btn-need   { background: var(--danger-tint); color: var(--danger); }
+  .btn-order  { background: var(--amber-tint);  color: var(--amber); }
+  .btn-stock  { background: var(--green-tint);  color: var(--green); }
+  .msg { font-size: 13px; color: var(--muted); margin-top: 16px; min-height: 18px; }
+  .spinner {
+    width: 28px; height: 28px; border: 3px solid var(--line);
+    border-top-color: var(--muted); border-radius: 50%;
+    margin: 0 auto 16px; animation: spin .8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="card" id="card">
+  <div class="spinner"></div>
+  <p class="msg">Loading item…</p>
+</div>
+
+<script>
+(function () {
+  var STATUSES = [
+    { value: "Needs Ordered", label: "Needs Ordered", cls: "btn-need" },
+    { value: "Ordered",       label: "Mark Ordered",  cls: "btn-order" },
+    { value: "In Stock",      label: "Mark In Stock", cls: "btn-stock" }
+  ];
+
+  function pathId() {
+    // /scan/<id>  (also accepts ?id=<id> if it's ever linked that way)
+    var m = window.location.pathname.match(/\/scan\/([^\/]+)\/?$/);
+    if (m) return decodeURIComponent(m[1]);
+    var q = new URLSearchParams(window.location.search).get("id");
+    return q || null;
+  }
+
+  var id = pathId();
+  var card = document.getElementById("card");
+
+  function render(item, message) {
+    var pillColor = item.status === "Needs Ordered" ? "var(--danger-tint)"
+      : item.status === "Ordered" ? "var(--amber-tint)" : "var(--green-tint)";
+    var pillText = item.status === "Needs Ordered" ? "var(--danger)"
+      : item.status === "Ordered" ? "var(--amber)" : "var(--green)";
+
+    var html = ''
+      + '<h1>' + escapeHtml(item.name) + '</h1>'
+      + '<p class="sub">Tap to update this item\'s status</p>'
+      + '<div class="status-pill" style="background:' + pillColor + ';color:' + pillText + '">'
+      + 'Currently: ' + escapeHtml(item.status || 'In Stock') + '</div>'
+      + '<div id="buttons"></div>'
+      + '<div class="msg" id="msg">' + (message || '') + '</div>';
+    card.innerHTML = html;
+
+    var wrap = document.getElementById("buttons");
+    STATUSES.forEach(function (s) {
+      var btn = document.createElement("button");
+      btn.className = "btn " + s.cls;
+      btn.textContent = s.label;
+      if (s.value === item.status) btn.disabled = true;
+      btn.addEventListener("click", function () { setStatus(s.value); });
+      wrap.appendChild(btn);
+    });
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+
+  function showError(text) {
+    card.innerHTML = '<h1>Can\'t update this item</h1><p class="msg">' + escapeHtml(text) + '</p>';
+  }
+
+  function load() {
+    if (!id) return showError("This QR code didn't include an item id.");
+    fetch('/api/scan-status?id=' + encodeURIComponent(id))
+      .then(function (r) {
+        if (!r.ok) throw new Error(r.status === 404 ? "Item not found." : "Something went wrong loading this item.");
+        return r.json();
+      })
+      .then(function (item) { render(item, ""); })
+      .catch(function (e) { showError(e.message || "Something went wrong."); });
+  }
+
+  function setStatus(status) {
+    var buttons = card.querySelectorAll(".btn");
+    buttons.forEach(function (b) { b.disabled = true; });
+    var msg = document.getElementById("msg");
+    if (msg) msg.textContent = "Updating…";
+
+    fetch('/api/scan-status?id=' + encodeURIComponent(id), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status: status })
+    })
+      .then(function (r) {
+        if (!r.ok) throw new Error("Update didn't go through. Try again.");
+        return r.json();
+      })
+      .then(function (item) { render(item, "Updated ✓"); })
+      .catch(function (e) {
+        buttons.forEach(function (b) { b.disabled = false; });
+        if (msg) msg.textContent = e.message || "Something went wrong.";
+      });
+  }
+
+  load();
+})();
+</script>
+
+</body>
+</html>
