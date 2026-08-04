@@ -472,4 +472,22 @@ t.test('errorengine: type and cause charts honor the cost metric', () => {
   });
 });
 
+/* ---- ErrorEngine delete gate ------------------------------------------- */
+// FIXED Aug 2026: api/errors.js used to gate DELETE on
+// ["admin","superuser"].includes(sess.role), but superuser is a boolean flag
+// on the user (perms.superuser), never a role name, so a real superuser
+// whose role wasn't literally "admin" could never delete a record. This
+// locks the fix in place and matches the pattern api/crewcore/*.js already
+// uses: look up the user's role AND check the superuser flag, don't
+// string-match role against a fake role name.
+t.test('errors.js delete gate checks the superuser flag, not a fake "superuser" role name', () => {
+  const src = read('api/errors.js');
+  t.assert(!/\[\s*["']admin["']\s*,\s*["']superuser["']\s*\]/.test(src),
+    'errors.js should not gate delete on a hardcoded ["admin","superuser"] role-name list');
+  t.assert(src.includes('user.superuser === true'),
+    'errors.js should check the user record\'s superuser flag before allowing delete');
+  t.assert(src.includes('getRole') && src.includes('data_scope'),
+    'errors.js should resolve the caller\'s role and check data_scope, matching the CrewCore admin-check pattern');
+});
+
 process.exit(t.report());
