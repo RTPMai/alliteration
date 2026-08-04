@@ -6,8 +6,9 @@
 //   - AUTH IS SHELL-LEVEL: imports requireAuth from the repo's shared
 //     lib/session.js (one login, one cookie). ErrorEngine's own session lib,
 //     user store, login page and auth/users routes were NOT ported.
-//   - Role names: destructive delete is gated on ADMIN_ROLES below. If the
-//     shell's role set differs, adjust that one constant.
+//   - Role names: destructive delete is gated via callerIsAdmin() below,
+//     same pattern as api/crewcore/*.js (role.data_scope === "all" OR the
+//     user's superuser flag).
 //   - Library imports point at lib/errorengine/.
 //   - Everything else is verbatim.
 //
@@ -19,6 +20,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
+import { getUser, getRole } from "../lib/users.js";
 import { validateRecordWith, validatePatchWith, VENDOR_DEFECT } from "../lib/errorengine/schema.js";
 import {
   listErrors, saveError, nextErrorId, resolveFromBackbone, deleteError,
@@ -26,9 +28,18 @@ import {
 } from "../lib/errorengine/store.js";
 import { getTaxonomy } from "../lib/errorengine/taxonomy-store.js";
 
-// Roles allowed to hard-delete error records. Deleting is destructive; everyone
-// signed in can log and edit, but removal stays restricted.
-const ADMIN_ROLES = ["admin", "superuser"];
+// Deleting is destructive; everyone signed in can log and edit, but removal
+// stays restricted to admin-scope roles or a superuser flag. FIXED Aug 2026:
+// this used to check sess.role against a literal "superuser" string, but
+// superuser is a boolean flag on the user (perms.superuser), never a role
+// name — so no superuser could ever pass this check unless their actual role
+// happened to be "admin". Matches the pattern already used in
+// api/crewcore/*.js.
+async function callerIsAdmin(sess) {
+  const user = sess.username ? await getUser(sess.username) : null;
+  const role = await getRole(user ? user.role : sess.role);
+  return (role && role.data_scope === "all") || (user && user.superuser === true);
+}
 
 // Values accepted by the validator = ALL options, active or retired. A retired
 // option must still validate, or every historical record using it would become
@@ -143,7 +154,7 @@ export default async function handler(req, res) {
 
     if (req.method === "DELETE") {
       // Admin-only. Deleting error records is destructive, so gate on role.
-      if (!ADMIN_ROLES.includes(sess.role)) {
+      if (!(await callerIsAdmin(sess))) {
         return res.status(403).json({ error: "Only admins can delete errors" });
       }
       const id = (req.query && req.query.id) || parseBody(req).id;
