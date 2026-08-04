@@ -27,7 +27,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const schemaReady = import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
   const {
     validateEmployee, stripAdminFields, ADMIN_ONLY_FIELDS,
-    validatePtoRequest, validatePtoStatus, validateReview,
+    validatePtoRequest, validatePtoStatus, validateReview, validateHandbookAck,
     DEPARTMENTS, PTO_TYPES, PTO_STATUSES, EMPLOYMENT_STATUSES,
     nextId,
   } = schema;
@@ -186,6 +186,33 @@ const schemaReady = import(path.join(ROOT, 'lib/crewcore/schema.js')).then((sche
     t.equal(nextId('EMP', ['EMP-00001', 'EMP-00003']), 'EMP-00004', 'should increment past the highest existing id');
   });
 
+  /* ---- handbook acknowledgment -----------------------------------------
+   * ADDED Aug 2026. handbook_ack_version pins WHICH version of the handbook
+   * an employee agreed to, handbook_ack_at is when. Re-acknowledgment is
+   * required whenever HANDBOOK_UPDATED changes, since the stored version
+   * simply won't match anymore — see api/crewcore/handbook.js GET, which
+   * compares own.handbook_ack_version to the live HANDBOOK_UPDATED.
+   */
+  t.test('validateHandbookAck stamps the given version and a fresh timestamp', () => {
+    const { ok, patch } = validateHandbookAck('2026-08');
+    t.assert(ok, 'expected valid');
+    t.equal(patch.handbook_ack_version, '2026-08', 'should record the exact version string passed in');
+    t.assert(typeof patch.handbook_ack_at === 'string' && patch.handbook_ack_at.length > 0,
+      'should stamp a timestamp for when the acknowledgment happened');
+  });
+
+  t.test('validateHandbookAck refuses to acknowledge with no version to point at', () => {
+    const { ok, errors } = validateHandbookAck('');
+    t.equal(ok, false, 'an empty version should fail rather than silently acknowledging nothing');
+    t.assert(errors && errors.length, 'should explain why it failed');
+  });
+
+  t.test('validateHandbookAck only ever writes the two ack fields, nothing else', () => {
+    const { patch } = validateHandbookAck('2026-08');
+    t.equal(Object.keys(patch).sort().join(','), 'handbook_ack_at,handbook_ack_version',
+      'the patch should be exactly these two fields — this is what keeps the self-serve acknowledgment endpoint from being able to smuggle other field changes through');
+  });
+
   /* ---- apparel stipend --------------------------------------------------
    * Role-based defaults per the Handbook's Dress Code policy: $250/year for
    * Front Office, $150/year for Production. validateEmployee() itself stays
@@ -314,10 +341,43 @@ t.test('reviews route never lets a self-serve caller write a review', () => {
     'the isAdmin gate should appear before the POST handler in reviews.js');
 });
 
-t.test('handbook route requires auth but no admin gate — everyone with crewcore access can read it', () => {
+t.test('handbook GET is not gated on isAdmin — everyone with crewcore access can read it', () => {
   const src = read('api/crewcore/handbook.js');
   t.assert(src.includes('requireAuth'), 'handbook.js should still require a signed-in session');
-  t.assert(!/isAdmin/.test(src), 'handbook.js should not gate reads on isAdmin — it is open to self-serve too');
+  const getIdx = src.indexOf('req.method === "GET"');
+  const postIdx = src.indexOf('req.method === "POST"');
+  const getBlock = src.slice(getIdx, postIdx);
+  // The GET block DOES reference isAdmin (to decide whether to report
+  // acknowledgment status), but it must never turn that into a 403 — every
+  // signed-in caller gets content back either way.
+  t.assert(!/isAdmin\s*\)\s*{\s*[\s\S]*?403/.test(getBlock) || !getBlock.includes('403'),
+    'GET should never 403 based on isAdmin — reading the handbook is open to self-serve too');
+});
+
+t.test('handbook POST (acknowledgment) refuses an admin caller — nothing for them to acknowledge here', () => {
+  const src = read('api/crewcore/handbook.js');
+  const postIdx = src.indexOf('req.method === "POST"');
+  const postBlock = src.slice(postIdx);
+  t.assert(/isAdmin[\s\S]{0,80}403/.test(postBlock),
+    'the POST branch should 403 an admin caller — acknowledgment is a self-serve action on your OWN record only');
+});
+
+t.test('handbook POST resolves the employee by the caller\'s own session, never a supplied id', () => {
+  const src = read('api/crewcore/handbook.js');
+  const postIdx = src.indexOf('req.method === "POST"');
+  const postBlock = src.slice(postIdx);
+  t.assert(postBlock.includes('getEmployeeByUsername(sess.username)'),
+    'acknowledgment should resolve the employee record from the caller\'s own session, so nobody can acknowledge on someone else\'s behalf');
+  t.assert(!/req\.(query|body)\.(employee_id|id)/.test(postBlock),
+    'the acknowledgment POST should never read an employee id from the request — that would let a caller acknowledge for someone else');
+});
+
+t.test('handbook POST stamps the CURRENT handbook version, not one supplied by the client', () => {
+  const src = read('api/crewcore/handbook.js');
+  const postIdx = src.indexOf('req.method === "POST"');
+  const postBlock = src.slice(postIdx);
+  t.assert(postBlock.includes('validateHandbookAck(HANDBOOK_UPDATED)'),
+    'the version acknowledged should come from the server\'s own HANDBOOK_UPDATED constant, never trust a client-supplied version string');
 });
 
 t.test('the hub gives crewcore a real metrics block, not just a Live pill with nothing behind it', () => {
