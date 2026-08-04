@@ -161,19 +161,61 @@ export default {
   }
   .cc-balance-bar .fill{height:100%;background:var(--accent);border-radius:99px}
 
-  .cc-hb-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:20px}
-  .cc-hb-navbtn{
-    border:1px solid var(--line);background:var(--card);border-radius:var(--radius-pill);
-    padding:5px 12px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;font-family:inherit;
+  .cc-hb-cover{
+    text-align:center;padding:36px 20px 30px;margin-bottom:28px;
+    border-bottom:1px solid var(--line);
   }
-  .cc-hb-navbtn:hover{color:var(--ink)}
-  .cc-hb-section{margin-bottom:32px;scroll-margin-top:16px}
-  .cc-hb-section h2{font-size:18px;font-weight:800;margin-bottom:12px;letter-spacing:-.01em}
-  .cc-hb-section h3{font-size:13.5px;font-weight:700;margin:16px 0 6px}
-  .cc-hb-section p{font-size:13.5px;line-height:1.65;color:var(--ink);margin-bottom:10px}
-  .cc-hb-section ul{margin:0 0 10px 20px;padding:0}
-  .cc-hb-section li{font-size:13.5px;line-height:1.65;margin-bottom:4px}
-  .cc-hb-updated{font-size:12px;color:var(--muted);margin-bottom:20px}
+  .cc-hb-cover-mark{font-size:28px;font-weight:800;letter-spacing:-.02em;margin-bottom:14px}
+  .cc-hb-cover-mark .w1{color:var(--accent)}
+  .cc-hb-cover-mark .w2{color:var(--wordmark-ink)}
+  .cc-hb-cover-mark .dot{color:var(--accent)}
+  .cc-hb-cover-title{font-size:26px;font-weight:800;letter-spacing:-.015em;margin-bottom:8px}
+  .cc-hb-cover-sub{font-size:12.5px;color:var(--muted);font-weight:600;letter-spacing:.02em}
+
+  .cc-hb-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:32px;padding-bottom:24px;border-bottom:1px solid var(--line)}
+  .cc-hb-navbtn{
+    display:inline-flex;align-items:center;gap:7px;
+    border:1px solid var(--line);background:var(--card);border-radius:var(--radius-pill);
+    padding:5px 12px 5px 8px;font-size:12px;font-weight:600;color:var(--muted);cursor:pointer;font-family:inherit;
+    transition:border-color .15s,color .15s;
+  }
+  .cc-hb-navbtn:hover{color:var(--ink);border-color:var(--accent)}
+  .cc-hb-navbtn-story{padding-left:12px}
+  .cc-hb-navnum{
+    display:inline-grid;place-items:center;width:16px;height:16px;border-radius:50%;
+    background:var(--accent-tint);color:var(--accent-deep);font-size:9.5px;font-weight:800;flex-shrink:0;
+  }
+
+  .cc-hb-story-rule{
+    display:flex;align-items:center;gap:12px;margin:0 0 20px;
+    font-size:11px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:var(--accent-deep);
+  }
+  .cc-hb-story-rule::before{content:'';flex:1 1 auto;height:1px;background:var(--line)}
+  .cc-hb-story-rule::after{content:'';flex:1 1 auto;height:1px;background:var(--line)}
+
+  .cc-hb-story{
+    background:var(--accent-tint);border-radius:var(--radius-md);
+    padding:8px 24px 4px;margin-bottom:36px;
+  }
+  .cc-hb-story .cc-hb-story-rule{color:var(--accent-deep);padding-top:16px}
+  .cc-hb-story .cc-hb-story-rule::before,.cc-hb-story .cc-hb-story-rule::after{background:var(--accent-deep);opacity:.25}
+  .cc-hb-story-section h2{color:var(--accent-deep)}
+
+  .cc-hb-section{margin-bottom:36px;scroll-margin-top:16px;position:relative}
+  .cc-hb-chapnum{
+    font-size:34px;font-weight:800;color:var(--accent-tint);line-height:1;
+    position:absolute;top:-4px;right:0;letter-spacing:-.02em;user-select:none;
+    -webkit-text-stroke:1px var(--accent);
+  }
+  .cc-hb-section h2{
+    font-size:19px;font-weight:800;margin-bottom:14px;letter-spacing:-.015em;
+    padding-bottom:10px;border-bottom:2px solid var(--accent);display:inline-block;
+  }
+  .cc-hb-section h3{font-size:13.5px;font-weight:700;margin:18px 0 6px;color:var(--accent-deep)}
+  .cc-hb-section p{font-size:13.5px;line-height:1.7;color:var(--ink);margin-bottom:10px;max-width:640px}
+  .cc-hb-section ul{margin:0 0 10px 20px;padding:0;max-width:640px}
+  .cc-hb-section li{font-size:13.5px;line-height:1.7;margin-bottom:5px}
+  .cc-hb-updated{font-size:12px;color:var(--muted);margin-top:10px}
   `,
 
   template: `
@@ -813,17 +855,62 @@ export default {
       if (b.list) return `<ul>${b.list.map((li) => `<li>${esc(li)}</li>`).join('')}</ul>`;
       return '';
     };
+
+    // The handbook's own content has two different characters: the first
+    // three sections are the founding story (About Us / Our Purpose / Our
+    // Niche), everything after is policy. STORY_IDS below is how the split
+    // is made without needing a new field on the content itself — if the
+    // handbook content ever grows a real "kind" field this can read that
+    // instead, but for now the three ids are stable (see
+    // lib/crewcore/handbook-content.js).
+    const STORY_IDS = new Set(['about-us', 'our-purpose', 'our-niche']);
+    const story = hb.sections.filter((s) => STORY_IDS.has(s.id));
+    const policy = hb.sections.filter((s) => !STORY_IDS.has(s.id));
+
+    // Numbering only applies to the policy chapters. They ARE a sequence an
+    // employee reads in order (basics, then pay, then conduct, then what
+    // happens if it ends) — the story sections aren't a sequence, they're
+    // one origin story told in three parts, so they don't get chapter
+    // numbers.
+    const policyNumbered = policy.map((s, i) => ({ ...s, num: i + 1 }));
+
     return `
-      <div class="cc-hb-updated">Last updated ${esc(hb.updated || '')}</div>
-      <div class="cc-hb-nav">
-        ${hb.sections.map((s) => `<button class="cc-hb-navbtn" data-jump="${esc(s.id)}">${esc(s.title)}</button>`).join('')}
-      </div>
-      ${hb.sections.map((s) => `
-        <div class="cc-hb-section" id="hb-${esc(s.id)}">
-          <h2>${esc(s.title)}</h2>
-          ${s.blocks.map(blockHtml).join('')}
+      <div class="cc-hb-cover">
+        <div class="cc-hb-cover-mark">
+          <span class="w1">Crew</span><span class="w2">Core</span><span class="dot">.</span>
         </div>
-      `).join('')}
+        <h1 class="cc-hb-cover-title">Employee Handbook</h1>
+        <div class="cc-hb-cover-sub">P&amp;M Apparel &middot; est. 1987 &middot; Polk City, Iowa</div>
+        <div class="cc-hb-updated">Last updated ${esc(hb.updated || '')}</div>
+      </div>
+
+      <div class="cc-hb-nav">
+        ${story.map((s) => `<button class="cc-hb-navbtn cc-hb-navbtn-story" data-jump="${esc(s.id)}">${esc(s.title)}</button>`).join('')}
+        ${policyNumbered.map((s) => `<button class="cc-hb-navbtn" data-jump="${esc(s.id)}"><span class="cc-hb-navnum">${s.num}</span>${esc(s.title)}</button>`).join('')}
+      </div>
+
+      ${story.length ? `
+        <div class="cc-hb-story">
+          <div class="cc-hb-story-rule"><span>Our Story</span></div>
+          ${story.map((s) => `
+            <div class="cc-hb-section cc-hb-story-section" id="hb-${esc(s.id)}">
+              <h2>${esc(s.title)}</h2>
+              ${s.blocks.map(blockHtml).join('')}
+            </div>
+          `).join('')}
+        </div>
+      ` : ''}
+
+      ${policyNumbered.length ? `
+        <div class="cc-hb-story-rule"><span>Policies &amp; Procedures</span></div>
+        ${policyNumbered.map((s) => `
+          <div class="cc-hb-section" id="hb-${esc(s.id)}">
+            <div class="cc-hb-chapnum">${String(s.num).padStart(2, '0')}</div>
+            <h2>${esc(s.title)}</h2>
+            ${s.blocks.map(blockHtml).join('')}
+          </div>
+        `).join('')}
+      ` : ''}
     `;
   },
 
