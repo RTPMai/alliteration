@@ -20,6 +20,30 @@ import {
   saveEmployee, updateEmployee, deleteEmployee, seedFromContactList,
 } from "../../lib/crewcore/store.js";
 
+// Checks the "Shell username (optional)" link before saving, rather than
+// letting a typo silently save. A broken link leaves a self-serve employee
+// stuck seeing "ask an admin to link your account" with nothing pointing at
+// why — this catches it at write time instead.
+//   - blank/null username is always fine, the link is optional
+//   - the username must belong to a REAL shell account
+//   - it can't already be claimed by a DIFFERENT employee record (one login,
+//     one employee record — otherwise two people could resolve to the same
+//     self-serve identity)
+async function checkUsernameLink(username, ownEmployeeId) {
+  if (!username) return null; // optional field, nothing to check
+  const user = await getUser(username);
+  if (!user) return "Shell username \"" + username + "\" does not match any Alliteration account.";
+
+  const all = await listEmployees();
+  const claimedBy = all.find(
+    (e) => e.id !== ownEmployeeId && String(e.username || "").toLowerCase() === String(username).toLowerCase()
+  );
+  if (claimedBy) {
+    return "Shell username \"" + username + "\" is already linked to " + (claimedBy.name || claimedBy.id) + ".";
+  }
+  return null;
+}
+
 function parseBody(req) {
   let b = req.body;
   if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
@@ -85,6 +109,9 @@ export default async function handler(req, res) {
       const { ok, errors, record } = validateEmployee(body);
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
 
+      const usernameError = await checkUsernameLink(record.username, null);
+      if (usernameError) return res.status(400).json({ error: usernameError });
+
       record.created_by = sess.username;
       record.created_at = new Date().toISOString();
       record.updated_at = record.created_at;
@@ -103,6 +130,11 @@ export default async function handler(req, res) {
 
       const { ok, errors, record } = validateEmployee(body, { partial: true });
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
+
+      if (record.username !== undefined) {
+        const usernameError = await checkUsernameLink(record.username, id);
+        if (usernameError) return res.status(400).json({ error: usernameError });
+      }
 
       const employee = await updateEmployee(id, record);
       return res.status(200).json({ ok: true, employee });
