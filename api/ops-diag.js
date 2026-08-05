@@ -41,6 +41,7 @@ export default async function handler(req, res) {
             updatedAt: partial.updatedAt || null,
             cursorPresent: !!partial.cursor,
             chainError: partial.chainError || null,
+            lastChainAttempt: partial.lastChainAttempt || null,
           }
         : null,
     });
