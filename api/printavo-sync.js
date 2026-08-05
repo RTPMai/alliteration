@@ -2198,6 +2198,13 @@ export default async function handler(req, res) {
       }
 
       // ---------- PHASE 2: current-year invoices (outstanding + sales-by-month) ----------
+      // salesByMonth here is the Sales Goal card's primary series as of Aug 5,
+      // 2026: each invoice's (total - outstanding) attributed to its own
+      // CREATION month. A partially-paid invoice shows only what's been
+      // collected on it so far; once outstanding hits ~0 the full total is
+      // credited to its invoice month, whatever month the last payment landed
+      // in. Recomputed from scratch on every ops run, so this always reflects
+      // each invoice's current payment state, not a stale snapshot.
       if (acc.phase === "invoices") {
         const descI = argPlan.hasSortDescending ? ",sortDescending:true" : "";
         const ytdDateArg = argPlan.hasInProductionAfter ? `,inProductionAfter:"${yearStart}"` : "";
@@ -2268,11 +2275,13 @@ export default async function handler(req, res) {
 
       // ---------- PHASE 3: cash collected per month (payment transactions) ----------
       // "Cash in the door": every Payment-typed transaction bucketed by the month
-      // it HAPPENED, regardless of when its order was written. This is the number
-      // the $280k/month goal is judged against. salesByMonth above (collected so
-      // far, credited to the order's creation month) systematically starves the
-      // current month — July 2026 showed $31k while actual July collections were
-      // $190k+ — so the dashboard prefers cashByMonth whenever it is present.
+      // it HAPPENED, regardless of when its order was written. This was the
+      // primary series for the Sales Goal card from Jul 27 to Aug 5, 2026.
+      // Ryan's call on Aug 5: track the goal by INVOICE date instead, so an
+      // invoice from January that gets paid in August still counts toward
+      // January. salesByMonth above is what the dashboard uses now; cashByMonth
+      // is still computed and kept as a fallback (and for anyone who wants a
+      // by-payment-date view later), but is no longer the dashboard's default.
       // Refund / Return / Void / Dispute transactions are excluded, matching how
       // Apparelytics counts payments.
       if (acc.phase === "cash") {
@@ -2385,8 +2394,9 @@ export default async function handler(req, res) {
         outstandingTotal: Math.round(outstandingTotal * 100) / 100,
         salesByMonth,
         // Cash collected per month (payment transactions by transaction date).
-        // Present only when the transactions probe succeeded; the dashboard
-        // falls back to salesByMonth when absent.
+        // Present only when the transactions probe succeeded. As of Aug 5,
+        // 2026 this is a fallback/diagnostic series only — the Sales Goal
+        // card's primary series is salesByMonth (invoice-date basis).
         cashByMonth: cashOk ? cashByMonth : undefined,
         workload: Object.values(acc.workloadByCustomer),
         statusGroups: WORKLOAD_STATUS_GROUPS,
