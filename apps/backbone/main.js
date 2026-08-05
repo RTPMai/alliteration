@@ -6421,11 +6421,36 @@ export async function start(ctx) {
       MARKETING_INITIATIVES.map(function(m) { return '<option value="' + m + '">' + m + '</option>'; }).join("");
   }
 
+  // ---- Triangulation schema v2 (Aug 2026 master prompt) ---------------------------
+  // v2 runs return a BATCH object: { schema_version:"2.0", batch_metadata, lead_count,
+  // leads:[...], validation_report }. Each lead keeps every legacy key and adds the
+  // extension sections (record_metadata, identity_resolution, verification, locations,
+  // related_organizations, event_intelligence, purchase_intelligence, source_evidence,
+  // research_gaps, field_confidence, assumption_details). Scoring moved from 1-5 per
+  // category (total /50) to 0-10 per category (total /100), with new tier names.
+  // Detection is per-qualification, so legacy leads and v2 leads coexist in the
+  // pipeline and each renders against its own scale.
+  function isV2Qual(q) {
+    if (!q) return false;
+    if (String(q.schema_version || "").charAt(0) === "2") return true;
+    const qs = q.qualification_scoring || {};
+    if (qs.scoring_status || Array.isArray(qs.unscored_categories)) return true;
+    return /^Tier [A-D]|^Disqualified|^Unscored/.test(String(qs.qualification_tier || ""));
+  }
+  // Score denominator for display: 100 for v2 qualifications, 50 for legacy.
+  function qualDenom(q) { return isV2Qual(q) ? 100 : 50; }
+
   function qualTierClass(tier) {
     if (tier === "Strategic Account") return "qt-strategic";
     if (tier === "High-Value Growth Account") return "qt-highvalue";
     if (tier === "Standard Account") return "qt-standard";
     if (tier === "Transactional Account") return "qt-transactional";
+    // v2 tiers map onto the same four badge styles; Disqualified and
+    // "Unscored - More Research Required" fall through to low priority.
+    if (/^Tier A/.test(tier)) return "qt-strategic";
+    if (/^Tier B/.test(tier)) return "qt-highvalue";
+    if (/^Tier C/.test(tier)) return "qt-standard";
+    if (/^Tier D/.test(tier)) return "qt-transactional";
     return "qt-lowpriority";
   }
 
@@ -6893,7 +6918,7 @@ export async function start(ctx) {
     if (lead.website_url) lines.push("Website: " + lead.website_url);
     if (industry) lines.push("Industry: " + industry);
     if (qs.total_score || qs.qualification_tier) {
-      lines.push("Score / Tier: " + (qs.total_score || "—") + "/50 — " + (qs.qualification_tier || "—"));
+      lines.push("Score / Tier: " + (qs.total_score || "—") + "/" + qualDenom(q) + " — " + (qs.qualification_tier || "—"));
     }
     if (rt.follow_up_speed) lines.push("Follow-up: " + rt.follow_up_speed);
     lines.push("");
@@ -6918,7 +6943,7 @@ export async function start(ctx) {
     const qs = (q && q.qualification_scoring) || {};
     const score = qs.total_score || "—";
     const tier = qs.qualification_tier || "—";
-    return "• " + (lead.company_name || "—") + " — " + score + "/50 " + tier +
+    return "• " + (lead.company_name || "—") + " — " + score + "/" + qualDenom(q) + " " + tier +
       " | " + (c.name || "contact TBD") +
       " | " + (c.email || "EMAIL NOT FOUND");
   }
@@ -7001,13 +7026,14 @@ export async function start(ctx) {
     }
   }
 
-  // Star rating out of 5 from the /50 score — a fast visual the AM reads before any words.
+  // Star rating out of 5 from the total score — a fast visual the AM reads before any words.
   // ASCII, deliberately. The Unicode stars looked good but cost 9 encoded chars EACH —
   // 45 characters of the mailto budget for decoration, which pushed real content (the
   // contacts) out of the email entirely. Brackets survive every mail client and cost 1.
-  function scoreStars(score) {
+  function scoreStars(score, denom) {
     if (typeof score !== "number") return "";
-    const filled = Math.max(1, Math.round(score / 10));
+    // 5 stars at full score regardless of schema: /50 divides by 10, /100 by 20.
+    const filled = Math.min(5, Math.max(1, Math.round(score / ((denom || 50) / 5))));
     return "[" + "*".repeat(filled) + ".".repeat(5 - filled) + "]";
   }
 
@@ -7024,16 +7050,17 @@ export async function start(ctx) {
     const topIdx = scores.indexOf(best);
     const topLead = leads[topIdx] || leads[0];
     const topTier = ((topLead.qualification || {}).qualification_scoring || {}).qualification_tier || "";
+    const topDenom = qualDenom(topLead.qualification);
 
     // Subject earns the open: name the prize, not the process.
     let subject;
     if (!realAM) {
       subject = leads.length + " unrouted lead" + (leads.length > 1 ? "s" : "") + " \u2014 needs AM assignment";
     } else if (leads.length === 1) {
-      subject = (best ? best + "/50 " : "") + (topTier || "New lead") + ": " + topLead.company_name;
+      subject = (best ? best + "/" + topDenom + " " : "") + (topTier || "New lead") + ": " + topLead.company_name;
     } else {
       subject = leads.length + " new leads for " + am.split(" ")[0] +
-        (best ? " \u2014 top scores " + best + "/50 (" + topLead.company_name + ")" : "");
+        (best ? " \u2014 top scores " + best + "/" + topDenom + " (" + topLead.company_name + ")" : "");
     }
 
     const greeting = realAM ? "Hi " + am.split(" ")[0] + "," : "Team,";
@@ -7072,8 +7099,9 @@ export async function start(ctx) {
         }
 
         // Headline: stars + name, then the score line.
-        parts.push((score != null ? scoreStars(score) + "  " : "") + l.company_name.toUpperCase());
-        if (score != null) parts.push(score + "/50 | " + tier);
+        const denom = qualDenom(l.qualification);
+        parts.push((score != null ? scoreStars(score, denom) + "  " : "") + l.company_name.toUpperCase());
+        if (score != null) parts.push(score + "/" + denom + " | " + tier);
         parts.push("");
 
         // THE LINK — first thing after the headline.
@@ -8257,6 +8285,168 @@ export async function start(ctx) {
     }
   }
 
+  // ---- v2 extension sections for the Full detail panel ------------------------------
+  // Every v2 section renders only when it has content, so a legacy lead's panel is
+  // byte-for-byte what it was before, and a sparse v2 lead doesn't show empty shells.
+
+  // Generic key/value rows. Arrays join with "; ", nested objects are skipped (they
+  // get their own dedicated sections), blanks are dropped.
+  function qualRowsFromObj(obj) {
+    return Object.keys(obj || {}).map(function(k) {
+      let v = obj[k];
+      if (Array.isArray(v)) v = v.filter(Boolean).join("; ");
+      if (v && typeof v === "object") return "";
+      if (v === "" || v == null) return "";
+      return '<div class="qual-row"><span>' + k.replace(/_/g, " ") + '</span><span>' + v + '</span></div>';
+    }).join("");
+  }
+
+  function fmtQualAddr(a) {
+    if (!a) return "";
+    return [a.street, a.city, a.state, a.postal_code].filter(Boolean).join(", ");
+  }
+
+  function v2DetailSections(q) {
+    if (!isV2Qual(q)) return "";
+    let out = "";
+    function section(title, inner) {
+      if (inner) out += '<div class="qual-section"><h4>' + title + '</h4>' + inner + '</div>';
+    }
+
+    // Scoring breakdown. v2 scores each category 0-10. A category listed in
+    // unscored_categories is "not scored", NOT a true zero — show it that way.
+    const qs = q.qualification_scoring || {};
+    const cats = ["industry_fit", "employee_size", "multi_location_opportunity", "uniform_potential",
+      "growth_activity", "brand_maturity", "long_term_value", "online_store_potential",
+      "promo_product_potential", "reorder_likelihood"];
+    const unscored = Array.isArray(qs.unscored_categories) ? qs.unscored_categories : [];
+    let scoring = cats.map(function(k) {
+      if (!(k in qs)) return "";
+      const val = unscored.indexOf(k) !== -1 ? "not scored" : (qs[k] + "/10");
+      return '<div class="qual-row"><span>' + k.replace(/_/g, " ") + '</span><span>' + val + '</span></div>';
+    }).join("");
+    if (qs.scoring_status) scoring += '<div class="qual-row"><span>scoring status</span><span>' + qs.scoring_status + '</span></div>';
+    if (Array.isArray(qs.scoring_notes) && qs.scoring_notes.length) {
+      scoring += '<div style="font-size:12px;color:var(--muted);margin-top:6px">' + qs.scoring_notes.join("; ") + '</div>';
+    }
+    section("Scoring breakdown", scoring);
+
+    if (q.identity_resolution) section("Identity resolution", qualRowsFromObj(q.identity_resolution));
+    if (q.verification) section("Verification", qualRowsFromObj(q.verification));
+
+    const locs = Array.isArray(q.locations) ? q.locations.filter(Boolean) : [];
+    if (locs.length) {
+      section("Locations", locs.map(function(L) {
+        const addr = fmtQualAddr(L);
+        return '<div style="font-size:13px;margin-bottom:6px"><strong>' + (L.location_name || "\u2014") + '</strong>' +
+          (L.location_type ? ' <span style="color:var(--muted)">(' + L.location_type + ')</span>' : '') +
+          (addr ? '<br>' + addr : '') +
+          (L.address_scope === "headquarters_fallback" ? ' <span style="color:var(--amber);font-size:11px;font-weight:700">HQ fallback</span>' : '') +
+          '</div>';
+      }).join(""));
+    }
+
+    const rel = Array.isArray(q.related_organizations) ? q.related_organizations.filter(Boolean) : [];
+    if (rel.length) {
+      section("Related organizations", rel.map(function(r) {
+        return '<div style="font-size:13px;margin-bottom:4px"><strong>' + (r.name || "\u2014") + '</strong>' +
+          (r.relationship_type ? ' \u2014 ' + r.relationship_type : '') +
+          (r.buying_relationship ? ' <span style="color:var(--muted)">(' + r.buying_relationship + ')</span>' : '') +
+          '</div>';
+      }).join(""));
+    }
+
+    // Events: the piece Abby acts on. Dates, venue, the actual purchasing org
+    // (not the calendar that listed it), deadlines, and the likely apparel needs.
+    const evs = Array.isArray(q.event_intelligence) ? q.event_intelligence.filter(Boolean) : [];
+    if (evs.length) {
+      section("Event intelligence", evs.map(function(ev) {
+        const dates = [ev.start_date, ev.end_date].filter(Boolean).join(" to ");
+        const va = fmtQualAddr(ev.venue_address);
+        const lines = ['<strong>' + (ev.event_name || "\u2014") + '</strong>' +
+          (ev.event_type ? ' <span style="color:var(--muted)">(' + ev.event_type + ')</span>' : '')];
+        if (dates) lines.push('Dates: ' + dates + (ev.lead_time_status ? ' \u2014 ' + ev.lead_time_status : ''));
+        if (ev.venue_name || va) lines.push('Venue: ' + [ev.venue_name, va].filter(Boolean).join(", "));
+        if (ev.purchasing_organization) lines.push('Purchasing org: ' + ev.purchasing_organization);
+        const who = [ev.event_contact_name, ev.event_contact_title].filter(Boolean).join(", ");
+        if (who || ev.event_contact_email || ev.event_contact_phone) {
+          lines.push('Contact: ' + [who, ev.event_contact_email, ev.event_contact_phone].filter(Boolean).join(" | "));
+        }
+        const dl = [];
+        if (ev.vendor_registration_deadline) dl.push("vendor reg " + ev.vendor_registration_deadline);
+        if (ev.apparel_or_order_deadline) dl.push("order deadline " + ev.apparel_or_order_deadline);
+        if (dl.length) lines.push('Deadlines: ' + dl.join(", "));
+        if (Array.isArray(ev.likely_needs) && ev.likely_needs.length) lines.push('Likely needs: ' + ev.likely_needs.join(", "));
+        return '<div style="font-size:13px;margin-bottom:10px;line-height:1.5">' + lines.join("<br>") + '</div>';
+      }).join(""));
+    }
+
+    if (q.purchase_intelligence) section("Purchase intelligence", qualRowsFromObj(q.purchase_intelligence));
+
+    const src = Array.isArray(q.source_evidence) ? q.source_evidence.filter(Boolean) : [];
+    if (src.length) {
+      section("Source evidence", src.map(function(s2, i) {
+        const title = s2.source_title || s2.url || ("Source " + (i + 1));
+        const link = s2.url
+          ? '<a href="' + s2.url + '" target="_blank" rel="noopener" style="color:var(--accent)">' + title + '</a>'
+          : title;
+        return '<div style="font-size:12px;margin-bottom:5px">' + (i + 1) + '. ' + link +
+          (s2.source_strength ? ' <span style="color:var(--muted)">(' + s2.source_strength + ')</span>' : '') +
+          (s2.evidence_summary ? '<br><span style="color:var(--muted)">' + s2.evidence_summary + '</span>' : '') +
+          '</div>';
+      }).join(""));
+    }
+
+    const gaps = Array.isArray(q.research_gaps) ? q.research_gaps.filter(Boolean) : [];
+    if (gaps.length) {
+      section("Research gaps", gaps.map(function(g) {
+        return '<div style="font-size:12px;margin-bottom:5px"><strong>' + (g.field_or_question || "\u2014") + '</strong>' +
+          (g.status ? ' \u2014 ' + g.status : '') +
+          (g.next_best_source_or_action ? '<br><span style="color:var(--muted)">Next: ' + g.next_best_source_or_action + '</span>' : '') +
+          '</div>';
+      }).join(""));
+    }
+
+    const fc = Array.isArray(q.field_confidence) ? q.field_confidence.filter(Boolean) : [];
+    if (fc.length) {
+      section("Field confidence", fc.map(function(f) {
+        return '<div class="qual-row"><span>' + (f.field_path || "\u2014") + '</span><span>' +
+          [f.confidence, f.value_type].filter(Boolean).join(" \u2014 ") + '</span></div>';
+      }).join(""));
+    }
+
+    const ad = Array.isArray(q.assumption_details) ? q.assumption_details.filter(Boolean) : [];
+    if (ad.length) {
+      section("Assumption details", ad.map(function(a) {
+        return '<div style="font-size:12px;margin-bottom:5px"><strong>' + (a.field_path || "\u2014") + '</strong>: ' + (a.assumption || "\u2014") +
+          (a.impact_if_wrong ? '<br><span style="color:var(--muted)">If wrong: ' + a.impact_if_wrong + '</span>' : '') +
+          '</div>';
+      }).join(""));
+    }
+
+    const rm = q.record_metadata;
+    if (rm) {
+      let inner = "";
+      if (rm.record_id) inner += '<div class="qual-row"><span>record id</span><span>' + rm.record_id + '</span></div>';
+      if (rm.research_status) inner += '<div class="qual-row"><span>research status</span><span>' + rm.research_status + '</span></div>';
+      if (rm.deduplication_status) inner += '<div class="qual-row"><span>deduplication</span><span>' + rm.deduplication_status + '</span></div>';
+      if (Array.isArray(rm.source_row_numbers) && rm.source_row_numbers.length) {
+        inner += '<div class="qual-row"><span>source rows</span><span>' + rm.source_row_numbers.join(", ") + '</span></div>';
+      }
+      if (Array.isArray(rm.merged_input_records) && rm.merged_input_records.length) {
+        inner += '<div class="qual-row"><span>merged input rows</span><span>' + rm.merged_input_records.length + '</span></div>';
+      }
+      const oi = rm.original_input || {};
+      const oiBits = Object.keys(oi).map(function(k) {
+        return oi[k] ? k.replace(/_/g, " ") + ": " + oi[k] : "";
+      }).filter(Boolean).join(" | ");
+      if (oiBits) inner += '<div style="font-size:12px;color:var(--muted);margin-top:6px">Submitted: ' + oiBits + '</div>';
+      section("Record metadata", inner);
+    }
+
+    return out;
+  }
+
   function renderLeadDetailBody(lead) {
     const body = $id("leadDetailBody");
     const q = lead.qualification;
@@ -8295,7 +8485,7 @@ export async function start(ctx) {
     // ---- Rundown: score + tier up top, plain-English summary, two clean stat blocks below ----
     let rundown = '<div class="qual-section"><h4>Rundown</h4>' +
       '<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px">' +
-        '<span class="qual-score-total">' + s.total_score + '<span style="font-size:13px;color:var(--muted);font-weight:400">/50</span></span>' +
+        '<span class="qual-score-total">' + s.total_score + '<span style="font-size:13px;color:var(--muted);font-weight:400">/' + qualDenom(q) + '</span></span>' +
         '<span class="qual-tier-badge ' + qualTierClass(s.qualification_tier) + '">' + s.qualification_tier + '</span>' +
       '</div>';
     if (q.at_a_glance) {
@@ -8350,8 +8540,22 @@ export async function start(ctx) {
             (conf ? '<span style="white-space:nowrap;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;' + confidenceStyle(conf) + '">' + conf + '</span>' : '') +
             '</div>' +
             (c.relevance ? '<div style="font-size:12px;color:var(--muted);margin-top:2px">' + c.relevance + '</div>' : '') +
-            '<div style="font-size:12px;margin-top:4px">✉ ' + emailHtml + '</div>' +
-            '<div style="font-size:12px;margin-top:2px">☎ ' + (phone || "—") + '</div>' +
+            (c.decision_role ? '<div style="font-size:12px;color:var(--muted);margin-top:2px">Decision role: ' + c.decision_role + '</div>' : '') +
+            '<div style="font-size:12px;margin-top:4px">✉ ' + emailHtml +
+              (c.email_type && email ? ' <span style="font-size:10px;color:var(--faint)">(' + String(c.email_type).replace(/_/g, " ") + ')</span>' : '') + '</div>' +
+            '<div style="font-size:12px;margin-top:2px">☎ ' + (phone || "—") +
+              (c.phone_type && phone ? ' <span style="font-size:10px;color:var(--faint)">(' + String(c.phone_type).replace(/_/g, " ") + ')</span>' : '') + '</div>' +
+            (function() {
+              // v2: contact's organization/work address, HQ fallback flagged.
+              const oa = c.organization_address;
+              const addr = fmtQualAddr(oa);
+              if (!addr) return '';
+              return '<div style="font-size:12px;color:var(--muted);margin-top:2px">' +
+                (c.organization_or_branch ? c.organization_or_branch + ' \u2014 ' : '') + addr +
+                (oa.address_scope === "headquarters_fallback" ? ' <span style="color:var(--amber);font-size:10px;font-weight:700">HQ fallback</span>' : '') +
+                '</div>';
+            })() +
+            (c.verification_note ? '<div style="font-size:11px;color:var(--faint);margin-top:2px">' + c.verification_note + '</div>' : '') +
             (extra ? '<div style="font-size:12px;color:var(--muted);margin-top:2px">' + extra + '</div>' : '') +
             (c.source ? '<div style="font-size:11px;color:var(--faint);margin-top:2px">Source: ' + c.source + '</div>' : '') +
             '</div>';
@@ -8386,6 +8590,7 @@ export async function start(ctx) {
         }).join("") +
       '</div>' +
       (q.assumptions_flagged.length ? '<div class="qual-section"><h4>Assumptions flagged</h4><div style="font-size:12px;color:var(--muted)">' + q.assumptions_flagged.join("; ") + '</div></div>' : '') +
+      v2DetailSections(q) +
       '</details>';
 
     body.innerHTML = leadContactBanner(lead) + intake + rundown + nextSteps + contacts + details;
@@ -8443,6 +8648,19 @@ export async function start(ctx) {
       errEl.textContent = "That's not valid JSON.";
       return;
     }
+    const shape = classifyTriangulationJson(parsed);
+    if (shape.kind === "parser_gate") { errEl.textContent = V2_PARSER_HELP; return; }
+    if (shape.kind === "batch") {
+      // A v2 batch pasted into the single-lead box: unwrap a one-lead batch,
+      // point a multi-lead batch at the bulk importer instead of guessing.
+      if (parsed.leads.length !== 1) {
+        errEl.textContent = "This is a v2 batch with " + parsed.leads.length + " leads. This box updates one lead. Paste the whole batch into \"Create lead from JSON\" on the Add lead panel to import all of them.";
+        return;
+      }
+      parsed = stampV2(parsed.leads[0], parsed);
+    } else {
+      stampV2(parsed, null);
+    }
     const required = ["company_overview", "apparel_opportunity", "growth_signals", "qualification_scoring", "routing", "red_flags", "executive_summary", "assumptions_flagged"];
     for (let i = 0; i < required.length; i++) {
       if (!(required[i] in parsed)) {
@@ -8468,6 +8686,64 @@ export async function start(ctx) {
 
   const QUAL_REQUIRED_KEYS = ["company_overview", "apparel_opportunity", "growth_signals",
     "qualification_scoring", "routing", "red_flags", "executive_summary", "assumptions_flagged"];
+
+  // ---- v2 triangulation paste shapes -----------------------------------------------
+  // A paste can arrive as one of three things:
+  //   parser_gate — the run refused because PARSER_ALLOWS_V2_EXTENSION_FIELDS was false
+  //   batch       — the v2 bulk object { schema_version, batch_metadata, leads:[...] }
+  //   single      — one lead/qualification object (legacy or v2, both carry legacy keys)
+  const V2_PARSER_HELP = "That run stopped itself because PARSER_ALLOWS_V2_EXTENSION_FIELDS was not set to true. This parser accepts all of the v2 extension fields, so set that flag to true in the Run Configuration and re-run the search.";
+  function classifyTriangulationJson(parsed) {
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { kind: "invalid" };
+    if (parsed.status === "PARSER_UPDATE_REQUIRED") return { kind: "parser_gate" };
+    if (Array.isArray(parsed.leads)) return { kind: "batch" };
+    return { kind: "single" };
+  }
+
+  // Persist the batch's schema version onto each lead's qualification, so per-lead
+  // rendering (score denominator, tier badge) still knows its scale after the batch
+  // wrapper is discarded. Single v2 pastes get stamped from their own tell-tales.
+  function stampV2(q, batch) {
+    if (batch && batch.schema_version) {
+      if (!q.schema_version) q.schema_version = batch.schema_version;
+    } else if (!q.schema_version && isV2Qual(q)) {
+      q.schema_version = "2.0";
+    }
+    return q;
+  }
+
+  // Build a pipeline lead record around a parsed qualification object. Shared by the
+  // single-lead paste and the v2 batch importer so the two can never drift apart.
+  // v2 leads marked research_status "unresolved" land as status "New", not "Qualified" —
+  // the research prompt preserves unresolved rows rather than dropping them, and the
+  // pipeline should not present an unresolved organization as a qualified lead.
+  function leadRecordFromQual(parsed, name) {
+    const co = parsed.company_overview || {};
+    const c = contactsFromQual(parsed);
+    const industry = normalizeIndustry(cleanContactValue(co.industry_classification) || "");
+    const website = cleanContactValue(co.website) || "";
+    const rm = parsed.record_metadata || {};
+    const unresolved = rm.research_status === "unresolved";
+    parsed.qualified_at = new Date().toISOString();
+    return {
+      lead_id: uid(),
+      company_name: name,
+      website_url: website,
+      contact_name: c.name,
+      contact_email: c.email,
+      contact_phone: c.phone,
+      source_type: "Outbound prospecting",
+      intake_source: "prospecting_json",
+      industry: industry,
+      inquiry_notes: "",
+      existing_crm_notes: "Created from pasted qualification JSON on " + new Date().toLocaleDateString() + "." +
+        (unresolved ? " Research status: unresolved — see the research gaps in Full detail before outreach." : ""),
+      status: unresolved ? "New" : "Qualified",
+      created_at: new Date().toISOString(),
+      qualification: parsed,
+      promoted_customer_id: null
+    };
+  }
 
   // Pull the first usable email/phone out of key_contacts[]. Reuses the same cleaners the
   // rest of the app uses, so "not found" placeholders get stripped rather than stored.
@@ -8508,10 +8784,17 @@ export async function start(ctx) {
       errEl.textContent = "That's not valid JSON.";
       return;
     }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    const shape = classifyTriangulationJson(parsed);
+    if (shape.kind === "invalid") {
       errEl.textContent = "Expected a single JSON object.";
       return;
     }
+    if (shape.kind === "parser_gate") { errEl.textContent = V2_PARSER_HELP; return; }
+    if (shape.kind === "batch") {
+      await createLeadsFromV2Batch(parsed);
+      return;
+    }
+    stampV2(parsed, null);
     for (let i = 0; i < QUAL_REQUIRED_KEYS.length; i++) {
       if (!(QUAL_REQUIRED_KEYS[i] in parsed)) {
         errEl.textContent = 'Missing "' + QUAL_REQUIRED_KEYS[i] + '" — this doesn\'t match the qualification schema.';
@@ -8547,29 +8830,7 @@ export async function start(ctx) {
 
     btn.disabled = true;
     try {
-      const c = contactsFromQual(parsed);
-      const industry = normalizeIndustry(cleanContactValue(co.industry_classification) || "");
-      const website = cleanContactValue(co.website) || "";
-
-      parsed.qualified_at = new Date().toISOString();
-
-      const lead = {
-        lead_id: uid(),
-        company_name: name,
-        website_url: website,
-        contact_name: c.name,
-        contact_email: c.email,
-        contact_phone: c.phone,
-        source_type: "Outbound prospecting",
-        industry: industry,
-        inquiry_notes: "",
-        existing_crm_notes: "Created from pasted qualification JSON on " + new Date().toLocaleDateString() + ".",
-        status: "Qualified",
-        created_at: new Date().toISOString(),
-        qualification: parsed,
-        promoted_customer_id: null
-      };
-
+      const lead = leadRecordFromQual(parsed, name);
       state_leads.push(lead);
       await saveLeads();
       box.value = "";
@@ -8577,12 +8838,70 @@ export async function start(ctx) {
 
       const qs = parsed.qualification_scoring || {};
       okEl.textContent = "Created \u201C" + name + "\u201D" +
-        (qs.total_score != null ? " \u2014 " + qs.total_score + "/50, " + (qs.qualification_tier || "") : "") + ".";
+        (qs.total_score != null ? " \u2014 " + qs.total_score + "/" + qualDenom(parsed) + ", " + (qs.qualification_tier || "") : "") + ".";
 
-      if (!c.email && !c.phone) warnNoContactAfterQual(lead);
+      if (!lead.contact_email && !lead.contact_phone) warnNoContactAfterQual(lead);
       openLeadDetail(lead.lead_id);
     } catch (e) {
       errEl.textContent = "Couldn't create the lead: " + (e && e.message ? e.message : "unknown error");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // ---- Bulk import: v2 triangulation batch -----------------------------------------
+  // One canonical lead per entry in batch.leads. Duplicates against the Roster or the
+  // pipeline are SKIPPED and reported by name, never confirm()-prompted — a 40-lead
+  // batch must not turn into 40 modal dialogs. Merged input rows stay inside each
+  // lead's record_metadata, so nothing from the research is lost by skipping here.
+  async function createLeadsFromV2Batch(batch) {
+    const box = $id("newLeadJsonBox");
+    const errEl = $id("newLeadJsonErr");
+    const okEl = $id("newLeadJsonOk");
+    const btn = $id("newLeadJsonBtn");
+    const list = batch.leads;
+    if (!list.length) {
+      errEl.textContent = 'The batch parsed, but its "leads" array is empty.';
+      return;
+    }
+
+    btn.disabled = true;
+    const created = [], skippedRoster = [], skippedLead = [], noName = [];
+    try {
+      for (const q of list) {
+        if (!q || typeof q !== "object") { noName.push("(not an object)"); continue; }
+        stampV2(q, batch);
+        const co = q.company_overview || {};
+        const rm = q.record_metadata || {};
+        const oi = rm.original_input || {};
+        // Unresolved leads may have no resolved company_overview; fall back to the
+        // original submitted organization name so the row still lands somewhere visible.
+        const name = cleanContactValue(co.company_name) || cleanContactValue(oi.organization_name);
+        if (!name) { noName.push(rm.record_id || "(no company name)"); continue; }
+        const key = normalizeCo(name);
+        const dupRoster = state.synced.find(function(c2) {
+          return c2.company_name && normalizeCo(c2.company_name) === key;
+        });
+        if (dupRoster) { skippedRoster.push(name); continue; }
+        const dupLead = state_leads.find(function(l) {
+          return l.company_name && normalizeCo(l.company_name) === key;
+        });
+        if (dupLead) { skippedLead.push(name); continue; }
+        state_leads.push(leadRecordFromQual(q, name));
+        created.push(name);
+      }
+      if (created.length) await saveLeads();
+      box.value = "";
+      renderLeadsPage();
+
+      const bits = ["Imported " + created.length + " of " + list.length + " leads from the batch."];
+      if (skippedLead.length) bits.push("Already in the pipeline, skipped: " + skippedLead.join(", ") + ".");
+      if (skippedRoster.length) bits.push("Already Roster customers, skipped: " + skippedRoster.join(", ") + ".");
+      if (noName.length) bits.push("No usable company name, skipped: " + noName.join(", ") + ".");
+      okEl.textContent = bits.join(" ");
+      if (!created.length) errEl.textContent = "Nothing new was imported.";
+    } catch (e) {
+      errEl.textContent = "Batch import stopped: " + (e && e.message ? e.message : "unknown error");
     } finally {
       btn.disabled = false;
     }
@@ -8657,7 +8976,7 @@ export async function start(ctx) {
       contact_phone: promoContact.phone || "",
       notes: "Promoted from Leads pipeline on " + new Date().toLocaleDateString() +
         (q ? ". Qualification tier: " + q.qualification_scoring.qualification_tier +
-          " (" + q.qualification_scoring.total_score + "/50). " + q.executive_summary.next_action : "")
+          " (" + q.qualification_scoring.total_score + "/" + qualDenom(q) + "). " + q.executive_summary.next_action : "")
     };
 
     lead.promoted_customer_id = customerId;
