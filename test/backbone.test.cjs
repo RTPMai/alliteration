@@ -34,9 +34,23 @@ t.test('cash phase excludes non-payment transaction types', () => {
   });
 });
 
-t.test('dashboard prefers cashByMonth with salesByMonth as fallback', () => {
-  t.assert(/cashByMonth[\s\S]{0,200}salesByMonth/.test(main),
-    'main.js should pick cashByMonth when present and fall back to salesByMonth');
+t.test('dashboard prefers salesByMonth (invoice date) with cashByMonth as fallback', () => {
+  t.assert(/salesByMonth[\s\S]{0,300}cashByMonth/.test(main),
+    'main.js should pick salesByMonth (invoice-date basis) when present and fall back to cashByMonth — Ryan\'s Aug 5 call: the Sales Goal card tracks by invoice date, so a January invoice paid in August still counts toward January');
+});
+
+t.test('roster revenue is attributed to invoice date, not payment date', () => {
+  // total_revenue / revenue_by_year (the "Total roster revenue" / "[Year]
+  // revenue" KPIs) are built by foldInvoice, keyed on bucketYear (the
+  // reconcile's invoice-date year window) or the invoice's own createdAt —
+  // never on a payment/transaction date. Locking this in since Ryan's Aug 5
+  // ask assumes it and it would be an easy regression to introduce by
+  // accident while touching the sales-goal series nearby.
+  t.assert(/const year = bucketYear \|\| \(d \? d\.slice\(0, 4\) : null\)/.test(sync),
+    'revenue_by_year must be keyed by invoice date (bucketYear / createdAt), not a payment date');
+  t.assert(!/paidAt|paymentDate|transactionDate/.test(
+    sync.slice(sync.indexOf('function foldInvoice'), sync.indexOf('function foldInvoice') + 2000)),
+    'foldInvoice should not reference a payment/transaction date field');
 });
 
 /* ---- staleness stamp ---------------------------------------------------- */
