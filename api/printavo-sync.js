@@ -137,7 +137,20 @@ export default async function handler(req, res) {
         lastChainResponse: null,
       };
     }
-    const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
+    // Use the stable production domain rather than whatever Host header this
+    // particular invocation happened to arrive on. A per-deployment URL
+    // (alliteration-XXXXXXXXX-pmapparel.vercel.app, which changes on every
+    // deploy) turned out to serve a cached HTML shell instead of actually
+    // invoking this function for at least one chain attempt (Aug 5 — the
+    // response had cache-header HIT and was the dashboard's own HTML, not
+    // JSON, even though it returned 200 and looked like a normal response).
+    // VERCEL_PROJECT_PRODUCTION_URL is Vercel's stable alias and does not
+    // rotate per deployment. process.env.VERCEL_URL is kept only as a
+    // last-resort fallback if the production env var is ever unset.
+    const chainHost = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || req.headers.host;
+    // Cache-bust with a unique query param too, in case an intermediate
+    // cache is keying on path+query without honoring Cache-Control at all.
+    const url = `https://${chainHost}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}&_cb=${Date.now()}`;
     // Actually wait for the next chunk to confirm it landed, instead of
     // racing a fire-and-forget fetch against a timer and treating "still in
     // flight" as success. That approach (used before this fix, and in the
@@ -164,7 +177,11 @@ export default async function handler(req, res) {
       const controller = new AbortController();
       const timeout = setTimeout(function () { controller.abort(); }, chainTimeoutMs);
       try {
-        result = await fetch(url, { headers: authHeaders, signal: controller.signal });
+        result = await fetch(url, {
+          headers: Object.assign({ "Cache-Control": "no-cache", "Pragma": "no-cache" }, authHeaders),
+          signal: controller.signal,
+          cache: "no-store",
+        });
       } finally {
         clearTimeout(timeout);
       }
@@ -180,6 +197,23 @@ export default async function handler(req, res) {
         chained: false,
         chainError: "chain fetch returned HTTP " + (result ? result.status : "no response"),
         lastChainResponse: null,
+      };
+    }
+    // A cached HTML shell served in place of a real invocation (Aug 5 — the
+    // per-deployment host quirk fixed above) still returns 200, so status
+    // alone cannot be trusted. Confirm the response is actually JSON with an
+    // ok field before treating the chain as successful.
+    const contentType = result.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      return {
+        chained: false,
+        chainError: "chain response was not JSON (content-type: " + (contentType || "none") +
+          "); likely served from a cache instead of a real invocation",
+        lastChainResponse: {
+          status: result.status,
+          cacheHeader: result.headers.get("x-vercel-cache") || null,
+          contentType,
+        },
       };
     }
     // Capture what the child actually said, not just its status code. Guard
