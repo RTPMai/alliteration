@@ -7,12 +7,19 @@ import { getSession, safeEqual } from "../lib/session.js";
 // Two modes, one endpoint:
 //   ?mode=incremental  (default) — fast path. Pulls only invoices created since
 //                       the last successful run's high-water mark, folds them
-//                       into the existing per-customer roster aggregates.
-//                       Meant to run every few minutes via cron. Cheap.
+//                       into the existing per-customer roster aggregates —
+//                       this is how a brand-new Printavo customer gets added
+//                       to the roster. Runs daily via cron at 10:50 UTC, ten
+//                       minutes ahead of the ops cron below, so a new client
+//                       is on the roster before the dashboard slice refreshes.
+//                       Self-chains like ops if a run goes long (see
+//                       continueIncremental below) so a big backlog still
+//                       finishes within the same cron firing.
 //   ?mode=reconcile    — slow path. Pages the FULL invoice history and rebuilds
 //                       every customer's aggregates from scratch. Self-heals any
 //                       drift (missed runs, edited/voided invoices, retries).
-//                       Meant to run nightly. Expensive but authoritative.
+//                       Manual only (the Reconcile button in Settings) — not
+//                       on a cron, since it re-pages full history every time.
 //
 // Both write into backbone_data under state.synced WITHOUT touching
 // state.enrichment or LEAD-/prospect rows. Printavo stays the source of truth;
@@ -116,7 +123,15 @@ export default async function handler(req, res) {
   // handler scope) cannot see it — referencing acc.* from in here threw
   // "acc is not defined" and crashed the whole run (Aug 5). Every call site
   // now has acc in scope and merges this result into it themselves.
-  async function continueOps() {
+  // continueChain(targetMode, extraQS) does the actual self-continue fetch.
+  // targetMode picks which mode the chained child request runs (mode is read
+  // explicitly from the child's query string, so this is never left to the
+  // viaCron default). extraQS carries anything else the child needs to pick
+  // up where this call left off — e.g. incremental's cursor, which (unlike
+  // ops) is not persisted to KV between calls and MUST be passed on the URL.
+  // continueOps() below is the original zero-arg ops caller, kept as-is so
+  // the three existing ops call sites need no changes.
+  async function continueChain(targetMode, extraQS) {
     if (!shouldChain) {
       // Either this wasn't a cron/chained invocation (a plain browser or
       // manual run, which intentionally does not self-chain — see comment
@@ -150,7 +165,7 @@ export default async function handler(req, res) {
     const chainHost = process.env.VERCEL_PROJECT_PRODUCTION_URL || process.env.VERCEL_URL || req.headers.host;
     // Cache-bust with a unique query param too, in case an intermediate
     // cache is keying on path+query without honoring Cache-Control at all.
-    const url = `https://${chainHost}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}&_cb=${Date.now()}`;
+    const url = `https://${chainHost}/api/printavo-sync?mode=${targetMode}&chain=${chainDepth + 1}${extraQS}&_cb=${Date.now()}`;
     // Actually wait for the next chunk to confirm it landed, instead of
     // racing a fire-and-forget fetch against a timer and treating "still in
     // flight" as success. That approach (used before this fix, and in the
@@ -231,6 +246,21 @@ export default async function handler(req, res) {
       lastChainResponse = { status: result.status, readError: (e && e.message) ? e.message : String(e) };
     }
     return { chained: true, chainError: null, lastChainResponse };
+  }
+
+  // Ops chain: resumes from its own persisted backbone_ops_partial, so the
+  // child needs nothing extra on the URL.
+  async function continueOps() {
+    return continueChain("ops", "");
+  }
+
+  // Incremental chain: incremental does NOT persist a partial to KV between
+  // calls (unlike ops/reconcile), so the resume cursor has to ride on the
+  // chained request's URL or the child would restart from the high-water
+  // mark and redo work. Mirrors the ops chain in every other respect
+  // (same auth, same JSON/cache verification, same CHAIN_MAX guard).
+  async function continueIncremental(cursor) {
+    return continueChain("incremental", `&cursor=${encodeURIComponent(cursor)}`);
   }
 
   // --- Printavo GraphQL --------------------------------------------------
@@ -1630,8 +1660,15 @@ export default async function handler(req, res) {
       // If we ran out of time mid-page, hand back a resume URL and DON'T advance
       // the high-water mark yet — next call continues, correctness preserved.
       if (cursor) {
+        // Self-chain the same way ops does: a cron-triggered run that runs
+        // long should finish within the same cron firing instead of leaving
+        // new invoices unfolded until tomorrow's run picks them up via the
+        // overlap window. Plain browser/manual calls still rely on the
+        // returned nextUrl instead, same as ops.
+        const chainResult = await continueIncremental(cursor);
         return res.status(200).json({
           ok: true, mode, status: "partial", pages, customersTouched: Object.keys(acc).length,
+          chained: chainResult.chained, chainError: chainResult.chainError,
           nextUrl: `/api/printavo-sync?mode=incremental&cursor=${encodeURIComponent(cursor)}${secretQS}`,
         });
       }
