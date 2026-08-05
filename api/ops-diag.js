@@ -42,6 +42,7 @@ export default async function handler(req, res) {
             cursorPresent: !!partial.cursor,
             chainError: partial.chainError || null,
             lastChainAttempt: partial.lastChainAttempt || null,
+            lastChainResponse: partial.lastChainResponse || null,
           }
         : null,
     });
