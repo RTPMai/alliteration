@@ -2351,6 +2351,19 @@ export default async function handler(req, res) {
 
     return res.status(400).json({ error: "Invalid mode. Use: incremental, reconcile, ops" });
   } catch (e) {
+    // Also persist to KV so the real error is visible from /api/ops-diag —
+    // Vercel's log view for this project has not been showing console/error
+    // output for this route, only the external API call trace, so a 500
+    // here was otherwise a dead end for debugging (Aug 5).
+    try {
+      await kvSet("backbone_last_sync_error", {
+        message: e.message,
+        stack: (e.stack || "").slice(0, 2000),
+        at: new Date().toISOString(),
+        mode: req.query && req.query.mode,
+        chain: req.query && req.query.chain,
+      });
+    } catch (e2) { /* best-effort only, do not mask the original error */ }
     return res.status(500).json({ error: e.message });
   }
 }
