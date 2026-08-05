@@ -158,6 +158,25 @@ export default async function handler(req, res) {
       await saveOpsPartial(acc);
       return false;
     }
+    // Capture what the child actually said, not just its status code. If the
+    // chain keeps reporting success but the ops payload never advances past
+    // the invoices phase, the two most likely explanations are (a) the
+    // response is being served from a cache instead of a live invocation, or
+    // (b) the child is a real invocation but its own chain-detection logic
+    // (viaCron/chainDepth) is rejecting itself for some reason not yet seen.
+    // Recording the body settles which, instead of guessing from the Vercel
+    // dashboard, which has not reliably shown chained invocations as
+    // separate log entries (Aug 5 debugging).
+    try {
+      const bodyText = await result.text();
+      acc.lastChainResponse = {
+        status: result.status,
+        cacheHeader: result.headers.get("x-vercel-cache") || result.headers.get("cache-control") || null,
+        bodySnippet: bodyText.slice(0, 500),
+      };
+    } catch (e) {
+      acc.lastChainResponse = { status: result.status, readError: String(e) };
+    }
     return true;
   }
 
