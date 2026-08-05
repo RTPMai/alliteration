@@ -59,6 +59,41 @@ t.test('vercel.json carries the daily ops cron', () => {
   t.equal(ops.schedule, '0 11 * * *', 'ops cron schedule changed');
 });
 
+/* ---- incremental roster refresh ------------------------------------------ */
+// New Printavo customers only reach the roster via mode=incremental (or a
+// manual Reconcile). Added Aug 5 so a new client shows up automatically
+// instead of waiting on someone to click Reconcile in Settings.
+
+t.test('vercel.json carries a daily incremental cron ahead of the ops cron', () => {
+  const crons = vercel.crons || [];
+  const inc = crons.find((c) => String(c.path).includes('printavo-sync') &&
+    String(c.path).includes('mode=incremental'));
+  const ops = crons.find((c) => String(c.path).includes('printavo-sync') &&
+    String(c.path).includes('mode=ops'));
+  t.assert(inc, 'the daily incremental cron is missing from vercel.json');
+  t.assert(ops, 'the daily ops cron is missing from vercel.json');
+  // Compare minute-of-day so "incremental runs before ops" holds regardless
+  // of the exact schedule chosen, not just today's specific times.
+  function minuteOfDay(schedule) {
+    const parts = String(schedule).trim().split(/\s+/);
+    return parseInt(parts[1], 10) * 60 + parseInt(parts[0], 10);
+  }
+  t.assert(minuteOfDay(inc.schedule) < minuteOfDay(ops.schedule),
+    'the incremental cron should run before the ops cron so a new client is on the roster before the dashboard slice refreshes');
+});
+
+t.test('incremental mode self-chains on a partial run, carrying its cursor', () => {
+  t.assert(sync.includes('continueIncremental'),
+    'incremental no longer self-chains; a big backlog could stop mid-run and wait for tomorrow');
+  t.assert(/continueIncremental\(cursor\)/.test(sync),
+    'continueIncremental must be called with the resume cursor — incremental does not persist a partial to KV between calls like ops does');
+});
+
+t.test('the ops and incremental chains share one continueChain implementation', () => {
+  t.assert(/function continueChain\(targetMode,\s*extraQS\)/.test(sync),
+    'continueOps and continueIncremental should share the same JSON/cache-verified chain logic, not duplicate it');
+});
+
 t.test('the sync accepts Vercel cron auth and fails closed', () => {
   t.assert(sync.includes('CRON_SECRET'), 'CRON_SECRET handling is gone from the sync');
   t.assert(sync.includes('safeEqual'),
