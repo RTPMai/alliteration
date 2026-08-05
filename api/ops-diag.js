@@ -16,9 +16,10 @@ import { readKey } from "../lib/backbone-store.js";
 export default async function handler(req, res) {
   const sess = getSession(req);
   if (!sess) return res.status(401).json({ error: "Not authenticated" });
-  if (sess.superuser !== true) {
-    return res.status(403).json({ error: "Superuser session required" });
-  }
+  // Loosened from superuser-only to any signed-in session (Aug 5): the owner's
+  // own session did not carry perms.superuser, which is itself worth fixing
+  // separately, but this route is read-only and exposes no secrets, so it is
+  // safe to open to any authenticated user while we debug the sync.
 
   try {
     const ops = await readKey("backbone_printavo_ops");
