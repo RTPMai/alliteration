@@ -110,29 +110,32 @@ export default async function handler(req, res) {
   const chainDepth  = parseInt(req.query.chain || "0", 10) || 0;
   const CHAIN_MAX   = 60;
   const shouldChain = (viaCron || chainDepth > 0) && chainDepth < CHAIN_MAX;
+  // Returns { chained, chainError, lastChainResponse } instead of touching
+  // `acc` directly. `acc` is declared inside the mode-specific block below,
+  // not in this outer scope, so continueOps() (defined here, in the outer
+  // handler scope) cannot see it — referencing acc.* from in here threw
+  // "acc is not defined" and crashed the whole run (Aug 5). Every call site
+  // now has acc in scope and merges this result into it themselves.
   async function continueOps() {
     if (!shouldChain) {
       // Either this wasn't a cron/chained invocation (a plain browser or
       // manual run, which intentionally does not self-chain — see comment
-      // above), or CHAIN_MAX was hit. Record which, so "chained:false" is
-      // never unexplained in stored state.
-      acc.chainError = viaCron
+      // above), or CHAIN_MAX was hit.
+      const why = viaCron
         ? "chain depth " + chainDepth + " reached CHAIN_MAX (" + CHAIN_MAX + ")"
         : "not a cron or chained invocation (viaCron=false, chainDepth=" + chainDepth + "); by design this run will not self-continue";
-      return false;
+      return { chained: false, chainError: why, lastChainResponse: null };
     }
     // The child is a fresh request with no cookie, so it authenticates with
     // whichever shared secret exists. Both fail closed on the receiving end.
     const authHeaders = secret ? { "x-sync-secret": secret }
       : (cronSecret ? { authorization: "Bearer " + cronSecret } : null);
     if (!authHeaders) {
-      // Neither SYNC_SECRET nor CRON_SECRET is set in this environment. This
-      // used to return false silently with no record anywhere of why —
-      // exactly the kind of gap that let a stuck chain look identical to a
-      // healthy one. Record it.
-      acc.chainError = "no SYNC_SECRET or CRON_SECRET available to authenticate the chained request";
-      await saveOpsPartial(acc);
-      return false;
+      return {
+        chained: false,
+        chainError: "no SYNC_SECRET or CRON_SECRET available to authenticate the chained request",
+        lastChainResponse: null,
+      };
     }
     const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
     // Actually wait for the next chunk to confirm it landed, instead of
@@ -166,29 +169,34 @@ export default async function handler(req, res) {
         clearTimeout(timeout);
       }
     } catch (e) {
-      acc.chainError = (e && e.message) ? e.message : String(e);
-      await saveOpsPartial(acc);
-      return false;
+      return {
+        chained: false,
+        chainError: (e && e.message) ? e.message : String(e),
+        lastChainResponse: null,
+      };
     }
     if (!result || typeof result.status !== "number" || result.status >= 400) {
-      acc.chainError = "chain fetch returned HTTP " + (result ? result.status : "no response");
-      await saveOpsPartial(acc);
-      return false;
+      return {
+        chained: false,
+        chainError: "chain fetch returned HTTP " + (result ? result.status : "no response"),
+        lastChainResponse: null,
+      };
     }
     // Capture what the child actually said, not just its status code. Guard
     // the body read separately: a failure here (e.g. an unusual stream state)
     // must not crash the whole run when the handoff itself already succeeded.
+    let lastChainResponse;
     try {
       const bodyText = await result.text();
-      acc.lastChainResponse = {
+      lastChainResponse = {
         status: result.status,
         cacheHeader: result.headers.get("x-vercel-cache") || result.headers.get("cache-control") || null,
         bodySnippet: bodyText.slice(0, 500),
       };
     } catch (e) {
-      acc.lastChainResponse = { status: result.status, readError: (e && e.message) ? e.message : String(e) };
+      lastChainResponse = { status: result.status, readError: (e && e.message) ? e.message : String(e) };
     }
-    return true;
+    return { chained: true, chainError: null, lastChainResponse };
   }
 
   // --- Printavo GraphQL --------------------------------------------------
@@ -2054,9 +2062,13 @@ export default async function handler(req, res) {
         if (acc.cursor) {
           // Ran out of time mid-quotes. Save and ask to continue.
           await saveOpsPartial(acc);
-          const chained = await continueOps();
+          const chainResult = await continueOps();
+          acc.chainError = chainResult.chainError;
+          acc.lastChainResponse = chainResult.lastChainResponse;
+          acc.lastChainAttempt = { phase: "quotes", chained: chainResult.chained, at: new Date().toISOString() };
+          await saveOpsPartial(acc);
           return res.status(200).json({
-            ok: true, mode: "ops", status: "partial", phase: "quotes", chained,
+            ok: true, mode: "ops", status: "partial", phase: "quotes", chained: chainResult.chained,
             quotesScanned: acc.quotesScanned, quotePages: acc.quotePages,
             nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
@@ -2162,15 +2174,17 @@ export default async function handler(req, res) {
         if (acc.cursor) {
           // Ran out of time mid-invoices. Save and ask to continue.
           await saveOpsPartial(acc);
-          const chained = await continueOps();
+          const chainResult = await continueOps();
           // Record the actual outcome even on the success path, so a run
           // that returns chained:true without chainError but never produces
           // a second log entry is provable from stored state instead of
           // guessed at (Aug 5 debugging).
-          acc.lastChainAttempt = { phase: "invoices", chained, at: new Date().toISOString() };
+          acc.chainError = chainResult.chainError;
+          acc.lastChainResponse = chainResult.lastChainResponse;
+          acc.lastChainAttempt = { phase: "invoices", chained: chainResult.chained, at: new Date().toISOString() };
           await saveOpsPartial(acc);
           return res.status(200).json({
-            ok: true, mode: "ops", status: "partial", phase: "invoices", chained,
+            ok: true, mode: "ops", status: "partial", phase: "invoices", chained: chainResult.chained,
             invoicePages: acc.invoicePages, outstandingSoFar: acc.outstanding.length,
             nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
           });
@@ -2254,9 +2268,13 @@ export default async function handler(req, res) {
           if (acc.cursor) {
             // Ran out of time mid-transactions. Save and ask to continue.
             await saveOpsPartial(acc);
-            const chained = await continueOps();
+            const chainResult = await continueOps();
+            acc.chainError = chainResult.chainError;
+            acc.lastChainResponse = chainResult.lastChainResponse;
+            acc.lastChainAttempt = { phase: "cash", chained: chainResult.chained, at: new Date().toISOString() };
+            await saveOpsPartial(acc);
             return res.status(200).json({
-              ok: true, mode: "ops", status: "partial", phase: "cash", chained,
+              ok: true, mode: "ops", status: "partial", phase: "cash", chained: chainResult.chained,
               cashPages: acc.cashPages, cashScanned: acc.cashScanned,
               nextUrl: `/api/printavo-sync?mode=ops${secretQS}`,
             });
