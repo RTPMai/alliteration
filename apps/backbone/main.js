@@ -5103,13 +5103,18 @@ export async function start(ctx) {
         '<span style="font-size:11px">Run <code>/api/printavo-sync?mode=ops</code> to populate monthly sales.</span></div>';
       return;
     }
-    // Cash collected per month (payment transactions, any order age) is the
-    // number the $280k goal means. The older salesByMonth series credited
-    // collections to the order's CREATION month, which structurally starved the
-    // current month (July 2026 showed $31k against real collections of $190k+).
-    // Fall back to it only when the sync could not read the transactions feed.
-    const usingCash = !!(opsData.cashByMonth && Object.keys(opsData.cashByMonth).length);
-    const series = usingCash ? opsData.cashByMonth : opsData.salesByMonth;
+    // Ryan's call (Aug 5): the goal is tracked by INVOICE date, not payment
+    // date. An invoice from January that gets fully paid in August counts
+    // toward January, not August. salesByMonth already works this way — it's
+    // rebuilt fresh on every ops run from each invoice's (total - outstanding)
+    // attributed to its own creation month, so a partially-paid invoice shows
+    // only what's actually been collected so far, and once it's fully paid
+    // the whole total lands under its invoice month automatically, no matter
+    // which month the last payment landed in.
+    // cashByMonth (payment-transaction date, any invoice age) is kept as a
+    // fallback only, for the rare case the transactions feed couldn't be read.
+    const usingInvoiceDate = !!(opsData.salesByMonth && Object.keys(opsData.salesByMonth).length);
+    const series = usingInvoiceDate ? opsData.salesByMonth : opsData.cashByMonth;
     const year = new Date().getFullYear();
     const curMonth = new Date().getMonth(); // 0-based; months elapsed so far
     const byMonth = [];
@@ -5174,9 +5179,9 @@ export async function start(ctx) {
         }).join("") +
       '</div>' +
       '<div class="help" style="margin-top:8px">' +
-        (usingCash
-          ? 'Cash collected per month, any order age. '
-          : '\u26A0 Showing the legacy collected-by-order-month series \u2014 the transactions feed was unavailable this sync. ') +
+        (usingInvoiceDate
+          ? 'Revenue by invoice date \u2014 an invoice counts toward the month it was created, once it\u2019s paid. '
+          : '\u26A0 Showing cash-by-payment-date \u2014 the invoice feed was unavailable this sync, so this may not match invoice month for partially-paid invoices. ') +
         'Line marks the $' + Math.round(MONTHLY_GOAL / 1000) + 'k monthly goal. Bars: <b style="color:var(--success)">green</b> met goal, <b style="color:var(--amber)">orange</b> within $' + Math.round(MONTH_CLOSE/1000) + 'k\u2013$' + Math.round(MONTHLY_GOAL/1000) + 'k, <b style="color:var(--danger)">red</b> under $' + Math.round(MONTH_CLOSE/1000) + 'k. Greyed months are still ahead.</div>' +
       opsStampHtml();
   }
