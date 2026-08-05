@@ -104,12 +104,29 @@ export default async function handler(req, res) {
   const CHAIN_MAX   = 60;
   const shouldChain = (viaCron || chainDepth > 0) && chainDepth < CHAIN_MAX;
   async function continueOps() {
-    if (!shouldChain) return false;
+    if (!shouldChain) {
+      // Either this wasn't a cron/chained invocation (a plain browser or
+      // manual run, which intentionally does not self-chain — see comment
+      // above), or CHAIN_MAX was hit. Record which, so "chained:false" is
+      // never unexplained in stored state.
+      acc.chainError = viaCron
+        ? "chain depth " + chainDepth + " reached CHAIN_MAX (" + CHAIN_MAX + ")"
+        : "not a cron or chained invocation (viaCron=false, chainDepth=" + chainDepth + "); by design this run will not self-continue";
+      return false;
+    }
     // The child is a fresh request with no cookie, so it authenticates with
     // whichever shared secret exists. Both fail closed on the receiving end.
     const authHeaders = secret ? { "x-sync-secret": secret }
       : (cronSecret ? { authorization: "Bearer " + cronSecret } : null);
-    if (!authHeaders) return false;
+    if (!authHeaders) {
+      // Neither SYNC_SECRET nor CRON_SECRET is set in this environment. This
+      // used to return false silently with no record anywhere of why —
+      // exactly the kind of gap that let a stuck chain look identical to a
+      // healthy one. Record it.
+      acc.chainError = "no SYNC_SECRET or CRON_SECRET available to authenticate the chained request";
+      await saveOpsPartial(acc);
+      return false;
+    }
     const url = `https://${req.headers.host}/api/printavo-sync?mode=ops&chain=${chainDepth + 1}`;
     // Actually wait for the next chunk to confirm it landed, instead of
     // racing a fire-and-forget fetch against a timer and treating "still in
@@ -2116,6 +2133,12 @@ export default async function handler(req, res) {
           // Ran out of time mid-invoices. Save and ask to continue.
           await saveOpsPartial(acc);
           const chained = await continueOps();
+          // Record the actual outcome even on the success path, so a run
+          // that returns chained:true without chainError but never produces
+          // a second log entry is provable from stored state instead of
+          // guessed at (Aug 5 debugging).
+          acc.lastChainAttempt = { phase: "invoices", chained, at: new Date().toISOString() };
+          await saveOpsPartial(acc);
           return res.status(200).json({
             ok: true, mode: "ops", status: "partial", phase: "invoices", chained,
             invoicePages: acc.invoicePages, outstandingSoFar: acc.outstanding.length,
