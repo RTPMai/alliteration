@@ -24,6 +24,7 @@ export default async function handler(req, res) {
   try {
     const ops = await readKey("backbone_printavo_ops");
     const partial = await readKey("backbone_ops_partial");
+    const lastError = await readKey("backbone_last_sync_error");
 
     return res.status(200).json({
       ok: true,
@@ -45,6 +46,7 @@ export default async function handler(req, res) {
             lastChainResponse: partial.lastChainResponse || null,
           }
         : null,
+      backbone_last_sync_error: lastError || null,
     });
   } catch (e) {
     return res.status(500).json({ error: e.message });
