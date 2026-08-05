@@ -45,7 +45,23 @@ function tierColor(tier) {
   if (t === "High-Value Growth Account") return { bg: "#DBEAFE", fg: "#1D4ED8", bar: "#2563EB" };
   if (t === "Standard Account") return { bg: "#FEF3C7", fg: "#92400E", bar: "#D97706" };
   if (t === "Transactional Account") return { bg: "#F3F4F6", fg: "#4B5563", bar: "#6B7280" };
+  // v2 triangulation schema (Aug 2026) tiers reuse the same four palettes.
+  // Disqualified and "Unscored - More Research Required" fall through to red.
+  if (/^Tier A/.test(t)) return { bg: "#EAF5EE", fg: "#1F6B3D", bar: "#3D9A5C" };
+  if (/^Tier B/.test(t)) return { bg: "#DBEAFE", fg: "#1D4ED8", bar: "#2563EB" };
+  if (/^Tier C/.test(t)) return { bg: "#FEF3C7", fg: "#92400E", bar: "#D97706" };
+  if (/^Tier D/.test(t)) return { bg: "#F3F4F6", fg: "#4B5563", bar: "#6B7280" };
   return { bg: "#FEE2E2", fg: "#991B1B", bar: "#DC2626" };
+}
+
+// v2 qualifications score /100 (0-10 per category); legacy score /50 (1-5).
+// Same tell-tales the app uses in apps/backbone/main.js — keep the two in step.
+function isV2Qual(q) {
+  if (!q) return false;
+  if (String(q.schema_version || "").charAt(0) === "2") return true;
+  const qs = q.qualification_scoring || {};
+  if (qs.scoring_status || Array.isArray(qs.unscored_categories)) return true;
+  return /^Tier [A-D]|^Disqualified|^Unscored/.test(String(qs.qualification_tier || ""));
 }
 
 function urgencyColor(u) {
@@ -87,14 +103,16 @@ function renderBrief(lead, am) {
   const scoreNum = typeof score === "number" ? score : null;
   const tier = qs.qualification_tier || "Unscored";
   const tc = tierColor(tier);
-  const pct = scoreNum == null ? 0 : Math.max(0, Math.min(100, (scoreNum / 50) * 100));
+  const denom = isV2Qual(q) ? 100 : 50;
+  const pct = scoreNum == null ? 0 : Math.max(0, Math.min(100, (scoreNum / denom) * 100));
 
   const action = next.recommended_action || exec.next_action || "";
   const urgency = next.urgency || exec.urgency || routing.follow_up_speed || "";
   const uc = urgencyColor(urgency);
 
-  // Rank out of 5 from the /50 score. An AM reads this before any words.
-  const stars = scoreNum == null ? 0 : Math.max(1, Math.round(scoreNum / 10));
+  // Rank out of 5 from the score. An AM reads this before any words.
+  // /50 divides by 10, /100 by 20 — 5 stars at full score on either schema.
+  const stars = scoreNum == null ? 0 : Math.min(5, Math.max(1, Math.round(scoreNum / (denom / 5))));
 
   const company = lead.company_name || co.company_name || "Lead";
   const website = clean(lead.website) || clean(co.website);
@@ -435,7 +453,7 @@ function renderBrief(lead, am) {
       '</a>'
     : '<div class="site-none">No website on file</div>') +
   '<div class="dial">' +
-    '<div class="dial-n">' + (scoreNum == null ? "\u2014" : scoreNum) + '<small>/50</small></div>' +
+    '<div class="dial-n">' + (scoreNum == null ? "\u2014" : scoreNum) + '<small>/' + denom + '</small></div>' +
     '<div class="dial-bar"><div class="dial-fill"></div></div>' +
     '<span class="tier">' + esc(tier) + '</span>' +
   '</div>' +
