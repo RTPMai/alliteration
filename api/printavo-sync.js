@@ -28,6 +28,13 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(200).end();
 
+  // Outer-scope start time, usable from continueOps() below regardless of
+  // which inner block (ops/reconcile/etc) is active. A per-mode `deadline`
+  // declared with `const` inside a nested block is NOT visible here — that
+  // gap caused a ReferenceError crash (500) the one time this function tried
+  // to read it (Aug 5 debugging).
+  const invocationStart = Date.now();
+
   const token   = process.env.PRINTAVO_API_TOKEN;
   const email   = process.env.PRINTAVO_EMAIL;
   const kvUrl   = process.env.KV_REST_API_URL;
@@ -136,13 +143,23 @@ export default async function handler(req, res) {
     // before ever knowing whether the request reached the network, reports
     // chained:true anyway, and no second invocation ever shows up in the
     // logs. This happened twice (Jul 27, and again Aug 3-4 despite the
-    // first "fix"). We give the handoff a real budget (8s, comfortably more
-    // than a cold start) and only report chained:true once we have an
-    // actual HTTP response confirming the child was accepted.
+    // first "fix").
+    //
+    // IMPORTANT: the child is not a quick handshake. It is a full ops run
+    // that does its own Printavo pagination before it ever sends a response,
+    // and can legitimately take minutes. An 8s budget was long enough to
+    // survive a cold start but not long enough to see the child's real
+    // response, so most attempts likely aborted mid-flight anyway — which
+    // can itself look like "no second log entry" depending on how Vercel
+    // records an aborted-by-caller request. Budget generously instead:
+    // slightly under this invocation's own remaining time, so we get a real
+    // answer without starving ourselves right up to the platform's hard
+    // kill.
+    const chainTimeoutMs = Math.max(5000, Math.min(90000, (invocationStart + 290000) - Date.now()));
     let result;
     try {
       const controller = new AbortController();
-      const timeout = setTimeout(function () { controller.abort(); }, 8000);
+      const timeout = setTimeout(function () { controller.abort(); }, chainTimeoutMs);
       try {
         result = await fetch(url, { headers: authHeaders, signal: controller.signal });
       } finally {
@@ -158,15 +175,9 @@ export default async function handler(req, res) {
       await saveOpsPartial(acc);
       return false;
     }
-    // Capture what the child actually said, not just its status code. If the
-    // chain keeps reporting success but the ops payload never advances past
-    // the invoices phase, the two most likely explanations are (a) the
-    // response is being served from a cache instead of a live invocation, or
-    // (b) the child is a real invocation but its own chain-detection logic
-    // (viaCron/chainDepth) is rejecting itself for some reason not yet seen.
-    // Recording the body settles which, instead of guessing from the Vercel
-    // dashboard, which has not reliably shown chained invocations as
-    // separate log entries (Aug 5 debugging).
+    // Capture what the child actually said, not just its status code. Guard
+    // the body read separately: a failure here (e.g. an unusual stream state)
+    // must not crash the whole run when the handoff itself already succeeded.
     try {
       const bodyText = await result.text();
       acc.lastChainResponse = {
@@ -175,7 +186,7 @@ export default async function handler(req, res) {
         bodySnippet: bodyText.slice(0, 500),
       };
     } catch (e) {
-      acc.lastChainResponse = { status: result.status, readError: String(e) };
+      acc.lastChainResponse = { status: result.status, readError: (e && e.message) ? e.message : String(e) };
     }
     return true;
   }
