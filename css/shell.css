@@ -1,3 +1,6 @@
+/* PUT IN: css/shell.css (REPLACES the current one) */
+/* (this banner line is for verification only, delete it after checking the path) */
+
 /* ==========================================================================
    alliteration. — shell chrome
    Header, left rail, sub-nav, view host, and the shared component vocabulary
@@ -72,7 +75,171 @@ body {
   flex: none;
 }
 
+/* Header bell + its dropdown panel. Sits between the crumb and the avatar so
+   it is reachable from every app — this is the ONLY place notifications live
+   now, there is no separate routed screen (see js/notifications-panel.js).
+   .bell-wrap is the positioning anchor for the panel, which is absolutely
+   placed under the bell rather than pushing header content around. */
+.bell-wrap { position: relative; }
+
+.bell {
+  position: relative;
+  width: 34px; height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  flex: none;
+}
+.bell:hover { background: var(--bg); color: var(--ink); }
+.bell:focus-visible { outline: 2px solid var(--notif); outline-offset: 2px; }
+.bell[aria-expanded="true"] { background: var(--bg); color: var(--ink); }
+
+/* Reuses the exact red-circle pattern already established by .rail-badge
+   (var(--danger)), so "a new notification" reads the same way everywhere
+   in the shell. */
+.bell-badge {
+  position: absolute;
+  top: 2px; right: 2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-pill);
+  background: var(--danger);
+  color: var(--on-accent);
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-grid;
+  place-items: center;
+  line-height: 1;
+  border: 2px solid var(--card);
+}
+
+.bell-panel {
+  position: absolute;
+  top: calc(100% + 10px);
+  right: 0;
+  width: 380px;
+  max-width: calc(100vw - 24px);
+  max-height: 70vh;
+  overflow-y: auto;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  z-index: 40;
+  padding: 14px;
+}
+
+.bp-hd { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.bp-hd h3 { font-size: 14px; font-weight: 800; }
+.bp-new {
+  border: 1px solid var(--notif); background: var(--notif); color: var(--on-accent);
+  font-family: inherit; font-size: 11.5px; font-weight: 700; padding: 5px 10px;
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.bp-new:hover { background: var(--notif-deep); border-color: var(--notif-deep); }
+
+.bp-tabs { display: flex; gap: 14px; border-bottom: 1px solid var(--line); margin-bottom: 10px; }
+.bp-tab {
+  border: none; background: none; font-family: inherit; font-size: 12.5px; font-weight: 700;
+  color: var(--muted); padding: 7px 1px; cursor: pointer; border-bottom: 2px solid transparent;
+}
+.bp-tab.active { color: var(--notif-deep); border-color: var(--notif); }
+.bp-tab .ct { color: var(--faint); font-weight: 600; margin-left: 3px; }
+
+.bp-msg { font-size: 12px; border-radius: var(--radius-sm); padding: 7px 9px; margin-bottom: 8px; }
+.bp-msg.err { background: var(--danger-tint); color: var(--danger); }
+.bp-msg.ok { background: var(--success-tint); color: var(--success-dk); }
+
+.bp-empty { padding: 22px 8px; text-align: center; color: var(--muted); font-size: 12.5px; }
+
+.bp-row {
+  border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 10px 11px; margin-bottom: 8px; display: flex; gap: 10px; align-items: flex-start;
+}
+.bp-row.done { opacity: .55; }
+.bp-check { margin-top: 2px; width: 16px; height: 16px; cursor: pointer; flex: none; }
+.bp-body { flex: 1; min-width: 0; }
+.bp-title { font-size: 13px; font-weight: 700; color: var(--ink); }
+.bp-title.done { text-decoration: line-through; }
+.bp-tags { display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px; }
+.bp-pill {
+  display: inline-flex; align-items: center; gap: 4px; font-size: 10px; font-weight: 700;
+  padding: 1px 8px; border-radius: var(--radius-pill); white-space: nowrap;
+}
+.bp-pill .sq { width: 5px; height: 5px; border-radius: 2px; flex: none; }
+.bp-pill.app {
+  background: color-mix(in srgb, var(--c) 12%, transparent); color: var(--c);
+  border: 1px solid color-mix(in srgb, var(--c) 26%, transparent);
+}
+.bp-pill.app .sq { background: var(--c); }
+.bp-pill.type-task { background: var(--bg); color: var(--muted); border: 1px solid var(--line); }
+.bp-pill.type-need { background: var(--warn-tint); color: var(--warn-dk); border: 1px solid var(--warn-tint); }
+.bp-pill.type-handoff { background: var(--notif-tint); color: var(--notif-deep); border: 1px solid transparent; }
+.bp-meta { font-size: 10.5px; color: var(--faint); margin-top: 5px; }
+.bp-del {
+  border: none; background: none; color: var(--faint); cursor: pointer; font-size: 11px;
+  padding: 2px 4px; flex: none;
+}
+.bp-del:hover { color: var(--danger); }
+
+.bp-form { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 12px; margin-bottom: 12px; }
+.bp-field { margin-bottom: 10px; }
+.bp-field label {
+  display: block; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 5px;
+}
+.bp-field input, .bp-field select {
+  width: 100%; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 7px 9px; font-family: inherit; font-size: 12.5px; color: var(--ink); background: var(--card);
+}
+.bp-field input:focus, .bp-field select:focus {
+  outline: none; border-color: var(--notif); box-shadow: 0 0 0 3px var(--notif-tint);
+}
+
+/* Multi-select toggle-pill grid — same pattern as Settings' role editor
+   (.app-toggle), reused here so picking apps/types for a notification feels
+   like picking apps for a role. aria-pressed carries the on/off state. */
+.bp-toggles { display: flex; gap: 5px; flex-wrap: wrap; }
+.bp-toggle {
+  display: inline-flex; align-items: center; gap: 5px; cursor: pointer;
+  font-size: 11px; font-weight: 600; padding: 4px 10px; border-radius: var(--radius-pill);
+  border: 1px solid var(--line); background: var(--card); color: var(--muted);
+  font-family: inherit; transition: .12s;
+}
+.bp-toggle .sq { width: 6px; height: 6px; border-radius: 2px; background: var(--line); flex: none; }
+.bp-toggle[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--c) 14%, transparent);
+  border-color: color-mix(in srgb, var(--c) 40%, transparent);
+  color: var(--c);
+}
+.bp-toggle[aria-pressed="true"] .sq { background: var(--c); }
+
+.bp-actions { display: flex; gap: 6px; margin-top: 4px; }
+.bp-btn {
+  border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  font-family: inherit; font-size: 11.5px; font-weight: 600; padding: 6px 11px;
+  border-radius: var(--radius-sm); cursor: pointer;
+}
+.bp-btn:hover { border-color: var(--muted); }
+.bp-btn.primary { background: var(--notif); border-color: var(--notif); color: var(--on-accent); }
+.bp-btn.primary:hover { background: var(--notif-deep); }
+.bp-btn:disabled { opacity: .5; cursor: default; }
+
+.bp-showdone {
+  font-size: 11px; color: var(--muted); margin: 6px 0 2px; display: flex; align-items: center; gap: 5px; cursor: pointer;
+}
+
+@media (max-width: 480px) {
+  .bell-panel { position: fixed; top: var(--shell-header-h); right: 8px; left: 8px; width: auto; max-width: none; }
+}
+
 .shell { display: flex; min-height: calc(100vh - var(--shell-header-h)); }
+
 
 /* ==========================================================================
    LEFT RAIL
