@@ -1,3 +1,6 @@
+// PUT IN: js/api.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * alliteration. — THE SEAM
  *
@@ -80,7 +83,10 @@ const LIVE_PREFIXES = [
   // for everything else, that removal isn't a route to un-list here.
   // The most sensitive app in the shell (pay, review notes), so every route
   // enforces scope server-side regardless of what MOCK shows on the client.
-  '/api/crewcore/'
+  '/api/crewcore/',
+  // Notifications: api/notifications.js is deployed. Shell-level, not one of
+  // the nine apps, same as auth/users/health above.
+  '/api/notifications'
 ];
 
 function isLive(path) {
@@ -195,7 +201,10 @@ export const ENDPOINTS = {
   ccStipend:       '/api/crewcore/stipend',
   ccReviews:       '/api/crewcore/reviews',
   ccHandbook:      '/api/crewcore/handbook',
-  ccSettings:      '/api/crewcore/settings'
+  ccSettings:      '/api/crewcore/settings',
+
+  // ---- Notifications (shell-level) ----
+  notifications:   '/api/notifications'
 };
 
 /* ------------------------------------------------------------------ *
@@ -516,7 +525,42 @@ const MOCK_DATA = {
       { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
     ]
   }),
-  [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true } })
+  [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true } }),
+
+  // Shape mirrors api/notifications.js. Two sample rows assigned to the mock
+  // user so the header bell has something to show while developing offline.
+  [ENDPOINTS.notifications]: (query) => {
+    if (query && query.people === '1') {
+      return {
+        people: [
+          { username: 'ryan', name: 'Ryan' }, { username: 'alexis', name: 'Alexis Davis' },
+          { username: 'hannah', name: 'Hannah Posey' }, { username: 'abby', name: 'Abby Penton' },
+          { username: 'jacob', name: 'Jacob Whitman' }, { username: 'megan', name: 'Megan Griffith' },
+          { username: 'amanda', name: 'Amanda Clark' }, { username: 'margo', name: 'Margo Niemeyer' }
+        ]
+      };
+    }
+    return {
+      notifications: [
+        {
+          id: 'N-00002', title: 'Reprint approval on hold', type: 'need',
+          appId: 'errorengine', status: 'open',
+          assignedTo: 'ryan', assignedToName: 'Ryan',
+          createdBy: 'margo', createdByName: 'Margo',
+          notes: 'Vendor defect on EE-00031, needs an OK before we reorder.',
+          dueDate: null, createdAt: new Date(Date.now() - 3 * 3600e3).toISOString(), doneAt: null
+        },
+        {
+          id: 'N-00001', title: 'Hand off Ankeny Miracle League quote', type: 'handoff',
+          appId: 'backbone', status: 'open',
+          assignedTo: 'ryan', assignedToName: 'Ryan',
+          createdBy: 'abby', createdByName: 'Abby',
+          notes: 'Heading out for the week, this one is close to closing.',
+          dueDate: null, createdAt: new Date(Date.now() - 26 * 3600e3).toISOString(), doneAt: null
+        }
+      ]
+    };
+  }
 };
 
 function mockResponse(path, method, body, query) {
