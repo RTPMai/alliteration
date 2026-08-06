@@ -10,10 +10,11 @@
 // close out or rewrite something they have no part in.
 //
 // GET    -> list all notifications, newest first. Query filters (all
-//           optional, ANDed): ?assignedTo=, ?createdBy=, ?appId=, ?type=,
-//           ?status=. ?people=1 instead returns { username, name } pairs for
-//           the assignee picker — open to any signed-in user, unlike
-//           GET /api/users which is admin-only.
+//           optional, ANDed): ?assignedTo=, ?createdBy=, ?appId= (matches if
+//           the notification's appIds array contains it), ?type= (same,
+//           against types), ?status=. ?people=1 instead returns
+//           { username, name } pairs for the assignee picker — open to any
+//           signed-in user, unlike GET /api/users which is admin-only.
 // POST   -> create, assigned to someone (defaults to the caller if
 //           assignedTo is omitted).
 // PATCH  -> edit one (?id= or body.id). Common case: { status: "done" }.
@@ -92,8 +93,8 @@ export default async function handler(req, res) {
       const q = req.query || {};
       if (q.assignedTo) list = list.filter((n) => n.assignedTo === String(q.assignedTo).toLowerCase());
       if (q.createdBy) list = list.filter((n) => n.createdBy === String(q.createdBy).toLowerCase());
-      if (q.appId) list = list.filter((n) => n.appId === q.appId);
-      if (q.type) list = list.filter((n) => n.type === q.type);
+      if (q.appId) list = list.filter((n) => Array.isArray(n.appIds) && n.appIds.includes(q.appId));
+      if (q.type) list = list.filter((n) => Array.isArray(n.types) && n.types.includes(q.type));
       if (q.status) list = list.filter((n) => n.status === q.status);
 
       return res.status(200).json({ notifications: list });
