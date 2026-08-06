@@ -1,3 +1,6 @@
+// PUT IN: js/shell.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * alliteration. — shell
  *
@@ -45,6 +48,8 @@ export async function boot() {
   el.mockBanner = document.getElementById('mockBanner');
   el.brandBtn   = document.getElementById('brandBtn');
   el.railToggle = document.getElementById('railToggle');
+  el.bellBtn    = document.getElementById('bellBtn');
+  el.bellBadge  = document.getElementById('bellBadge');
 
   // index.html paints a "Starting…" message before this module loads, so a
   // failed load leaves something readable instead of a blank page. Reaching
@@ -103,6 +108,7 @@ export async function boot() {
   state.perms = session.user.perms || {};
 
   renderAvatar();
+  initBell();
 
   const start = router.start();
   router.onRoute(handleRoute);
@@ -372,6 +378,49 @@ function renderAvatar() {
   el.avatar.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); signOut(); }
   });
+}
+
+/* ------------------------------------------------------------------ *
+ * NOTIFICATIONS BELL
+ *
+ * Header-level, visible from every app (unlike a rail badge, which only
+ * shows while its own app is open). Shows the count of OPEN notifications
+ * assigned to the signed-in user; clicking goes straight to the "Assigned to
+ * me" view. Refreshed on every navigation (cheap: one filtered GET) plus a
+ * standing interval so a badge left open on one screen still updates when a
+ * teammate assigns something new.
+ * ------------------------------------------------------------------ */
+
+const BELL_POLL_MS = 60000;
+let bellTimer = null;
+
+function initBell() {
+  if (!el.bellBtn || !canAccess(state.perms, 'notifications')) return;
+  el.bellBtn.hidden = false;
+
+  el.bellBtn.addEventListener('click', () => router.go('notifications', 'inbox'));
+
+  refreshBell();
+  if (bellTimer) clearInterval(bellTimer);
+  bellTimer = setInterval(refreshBell, BELL_POLL_MS);
+}
+
+async function refreshBell() {
+  if (!el.bellBadge || !state.user) return;
+  try {
+    const username = String(state.user.username || '').toLowerCase();
+    const data = await api.get(api.ENDPOINTS.notifications, { assignedTo: username, status: 'open' });
+    const n = Array.isArray(data && data.notifications) ? data.notifications.length : 0;
+    if (n > 0) {
+      el.bellBadge.textContent = n > 99 ? '99+' : String(n);
+      el.bellBadge.hidden = false;
+    } else {
+      el.bellBadge.hidden = true;
+    }
+  } catch (e) {
+    // Silent: a failed poll should not surface as an error banner over
+    // whatever app the person is actually looking at.
+  }
 }
 
 /* ------------------------------------------------------------------ *
