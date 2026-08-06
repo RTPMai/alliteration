@@ -427,21 +427,22 @@ td.credited { color: var(--success-dk); }
 .app:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 .app-hd { padding: 15px 20px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 11px; }
+/* Real brand artwork (assets/logos/<id>-mark.svg, assets/logos/<id>-wordmark.svg)
+   replaces the old CSS-built letter badge and w1/w2 text lockup. Each file
+   carries its own accent color baked into the art, so nothing here needs the
+   --mark variable anymore; it stays on the button element for the footer dot
+   and other chrome that still wants it. */
 .app-mark {
-  width: 30px; height: 30px;
+  width: 34px; height: 34px;
   flex: none;
-  border-radius: var(--radius-sm);
-  display: grid;
-  place-items: center;
-  font-weight: 800;
-  font-size: 13px;
-  color: var(--on-accent);
-  background: var(--mark, var(--muted));
+  display: block;
 }
-.app-name { font-size: 15.5px; font-weight: 800; letter-spacing: -.01em; line-height: 1; }
-.app-name .w1 { color: var(--mark, var(--muted)); }
-.app-name .w2 { color: var(--wordmark-ink); }
-.app-name .dot { color: var(--mark, var(--muted)); }
+.app-wordmark {
+  display: block;
+  height: 15px;
+  width: auto;
+  margin-bottom: 3px;
+}
 .app-role { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
 
 .app-body { padding: 14px 20px 16px; flex: 1; display: flex; flex-direction: column; gap: 10px; }
@@ -462,9 +463,8 @@ td.credited { color: var(--success-dk); }
 
 .app.planned { border-style: dashed; box-shadow: none; cursor: default; }
 .app.planned:hover { transform: none; box-shadow: none; }
-.app.planned .app-mark { background: var(--line); color: var(--muted); }
-.app.planned .app-name .w1,
-.app.planned .app-name .dot { color: var(--muted); }
+.app.planned .app-mark,
+.app.planned .app-wordmark { filter: grayscale(1); opacity: .5; }
 
 /* ==========================================================================
    SHELL-LEVEL STATES
