@@ -20,6 +20,7 @@ import { APPS, SHELL_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLa
 import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
+import { initBellPanel } from './notifications-panel.js';
 
 const HUB = 'hub';
 
@@ -50,6 +51,7 @@ export async function boot() {
   el.railToggle = document.getElementById('railToggle');
   el.bellBtn    = document.getElementById('bellBtn');
   el.bellBadge  = document.getElementById('bellBadge');
+  el.bellPanel  = document.getElementById('bellPanel');
 
   // index.html paints a "Starting…" message before this module loads, so a
   // failed load leaves something readable instead of a blank page. Reaching
@@ -383,44 +385,15 @@ function renderAvatar() {
 /* ------------------------------------------------------------------ *
  * NOTIFICATIONS BELL
  *
- * Header-level, visible from every app (unlike a rail badge, which only
- * shows while its own app is open). Shows the count of OPEN notifications
- * assigned to the signed-in user; clicking goes straight to the "Assigned to
- * me" view. Refreshed on every navigation (cheap: one filtered GET) plus a
- * standing interval so a badge left open on one screen still updates when a
- * teammate assigns something new.
+ * The entire notifications feature (badge, list, create form) lives in
+ * js/notifications-panel.js as a header dropdown — there is no routed
+ * screen or rail entry for it. initBell() here only wires the element
+ * references and hands off; see that module for the rest.
  * ------------------------------------------------------------------ */
 
-const BELL_POLL_MS = 60000;
-let bellTimer = null;
-
 function initBell() {
-  if (!el.bellBtn || !canAccess(state.perms, 'notifications')) return;
-  el.bellBtn.hidden = false;
-
-  el.bellBtn.addEventListener('click', () => router.go('notifications', 'inbox'));
-
-  refreshBell();
-  if (bellTimer) clearInterval(bellTimer);
-  bellTimer = setInterval(refreshBell, BELL_POLL_MS);
-}
-
-async function refreshBell() {
-  if (!el.bellBadge || !state.user) return;
-  try {
-    const username = String(state.user.username || '').toLowerCase();
-    const data = await api.get(api.ENDPOINTS.notifications, { assignedTo: username, status: 'open' });
-    const n = Array.isArray(data && data.notifications) ? data.notifications.length : 0;
-    if (n > 0) {
-      el.bellBadge.textContent = n > 99 ? '99+' : String(n);
-      el.bellBadge.hidden = false;
-    } else {
-      el.bellBadge.hidden = true;
-    }
-  } catch (e) {
-    // Silent: a failed poll should not surface as an error banner over
-    // whatever app the person is actually looking at.
-  }
+  if (!el.bellBtn || !el.bellPanel) return;
+  initBellPanel({ btn: el.bellBtn, badge: el.bellBadge, panel: el.bellPanel }, state.user);
 }
 
 /* ------------------------------------------------------------------ *
