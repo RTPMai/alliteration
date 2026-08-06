@@ -95,14 +95,11 @@ function appCard(app, sample) {
 
   return `
     <button class="app${planned ? ' planned' : ''}"
-            ${planned ? 'disabled' : `data-goto="${app.id}"`}
-            style="--mark:${app.accent}">
+            ${planned ? 'disabled' : `data-goto="${app.id}"`}>
       <div class="app-hd">
-        <div class="app-mark">${esc(app.letter || app.name[0])}</div>
+        <img class="app-mark" src="/assets/logos/${app.id}-mark.svg" alt="" width="34" height="34">
         <div>
-          <div class="app-name">
-            <span class="w1">${esc(app.w1 || app.name)}</span><span class="w2">${esc(app.w2 || '')}</span><span class="dot">.</span>
-          </div>
+          <img class="app-wordmark" src="/assets/logos/${app.id}-wordmark.svg" alt="${esc(app.name)}">
           <div class="app-role">${esc(app.role || app.blurb)}</div>
         </div>
       </div>
