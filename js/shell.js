@@ -49,7 +49,6 @@ export async function boot() {
   el.brandBtn   = document.getElementById('brandBtn');
   el.railToggle = document.getElementById('railToggle');
   el.bellBtn    = document.getElementById('bellBtn');
-  el.bellBadge  = document.getElementById('bellBadge');
 
   // index.html paints a "Starting…" message before this module loads, so a
   // failed load leaves something readable instead of a blank page. Reaching
@@ -313,13 +312,16 @@ function renderRail() {
       <span class="sq" style="--dot:var(--hub)"></span>All apps
     </button>`;
 
-  // Shell-level screens (Settings). Not apps, so they sit under Shared and
-  // gate on role rather than on a role's app grants.
+  // Shell-level screens (Settings, Notifications). Not apps, so they sit
+  // under Shared and gate on role rather than on a role's app grants.
+  // Reuses the same rail-badge count mechanism as the apps above it — the
+  // "eye-catching" spot Ryan asked for, rather than the small header bell
+  // badge alone.
   SHELL_APPS.filter((a) => canAccess(state.perms, a.id)).forEach((a) => {
     html += `
       <button class="rail-item${state.app === a.id ? ' active' : ''}"
               data-app="${a.id}" style="--dot:${a.accent}">
-        <span class="sq"></span>${escape(a.name)}
+        <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}
       </button>`;
   });
 
@@ -383,16 +385,17 @@ function renderAvatar() {
 /* ------------------------------------------------------------------ *
  * NOTIFICATIONS BELL
  *
- * Header-level, visible from every app (unlike a rail badge, which only
- * shows while its own app is open). Shows the count of OPEN notifications
- * assigned to the signed-in user; clicking goes straight to the "Assigned to
- * me" view. Refreshed on every navigation (cheap: one filtered GET) plus a
- * standing interval so a badge left open on one screen still updates when a
- * teammate assigns something new.
+ * Header-level, visible from every app. Clicking it navigates straight to
+ * the "Assigned to me" view. It no longer carries its own badge — the open
+ * count now shows on the rail item next to "Notifications" instead (Ryan's
+ * call: the small header number wasn't eye-catching enough). refreshBell()
+ * still owns the polling, it just calls setBadge('notifications', n) rather
+ * than painting a number onto the bell itself. Refreshed on every
+ * navigation (cheap: one filtered GET) plus a standing interval so the
+ * count updates even while parked on one screen.
  *
  * This briefly rendered its own dropdown (Aug 6) and got reverted the same
- * day — Ryan preferred Notifications stay a full routed screen. The bell
- * here is back to badge-plus-navigate only.
+ * day — Ryan preferred Notifications stay a full routed screen.
  * ------------------------------------------------------------------ */
 
 const BELL_POLL_MS = 60000;
@@ -410,17 +413,15 @@ function initBell() {
 }
 
 async function refreshBell() {
-  if (!el.bellBadge || !state.user) return;
+  if (!state.user) return;
   try {
     const username = String(state.user.username || '').toLowerCase();
     const data = await api.get(api.ENDPOINTS.notifications, { assignedTo: username, status: 'open' });
     const n = Array.isArray(data && data.notifications) ? data.notifications.length : 0;
-    if (n > 0) {
-      el.bellBadge.textContent = n > 99 ? '99+' : String(n);
-      el.bellBadge.hidden = false;
-    } else {
-      el.bellBadge.hidden = true;
-    }
+    // The count now lives on the rail item next to "Notifications" (Ryan's
+    // call: the small header badge wasn't eye-catching enough), reusing the
+    // same rail-badge mechanism apps like ShopStock already use for counts.
+    setBadge('notifications', n);
   } catch (e) {
     // Silent: a failed poll should not surface as an error banner over
     // whatever app the person is actually looking at.
