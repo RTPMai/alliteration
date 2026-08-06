@@ -1,22 +1,31 @@
-// PUT IN: api/notifications.js (new)
+// PUT IN: api/notifications.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
 // api/notifications.js — shell-level notifications / to-do list.
 //
 // Every signed-in user can create a notification and assign it to anyone
 // else (or themselves) — this is a team hand-off tool, not something gated
-// by role, unlike the apps in APPS. Only the assignee, the creator, or an
-// admin/superuser can change status, edit, or delete one, so people can't
-// close out or rewrite something they have no part in.
+// by role, unlike the apps in APPS. The assignee, the creator, or an
+// admin/superuser can change status, reassign, or edit one, so people can't
+// rewrite something they have no part in. The creator can always fix a
+// notification they made a mistake on (they're a "party" to it by
+// definition), and that fix is logged, not silent.
+//
+// Deleting is a step further: it's still restricted to the same
+// assignee/creator/admin set, but each role also carries a
+// can_delete_notifications flag (Settings > Roles, opt-out, default true)
+// that an admin can turn off for a role entirely. Admins/superusers always
+// bypass that flag — see callerCanDelete() below.
 //
 // Every notification carries an append-only `history` array: created,
-// reassigned, completed ("who clicked it off"), reopened, edited, or a
-// plain comment. This exists because Ryan described how Printavo's Tasks
-// get used in practice — a question gets asked by reassigning the task,
-// the answer comes back the same way — and wanted that back-and-forth
-// visible on the notification itself, not just the current assignee.
-// A PATCH's optional `message` field is never stored on its own; it is
-// folded into whichever history entry the patch produces.
+// reassigned, completed ("who clicked it off"), reopened, edited (with the
+// actual before/after values, not just which fields changed), or a plain
+// comment. This exists because Ryan described how Printavo's Tasks get used
+// in practice — a question gets asked by reassigning the task, the answer
+// comes back the same way — and wanted that back-and-forth visible on the
+// notification itself, not just the current assignee. A PATCH's optional
+// `message` field is never stored on its own; it is folded into whichever
+// history entry the patch produces.
 //
 // GET    -> list all notifications, newest first. Query filters (all
 //           optional, ANDed): ?assignedTo=, ?createdBy=, ?appId= (matches if
@@ -54,6 +63,17 @@ async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
   const role = await getRole(user ? user.role : sess.role);
   return (role && role.data_scope === "all") || (user && user.superuser === true);
+}
+
+// Opt-out flag (default true): a role can turn OFF the ability for its
+// people to delete a notification they created or were assigned, without
+// touching the "who can act on this at all" isParty check above. Admins
+// always bypass this (see callerIsAdmin above) so there is no way to lock
+// an admin out of cleanup by mis-configuring a role.
+async function callerCanDelete(sess) {
+  const user = sess.username ? await getUser(sess.username) : null;
+  const role = await getRole(user ? user.role : sess.role);
+  return !role || role.can_delete_notifications !== false;
 }
 
 function parseBody(req) {
@@ -214,11 +234,16 @@ export default async function handler(req, res) {
 
       // Any other edit (title, types, appIds, dueDate) that ISN'T covered by
       // the two cases above still gets one summary entry, so nothing changes
-      // silently. Skipped when a reassignment/status entry already exists
-      // this call, since that entry's own message covers the "why."
+      // silently — this is what lets a creator who made a mistake fix it and
+      // have the fix itself be visible, not just the current state. Skipped
+      // when a reassignment/status entry already exists this call, since
+      // that entry's own message covers the "why." Each entry keeps the
+      // actual before/after values (not just field names) so the trail
+      // answers "what did it used to say," not only "something changed."
       const editedFields = ["title", "types", "appIds", "dueDate"].filter((f) => patch[f] !== undefined);
       if (editedFields.length && !entries.length) {
-        entries.push(historyEntry("edited", me, myName, { fields: editedFields, message: message || undefined }));
+        const changes = editedFields.map((f) => ({ field: f, from: existing[f], to: patch[f] }));
+        entries.push(historyEntry("edited", me, myName, { fields: editedFields, changes, message: message || undefined }));
       }
 
       if (!entries.length && message) {
@@ -241,8 +266,14 @@ export default async function handler(req, res) {
       if (!existing) return res.status(404).json({ error: "Notification not found" });
 
       const isParty = existing.assignedTo === me || existing.createdBy === me;
-      if (!isParty && !(await callerIsAdmin(sess))) {
-        return res.status(403).json({ error: "Only the assignee, the creator, or an admin can delete this" });
+      const admin = await callerIsAdmin(sess);
+      if (!admin) {
+        if (!isParty) {
+          return res.status(403).json({ error: "Only the assignee, the creator, or an admin can delete this" });
+        }
+        if (!(await callerCanDelete(sess))) {
+          return res.status(403).json({ error: "Your role does not allow deleting notifications. Ask an admin." });
+        }
       }
 
       const removed = await deleteNotification(id);
