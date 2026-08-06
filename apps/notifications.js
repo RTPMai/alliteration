@@ -5,16 +5,29 @@
  * Notifications — shell-level to-do / hand-off list.
  *
  * Lives in the SHELL, same reasoning as Settings: this is not one app's
- * data, it spans all of them, so it does not belong inside BackBone or any
- * other single app. Every signed-in employee can open this (unlike
- * Settings, which is admin-only) — see js/registry.js SHELL_APPS.
+ * data, it spans all of them. Every signed-in employee can open this
+ * (unlike Settings, which is admin-only) — see js/registry.js SHELL_APPS.
+ *
+ * Reverted back to a routed screen (Aug 6) after a same-day detour through
+ * a header-dropdown panel — Ryan preferred the full page. The header bell
+ * (js/shell.js) still shows the open-count badge and navigates here.
  *
  * Two views, both driven off one fetch:
  *   inbox -> notifications ASSIGNED TO the signed-in user
  *   sent  -> notifications CREATED BY the signed-in user
  *
- * The header bell (js/shell.js) shows the open count for "inbox" from
- * anywhere in the shell; this screen is where you actually work the list.
+ * The create form's App and Type pickers are the same multi-select
+ * toggle-pill pattern as Settings' role editor (.app-toggle there, .nt-toggle
+ * here) — both fields take more than one selection, per Ryan's ask. There is
+ * no notes field on creation.
+ *
+ * Every notification also carries a `history` log (who created it, every
+ * reassignment, who marked it done, edits, plain comments) — the Printavo
+ * Tasks pattern Ryan described: a question gets asked by reassigning with a
+ * message, the answer comes back the same way, and both hops stay visible
+ * here rather than only the current assignee showing. Reassigning is done
+ * from this screen with an optional message; api/notifications.js turns
+ * that into a history entry.
  */
 
 import { ENDPOINTS } from '../js/api.js';
@@ -53,6 +66,25 @@ function relTime(iso) {
   if (h < 24) return h + 'h ago';
   const d = Math.round(h / 24);
   return d + (d === 1 ? ' day ago' : ' days ago');
+}
+
+function historyLine(e) {
+  switch (e.action) {
+    case 'created':
+      return e.byName + ' created this, assigned to ' + (e.toName || e.to);
+    case 'reassigned':
+      return e.byName + ' reassigned from ' + (e.fromName || e.from) + ' to ' + (e.toName || e.to);
+    case 'completed':
+      return e.byName + ' marked this done';
+    case 'reopened':
+      return e.byName + ' reopened this';
+    case 'edited':
+      return e.byName + ' edited ' + (Array.isArray(e.fields) ? e.fields.join(', ') : 'this');
+    case 'comment':
+      return e.byName + ' commented';
+    default:
+      return e.byName + ' updated this';
+  }
 }
 
 export default {
@@ -94,7 +126,6 @@ export default {
     background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
     padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow-card);
   }
-  .nt-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
   .nt-field{margin-bottom:12px}
   .nt-field label{
     display:block;font-size:11px;font-weight:700;letter-spacing:.05em;
@@ -105,16 +136,35 @@ export default {
     padding:9px 11px;font-family:inherit;font-size:13.5px;color:var(--ink);
     background:var(--card);
   }
-  .nt-field textarea{resize:vertical;min-height:60px}
+  .nt-field textarea{resize:vertical;min-height:50px}
   .nt-field input:focus,.nt-field select:focus,.nt-field textarea:focus{
     outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint);
   }
 
+  /* Multi-select toggle-pill grid — same pattern as Settings' role editor
+     (.app-toggle), reused here so picking apps/types for a notification
+     feels like picking apps for a role. aria-pressed carries on/off state. */
+  .nt-toggles{display:flex;gap:6px;flex-wrap:wrap}
+  .nt-toggle{
+    display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+    font-size:11.5px;font-weight:600;padding:5px 12px;border-radius:var(--radius-pill);
+    border:1px solid var(--line);background:var(--card);color:var(--muted);
+    font-family:inherit;transition:.12s;
+  }
+  .nt-toggle .sq{width:7px;height:7px;border-radius:2px;background:var(--line);flex:none}
+  .nt-toggle[aria-pressed="true"]{
+    background:color-mix(in srgb, var(--c) 14%, transparent);
+    border-color:color-mix(in srgb, var(--c) 40%, transparent);
+    color:var(--c);
+  }
+  .nt-toggle[aria-pressed="true"] .sq{background:var(--c)}
+
   .nt-card{
     background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-    padding:14px 16px;margin-bottom:10px;display:flex;gap:12px;align-items:flex-start;
+    padding:14px 16px;margin-bottom:10px;
   }
-  .nt-card.done{opacity:.55}
+  .nt-card.done{opacity:.6}
+  .nt-card-top{display:flex;gap:12px;align-items:flex-start}
   .nt-check{margin-top:2px;width:17px;height:17px;cursor:pointer;flex:none}
   .nt-body{flex:1;min-width:0}
   .nt-title{font-size:14px;font-weight:700;color:var(--ink)}
@@ -132,15 +182,25 @@ export default {
   .nt-pill.app .sq{background:var(--c)}
   .nt-pill.type-task{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
   .nt-pill.type-need{background:var(--warn-tint);color:var(--warn-dk);border:1px solid var(--warn-tint)}
-  .nt-pill.type-handoff{background:var(--accent-tint);color:var(--tier-a);border:1px solid transparent}
+  .nt-pill.type-handoff{background:var(--accent-tint);color:var(--accent-deep);border:1px solid transparent}
   .nt-meta{font-size:11.5px;color:var(--faint);margin-top:6px}
-  .nt-notes{font-size:12.5px;color:var(--muted);margin-top:6px;line-height:1.5}
-  .nt-actions{display:flex;gap:6px;flex:none}
+  .nt-actions{display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end}
+
+  .nt-sub{border-top:1px solid var(--line-soft);margin-top:11px;padding-top:10px}
+  .nt-reassign{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px}
+  .nt-reassign select{flex:1;min-width:140px}
+  .nt-reassign input{flex:2;min-width:180px}
+
+  .nt-hist{margin-top:8px}
+  .nt-hist-row{font-size:11.5px;color:var(--muted);padding:5px 0;border-top:1px solid var(--line-soft)}
+  .nt-hist-row:first-child{border-top:none}
+  .nt-hist-when{color:var(--faint);margin-left:5px}
+  .nt-hist-msg{color:var(--ink);margin-top:2px;font-style:italic}
 
   .nt-empty{padding:32px 20px;text-align:center;color:var(--muted);font-size:13px}
   .nt-showdone{font-size:12px;color:var(--muted);margin:10px 0 4px;display:flex;align-items:center;gap:6px;cursor:pointer}
 
-  @media (max-width:640px){ .nt-grid{grid-template-columns:1fr} }
+  @media (max-width:640px){ .nt-reassign{flex-direction:column;align-items:stretch} }
   `,
 
   template: `
@@ -176,6 +236,12 @@ export default {
     let people = [];
     let tab = 'inbox';
     let showDone = false;
+    let formTypes = new Set();
+    let formApps = new Set();
+    // Per-card UI state that should NOT reset on every re-render: which
+    // card has its reassign form or history log expanded.
+    const openReassign = new Set();
+    const openHistory = new Set();
 
     const me = String(ctx.user && ctx.user.username || '').toLowerCase();
 
@@ -218,27 +284,75 @@ export default {
       return 'nt-pill type-' + (t === 'handoff' ? 'handoff' : t === 'need' ? 'need' : 'task');
     }
 
+    function toggleHtml(items, selectedSet, dataAttr) {
+      return items.map((it) => {
+        const on = selectedSet.has(it.id);
+        return '<button type="button" class="nt-toggle" style="--c:' + esc(it.accent) + '"' +
+          ' data-' + dataAttr + '="' + esc(it.id) + '" aria-pressed="' + on + '">' +
+          '<span class="sq"></span>' + esc(it.name) +
+        '</button>';
+      }).join('');
+    }
+
+    function historyHtml(n) {
+      const hist = Array.isArray(n.history) ? n.history.slice().reverse() : [];
+      if (!hist.length) return '<div class="nt-hist"><div class="nt-hist-row">No history yet.</div></div>';
+      return '<div class="nt-hist">' + hist.map((e) =>
+        '<div class="nt-hist-row">' + esc(historyLine(e)) +
+          '<span class="nt-hist-when">' + esc(relTime(e.at)) + '</span>' +
+          (e.message ? '<div class="nt-hist-msg">\u201c' + esc(e.message) + '\u201d</div>' : '') +
+        '</div>'
+      ).join('') + '</div>';
+    }
+
+    function reassignHtml(n) {
+      return '<div class="nt-reassign">' +
+        '<select data-reassign-who="' + esc(n.id) + '">' +
+          people.map((p) => '<option value="' + esc(p.username) + '"' +
+            (p.username === n.assignedTo ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') +
+        '</select>' +
+        '<input type="text" data-reassign-msg="' + esc(n.id) + '" maxlength="500" placeholder="Optional message (e.g. a question for them)">' +
+        '<button class="nt-btn small primary" data-reassign-save="' + esc(n.id) + '">Reassign</button>' +
+      '</div>';
+    }
+
     function cardHtml(n) {
-      const app = appMeta(n.appId);
+      const app0 = appMeta((n.appIds || [])[0]);
       const done = n.status === 'done';
       const who = tab === 'inbox'
         ? 'From ' + esc(n.createdByName || n.createdBy)
         : 'To ' + esc(n.assignedToName || n.assignedTo);
-      const due = n.dueDate ? ' · ' + esc(fmtDue(n.dueDate)) : '';
+      const due = n.dueDate ? ' \u00b7 ' + esc(fmtDue(n.dueDate)) : '';
+      const completed = done && n.doneByName ? ' \u00b7 Completed by ' + esc(n.doneByName) : '';
+      const appPills = (n.appIds || []).map((id) => {
+        const a = appMeta(id);
+        return '<span class="nt-pill app" style="--c:' + esc(a.accent) + '"><span class="sq"></span>' + esc(a.name) + '</span>';
+      }).join('');
+      const typePills = (n.types || []).map((t) =>
+        '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('');
+      const histCount = Array.isArray(n.history) ? n.history.length : 0;
+      const showReassign = openReassign.has(n.id);
+      const showHistory = openHistory.has(n.id);
+
       return '' +
         '<div class="nt-card' + (done ? ' done' : '') + '" data-id="' + esc(n.id) + '">' +
-          '<input type="checkbox" class="nt-check" data-toggle="' + esc(n.id) + '"' +
-            (done ? ' checked' : '') + ' title="' + (done ? 'Mark open' : 'Mark done') + '">' +
-          '<div class="nt-body">' +
-            '<div class="nt-title' + (done ? ' done' : '') + '">' + esc(n.title) + '</div>' +
-            '<div class="nt-tags">' +
-              '<span class="nt-pill app" style="--c:' + esc(app.accent) + '"><span class="sq"></span>' + esc(app.name) + '</span>' +
-              '<span class="' + typePillClass(n.type) + '">' + esc(typeLabel(n.type)) + '</span>' +
+          '<div class="nt-card-top">' +
+            '<input type="checkbox" class="nt-check" data-toggle="' + esc(n.id) + '"' +
+              (done ? ' checked' : '') + ' title="' + (done ? 'Reopen' : 'Mark done') + '">' +
+            '<div class="nt-body">' +
+              '<div class="nt-title' + (done ? ' done' : '') + '">' + esc(n.title) + '</div>' +
+              '<div class="nt-tags">' + appPills + typePills + '</div>' +
+              '<div class="nt-meta">' + who + due + completed + ' \u00b7 ' + esc(relTime(n.createdAt)) + '</div>' +
             '</div>' +
-            (n.notes ? '<div class="nt-notes">' + esc(n.notes) + '</div>' : '') +
-            '<div class="nt-meta">' + who + due + ' · ' + esc(relTime(n.createdAt)) + '</div>' +
+            '<div class="nt-actions">' +
+              '<button class="nt-btn small" data-reassign-toggle="' + esc(n.id) + '">Reassign</button>' +
+              '<button class="nt-btn small" data-history-toggle="' + esc(n.id) + '">History' +
+                (histCount ? ' (' + histCount + ')' : '') + '</button>' +
+              '<button class="nt-btn small danger" data-del="' + esc(n.id) + '">Delete</button>' +
+            '</div>' +
           '</div>' +
-          '<div class="nt-actions"><button class="nt-btn small danger" data-del="' + esc(n.id) + '">Delete</button></div>' +
+          (showReassign ? '<div class="nt-sub">' + reassignHtml(n) + '</div>' : '') +
+          (showHistory ? '<div class="nt-sub">' + historyHtml(n) + '</div>' : '') +
         '</div>';
     }
 
@@ -262,12 +376,7 @@ export default {
         .map(cardHtml).join('');
     }
 
-    function fillFormSelects() {
-      const appSel = $('#nf-app');
-      if (appSel) {
-        appSel.innerHTML = APP_OPTIONS.map((a) =>
-          '<option value="' + esc(a.id) + '">' + esc(a.name) + '</option>').join('');
-      }
+    function fillWhoSelect() {
       const whoSel = $('#nf-who');
       if (whoSel) {
         whoSel.innerHTML = people.map((p) =>
@@ -278,59 +387,32 @@ export default {
     }
 
     function openForm() {
+      const typeItems = TYPES.map((t) => ({ id: t.value, name: t.label, accent: 'var(--accent)' }));
       $('#ntForm').innerHTML =
         '<div class="nt-form">' +
-          '<div class="nt-grid">' +
-            '<div class="nt-field" style="grid-column:1/-1"><label for="nf-title">Title</label>' +
-              '<input id="nf-title" maxlength="200" placeholder="What needs to happen"></div>' +
-            '<div class="nt-field"><label for="nf-type">Type</label><select id="nf-type">' +
-              TYPES.map((t) => '<option value="' + t.value + '">' + t.label + '</option>').join('') +
-            '</select></div>' +
-            '<div class="nt-field"><label for="nf-app">App</label><select id="nf-app"></select></div>' +
-            '<div class="nt-field"><label for="nf-who">Assign to</label><select id="nf-who"></select></div>' +
-            '<div class="nt-field"><label for="nf-due">Due date (optional)</label><input id="nf-due" type="date"></div>' +
-            '<div class="nt-field" style="grid-column:1/-1"><label for="nf-notes">Notes (optional)</label>' +
-              '<textarea id="nf-notes" maxlength="2000"></textarea></div>' +
-          '</div>' +
+          '<div class="nt-field"><label>Title</label>' +
+            '<input id="nf-title" maxlength="200" placeholder="What needs to happen"></div>' +
+          '<div class="nt-field"><label>Type (select one or more)</label><div class="nt-toggles" id="nfTypeToggles">' +
+            toggleHtml(typeItems, formTypes, 'type') +
+          '</div></div>' +
+          '<div class="nt-field"><label>App (select one or more)</label><div class="nt-toggles" id="nfAppToggles">' +
+            toggleHtml(APP_OPTIONS, formApps, 'app') +
+          '</div></div>' +
+          '<div class="nt-field"><label>Assign to</label><select id="nf-who"></select></div>' +
+          '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
           '<button class="nt-btn primary" id="nf-save">Create</button>' +
           '<button class="nt-btn" id="nf-cancel">Cancel</button>' +
         '</div>';
 
-      fillFormSelects();
+      fillWhoSelect();
       $('#ntForm').style.display = 'block';
       $('#nf-title').focus();
-
-      $('#nf-cancel').addEventListener('click', () => { $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = ''; });
-
-      $('#nf-save').addEventListener('click', async () => {
-        const btn = $('#nf-save');
-        btn.disabled = true;
-        say('');
-        try {
-          await ctx.api.post(ENDPOINTS.notifications, {
-            title: $('#nf-title').value.trim(),
-            type: $('#nf-type').value,
-            appId: $('#nf-app').value,
-            assignedTo: $('#nf-who').value,
-            dueDate: $('#nf-due').value || null,
-            notes: $('#nf-notes').value.trim()
-          });
-          $('#ntForm').style.display = 'none';
-          $('#ntForm').innerHTML = '';
-          say('Notification created.', 'ok');
-          await load();
-        } catch (e) {
-          say(e.message || 'Could not create that notification', 'err');
-        } finally {
-          btn.disabled = false;
-        }
-      });
     }
 
     $('#ntNewBtn').addEventListener('click', () => {
-      const open = $('#ntForm').style.display !== 'none';
-      if (open) { $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = ''; }
-      else openForm();
+      const isOpen = $('#ntForm').style.display !== 'none';
+      if (isOpen) { $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = ''; }
+      else { formTypes = new Set(); formApps = new Set(); openForm(); }
     });
 
     root.querySelectorAll('.nt-tab').forEach((b) => {
@@ -342,12 +424,109 @@ export default {
       });
     });
 
-    $('#ntShowDone').addEventListener('change', (e) => {
-      showDone = e.target.checked;
-      renderList();
+    // ---- Delegated events on the root: covers the form, the toggle-pill
+    // pickers, and every card, including ones re-rendered after a reload. ----
+
+    root.addEventListener('click', async (e) => {
+      const typeToggle = e.target.closest('[data-type]');
+      if (typeToggle && typeToggle.closest('#nfTypeToggles')) {
+        const v = typeToggle.dataset.type;
+        if (formTypes.has(v)) formTypes.delete(v); else formTypes.add(v);
+        typeToggle.setAttribute('aria-pressed', formTypes.has(v));
+        return;
+      }
+
+      const appToggle = e.target.closest('[data-app]');
+      if (appToggle && appToggle.closest('#nfAppToggles')) {
+        const v = appToggle.dataset.app;
+        if (formApps.has(v)) formApps.delete(v); else formApps.add(v);
+        appToggle.setAttribute('aria-pressed', formApps.has(v));
+        return;
+      }
+
+      if (e.target.id === 'nf-cancel') {
+        $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = '';
+        return;
+      }
+
+      if (e.target.id === 'nf-save') {
+        const btn = e.target;
+        btn.disabled = true;
+        say('');
+        try {
+          await ctx.api.post(ENDPOINTS.notifications, {
+            title: $('#nf-title').value.trim(),
+            types: [...formTypes],
+            appIds: [...formApps],
+            assignedTo: $('#nf-who').value,
+            dueDate: $('#nf-due').value || null
+          });
+          $('#ntForm').style.display = 'none';
+          $('#ntForm').innerHTML = '';
+          say('Notification created.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not create that notification', 'err');
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      const reassignToggle = e.target.closest('[data-reassign-toggle]');
+      if (reassignToggle) {
+        const id = reassignToggle.dataset.reassignToggle;
+        if (openReassign.has(id)) openReassign.delete(id); else openReassign.add(id);
+        renderList();
+        return;
+      }
+
+      const historyToggle = e.target.closest('[data-history-toggle]');
+      if (historyToggle) {
+        const id = historyToggle.dataset.historyToggle;
+        if (openHistory.has(id)) openHistory.delete(id); else openHistory.add(id);
+        renderList();
+        return;
+      }
+
+      const reassignSave = e.target.closest('[data-reassign-save]');
+      if (reassignSave) {
+        const id = reassignSave.dataset.reassignSave;
+        const who = root.querySelector('[data-reassign-who="' + id + '"]').value;
+        const msg = root.querySelector('[data-reassign-msg="' + id + '"]').value.trim();
+        reassignSave.disabled = true;
+        try {
+          await ctx.api.patch(ENDPOINTS.notifications,
+            { assignedTo: who, message: msg || undefined }, { query: { id } });
+          openReassign.delete(id);
+          say('Reassigned.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not reassign that notification', 'err');
+          reassignSave.disabled = false;
+        }
+        return;
+      }
+
+      const del = e.target.closest('[data-del]');
+      if (del) {
+        if (!confirm('Delete this notification?')) return;
+        try {
+          await ctx.api.del(ENDPOINTS.notifications, { query: { id: del.dataset.del } });
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not delete that notification', 'err');
+        }
+      }
     });
 
     root.addEventListener('change', async (e) => {
+      if (e.target.id === 'ntShowDone') {
+        showDone = e.target.checked;
+        renderList();
+        return;
+      }
+
       const box = e.target.closest('[data-toggle]');
       if (!box) return;
       const id = box.dataset.toggle;
@@ -360,19 +539,6 @@ export default {
         say(err.message || 'Could not update that notification', 'err');
         box.disabled = false;
         box.checked = !box.checked;
-      }
-    });
-
-    root.addEventListener('click', async (e) => {
-      const del = e.target.closest('[data-del]');
-      if (!del) return;
-      const id = del.dataset.del;
-      if (!confirm('Delete this notification?')) return;
-      try {
-        await ctx.api.del(ENDPOINTS.notifications, { query: { id } });
-        await load();
-      } catch (err) {
-        say(err.message || 'Could not delete that notification', 'err');
       }
     });
 
