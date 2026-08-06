@@ -1,3 +1,6 @@
+// PUT IN: js/registry.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * alliteration. — app registry
  *
@@ -246,6 +249,21 @@ export const SHELL_APPS = [
     views: [['accounts', 'Accounts']],
     defaultView: 'accounts',
     adminOnly: true,
+    shellLevel: true,
+    stub: false
+  },
+  {
+    id: 'notifications',
+    name: 'Notifications',
+    role: 'Assigned tasks, needs, hand offs',
+    accent: '#3E4C59',
+    views: [['inbox', 'Assigned to me'], ['sent', 'I assigned']],
+    defaultView: 'inbox',
+    // Not adminOnly: every signed-in employee uses this to assign and track
+    // work across apps, same as everyone gets a Settings-level "who am I"
+    // but without the account-management gate. See js/registry.js canAccess():
+    // shell screens with adminOnly:false are open to any authenticated user.
+    adminOnly: false,
     shellLevel: true,
     stub: false
   }
