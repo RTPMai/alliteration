@@ -1,3 +1,6 @@
+/* PUT IN: css/tokens.css (REPLACES the current one) */
+/* (this banner line is for verification only, delete it after checking the path) */
+
 /* ==========================================================================
    alliteration. — design tokens
    THE ONLY PLACE COLORS AND DIMENSIONS ARE DEFINED.
@@ -194,6 +197,16 @@ body[data-app="settings"] {
   --accent:      #6B7684;
   --accent-deep: #55606D;
   --accent-tint: #EEF1F4;
+}
+
+/* Notifications is a shell-level screen like Settings, not one of the nine
+   apps, so it gets its own neutral slate rather than borrowing a real app's
+   brand color. Distinct from Settings' grey so the two shell screens don't
+   read as the same thing in the "Shared" rail section. */
+body[data-app="notifications"] {
+  --accent:      #3E4C59;
+  --accent-deep: #2F3B45;
+  --accent-tint: #EAECEF;
 }
 
 /* TravelTrack's accent matches its new logo mark (sampled #51A446 from the
