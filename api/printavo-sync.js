@@ -1,3 +1,4 @@
+// api/printavo-sync.js
 export const config = { maxDuration: 300 };
 
 import { getSession, safeEqual } from "../lib/session.js";
@@ -250,8 +251,26 @@ export default async function handler(req, res) {
 
   // Ops chain: resumes from its own persisted backbone_ops_partial, so the
   // child needs nothing extra on the URL.
+  //
+  // DISABLED (Aug 6, 2026): the function-calls-itself pattern in
+  // continueChain() reliably trips Vercel's own INFINITE_LOOP_DETECTED
+  // protection (HTTP 508) well before this app's CHAIN_MAX (60) is reached —
+  // the Aug 6 6 AM run died on the "cash" phase with "chain fetch returned
+  // HTTP 508". This is a platform-level guard against a serverless function
+  // repeatedly invoking its own route, and no amount of app-side chain-depth
+  // limiting avoids it, because it is Vercel counting the self-fetches, not
+  // this code. Ops mode now leans entirely on the frequent external cron
+  // ticks in vercel.json (every 10 min for ~2 hours after the 6 AM run) to
+  // resume backbone_ops_partial — each tick is a fresh, non-recursive
+  // invocation from Vercel's scheduler, so it never trips the loop guard.
+  // Kept as a same-signature no-op so the three ops call sites need no
+  // changes; the partial is already saved before this is called either way.
   async function continueOps() {
-    return continueChain("ops", "");
+    return {
+      chained: false,
+      chainError: "ops self-chain disabled by design (Aug 6, 2026) — relies on the next scheduled cron tick to resume the saved partial instead of self-invoking",
+      lastChainResponse: null,
+    };
   }
 
   // Incremental chain: incremental does NOT persist a partial to KV between
@@ -2048,6 +2067,32 @@ export default async function handler(req, res) {
       async function saveOpsPartial(a) {
         a.updatedAt = new Date().toISOString();
         await kvSet("backbone_ops_partial", a);
+      }
+      // Cheap short-circuit (Aug 6, 2026): now that ops mode is driven by a
+      // cron ticking every 10 minutes for ~2 hours (see vercel.json) instead
+      // of self-chaining, most of those ticks land AFTER the day's run has
+      // already finished. Without this check each one would still repeat the
+      // full Printavo pull. If there's no partial to resume and today's
+      // snapshot (Central time) is already complete, skip straight to a
+      // cheap response. &fresh=1 bypasses this to force a rebuild.
+      if (!acc && req.query.fresh !== "1" && req.query.fresh !== "true") {
+        try {
+          const existingOps = await kvGet("backbone_printavo_ops");
+          if (existingOps && existingOps.generatedAt) {
+            const centralDate = function (iso) {
+              return new Date(iso).toLocaleDateString("en-CA", { timeZone: "America/Chicago" });
+            };
+            if (centralDate(existingOps.generatedAt) === centralDate(nowIso)) {
+              return res.status(200).json({
+                ok: true, mode: "ops", status: "already-done-today",
+                generatedAt: existingOps.generatedAt,
+                note: "A complete ops run already finished today; skipped to avoid a redundant Printavo pull. Pass &fresh=1 to force a rebuild.",
+              });
+            }
+          }
+        } catch (e) {
+          // Best-effort only — never let this check block a real run.
+        }
       }
       if (!acc) {
         acc = {
