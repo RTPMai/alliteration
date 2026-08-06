@@ -77,9 +77,10 @@ body {
 
 /* Header bell. Sits between the crumb and the avatar so it is reachable
    from every app, not just when Notifications itself is open. Clicking it
-   navigates to Notifications (js/shell.js); the badge reuses the exact
-   red-circle pattern already established by .rail-badge (var(--danger)),
-   so "a new notification" reads the same way everywhere in the shell. */
+   navigates to Notifications (js/shell.js). No badge here anymore — the
+   open count moved to the rail item next to "Notifications" (.rail-badge,
+   same red-circle pattern other apps like ShopStock use), since the small
+   header number wasn't eye-catching enough. */
 .bell {
   position: relative;
   width: 34px; height: 34px;
@@ -94,23 +95,6 @@ body {
 }
 .bell:hover { background: var(--bg); color: var(--ink); }
 .bell:focus-visible { outline: 2px solid var(--notif); outline-offset: 2px; }
-
-.bell-badge {
-  position: absolute;
-  top: 2px; right: 2px;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: var(--radius-pill);
-  background: var(--danger);
-  color: var(--on-accent);
-  font-size: 10px;
-  font-weight: 700;
-  display: inline-grid;
-  place-items: center;
-  line-height: 1;
-  border: 2px solid var(--card);
-}
 
 .shell { display: flex; min-height: calc(100vh - var(--shell-header-h)); }
 
