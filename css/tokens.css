@@ -208,6 +208,17 @@ body[data-app="settings"] {
   --accent-tint: #EEF1F4;
 }
 
+/* Notifications is a shell-level screen like Settings, not one of the nine
+   apps, so it gets its own neutral slate rather than borrowing a real app's
+   brand color. Same slate as --notif below (kept in sync on purpose — the
+   header bell uses the fixed token since it has no data-app scope of its
+   own, this block themes the routed screen when it's the active app). */
+body[data-app="notifications"] {
+  --accent:      #3E4C59;
+  --accent-deep: #2F3B45;
+  --accent-tint: #EAECEF;
+}
+
 /* TravelTrack's accent matches its new logo mark (sampled #51A446 from the
    icon and wordmark). Note: this reads as effectively the same green as
    --hub (#52A246, the "All apps" landing view's own color) — the two are
