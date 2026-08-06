@@ -251,10 +251,27 @@ export const SHELL_APPS = [
     adminOnly: true,
     shellLevel: true,
     stub: false
+  },
+  {
+    id: 'notifications',
+    name: 'Notifications',
+    role: 'Assigned tasks, needs, hand offs',
+    accent: '#3E4C59',
+    views: [['inbox', 'Assigned to me'], ['sent', 'I assigned']],
+    defaultView: 'inbox',
+    // Not adminOnly: every signed-in employee uses this to assign and track
+    // work across apps. See js/registry.js canAccess(): shell screens with
+    // adminOnly:false are open to any authenticated user.
+    //
+    // This was briefly a header-dropdown-only panel (Aug 6) and got reverted
+    // back to a routed screen the same day — Ryan preferred the full page.
+    // The header bell (js/shell.js) still shows the open-count badge and
+    // still navigates here on click; it just doesn't render the list itself
+    // anymore.
+    adminOnly: false,
+    shellLevel: true,
+    stub: false
   }
-  // Notifications is NOT a routed screen — it lives entirely in the header
-  // bell's dropdown panel (js/notifications-panel.js), so it has no rail
-  // entry, no view, and no data-app theming block. See js/shell.js initBell().
 ];
 
 /* ------------------------------------------------------------------ *
