@@ -1,3 +1,6 @@
+// PUT IN: apps/settings.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * Settings — accounts and access.
  *
@@ -371,6 +374,11 @@ export default {
               // this flag existed must not silently gain list editing.
               '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="manage_lists"' +
                 (r.manage_lists === true ? ' checked' : '') + (locked ? ' disabled' : '') + '> Manage ErrorEngine lists</label>' +
+              // Opt-out (checked unless explicitly false), matching can_edit/
+              // can_export: everyone keeps the ability to delete their own
+              // notifications until an admin turns it off for a role.
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_delete_notifications"' +
+                (r.can_delete_notifications !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can delete notifications</label>' +
             '</div>' +
 
             (locked
