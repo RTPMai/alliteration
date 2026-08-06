@@ -219,51 +219,60 @@ body[data-app="notifications"] {
   --accent-tint: #EAECEF;
 }
 
-/* TravelTrack's accent matches its new logo mark (sampled #51A446 from the
-   icon and wordmark). Note: this reads as effectively the same green as
-   --hub (#52A246, the "All apps" landing view's own color) — the two are
-   1-2 units apart per channel, indistinguishable on screen. Deep/tint below
-   are shared with --hub-deep/--hub-tint rather than a fresh pair, since a
-   second near-identical green would just be noise. */
+/* TravelTrack's accent is the EXACT fill from the vector logo file
+   (assets/logos/traveltrack-mark.svg / -wordmark.svg), corrected Aug 2026
+   from an earlier hand-sampled #51A446. It is #52A246 — the same green as
+   --hub, the "All apps" landing view's own color, which is intentional:
+   both trace back to the same brand green. Deep/tint below are shared with
+   --hub-deep/--hub-tint rather than a fresh pair, since a second
+   near-identical green would just be noise. */
 body[data-app="traveltrack"] {
-  --accent:      #51A446;
-  --accent-deep: #3F8236;
-  --accent-tint: #EDF6EB;
+  --accent:      #52A246;
+  --accent-deep: #428238;
+  --accent-tint: #EFF7EE;
 }
 
-/* CrewCore's accent is RED, per the confirmed logo lineup (registry.js
-   accent field). An earlier pass shipped this block with #4A90E2, a blue
-   pulled from a draft mark before the logo was finalized; that blue is gone
-   from the shell now. Corrected Aug 3, 2026. */
+/* CrewCore's accent is RED, per the logo lineup. An earlier pass shipped
+   this block with #4A90E2 (blue, corrected Aug 3, 2026), then with #D61623
+   (a red, but not quite the right one). This is now the EXACT fill from
+   the vector logo file (assets/logos/crewcore-mark.svg / -wordmark.svg),
+   corrected Aug 2026: #E1251B. */
 body[data-app="crewcore"] {
-  --accent:      #D61623;
-  --accent-deep: #AB111C;
-  --accent-tint: #FAE7E9;
+  --accent:      #E1251B;
+  --accent-deep: #B41E16;
+  --accent-tint: #FCEBEA;
 }
 
-/* MailMe's accent matches its confirmed logo mark: a slate/muted blue,
-   deliberately quieter than BackBone's or CrewCore's blues since this app
-   sends real email once built. */
+/* MailMe's accent is the EXACT fill from the vector logo file
+   (assets/logos/mailme-mark.svg / -wordmark.svg), corrected Aug 2026 from
+   an earlier hand-sampled #85A0C6: a slate/muted blue, deliberately
+   quieter than BackBone's or CrewCore's colors since this app sends real
+   email once built. */
 body[data-app="mailme"] {
-  --accent:      #85A0C6;
-  --accent-deep: #6A809E;
-  --accent-tint: #F2F5F9;
+  --accent:      #8CA9CC;
+  --accent-deep: #7087A3;
+  --accent-tint: #F5F7FA;
 }
 
-/* TeleTally's accent matches its confirmed logo mark: dark navy/indigo,
-   with the periwinkle-blue icon staying in the SVG mark itself rather than
-   becoming a second CSS variable (only one accent per app in this scale). */
+/* TeleTally's accent is the EXACT fill from the vector logo file
+   (assets/logos/teletally-mark.svg / -wordmark.svg), corrected Aug 2026
+   from an earlier hand-sampled #282A72 (too indigo/purple) — the logo's
+   dark navy is #000B8C. The periwinkle-blue circle stays in the SVG mark
+   itself rather than becoming a second CSS variable (only one accent per
+   app in this scale). */
 body[data-app="teletally"] {
-  --accent:      #282A72;
-  --accent-deep: #20215B;
-  --accent-tint: #E9E9F0;
+  --accent:      #000B8C;
+  --accent-deep: #000970;
+  --accent-tint: #E8E9F5;
 }
 
-/* WebsiteWidget's accent matches its confirmed logo mark: teal. */
+/* WebsiteWidget's accent is the EXACT fill from the vector logo file
+   (assets/logos/websitewidget-mark.svg / -wordmark.svg): teal, corrected
+   Aug 2026 from an earlier hand-sampled #02A9A5. */
 body[data-app="websitewidget"] {
-  --accent:      #02A9A5;
-  --accent-deep: #018784;
-  --accent-tint: #E5F6F6;
+  --accent:      #00BBB4;
+  --accent-deep: #009690;
+  --accent-tint: #E8F9F8;
 }
 
 /* ==========================================================================
