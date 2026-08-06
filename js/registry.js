@@ -114,7 +114,7 @@ export const APPS = [
     w1: 'Travel', w2: 'Track', letter: 'T',
     role: 'What it costs to get there',
     blurb: 'Trips, expenses, mileage, miles.',
-    accent: '#51A446',           // display only (rail dot / app mark); tokens.css owns theming — matches the new logo
+    accent: '#52A246',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #51A446, off by a hair)
     // Rebuilt from scratch (Base44 had no api/ to point at). Trip Form and
     // Expense Form aren't separate rail entries: both live inline on their
     // list view, matching how the rest of the shell handles create panels.
@@ -138,7 +138,7 @@ export const APPS = [
     w1: 'Crew', w2: 'Core', letter: 'C',
     role: 'Who does the work',
     blurb: 'Employees, stipends, reviews, handbook.',
-    accent: '#D61623',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    accent: '#E1251B',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #D61623, a different red)
     // Real build, Aug 2026. Roster and Reviews render an admin view (roles
     // with data_scope "all", or any superuser account) and a self-serve "my
     // profile" view otherwise, from the SAME route — see apps/crewcore.js.
@@ -175,7 +175,7 @@ export const APPS = [
     w1: 'Mail', w2: 'Me', letter: 'M',
     role: 'What we tell them',
     blurb: 'Email marketing, opens, clicks, unsubscribes.',
-    accent: '#85A0C6',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    accent: '#8CA9CC',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #85A0C6, close but off)
     views: [
       ['dashboard', 'Dashboard'],
       ['contacts', 'Contacts'],
@@ -203,7 +203,7 @@ export const APPS = [
     w1: 'Tele', w2: 'Tally', letter: 'T',
     role: 'Who is on the phone',
     blurb: 'Call activity, answering performance, team usage.',
-    accent: '#282A72',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    accent: '#000B8C',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #282A72, too indigo/purple — the logo is a darker true navy)
     views: [
       ['dashboard', 'Dashboard']
     ],
@@ -220,7 +220,7 @@ export const APPS = [
     w1: 'Website', w2: 'Widget', letter: 'W',
     role: 'What the website is doing',
     blurb: 'Visitors, traffic sources, site performance for PMApparel.com.',
-    accent: '#02A9A5',           // display only (rail dot / app mark); tokens.css owns theming — confirmed logo color
+    accent: '#00BBB4',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #02A9A5, close but off)
     views: [
       ['dashboard', 'Dashboard']
     ],
