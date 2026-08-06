@@ -1,3 +1,6 @@
+<!-- PUT IN: index.html (REPLACES the current one, at repo root) -->
+<!-- (this banner line is for verification only, delete it after checking the path) -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -35,6 +38,13 @@
   </div>
   <div class="hdr-right">
     <div class="crumb" id="crumb"></div>
+    <button class="bell" id="bellBtn" aria-label="Notifications" title="Notifications" hidden>
+      <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 7a5 5 0 0 1 10 0c0 3.4 1 4.6 1.5 5.2a.6.6 0 0 1-.5 1H3a.6.6 0 0 1-.5-1C3 11.6 4 10.4 4 7Z"/>
+        <path d="M7.2 15.8a1.8 1.8 0 0 0 3.6 0"/>
+      </svg>
+      <span class="bell-badge" id="bellBadge" hidden>0</span>
+    </button>
     <div class="avatar" id="avatar"></div>
   </div>
 </header>
