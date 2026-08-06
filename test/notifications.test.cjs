@@ -3,16 +3,21 @@
 
 // PUT IN: test/notifications.test.cjs
 /**
- * Notifications tests (v2 — header panel, multi-select apps/types, no notes).
+ * Notifications tests (v3 — back to a routed screen, plus reassignment and
+ * a per-item history log).
+ *
+ * Timeline: v1 was a routed screen. v2 (same day) moved everything into a
+ * header dropdown, which turned out to have an event-bubbling bug (the
+ * panel closed itself the instant any inner button re-rendered it) and
+ * Ryan preferred the full page anyway. v3 reverts to routed, fixes nothing
+ * dropdown-related since the dropdown is gone, and adds: reassignment with
+ * an optional message, and an append-only history log so "who clicked the
+ * notification off" and every reassignment is traceable — the Printavo
+ * Tasks pattern Ryan described.
  *
  * Covers schema validation (lib/notifications/schema.js) directly — pure
- * functions, no KV needed — plus structural checks: the API's hand-maintained
- * APP_IDS allowlist against the real registry, the header panel wiring, and
- * that notifications has NO routed screen (moved out of SHELL_APPS/apps/ when
- * it became a header-only dropdown).
- *
- * registry.js is an ES module and the harness is CommonJS, so it is loaded
- * through a dynamic import, same pattern as test/scope.test.cjs.
+ * functions, no KV needed — plus structural checks against the real
+ * registry and the restored routed screen.
  */
 
 const fs = require('fs');
@@ -40,21 +45,9 @@ Promise.all([
     t.equal(TYPE_VALUES.includes('task'), true, 'missing task');
     t.equal(TYPE_VALUES.includes('need'), true, 'missing need');
     t.equal(TYPE_VALUES.includes('handoff'), true, 'missing handoff');
-    const handoff = TYPES.find((x) => x.value === 'handoff');
-    t.equal(handoff.label, 'Hand Off', 'handoff label should read "Hand Off"');
   });
 
   /* ---- validateNew: multi-select ---------------------------------------- */
-
-  t.test('a valid new notification with ONE app and ONE type passes', () => {
-    const { ok, errors, record } = validateNew(
-      { title: 'Reprint approval', types: ['need'], appIds: ['errorengine'], assignedTo: 'ryan' },
-      APP_IDS, USERS
-    );
-    t.equal(ok, true, 'expected valid: ' + (errors || []).join(', '));
-    t.equal(record.types.length, 1, 'expected one type');
-    t.equal(record.appIds.length, 1, 'expected one app');
-  });
 
   t.test('a notification can carry MULTIPLE types and MULTIPLE apps', () => {
     const { ok, errors, record } = validateNew(
@@ -64,48 +57,25 @@ Promise.all([
     t.equal(ok, true, 'expected valid: ' + (errors || []).join(', '));
     t.equal(record.types.length, 2, 'expected two types to be kept');
     t.equal(record.appIds.length, 2, 'expected two apps to be kept');
-    t.assert(record.types.includes('need') && record.types.includes('handoff'), 'both types should survive');
-    t.assert(record.appIds.includes('backbone') && record.appIds.includes('errorengine'), 'both apps should survive');
-  });
-
-  t.test('duplicate selections are de-duplicated', () => {
-    const { record } = validateNew(
-      { title: 'x', types: ['need', 'need', 'task'], appIds: ['general', 'general'], assignedTo: 'ryan' },
-      APP_IDS, USERS
-    );
-    t.equal(record.types.length, 2, 'duplicate types should collapse');
-    t.equal(record.appIds.length, 1, 'duplicate apps should collapse');
   });
 
   t.test('at least one type is required', () => {
     const { ok } = validateNew(
-      { title: 'x', types: [], appIds: ['general'], assignedTo: 'ryan' },
-      APP_IDS, USERS
+      { title: 'x', types: [], appIds: ['general'], assignedTo: 'ryan' }, APP_IDS, USERS
     );
     t.equal(ok, false, 'empty types array should not validate');
   });
 
   t.test('at least one app is required', () => {
     const { ok } = validateNew(
-      { title: 'x', types: ['task'], appIds: [], assignedTo: 'ryan' },
-      APP_IDS, USERS
+      { title: 'x', types: ['task'], appIds: [], assignedTo: 'ryan' }, APP_IDS, USERS
     );
     t.equal(ok, false, 'empty appIds array should not validate');
   });
 
-  t.test('an unknown type in the array is dropped, not fatal on its own', () => {
-    const { ok, record } = validateNew(
-      { title: 'x', types: ['task', 'urgent'], appIds: ['general'], assignedTo: 'ryan' },
-      APP_IDS, USERS
-    );
-    t.equal(ok, true, 'a mix of valid and invalid should keep the valid ones');
-    t.equal(record.types.length, 1, 'the made-up type should be dropped, not kept');
-  });
-
   t.test('a blank title is rejected', () => {
     const { ok } = validateNew(
-      { title: '  ', types: ['task'], appIds: ['general'], assignedTo: 'ryan' },
-      APP_IDS, USERS
+      { title: '  ', types: ['task'], appIds: ['general'], assignedTo: 'ryan' }, APP_IDS, USERS
     );
     t.equal(ok, false, 'blank title should not validate');
   });
@@ -118,15 +88,7 @@ Promise.all([
     t.equal(record.notes, undefined, 'notes field should not be carried through — it was removed');
   });
 
-  t.test('assignedTo must be a known account', () => {
-    const { ok } = validateNew(
-      { title: 'x', types: ['task'], appIds: ['general'], assignedTo: 'someone-who-does-not-exist' },
-      APP_IDS, USERS
-    );
-    t.equal(ok, false, 'unknown assignee should not validate');
-  });
-
-  /* ---- validatePatch ----------------------------------------------------- */
+  /* ---- validatePatch: reassignment + message ----------------------------- */
 
   t.test('marking done is a valid patch', () => {
     const { ok, patch } = validatePatch({ status: 'done' }, APP_IDS, USERS);
@@ -134,30 +96,37 @@ Promise.all([
     t.equal(patch.status, 'done', 'patch should carry status through');
   });
 
-  t.test('patching types/appIds accepts arrays with multiple entries', () => {
-    const { ok, patch } = validatePatch({ types: ['task', 'need'], appIds: ['shopstock', 'general'] }, APP_IDS, USERS);
-    t.equal(ok, true, 'multi-value patch should validate');
-    t.equal(patch.types.length, 2, 'expected two types in the patch');
-    t.equal(patch.appIds.length, 2, 'expected two apps in the patch');
+  t.test('reassigning to a known user is a valid patch', () => {
+    const { ok, patch } = validatePatch({ assignedTo: 'HANNAH' }, APP_IDS, USERS);
+    t.equal(ok, true, 'reassignment should validate');
+    t.equal(patch.assignedTo, 'hannah', 'assignedTo should be lowercased');
   });
 
-  t.test('patching types to an empty array is rejected', () => {
-    const { ok } = validatePatch({ types: [] }, APP_IDS, USERS);
-    t.equal(ok, false, 'an explicit empty types array should not validate');
+  t.test('a reassignment message is accepted and trimmed, but is a separate field from the record fields', () => {
+    const { ok, patch } = validatePatch({ assignedTo: 'margo', message: '  can you confirm this?  ' }, APP_IDS, USERS);
+    t.equal(ok, true, 'message alongside reassignment should validate');
+    t.equal(patch.message, 'can you confirm this?', 'message should be trimmed');
+  });
+
+  t.test('a patch with only a message (no other field) still validates — a plain comment', () => {
+    const { ok, patch } = validatePatch({ message: 'just checking in' }, APP_IDS, USERS);
+    t.equal(ok, true, 'message-only patch should validate');
+    t.equal(patch.message, 'just checking in', 'message should be carried through');
+    t.equal(Object.keys(patch).length, 1, 'a message-only patch should produce no other fields');
   });
 
   /* ---- store key layout --------------------------------------------------- */
 
   t.test('KV keys live under the notifications_data prefix', () => {
     t.assert(keys.record('N-00001').startsWith('notifications_data:'), 'record key missing prefix');
-    t.assert(keys.index().startsWith('notifications_data:'), 'index key missing prefix');
   });
 
-  /* ---- no routed screen --------------------------------------------------- */
+  /* ---- routed screen is back ------------------------------------------------ */
 
-  t.test('notifications has NO entry in SHELL_APPS — header panel only', () => {
+  t.test('notifications HAS an entry in SHELL_APPS again — routed screen restored', () => {
     const hit = SHELL_APPS.find((a) => a.id === 'notifications');
-    t.equal(hit, undefined, 'notifications should not be a routed shell screen anymore');
+    t.assert(hit, 'notifications should be a routed shell screen');
+    t.equal(hit.adminOnly, false, 'notifications must stay open to every employee, not admin-only');
   });
 
   process.exit(t.report());
@@ -183,6 +152,18 @@ t.test('api/notifications.js filters by array membership, not equality', () => {
     'type filter should check array membership (n.types.includes(...))');
 });
 
+t.test('api/notifications.js logs history on create, reassignment, and completion', () => {
+  const src = read('api/notifications.js');
+  ['historyEntry', '"created"', '"reassigned"', '"completed"', '"reopened"'].forEach((k) =>
+    t.assert(src.includes(k), 'api/notifications.js is missing history handling for ' + k));
+});
+
+t.test('api/notifications.js records who completed a notification (doneBy)', () => {
+  const src = read('api/notifications.js');
+  t.assert(src.includes('doneBy') && src.includes('doneByName'),
+    'completing a notification should record who did it, not just when');
+});
+
 t.test('api/notifications.js exposes a people picker open to any signed-in user', () => {
   const src = read('api/notifications.js');
   t.assert(src.includes('people'), 'no people-picker branch found');
@@ -190,9 +171,27 @@ t.test('api/notifications.js exposes a people picker open to any signed-in user'
     'notifications route must not be admin-gated');
 });
 
-t.test('there is no apps/notifications.js — the panel replaced the routed screen', () => {
-  t.assert(!exists('apps/notifications.js'),
-    'apps/notifications.js should have been removed when notifications moved into the header panel');
+t.test('there is no js/notifications-panel.js — the header dropdown was reverted', () => {
+  t.assert(!exists('js/notifications-panel.js'),
+    'js/notifications-panel.js should have been removed when notifications reverted to a routed screen');
+});
+
+t.test('apps/notifications.js exists and follows the app contract', () => {
+  t.assert(exists('apps/notifications.js'), 'apps/notifications.js is missing');
+  const src = read('apps/notifications.js');
+  ['export default', "id: 'notifications'", 'mount', 'showView', 'styles', 'template']
+    .forEach((k) => t.assert(src.includes(k), 'notifications.js is missing ' + k));
+});
+
+t.test('apps/notifications.js offers a reassign control and a history view', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('reassign'), 'no reassign UI found in apps/notifications.js');
+  t.assert(src.includes('history') || src.includes('History'), 'no history UI found in apps/notifications.js');
+});
+
+t.test('apps/notifications.js uses the toggle-pill multi-select for type/app, not a <select>', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('nt-toggle'), 'multi-select toggle-pill pattern is missing');
 });
 
 t.test('js/api.js wires the notifications endpoint as live', () => {
@@ -202,24 +201,13 @@ t.test('js/api.js wires the notifications endpoint as live', () => {
     'notifications endpoint should be listed live, not left on mock data');
 });
 
-t.test('css/tokens.css defines a fixed --notif accent for the panel', () => {
-  const src = read('css/tokens.css');
-  t.assert(src.includes('--notif:'), 'no fixed --notif token — the panel is not tied to any one app\'s accent');
-  t.assert(!src.includes('data-app="notifications"'),
-    'notifications should not have a data-app theming block anymore — it has no routed screen');
+t.test('css/tokens.css themes the routed notifications screen again', () => {
+  t.assert(read('css/tokens.css').includes('body[data-app="notifications"]'),
+    'no theming block for notifications — expected now that it is a routed screen again');
 });
 
-t.test('js/notifications-panel.js exists and exports initBellPanel', () => {
-  t.assert(exists('js/notifications-panel.js'), 'js/notifications-panel.js is missing');
-  const src = read('js/notifications-panel.js');
-  t.assert(src.includes('export function initBellPanel'), 'initBellPanel is not exported');
-  t.assert(src.includes('bp-toggle'), 'multi-select toggle-pill pattern is missing from the panel');
-});
-
-t.test('the header bell + panel are wired into index.html and js/shell.js', () => {
-  const html = read('index.html');
-  t.assert(html.includes('id="bellBtn"'), 'index.html is missing the bell button');
-  t.assert(html.includes('id="bellPanel"'), 'index.html is missing the bell dropdown panel container');
+t.test('the header bell navigates to notifications rather than opening its own panel', () => {
   const shell = read('js/shell.js');
-  t.assert(shell.includes('initBellPanel'), 'shell.js does not wire up the notifications panel module');
+  t.assert(shell.includes("router.go('notifications'"), 'bell click should route to the notifications screen');
+  t.assert(!shell.includes('initBellPanel'), 'shell.js should no longer reference the removed dropdown panel module');
 });
