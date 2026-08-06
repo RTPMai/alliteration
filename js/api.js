@@ -543,19 +543,17 @@ const MOCK_DATA = {
     return {
       notifications: [
         {
-          id: 'N-00002', title: 'Reprint approval on hold', type: 'need',
-          appId: 'errorengine', status: 'open',
+          id: 'N-00002', title: 'Reprint approval on hold', types: ['need'],
+          appIds: ['errorengine'], status: 'open',
           assignedTo: 'ryan', assignedToName: 'Ryan',
           createdBy: 'margo', createdByName: 'Margo',
-          notes: 'Vendor defect on EE-00031, needs an OK before we reorder.',
           dueDate: null, createdAt: new Date(Date.now() - 3 * 3600e3).toISOString(), doneAt: null
         },
         {
-          id: 'N-00001', title: 'Hand off Ankeny Miracle League quote', type: 'handoff',
-          appId: 'backbone', status: 'open',
+          id: 'N-00001', title: 'Hand off Ankeny Miracle League quote', types: ['handoff'],
+          appIds: ['backbone'], status: 'open',
           assignedTo: 'ryan', assignedToName: 'Ryan',
           createdBy: 'abby', createdByName: 'Abby',
-          notes: 'Heading out for the week, this one is close to closing.',
           dueDate: null, createdAt: new Date(Date.now() - 26 * 3600e3).toISOString(), doneAt: null
         }
       ]
