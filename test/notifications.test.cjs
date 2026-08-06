@@ -1,4 +1,4 @@
-// PUT IN: test/notifications.test.cjs (new)
+// PUT IN: test/notifications.test.cjs (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
 // PUT IN: test/notifications.test.cjs
@@ -31,9 +31,11 @@ const exists = (p) => fs.existsSync(path.join(ROOT, p));
 Promise.all([
   import(path.join(ROOT, 'lib/notifications/schema.js')),
   import(path.join(ROOT, 'js/registry.js')),
-]).then(([schema, reg]) => {
+  import(path.join(ROOT, 'lib/users.js')),
+]).then(([schema, reg, users]) => {
   const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, keys } = schema;
   const { APPS, SHELL_APPS } = reg;
+  const { DEFAULT_ROLES, permsFor } = users;
 
   const APP_IDS = APPS.map((a) => a.id).concat([GENERAL_APP]);
   const USERS = ['ryan', 'hannah', 'margo'];
@@ -129,9 +131,25 @@ Promise.all([
     t.equal(hit.adminOnly, false, 'notifications must stay open to every employee, not admin-only');
   });
 
+  /* ---- per-role delete permission -------------------------------------- */
+
+  t.test('every default role declares can_delete_notifications', () => {
+    Object.entries(DEFAULT_ROLES).forEach(([key, role]) => {
+      t.assert(role.can_delete_notifications !== undefined,
+        'role "' + key + '" has no can_delete_notifications value set');
+    });
+  });
+
+  t.test('can_delete_notifications defaults true when a role omits it (opt-out, not opt-in)', async () => {
+    // A role saved before this flag existed (no can_delete_notifications key
+    // at all) must not silently lose delete access.
+    const fakeRole = { name: 'legacy', apps: ['backbone'] };
+    t.equal(fakeRole.can_delete_notifications !== false, true, 'an absent flag must not read as false');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
-  console.log('  FAIL could not import lib/notifications/schema.js or js/registry.js: ' + e.message);
+  console.log('  FAIL could not import lib/notifications/schema.js, js/registry.js, or lib/users.js: ' + e.message);
   process.exit(1);
 });
 
@@ -210,4 +228,40 @@ t.test('the header bell navigates to notifications rather than opening its own p
   const shell = read('js/shell.js');
   t.assert(shell.includes("router.go('notifications'"), 'bell click should route to the notifications screen');
   t.assert(!shell.includes('initBellPanel'), 'shell.js should no longer reference the removed dropdown panel module');
+});
+
+t.test('api/notifications.js gates DELETE on a per-role flag, not just isParty', () => {
+  const src = read('api/notifications.js');
+  t.assert(src.includes('callerCanDelete'), 'DELETE should check a role-level delete permission');
+  t.assert(src.includes('can_delete_notifications'), 'the role flag name should appear in api/notifications.js');
+});
+
+t.test('api/notifications.js records before/after values on an edit, not just field names', () => {
+  const src = read('api/notifications.js');
+  t.assert(src.includes('changes'), 'edited history entries should carry a changes array with from/to values');
+});
+
+t.test('lib/users.js exposes can_delete_notifications via permsFor, opt-out by default', () => {
+  const src = read('lib/users.js');
+  t.assert(/can_delete_notifications:\s*role\.can_delete_notifications\s*!==\s*false/.test(src),
+    'permsFor should default can_delete_notifications to true unless a role explicitly sets it false');
+});
+
+t.test('apps/settings.js exposes a "Can delete notifications" role toggle', () => {
+  const src = read('apps/settings.js');
+  t.assert(src.includes('data-flag="can_delete_notifications"'),
+    'the role editor is missing the delete-notifications checkbox');
+});
+
+t.test('apps/notifications.js offers an Edit control that anyone who can act on the item can use', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('data-edit-toggle') && src.includes('data-edit-save'),
+    'no Edit control found in apps/notifications.js');
+  t.assert(src.includes('data-edit-title') && src.includes('data-edit-due'),
+    'edit form should let title and due date be changed, not just type/app');
+});
+
+t.test('apps/notifications.js hides the Delete button when the role does not allow it', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('canDelete'), 'no client-side canDelete gate found for the Delete button');
 });
