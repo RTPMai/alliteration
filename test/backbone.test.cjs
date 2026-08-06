@@ -1,3 +1,4 @@
+// test/backbone.test.cjs
 /**
  * BackBone contract tests.
  *
@@ -65,12 +66,18 @@ t.test('the ops data stamp exists and turns amber past 48 hours', () => {
 
 /* ---- cron --------------------------------------------------------------- */
 
-t.test('vercel.json carries the daily ops cron', () => {
+t.test('vercel.json carries the ops cron, ticking repeatedly to cover self-chain removal', () => {
+  // Aug 6, 2026: continueOps() stopped self-fetching (it reliably tripped
+  // Vercel's own INFINITE_LOOP_DETECTED / HTTP 508 well before CHAIN_MAX).
+  // Ops mode now relies on this cron ticking every 10 minutes for a ~2 hour
+  // window after the original 6 AM slot to resume backbone_ops_partial,
+  // since each tick is an external, non-recursive invocation.
   const crons = vercel.crons || [];
   const ops = crons.find((c) => String(c.path).includes('printavo-sync') &&
     String(c.path).includes('mode=ops'));
-  t.assert(ops, 'the daily ops cron is missing from vercel.json');
-  t.equal(ops.schedule, '0 11 * * *', 'ops cron schedule changed');
+  t.assert(ops, 'the ops cron is missing from vercel.json');
+  t.equal(ops.schedule, '*/10 11-12 * * *',
+    'ops cron schedule changed; expected a repeating window starting at 11:00 UTC (6 AM Central) since continueOps() no longer self-chains');
 });
 
 /* ---- incremental roster refresh ------------------------------------------ */
@@ -85,15 +92,24 @@ t.test('vercel.json carries a daily incremental cron ahead of the ops cron', () 
   const ops = crons.find((c) => String(c.path).includes('printavo-sync') &&
     String(c.path).includes('mode=ops'));
   t.assert(inc, 'the daily incremental cron is missing from vercel.json');
-  t.assert(ops, 'the daily ops cron is missing from vercel.json');
-  // Compare minute-of-day so "incremental runs before ops" holds regardless
-  // of the exact schedule chosen, not just today's specific times.
+  t.assert(ops, 'the ops cron is missing from vercel.json');
+  // Compare minute-of-day of each schedule's FIRST tick so "incremental runs
+  // before ops" holds regardless of the exact schedule chosen. Handles plain
+  // "M H" entries as well as step/range fields (e.g. "*/10 11-12") since the
+  // ops cron moved to a repeating window on Aug 6.
+  function firstValue(field) {
+    const first = String(field).split(',')[0];
+    const base = first.includes('/') ? first.split('/')[0] : first;
+    if (base === '*') return 0;
+    if (base.includes('-')) return parseInt(base.split('-')[0], 10);
+    return parseInt(base, 10);
+  }
   function minuteOfDay(schedule) {
     const parts = String(schedule).trim().split(/\s+/);
-    return parseInt(parts[1], 10) * 60 + parseInt(parts[0], 10);
+    return firstValue(parts[1]) * 60 + firstValue(parts[0]);
   }
   t.assert(minuteOfDay(inc.schedule) < minuteOfDay(ops.schedule),
-    'the incremental cron should run before the ops cron so a new client is on the roster before the dashboard slice refreshes');
+    'the incremental cron should run before the ops cron\'s first tick so a new client is on the roster before the dashboard slice refreshes');
 });
 
 t.test('incremental mode self-chains on a partial run, carrying its cursor', () => {
@@ -168,6 +184,20 @@ t.test('every ops partial return fires the self-continue chain', () => {
 t.test('the ops chain has a hard depth cap', () => {
   t.assert(/CHAIN_MAX/.test(sync) && /chainDepth\s*<\s*CHAIN_MAX/.test(sync),
     'continueOps can loop forever without a CHAIN_MAX guard');
+});
+
+t.test('continueOps no longer self-fetches (Aug 6 508 fix)', () => {
+  t.assert(/async function continueOps\(\)\s*\{\s*return\s*\{/.test(sync),
+    'continueOps should return a static no-op result instead of calling continueChain and self-fetching, which trips Vercel\'s INFINITE_LOOP_DETECTED');
+  t.assert(!/async function continueOps\(\)\s*\{\s*return continueChain/.test(sync),
+    'continueOps is calling continueChain again; this is the pattern that produced the Aug 6 HTTP 508 outage');
+});
+
+t.test('ops mode skips redundant work once a run has already finished today', () => {
+  t.assert(/already-done-today/.test(sync),
+    'the same-day short-circuit is missing; repeated cron ticks after completion would redo the full Printavo pull every 10 minutes');
+  t.assert(/fresh.{0,20}America\/Chicago|America\/Chicago[\s\S]{0,400}already-done-today|already-done-today[\s\S]{0,400}America\/Chicago/.test(sync),
+    'the same-day check should compare Central-time calendar dates');
 });
 
 t.test('ops partial saves are stamped and stale partials restart fresh', () => {
