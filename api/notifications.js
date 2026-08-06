@@ -9,6 +9,15 @@
 // admin/superuser can change status, edit, or delete one, so people can't
 // close out or rewrite something they have no part in.
 //
+// Every notification carries an append-only `history` array: created,
+// reassigned, completed ("who clicked it off"), reopened, edited, or a
+// plain comment. This exists because Ryan described how Printavo's Tasks
+// get used in practice — a question gets asked by reassigning the task,
+// the answer comes back the same way — and wanted that back-and-forth
+// visible on the notification itself, not just the current assignee.
+// A PATCH's optional `message` field is never stored on its own; it is
+// folded into whichever history entry the patch produces.
+//
 // GET    -> list all notifications, newest first. Query filters (all
 //           optional, ANDed): ?assignedTo=, ?createdBy=, ?appId= (matches if
 //           the notification's appIds array contains it), ?type= (same,
@@ -17,7 +26,9 @@
 //           signed-in user, unlike GET /api/users which is admin-only.
 // POST   -> create, assigned to someone (defaults to the caller if
 //           assignedTo is omitted).
-// PATCH  -> edit one (?id= or body.id). Common case: { status: "done" }.
+// PATCH  -> edit, reassign, mark done/reopen, or comment (?id= or body.id).
+//           Common cases: { status: "done" }, { assignedTo: "hannah",
+//           message: "can you confirm the ship date?" }.
 // DELETE -> ?id=.
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
@@ -58,6 +69,14 @@ async function nameFor(username, cache) {
   const name = u ? u.name : username;
   cache.set(username, name);
   return name;
+}
+
+// One log entry per meaningful change. history is append-only and returned
+// as part of the record, so the front end can render "what changed, when,
+// by whom" without a separate endpoint. Modeled loosely on BackBone's leads
+// status-history trail (same idea: never delete, just keep appending).
+function historyEntry(action, by, byName, extra) {
+  return { at: new Date().toISOString(), by, byName, action, ...extra };
 }
 
 export default async function handler(req, res) {
@@ -111,15 +130,21 @@ export default async function handler(req, res) {
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
 
       const nameCache = new Map();
+      const myName = sess.name || me;
       const full = {
         ...record,
         id: await nextNotificationId(),
         status: "open",
         createdBy: me,
-        createdByName: sess.name || me,
+        createdByName: myName,
         assignedToName: await nameFor(record.assignedTo, nameCache),
         createdAt: new Date().toISOString(),
         doneAt: null,
+        doneBy: null,
+        doneByName: null,
+        history: [historyEntry("created", me, myName, {
+          to: record.assignedTo, toName: await nameFor(record.assignedTo, nameCache),
+        })],
       };
 
       await saveNotification(full);
@@ -143,15 +168,66 @@ export default async function handler(req, res) {
       const usernames = users.map((u) => u.username.toLowerCase());
       const { ok, errors, patch } = validatePatch(body, APP_IDS, usernames);
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
-      if (!Object.keys(patch).length) return res.status(400).json({ error: "No editable fields in patch" });
 
-      if (patch.status === "done" && existing.status !== "done") patch.doneAt = new Date().toISOString();
-      if (patch.status === "open") patch.doneAt = null;
+      // message is ephemeral — folded into a history entry below, never
+      // stored as its own field on the record.
+      const message = patch.message;
+      delete patch.message;
 
-      if (patch.assignedTo) {
-        const nameCache = new Map();
-        patch.assignedToName = await nameFor(patch.assignedTo, nameCache);
+      if (!Object.keys(patch).length && !message) {
+        return res.status(400).json({ error: "No editable fields in patch" });
       }
+
+      const myName = sess.name || me;
+      const nameCache = new Map();
+      const entries = [];
+
+      // Reassignment. Logged with both names so the trail reads clearly even
+      // after someone's account is later renamed or removed. This is the
+      // Printavo-Tasks pattern Ryan described: ask a question by reassigning
+      // with a message, the answer comes back the same way, and both hops
+      // stay visible here rather than only the current assignee showing.
+      if (patch.assignedTo && patch.assignedTo !== existing.assignedTo) {
+        patch.assignedToName = await nameFor(patch.assignedTo, nameCache);
+        entries.push(historyEntry("reassigned", me, myName, {
+          from: existing.assignedTo, fromName: existing.assignedToName,
+          to: patch.assignedTo, toName: patch.assignedToName,
+          message: message || undefined,
+        }));
+      }
+
+      // Status. "Who clicked the notification off" — completedBy is a top
+      // level field for quick display, AND a history entry, so the trail
+      // doesn't require walking history just to answer "who closed this."
+      if (patch.status === "done" && existing.status !== "done") {
+        patch.doneAt = new Date().toISOString();
+        patch.doneBy = me;
+        patch.doneByName = myName;
+        entries.push(historyEntry("completed", me, myName, { message: message || undefined }));
+      }
+      if (patch.status === "open" && existing.status === "done") {
+        patch.doneAt = null;
+        patch.doneBy = null;
+        patch.doneByName = null;
+        entries.push(historyEntry("reopened", me, myName, { message: message || undefined }));
+      }
+
+      // Any other edit (title, types, appIds, dueDate) that ISN'T covered by
+      // the two cases above still gets one summary entry, so nothing changes
+      // silently. Skipped when a reassignment/status entry already exists
+      // this call, since that entry's own message covers the "why."
+      const editedFields = ["title", "types", "appIds", "dueDate"].filter((f) => patch[f] !== undefined);
+      if (editedFields.length && !entries.length) {
+        entries.push(historyEntry("edited", me, myName, { fields: editedFields, message: message || undefined }));
+      }
+
+      if (!entries.length && message) {
+        // A message with no other field change — a plain comment on the
+        // notification, same "ask a question" pattern without reassigning.
+        entries.push(historyEntry("comment", me, myName, { message }));
+      }
+
+      if (entries.length) patch.history = [...(existing.history || []), ...entries];
 
       const record = await updateNotification(id, patch);
       return res.status(200).json({ ok: true, notification: record });
