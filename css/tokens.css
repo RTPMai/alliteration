@@ -70,6 +70,15 @@
   --hub-deep: #3F8236;
   --hub-tint: #EDF6EB;
 
+  /* ---- Notifications panel (header bell dropdown) ------------------------
+     Not one of the nine apps and not a routed screen (no data-app value of
+     its own), so like --hub above it gets a fixed color rather than reading
+     var(--accent), which would otherwise shift with whatever app happens to
+     be open behind it. Same slate used before this became a header panel. */
+  --notif:      #3E4C59;
+  --notif-deep: #2F3B45;
+  --notif-tint: #EAECEF;
+
   /* ---- Tier badges (BackBone scorecard, shown on the hub too) ----------
      Fixed per tier, NOT app accents: an A-tier account is blue whichever app
      is on screen. Declared here so no app file needs a hex. */
@@ -197,16 +206,6 @@ body[data-app="settings"] {
   --accent:      #6B7684;
   --accent-deep: #55606D;
   --accent-tint: #EEF1F4;
-}
-
-/* Notifications is a shell-level screen like Settings, not one of the nine
-   apps, so it gets its own neutral slate rather than borrowing a real app's
-   brand color. Distinct from Settings' grey so the two shell screens don't
-   read as the same thing in the "Shared" rail section. */
-body[data-app="notifications"] {
-  --accent:      #3E4C59;
-  --accent-deep: #2F3B45;
-  --accent-tint: #EAECEF;
 }
 
 /* TravelTrack's accent matches its new logo mark (sampled #51A446 from the
