@@ -1,289 +1,688 @@
-// PUT IN: api/notifications.js (REPLACES the current one)
+// PUT IN: apps/notifications.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
-// api/notifications.js — shell-level notifications / to-do list.
-//
-// Every signed-in user can create a notification and assign it to anyone
-// else (or themselves) — this is a team hand-off tool, not something gated
-// by role, unlike the apps in APPS. The assignee, the creator, or an
-// admin/superuser can change status, reassign, or edit one, so people can't
-// rewrite something they have no part in. The creator can always fix a
-// notification they made a mistake on (they're a "party" to it by
-// definition), and that fix is logged, not silent.
-//
-// Deleting is a step further: it's still restricted to the same
-// assignee/creator/admin set, but each role also carries a
-// can_delete_notifications flag (Settings > Roles, opt-out, default true)
-// that an admin can turn off for a role entirely. Admins/superusers always
-// bypass that flag — see callerCanDelete() below.
-//
-// Every notification carries an append-only `history` array: created,
-// reassigned, completed ("who clicked it off"), reopened, edited (with the
-// actual before/after values, not just which fields changed), or a plain
-// comment. This exists because Ryan described how Printavo's Tasks get used
-// in practice — a question gets asked by reassigning the task, the answer
-// comes back the same way — and wanted that back-and-forth visible on the
-// notification itself, not just the current assignee. A PATCH's optional
-// `message` field is never stored on its own; it is folded into whichever
-// history entry the patch produces.
-//
-// GET    -> list all notifications, newest first. Query filters (all
-//           optional, ANDed): ?assignedTo=, ?createdBy=, ?appId= (matches if
-//           the notification's appIds array contains it), ?type= (same,
-//           against types), ?status=. ?people=1 instead returns
-//           { username, name } pairs for the assignee picker — open to any
-//           signed-in user, unlike GET /api/users which is admin-only.
-// POST   -> create, assigned to someone (defaults to the caller if
-//           assignedTo is omitted).
-// PATCH  -> edit, reassign, mark done/reopen, or comment (?id= or body.id).
-//           Common cases: { status: "done" }, { assignedTo: "hannah",
-//           message: "can you confirm the ship date?" }.
-// DELETE -> ?id=.
-//
-// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
+/**
+ * Notifications — shell-level to-do / hand-off list.
+ *
+ * Lives in the SHELL, same reasoning as Settings: this is not one app's
+ * data, it spans all of them. Every signed-in employee can open this
+ * (unlike Settings, which is admin-only) — see js/registry.js SHELL_APPS.
+ *
+ * Reverted back to a routed screen (Aug 6) after a same-day detour through
+ * a header-dropdown panel — Ryan preferred the full page. The header bell
+ * (js/shell.js) still shows the open-count badge and navigates here.
+ *
+ * Two views, both driven off one fetch:
+ *   inbox -> notifications ASSIGNED TO the signed-in user
+ *   sent  -> notifications CREATED BY the signed-in user
+ *
+ * The create form's App and Type pickers are the same multi-select
+ * toggle-pill pattern as Settings' role editor (.app-toggle there, .nt-toggle
+ * here) — both fields take more than one selection, per Ryan's ask. There is
+ * no notes field on creation.
+ *
+ * Every notification also carries a `history` log (who created it, every
+ * reassignment, who marked it done, edits with before/after values, plain
+ * comments) — the Printavo Tasks pattern Ryan described: a question gets
+ * asked by reassigning with a message, the answer comes back the same way,
+ * and both hops stay visible here rather than only the current assignee
+ * showing. Reassigning is done from this screen with an optional message;
+ * api/notifications.js turns that into a history entry.
+ *
+ * Whoever created a notification can edit it later if they got something
+ * wrong — title, type(s), app(s), due date — using the same toggle-pill
+ * pickers as creation, via the "Edit" button on each card. Every edit is
+ * itself a history entry with the old and new values, not a silent
+ * overwrite. The assignee and admins can edit too, same "isParty" rule the
+ * server already used for reassigning and marking done.
+ *
+ * The Delete button only shows if the signed-in user's role allows it
+ * (ctx.perms.can_delete_notifications, set in Settings > Roles) or they are
+ * an admin/superuser — api/notifications.js enforces this server-side
+ * regardless of what the button shows, this is just to not offer an action
+ * that will get rejected.
+ */
 
-import { requireAuth } from "../lib/session.js";
-import { getUser, getRole, listUsers } from "../lib/users.js";
-import { validateNew, validatePatch, GENERAL_APP } from "../lib/notifications/schema.js";
-import {
-  listNotifications, saveNotification, nextNotificationId,
-  getNotification, updateNotification, deleteNotification,
-} from "../lib/notifications/store.js";
+import { ENDPOINTS } from '../js/api.js';
+import { APPS } from '../js/registry.js';
+import { TYPES, GENERAL_APP } from '../lib/notifications/schema.js';
 
-// The app-id allowlist lives server-side rather than importing js/registry.js
-// (browser code), so it is kept in sync by hand. Covers the nine apps plus
-// "general" for anything not tied to one app. See test/notifications.test.cjs,
-// which asserts this list against js/registry.js's real app ids.
-const APP_IDS = [
-  "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
-  "crewcore", "mailme", "teletally", "websitewidget", GENERAL_APP,
-];
+const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
+  .concat([{ id: GENERAL_APP, name: 'General', accent: 'var(--muted)' }]);
 
-async function callerIsAdmin(sess) {
-  const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
-  return (role && role.data_scope === "all") || (user && user.superuser === true);
+function appMeta(id) {
+  return APP_OPTIONS.find((a) => a.id === id) || { id, name: id, accent: 'var(--muted)' };
 }
 
-// Opt-out flag (default true): a role can turn OFF the ability for its
-// people to delete a notification they created or were assigned, without
-// touching the "who can act on this at all" isParty check above. Admins
-// always bypass this (see callerIsAdmin above) so there is no way to lock
-// an admin out of cleanup by mis-configuring a role.
-async function callerCanDelete(sess) {
-  const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
-  return !role || role.can_delete_notifications !== false;
+function typeLabel(v) {
+  const hit = TYPES.find((t) => t.value === v);
+  return hit ? hit.label : v;
 }
 
-function parseBody(req) {
-  let b = req.body;
-  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
-  return b && typeof b === "object" ? b : {};
+function fmtDue(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 86400000);
+  if (days === 0) return 'Due today';
+  if (days === 1) return 'Due tomorrow';
+  if (days < 0) return 'Overdue ' + d.toLocaleDateString();
+  return 'Due ' + d.toLocaleDateString();
 }
 
-async function nameFor(username, cache) {
-  if (!username) return "";
-  if (cache.has(username)) return cache.get(username);
-  const u = await getUser(username);
-  const name = u ? u.name : username;
-  cache.set(username, name);
-  return name;
+function relTime(iso) {
+  if (!iso) return '';
+  const ms = Date.now() - new Date(iso).getTime();
+  const h = Math.round(ms / 3600000);
+  if (h < 1) return 'just now';
+  if (h < 24) return h + 'h ago';
+  const d = Math.round(h / 24);
+  return d + (d === 1 ? ' day ago' : ' days ago');
 }
 
-// One log entry per meaningful change. history is append-only and returned
-// as part of the record, so the front end can render "what changed, when,
-// by whom" without a separate endpoint. Modeled loosely on BackBone's leads
-// status-history trail (same idea: never delete, just keep appending).
-function historyEntry(action, by, byName, extra) {
-  return { at: new Date().toISOString(), by, byName, action, ...extra };
+function fmtChangeValue(field, v) {
+  if (v == null || v === '') return '(none)';
+  if (field === 'appIds') return (Array.isArray(v) ? v : [v]).map((id) => appMeta(id).name).join(', ');
+  if (field === 'types') return (Array.isArray(v) ? v : [v]).map(typeLabel).join(', ');
+  if (field === 'dueDate') return fmtDue(v) || v;
+  return String(v);
 }
 
-export default async function handler(req, res) {
-  res.setHeader("Cache-Control", "no-store");
-  if (req.method === "OPTIONS") return res.status(200).end();
+const FIELD_LABEL = { title: 'title', types: 'type', appIds: 'app', dueDate: 'due date' };
 
-  const sess = requireAuth(req, res);
-  if (!sess) return;
-
-  const me = String(sess.username || "").toLowerCase();
-
-  try {
-    if (req.method === "GET") {
-      // Assignee picker data. Any signed-in user needs this (not just admins,
-      // who are the only ones with GET /api/users) so everyone can pick who
-      // a notification goes to. Username + display name only — no role, no
-      // superuser flag, nothing api/users.js already gates behind admin.
-      if (req.query && req.query.people === "1") {
-        const users = await listUsers();
-        return res.status(200).json({
-          people: users.map((u) => ({ username: u.username, name: u.name })),
-        });
+function historyLine(e) {
+  switch (e.action) {
+    case 'created':
+      return e.byName + ' created this, assigned to ' + (e.toName || e.to);
+    case 'reassigned':
+      return e.byName + ' reassigned from ' + (e.fromName || e.from) + ' to ' + (e.toName || e.to);
+    case 'completed':
+      return e.byName + ' marked this done';
+    case 'reopened':
+      return e.byName + ' reopened this';
+    case 'edited':
+      if (Array.isArray(e.changes) && e.changes.length) {
+        const parts = e.changes.map((c) =>
+          (FIELD_LABEL[c.field] || c.field) + ': "' + fmtChangeValue(c.field, c.from) +
+          '" \u2192 "' + fmtChangeValue(c.field, c.to) + '"');
+        return e.byName + ' edited \u2014 ' + parts.join('; ');
       }
-
-      const id = req.query && req.query.id;
-      if (id) {
-        const rec = await getNotification(id);
-        if (!rec) return res.status(404).json({ error: "Notification not found" });
-        return res.status(200).json({ notification: rec });
-      }
-
-      let list = await listNotifications();
-      const q = req.query || {};
-      if (q.assignedTo) list = list.filter((n) => n.assignedTo === String(q.assignedTo).toLowerCase());
-      if (q.createdBy) list = list.filter((n) => n.createdBy === String(q.createdBy).toLowerCase());
-      if (q.appId) list = list.filter((n) => Array.isArray(n.appIds) && n.appIds.includes(q.appId));
-      if (q.type) list = list.filter((n) => Array.isArray(n.types) && n.types.includes(q.type));
-      if (q.status) list = list.filter((n) => n.status === q.status);
-
-      return res.status(200).json({ notifications: list });
-    }
-
-    if (req.method === "POST") {
-      const body = parseBody(req);
-      const users = await listUsers();
-      const usernames = users.map((u) => u.username.toLowerCase());
-
-      if (!body.assignedTo) body.assignedTo = me;
-
-      const { ok, errors, record } = validateNew(body, APP_IDS, usernames);
-      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
-
-      const nameCache = new Map();
-      const myName = sess.name || me;
-      const full = {
-        ...record,
-        id: await nextNotificationId(),
-        status: "open",
-        createdBy: me,
-        createdByName: myName,
-        assignedToName: await nameFor(record.assignedTo, nameCache),
-        createdAt: new Date().toISOString(),
-        doneAt: null,
-        doneBy: null,
-        doneByName: null,
-        history: [historyEntry("created", me, myName, {
-          to: record.assignedTo, toName: await nameFor(record.assignedTo, nameCache),
-        })],
-      };
-
-      await saveNotification(full);
-      return res.status(201).json({ ok: true, notification: full });
-    }
-
-    if (req.method === "PATCH") {
-      const body = parseBody(req);
-      const id = (req.query && req.query.id) || body.id;
-      if (!id) return res.status(400).json({ error: "Missing notification id" });
-
-      const existing = await getNotification(id);
-      if (!existing) return res.status(404).json({ error: "Notification not found" });
-
-      const isParty = existing.assignedTo === me || existing.createdBy === me;
-      if (!isParty && !(await callerIsAdmin(sess))) {
-        return res.status(403).json({ error: "Only the assignee, the creator, or an admin can change this" });
-      }
-
-      const users = await listUsers();
-      const usernames = users.map((u) => u.username.toLowerCase());
-      const { ok, errors, patch } = validatePatch(body, APP_IDS, usernames);
-      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
-
-      // message is ephemeral — folded into a history entry below, never
-      // stored as its own field on the record.
-      const message = patch.message;
-      delete patch.message;
-
-      if (!Object.keys(patch).length && !message) {
-        return res.status(400).json({ error: "No editable fields in patch" });
-      }
-
-      const myName = sess.name || me;
-      const nameCache = new Map();
-      const entries = [];
-
-      // Reassignment. Logged with both names so the trail reads clearly even
-      // after someone's account is later renamed or removed. This is the
-      // Printavo-Tasks pattern Ryan described: ask a question by reassigning
-      // with a message, the answer comes back the same way, and both hops
-      // stay visible here rather than only the current assignee showing.
-      if (patch.assignedTo && patch.assignedTo !== existing.assignedTo) {
-        patch.assignedToName = await nameFor(patch.assignedTo, nameCache);
-        entries.push(historyEntry("reassigned", me, myName, {
-          from: existing.assignedTo, fromName: existing.assignedToName,
-          to: patch.assignedTo, toName: patch.assignedToName,
-          message: message || undefined,
-        }));
-      }
-
-      // Status. "Who clicked the notification off" — completedBy is a top
-      // level field for quick display, AND a history entry, so the trail
-      // doesn't require walking history just to answer "who closed this."
-      if (patch.status === "done" && existing.status !== "done") {
-        patch.doneAt = new Date().toISOString();
-        patch.doneBy = me;
-        patch.doneByName = myName;
-        entries.push(historyEntry("completed", me, myName, { message: message || undefined }));
-      }
-      if (patch.status === "open" && existing.status === "done") {
-        patch.doneAt = null;
-        patch.doneBy = null;
-        patch.doneByName = null;
-        entries.push(historyEntry("reopened", me, myName, { message: message || undefined }));
-      }
-
-      // Any other edit (title, types, appIds, dueDate) that ISN'T covered by
-      // the two cases above still gets one summary entry, so nothing changes
-      // silently — this is what lets a creator who made a mistake fix it and
-      // have the fix itself be visible, not just the current state. Skipped
-      // when a reassignment/status entry already exists this call, since
-      // that entry's own message covers the "why." Each entry keeps the
-      // actual before/after values (not just field names) so the trail
-      // answers "what did it used to say," not only "something changed."
-      const editedFields = ["title", "types", "appIds", "dueDate"].filter((f) => patch[f] !== undefined);
-      if (editedFields.length && !entries.length) {
-        const changes = editedFields.map((f) => ({ field: f, from: existing[f], to: patch[f] }));
-        entries.push(historyEntry("edited", me, myName, { fields: editedFields, changes, message: message || undefined }));
-      }
-
-      if (!entries.length && message) {
-        // A message with no other field change — a plain comment on the
-        // notification, same "ask a question" pattern without reassigning.
-        entries.push(historyEntry("comment", me, myName, { message }));
-      }
-
-      if (entries.length) patch.history = [...(existing.history || []), ...entries];
-
-      const record = await updateNotification(id, patch);
-      return res.status(200).json({ ok: true, notification: record });
-    }
-
-    if (req.method === "DELETE") {
-      const id = (req.query && req.query.id) || parseBody(req).id;
-      if (!id) return res.status(400).json({ error: "Missing notification id" });
-
-      const existing = await getNotification(id);
-      if (!existing) return res.status(404).json({ error: "Notification not found" });
-
-      const isParty = existing.assignedTo === me || existing.createdBy === me;
-      const admin = await callerIsAdmin(sess);
-      if (!admin) {
-        if (!isParty) {
-          return res.status(403).json({ error: "Only the assignee, the creator, or an admin can delete this" });
-        }
-        if (!(await callerCanDelete(sess))) {
-          return res.status(403).json({ error: "Your role does not allow deleting notifications. Ask an admin." });
-        }
-      }
-
-      const removed = await deleteNotification(id);
-      return res.status(200).json({ ok: true, deleted: removed ? id : null });
-    }
-
-    res.setHeader("Allow", "GET, POST, PATCH, DELETE");
-    return res.status(405).json({ error: "Method not allowed" });
-  } catch (e) {
-    console.error("notifications route error:", e);
-    return res.status(500).json({ error: e.message });
+      return e.byName + ' edited ' + (Array.isArray(e.fields) ? e.fields.join(', ') : 'this');
+    case 'comment':
+      return e.byName + ' commented';
+    default:
+      return e.byName + ' updated this';
   }
 }
+
+export default {
+  id: 'notifications',
+
+  styles: `
+  .nt-wrap{max-width:900px}
+  .nt-hd{margin-bottom:22px;display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+  .nt-hd h1{font-size:24px;font-weight:800;letter-spacing:-.02em}
+  .nt-hd .sub{font-size:13px;color:var(--muted);margin-top:3px}
+
+  .nt-btn{
+    border:1px solid var(--line);background:var(--card);color:var(--ink);
+    font-family:inherit;font-size:12.5px;font-weight:600;padding:7px 12px;
+    border-radius:var(--radius-sm);cursor:pointer;
+  }
+  .nt-btn:hover{border-color:var(--muted)}
+  .nt-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+  .nt-btn.primary:hover{background:var(--accent-deep)}
+  .nt-btn.danger{color:var(--danger);border-color:var(--danger-line)}
+  .nt-btn.danger:hover{background:var(--danger-tint)}
+  .nt-btn:disabled{opacity:.5;cursor:default}
+  .nt-btn.small{padding:4px 9px;font-size:11.5px}
+
+  .nt-tabs{display:flex;gap:6px;margin-bottom:14px;border-bottom:1px solid var(--line)}
+  .nt-tab{
+    border:none;background:none;font-family:inherit;font-size:13px;font-weight:700;
+    color:var(--muted);padding:9px 4px;margin-right:18px;cursor:pointer;
+    border-bottom:2px solid transparent;
+  }
+  .nt-tab.active{color:var(--accent-deep);border-color:var(--accent)}
+  .nt-tab .ct{color:var(--faint);font-weight:600;margin-left:4px}
+
+  .nt-msg{font-size:12.5px;border-radius:var(--radius-sm);padding:9px 11px;margin-bottom:14px}
+  .nt-msg.err{background:var(--danger-tint);color:var(--danger)}
+  .nt-msg.ok{background:var(--success-tint);color:var(--success-dk)}
+
+  .nt-form{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:16px 18px;margin-bottom:16px;box-shadow:var(--shadow-card);
+  }
+  .nt-field{margin-bottom:12px}
+  .nt-field label{
+    display:block;font-size:11px;font-weight:700;letter-spacing:.05em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:5px;
+  }
+  .nt-field input,.nt-field select,.nt-field textarea{
+    width:100%;border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:9px 11px;font-family:inherit;font-size:13.5px;color:var(--ink);
+    background:var(--card);
+  }
+  .nt-field textarea{resize:vertical;min-height:50px}
+  .nt-field input:focus,.nt-field select:focus,.nt-field textarea:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint);
+  }
+
+  /* Multi-select toggle-pill grid — same pattern as Settings' role editor
+     (.app-toggle), reused here so picking apps/types for a notification
+     feels like picking apps for a role. aria-pressed carries on/off state. */
+  .nt-toggles{display:flex;gap:6px;flex-wrap:wrap}
+  .nt-toggle{
+    display:inline-flex;align-items:center;gap:6px;cursor:pointer;
+    font-size:11.5px;font-weight:600;padding:5px 12px;border-radius:var(--radius-pill);
+    border:1px solid var(--line);background:var(--card);color:var(--muted);
+    font-family:inherit;transition:.12s;
+  }
+  .nt-toggle .sq{width:7px;height:7px;border-radius:2px;background:var(--line);flex:none}
+  .nt-toggle[aria-pressed="true"]{
+    background:color-mix(in srgb, var(--c) 14%, transparent);
+    border-color:color-mix(in srgb, var(--c) 40%, transparent);
+    color:var(--c);
+  }
+  .nt-toggle[aria-pressed="true"] .sq{background:var(--c)}
+
+  .nt-card{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
+    padding:14px 16px;margin-bottom:10px;
+  }
+  .nt-card.done{opacity:.6}
+  .nt-card-top{display:flex;gap:12px;align-items:flex-start}
+  .nt-check{margin-top:2px;width:17px;height:17px;cursor:pointer;flex:none}
+  .nt-body{flex:1;min-width:0}
+  .nt-title{font-size:14px;font-weight:700;color:var(--ink)}
+  .nt-title.done{text-decoration:line-through}
+  .nt-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:7px;align-items:center}
+  .nt-pill{
+    display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;
+    padding:2px 9px;border-radius:var(--radius-pill);white-space:nowrap;
+  }
+  .nt-pill .sq{width:6px;height:6px;border-radius:2px;flex:none}
+  .nt-pill.app{
+    background:color-mix(in srgb, var(--c) 12%, transparent);color:var(--c);
+    border:1px solid color-mix(in srgb, var(--c) 26%, transparent);
+  }
+  .nt-pill.app .sq{background:var(--c)}
+  .nt-pill.type-task{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
+  .nt-pill.type-need{background:var(--warn-tint);color:var(--warn-dk);border:1px solid var(--warn-tint)}
+  .nt-pill.type-handoff{background:var(--accent-tint);color:var(--accent-deep);border:1px solid transparent}
+  .nt-meta{font-size:11.5px;color:var(--faint);margin-top:6px}
+  .nt-actions{display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end}
+
+  .nt-sub{border-top:1px solid var(--line-soft);margin-top:11px;padding-top:10px}
+  .nt-reassign{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;margin-top:8px}
+  .nt-reassign select{flex:1;min-width:140px}
+  .nt-reassign input{flex:2;min-width:180px}
+
+  .nt-hist{margin-top:8px}
+  .nt-hist-row{font-size:11.5px;color:var(--muted);padding:5px 0;border-top:1px solid var(--line-soft)}
+  .nt-hist-row:first-child{border-top:none}
+  .nt-hist-when{color:var(--faint);margin-left:5px}
+  .nt-hist-msg{color:var(--ink);margin-top:2px;font-style:italic}
+
+  .nt-empty{padding:32px 20px;text-align:center;color:var(--muted);font-size:13px}
+  .nt-showdone{font-size:12px;color:var(--muted);margin:10px 0 4px;display:flex;align-items:center;gap:6px;cursor:pointer}
+
+  @media (max-width:640px){ .nt-reassign{flex-direction:column;align-items:stretch} }
+  `,
+
+  template: `
+    <div class="nt-wrap">
+      <div class="nt-hd">
+        <div>
+          <h1>Notifications.</h1>
+          <div class="sub">Tasks, needs, and hand offs across every app.</div>
+        </div>
+        <button class="nt-btn primary" id="ntNewBtn">New notification</button>
+      </div>
+
+      <div id="ntMsg"></div>
+
+      <div class="nt-tabs">
+        <button class="nt-tab" data-tab="inbox">Assigned to me<span class="ct" id="ntInboxCt"></span></button>
+        <button class="nt-tab" data-tab="sent">I assigned<span class="ct" id="ntSentCt"></span></button>
+      </div>
+
+      <div id="ntForm" style="display:none"></div>
+      <div id="ntList"><div class="nt-empty">Loading…</div></div>
+      <label class="nt-showdone" id="ntShowDoneWrap" style="display:none">
+        <input type="checkbox" id="ntShowDone"> Show completed
+      </label>
+    </div>
+  `,
+
+  async mount(ctx) {
+    const root = ctx.root;
+    const $ = (sel) => root.querySelector(sel);
+
+    let all = [];
+    let people = [];
+    let tab = 'inbox';
+    let showDone = false;
+    let formTypes = new Set();
+    let formApps = new Set();
+    // Per-card UI state that should NOT reset on every re-render: which
+    // card has its reassign form, edit form, or history log expanded.
+    const openReassign = new Set();
+    const openHistory = new Set();
+    const openEdit = new Set();
+
+    const me = String(ctx.user && ctx.user.username || '').toLowerCase();
+    // Admins/superusers always retain delete regardless of the role flag
+    // (see api/notifications.js callerCanDelete) — mirrored here so the
+    // button doesn't appear and then get rejected by the server.
+    const canDelete = !!(ctx.perms && (
+      ctx.perms.superuser === true || ctx.perms.role === 'admin' ||
+      ctx.perms.can_delete_notifications !== false
+    ));
+
+    const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    })[c]);
+
+    function say(text, kind) {
+      $('#ntMsg').innerHTML = text
+        ? '<div class="nt-msg ' + kind + '">' + esc(text) + '</div>'
+        : '';
+    }
+
+    async function load() {
+      try {
+        const [notesRes, peopleRes] = await Promise.all([
+          ctx.api.get(ENDPOINTS.notifications),
+          people.length ? Promise.resolve({ people }) : ctx.api.get(ENDPOINTS.notifications, { people: '1' })
+        ]);
+        all = notesRes.notifications || [];
+        people = peopleRes.people || people;
+        renderTabs();
+        renderList();
+      } catch (e) {
+        $('#ntList').innerHTML = '<div class="nt-empty">Could not load notifications: ' + esc(e.message) + '</div>';
+      }
+    }
+
+    function renderTabs() {
+      const inboxOpen = all.filter((n) => n.assignedTo === me && n.status === 'open').length;
+      const sentOpen = all.filter((n) => n.createdBy === me && n.status === 'open').length;
+      $('#ntInboxCt').textContent = inboxOpen ? ' (' + inboxOpen + ')' : '';
+      $('#ntSentCt').textContent = sentOpen ? ' (' + sentOpen + ')' : '';
+      root.querySelectorAll('.nt-tab').forEach((b) => {
+        b.classList.toggle('active', b.dataset.tab === tab);
+      });
+    }
+
+    function typePillClass(t) {
+      return 'nt-pill type-' + (t === 'handoff' ? 'handoff' : t === 'need' ? 'need' : 'task');
+    }
+
+    function toggleHtml(items, selectedSet, dataAttr) {
+      return items.map((it) => {
+        const on = selectedSet.has(it.id);
+        return '<button type="button" class="nt-toggle" style="--c:' + esc(it.accent) + '"' +
+          ' data-' + dataAttr + '="' + esc(it.id) + '" aria-pressed="' + on + '">' +
+          '<span class="sq"></span>' + esc(it.name) +
+        '</button>';
+      }).join('');
+    }
+
+    function historyHtml(n) {
+      const hist = Array.isArray(n.history) ? n.history.slice().reverse() : [];
+      if (!hist.length) return '<div class="nt-hist"><div class="nt-hist-row">No history yet.</div></div>';
+      return '<div class="nt-hist">' + hist.map((e) =>
+        '<div class="nt-hist-row">' + esc(historyLine(e)) +
+          '<span class="nt-hist-when">' + esc(relTime(e.at)) + '</span>' +
+          (e.message ? '<div class="nt-hist-msg">\u201c' + esc(e.message) + '\u201d</div>' : '') +
+        '</div>'
+      ).join('') + '</div>';
+    }
+
+    function reassignHtml(n) {
+      return '<div class="nt-reassign">' +
+        '<select data-reassign-who="' + esc(n.id) + '">' +
+          people.map((p) => '<option value="' + esc(p.username) + '"' +
+            (p.username === n.assignedTo ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') +
+        '</select>' +
+        '<input type="text" data-reassign-msg="' + esc(n.id) + '" maxlength="500" placeholder="Optional message (e.g. a question for them)">' +
+        '<button class="nt-btn small primary" data-reassign-save="' + esc(n.id) + '">Reassign</button>' +
+      '</div>';
+    }
+
+    // Whoever created a notification (or the current assignee, or an admin
+    // — same "isParty" rule the server enforces) can fix a mistake here.
+    // The change itself becomes a history entry (api/notifications.js), so
+    // fixing something wrong is visible, not silent.
+    function editHtml(n) {
+      const typeItems = TYPES.map((t) => ({ id: t.value, name: t.label, accent: 'var(--accent)' }));
+      const editTypes = new Set(n.types || []);
+      const editApps = new Set(n.appIds || []);
+      return '<div class="nt-form" data-edit-form="' + esc(n.id) + '">' +
+        '<div class="nt-field"><label>Title</label>' +
+          '<input type="text" data-edit-title="' + esc(n.id) + '" maxlength="200" value="' + esc(n.title) + '"></div>' +
+        '<div class="nt-field"><label>Type (select one or more)</label><div class="nt-toggles" data-edit-type-toggles="' + esc(n.id) + '">' +
+          toggleHtml(typeItems, editTypes, 'edit-type') +
+        '</div></div>' +
+        '<div class="nt-field"><label>App (select one or more)</label><div class="nt-toggles" data-edit-app-toggles="' + esc(n.id) + '">' +
+          toggleHtml(APP_OPTIONS, editApps, 'edit-app') +
+        '</div></div>' +
+        '<div class="nt-field"><label>Due date (optional)</label>' +
+          '<input type="date" data-edit-due="' + esc(n.id) + '" value="' + esc(n.dueDate || '') + '"></div>' +
+        '<div class="nt-field"><label>What changed (optional, goes in History)</label>' +
+          '<input type="text" data-edit-msg="' + esc(n.id) + '" maxlength="500" placeholder="e.g. wrong app selected the first time"></div>' +
+        '<button class="nt-btn small primary" data-edit-save="' + esc(n.id) + '">Save changes</button>' +
+        '<button class="nt-btn small" data-edit-cancel="' + esc(n.id) + '">Cancel</button>' +
+      '</div>';
+    }
+
+    // Toggle-pill state lives in the DOM (aria-pressed) for edit forms,
+    // since — unlike the create form — each card needs its own independent
+    // selection and there can be several edit forms rendered at once.
+    function editSelected(id, kind) {
+      const sel = root.querySelector('[data-edit-' + kind + '-toggles="' + id + '"]');
+      if (!sel) return [];
+      return [...sel.querySelectorAll('[aria-pressed="true"]')].map((b) => b.dataset['edit' + kind[0].toUpperCase() + kind.slice(1)]);
+    }
+
+    function cardHtml(n) {
+      const app0 = appMeta((n.appIds || [])[0]);
+      const done = n.status === 'done';
+      const who = tab === 'inbox'
+        ? 'From ' + esc(n.createdByName || n.createdBy)
+        : 'To ' + esc(n.assignedToName || n.assignedTo);
+      const due = n.dueDate ? ' \u00b7 ' + esc(fmtDue(n.dueDate)) : '';
+      const completed = done && n.doneByName ? ' \u00b7 Completed by ' + esc(n.doneByName) : '';
+      const appPills = (n.appIds || []).map((id) => {
+        const a = appMeta(id);
+        return '<span class="nt-pill app" style="--c:' + esc(a.accent) + '"><span class="sq"></span>' + esc(a.name) + '</span>';
+      }).join('');
+      const typePills = (n.types || []).map((t) =>
+        '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('');
+      const histCount = Array.isArray(n.history) ? n.history.length : 0;
+      const showReassign = openReassign.has(n.id);
+      const showHistory = openHistory.has(n.id);
+      const showEdit = openEdit.has(n.id);
+
+      return '' +
+        '<div class="nt-card' + (done ? ' done' : '') + '" data-id="' + esc(n.id) + '">' +
+          '<div class="nt-card-top">' +
+            '<input type="checkbox" class="nt-check" data-toggle="' + esc(n.id) + '"' +
+              (done ? ' checked' : '') + ' title="' + (done ? 'Reopen' : 'Mark done') + '">' +
+            '<div class="nt-body">' +
+              '<div class="nt-title' + (done ? ' done' : '') + '">' + esc(n.title) + '</div>' +
+              '<div class="nt-tags">' + appPills + typePills + '</div>' +
+              '<div class="nt-meta">' + who + due + completed + ' \u00b7 ' + esc(relTime(n.createdAt)) + '</div>' +
+            '</div>' +
+            '<div class="nt-actions">' +
+              '<button class="nt-btn small" data-edit-toggle="' + esc(n.id) + '">Edit</button>' +
+              '<button class="nt-btn small" data-reassign-toggle="' + esc(n.id) + '">Reassign</button>' +
+              '<button class="nt-btn small" data-history-toggle="' + esc(n.id) + '">History' +
+                (histCount ? ' (' + histCount + ')' : '') + '</button>' +
+              (canDelete
+                ? '<button class="nt-btn small danger" data-del="' + esc(n.id) + '">Delete</button>'
+                : '') +
+            '</div>' +
+          '</div>' +
+          (showEdit ? '<div class="nt-sub">' + editHtml(n) + '</div>' : '') +
+          (showReassign ? '<div class="nt-sub">' + reassignHtml(n) + '</div>' : '') +
+          (showHistory ? '<div class="nt-sub">' + historyHtml(n) + '</div>' : '') +
+        '</div>';
+    }
+
+    function renderList() {
+      const mine = tab === 'inbox'
+        ? all.filter((n) => n.assignedTo === me)
+        : all.filter((n) => n.createdBy === me);
+
+      const visible = mine.filter((n) => showDone || n.status !== 'done');
+      $('#ntShowDoneWrap').style.display = mine.some((n) => n.status === 'done') ? 'flex' : 'none';
+
+      if (!visible.length) {
+        $('#ntList').innerHTML = '<div class="nt-empty">' +
+          (tab === 'inbox' ? 'Nothing assigned to you right now.' : 'You have not assigned anything yet.') +
+        '</div>';
+        return;
+      }
+
+      $('#ntList').innerHTML = visible
+        .sort((a, b) => (a.status === b.status ? 0 : a.status === 'done' ? 1 : -1))
+        .map(cardHtml).join('');
+    }
+
+    function fillWhoSelect() {
+      const whoSel = $('#nf-who');
+      if (whoSel) {
+        whoSel.innerHTML = people.map((p) =>
+          '<option value="' + esc(p.username) + '"' + (p.username === me ? ' selected' : '') + '>' +
+            esc(p.name) + (p.username === me ? ' (you)' : '') +
+          '</option>').join('');
+      }
+    }
+
+    function openForm() {
+      const typeItems = TYPES.map((t) => ({ id: t.value, name: t.label, accent: 'var(--accent)' }));
+      $('#ntForm').innerHTML =
+        '<div class="nt-form">' +
+          '<div class="nt-field"><label>Title</label>' +
+            '<input id="nf-title" maxlength="200" placeholder="What needs to happen"></div>' +
+          '<div class="nt-field"><label>Type (select one or more)</label><div class="nt-toggles" id="nfTypeToggles">' +
+            toggleHtml(typeItems, formTypes, 'type') +
+          '</div></div>' +
+          '<div class="nt-field"><label>App (select one or more)</label><div class="nt-toggles" id="nfAppToggles">' +
+            toggleHtml(APP_OPTIONS, formApps, 'app') +
+          '</div></div>' +
+          '<div class="nt-field"><label>Assign to</label><select id="nf-who"></select></div>' +
+          '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
+          '<button class="nt-btn primary" id="nf-save">Create</button>' +
+          '<button class="nt-btn" id="nf-cancel">Cancel</button>' +
+        '</div>';
+
+      fillWhoSelect();
+      $('#ntForm').style.display = 'block';
+      $('#nf-title').focus();
+    }
+
+    $('#ntNewBtn').addEventListener('click', () => {
+      const isOpen = $('#ntForm').style.display !== 'none';
+      if (isOpen) { $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = ''; }
+      else { formTypes = new Set(); formApps = new Set(); openForm(); }
+    });
+
+    root.querySelectorAll('.nt-tab').forEach((b) => {
+      b.addEventListener('click', () => {
+        tab = b.dataset.tab;
+        ctx.go(tab);
+        renderTabs();
+        renderList();
+      });
+    });
+
+    // ---- Delegated events on the root: covers the form, the toggle-pill
+    // pickers, and every card, including ones re-rendered after a reload. ----
+
+    root.addEventListener('click', async (e) => {
+      const typeToggle = e.target.closest('[data-type]');
+      if (typeToggle && typeToggle.closest('#nfTypeToggles')) {
+        const v = typeToggle.dataset.type;
+        if (formTypes.has(v)) formTypes.delete(v); else formTypes.add(v);
+        typeToggle.setAttribute('aria-pressed', formTypes.has(v));
+        return;
+      }
+
+      const appToggle = e.target.closest('[data-app]');
+      if (appToggle && appToggle.closest('#nfAppToggles')) {
+        const v = appToggle.dataset.app;
+        if (formApps.has(v)) formApps.delete(v); else formApps.add(v);
+        appToggle.setAttribute('aria-pressed', formApps.has(v));
+        return;
+      }
+
+      if (e.target.id === 'nf-cancel') {
+        $('#ntForm').style.display = 'none'; $('#ntForm').innerHTML = '';
+        return;
+      }
+
+      if (e.target.id === 'nf-save') {
+        const btn = e.target;
+        btn.disabled = true;
+        say('');
+        try {
+          await ctx.api.post(ENDPOINTS.notifications, {
+            title: $('#nf-title').value.trim(),
+            types: [...formTypes],
+            appIds: [...formApps],
+            assignedTo: $('#nf-who').value,
+            dueDate: $('#nf-due').value || null
+          });
+          $('#ntForm').style.display = 'none';
+          $('#ntForm').innerHTML = '';
+          say('Notification created.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not create that notification', 'err');
+        } finally {
+          btn.disabled = false;
+        }
+        return;
+      }
+
+      const editToggle = e.target.closest('[data-edit-toggle]');
+      if (editToggle) {
+        const id = editToggle.dataset.editToggle;
+        if (openEdit.has(id)) openEdit.delete(id); else openEdit.add(id);
+        renderList();
+        return;
+      }
+
+      const editTypeToggle = e.target.closest('[data-edit-type]');
+      if (editTypeToggle) {
+        const on = editTypeToggle.getAttribute('aria-pressed') === 'true';
+        editTypeToggle.setAttribute('aria-pressed', String(!on));
+        return;
+      }
+
+      const editAppToggle = e.target.closest('[data-edit-app]');
+      if (editAppToggle) {
+        const on = editAppToggle.getAttribute('aria-pressed') === 'true';
+        editAppToggle.setAttribute('aria-pressed', String(!on));
+        return;
+      }
+
+      const editCancel = e.target.closest('[data-edit-cancel]');
+      if (editCancel) {
+        openEdit.delete(editCancel.dataset.editCancel);
+        renderList();
+        return;
+      }
+
+      const editSave = e.target.closest('[data-edit-save]');
+      if (editSave) {
+        const id = editSave.dataset.editSave;
+        const title = root.querySelector('[data-edit-title="' + id + '"]').value.trim();
+        const types = editSelected(id, 'type');
+        const apps = editSelected(id, 'app');
+        const due = root.querySelector('[data-edit-due="' + id + '"]').value || null;
+        const msg = root.querySelector('[data-edit-msg="' + id + '"]').value.trim();
+        if (!title) { say('Title cannot be blank.', 'err'); return; }
+        if (!types.length) { say('Select at least one type.', 'err'); return; }
+        if (!apps.length) { say('Select at least one app.', 'err'); return; }
+        editSave.disabled = true;
+        try {
+          await ctx.api.patch(ENDPOINTS.notifications,
+            { title, types, appIds: apps, dueDate: due, message: msg || undefined },
+            { query: { id } });
+          openEdit.delete(id);
+          say('Notification updated.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not save that edit', 'err');
+          editSave.disabled = false;
+        }
+        return;
+      }
+
+      const reassignToggle = e.target.closest('[data-reassign-toggle]');
+      if (reassignToggle) {
+        const id = reassignToggle.dataset.reassignToggle;
+        if (openReassign.has(id)) openReassign.delete(id); else openReassign.add(id);
+        renderList();
+        return;
+      }
+
+      const historyToggle = e.target.closest('[data-history-toggle]');
+      if (historyToggle) {
+        const id = historyToggle.dataset.historyToggle;
+        if (openHistory.has(id)) openHistory.delete(id); else openHistory.add(id);
+        renderList();
+        return;
+      }
+
+      const reassignSave = e.target.closest('[data-reassign-save]');
+      if (reassignSave) {
+        const id = reassignSave.dataset.reassignSave;
+        const who = root.querySelector('[data-reassign-who="' + id + '"]').value;
+        const msg = root.querySelector('[data-reassign-msg="' + id + '"]').value.trim();
+        reassignSave.disabled = true;
+        try {
+          await ctx.api.patch(ENDPOINTS.notifications,
+            { assignedTo: who, message: msg || undefined }, { query: { id } });
+          openReassign.delete(id);
+          say('Reassigned.', 'ok');
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not reassign that notification', 'err');
+          reassignSave.disabled = false;
+        }
+        return;
+      }
+
+      const del = e.target.closest('[data-del]');
+      if (del) {
+        if (!confirm('Delete this notification?')) return;
+        try {
+          await ctx.api.del(ENDPOINTS.notifications, { query: { id: del.dataset.del } });
+          await load();
+        } catch (err) {
+          say(err.message || 'Could not delete that notification', 'err');
+        }
+      }
+    });
+
+    root.addEventListener('change', async (e) => {
+      if (e.target.id === 'ntShowDone') {
+        showDone = e.target.checked;
+        renderList();
+        return;
+      }
+
+      const box = e.target.closest('[data-toggle]');
+      if (!box) return;
+      const id = box.dataset.toggle;
+      const next = box.checked ? 'done' : 'open';
+      box.disabled = true;
+      try {
+        await ctx.api.patch(ENDPOINTS.notifications, { status: next }, { query: { id } });
+        await load();
+      } catch (err) {
+        say(err.message || 'Could not update that notification', 'err');
+        box.disabled = false;
+        box.checked = !box.checked;
+      }
+    });
+
+    // Exposed so showView() (called by the shell on every route change,
+    // including the very first one) can switch tabs without re-mounting.
+    this._setTab = (v) => { tab = v; renderTabs(); renderList(); };
+
+    await load();
+    this._setTab(ctx.defaultView === 'sent' ? 'sent' : 'inbox');
+  },
+
+  showView(view) {
+    if (this._setTab) this._setTab(view === 'sent' ? 'sent' : 'inbox');
+  }
+};
