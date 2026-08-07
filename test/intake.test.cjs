@@ -99,4 +99,65 @@ if (intakeHtml) {
   });
 }
 
+/* ---- art file upload (drag & drop on the vision board step) ---- */
+
+const uploadApi = fs.existsSync(path.join(ROOT, 'api/intake-upload.js'))
+  ? read('api/intake-upload.js')
+  : null;
+
+if (uploadApi) {
+  t.test('the art upload endpoint is public — no getSession/requireAuth gate', () => {
+    // Check actual calls, not the file's own explanatory comment about why
+    // there's no auth (which mentions requireAuth by name).
+    t.assert(!/requireAuth\(req|getSession\(req/.test(uploadApi),
+      'api/intake-upload.js gained an auth check — a prospect dropping a file on the public form is never signed in');
+  });
+
+  t.test('the art upload endpoint caps file size', () => {
+    t.assert(/MAX_BYTES/.test(uploadApi), 'the size cap constant is missing');
+    t.assert(/bytes > MAX_BYTES/.test(uploadApi), 'the size cap is defined but never actually checked against the decoded upload');
+  });
+
+  t.test('the art upload endpoint validates file type against an allowlist', () => {
+    t.assert(/ALLOWED_TYPES/.test(uploadApi), 'the type allowlist is missing');
+    t.assert(/application\/pdf/.test(uploadApi) && /image\/(jpeg|png)/.test(uploadApi),
+      'the allowlist should cover at least PDF and common image types (art references are usually one or the other)');
+  });
+
+  t.test("uploaded files are stored under a distinct intake/ prefix, not mixed into another app's Blob keys", () => {
+    t.assert(/intake\/art\//.test(uploadApi),
+      'upload keys should live under intake/art/ so they are easy to find/clean up separately from TravelTrack receipts etc');
+  });
+
+  t.test('intake.html wires the dropzone to /api/intake-upload', () => {
+    t.assert(intakeHtml && /\/api\/intake-upload/.test(intakeHtml),
+      'intake.html does not call /api/intake-upload — the dropzone has nothing to upload to');
+    t.assert(intakeHtml && /addEventListener\(.drop./.test(intakeHtml),
+      'intake.html is missing a drop event listener — drag & drop is not actually wired up');
+    t.assert(intakeHtml && /readAsDataURL/.test(intakeHtml),
+      'intake.html should read dropped files as a data URL, matching the data-URL shape api/intake-upload.js expects');
+  });
+
+  t.test('submission blocks while an upload is still in flight', () => {
+    t.assert(intakeHtml && /status === .uploading./.test(intakeHtml),
+      'saveVision() should refuse to submit while a file is mid-upload, or a slow upload could get silently dropped from the submission');
+  });
+
+  t.test('vision.art_files carries through into the stored entry (nested, not flattened)', () => {
+    t.assert(/art_files/.test(apiIntake) || /vision:\s*sanitize\(submission\.vision/.test(apiIntake),
+      'api/intake.js must preserve vision.art_files — either explicitly or because it stores submission.vision as a whole nested object');
+  });
+
+  t.test('the Inbox renders uploaded art as real links, not escaped plain text', () => {
+    const idx = mainJs.indexOf('artFiles');
+    t.assert(idx !== -1, 'main.js no longer reads vis.art_files (artFiles variable missing)');
+    t.assert(/<a href=/.test(mainJs.slice(idx, idx + 600)),
+      'main.js should render vis.art_files as clickable <a> links near where it reads them, not run them through the plain-text kvRows() helper');
+  });
+} else {
+  t.test('api/intake-upload.js exists (art drag & drop endpoint)', () => {
+    t.assert(false, 'api/intake-upload.js is missing — the vision board drag & drop has nothing to upload to');
+  });
+}
+
 process.exit(t.report());
