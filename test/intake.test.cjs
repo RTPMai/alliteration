@@ -160,4 +160,34 @@ if (uploadApi) {
   });
 }
 
+/* ---- industry field removed entirely ---- */
+
+t.test('the industry field is completely gone from intake.html', () => {
+  t.assert(intakeHtml && !/industry/i.test(intakeHtml),
+    'intake.html still contains an "industry" reference — the field was supposed to be fully removed, not just hidden');
+});
+
+t.test('the industry field is completely gone from the Inbox reader (main.js)', () => {
+  // Not required to fail the build if a stray read remains (it degrades
+  // gracefully since co.industry is just undefined now), but flag it loudly
+  // if it's still displayed as a labeled row, since "completely removed"
+  // means removed everywhere, not just where it breaks something.
+  t.assert(!/\["Industry", co\.industry\]/.test(mainJs),
+    'main.js still has a dedicated "Industry" row wired to co.industry — remove it since the form no longer collects it');
+});
+
+/* ---- back button no longer discards in-progress field values ---- */
+
+t.test('a draft store exists and every step re-applies it on render', () => {
+  t.assert(/let draft = \{\}/.test(intakeHtml), 'the field-level draft store is missing');
+  t.assert(/function draftFields/.test(intakeHtml), 'draftFields() is missing');
+  t.assert(/STEPS\[step\]\(\);\s*draftFields\(\);/.test(intakeHtml),
+    'go() must call draftFields() right after rendering a step, or Back navigation will render blank fields again');
+});
+
+t.test('draftFields() captures both text/select input and checkbox state', () => {
+  t.assert(/el\.type === "checkbox"/.test(intakeHtml),
+    'draftFields() should special-case checkboxes (the CSG waiver checkbox) — reading .value on a checkbox is meaningless');
+});
+
 process.exit(t.report());
