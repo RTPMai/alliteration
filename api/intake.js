@@ -20,15 +20,49 @@
 // COLLISION NOTE: ErrorEngine also shipped an api/intake.js. Under the shell
 // BackBone keeps this route and ErrorEngine's moves to /api/errors, which is
 // why ERRORS_ENDPOINT exists in js/api.js.
+//
+// SCHEMA NOTE (Aug 2026 fix): this handler used to flatten the post body into
+// flat clean(body.company, ...) strings. That never matched what the actual
+// intake.html wizard sends (POST body is { submission: { entry, company,
+// contact, project, vision, internal } }, each a nested object) or what the
+// Inbox in apps/backbone/main.js reads (s.company.name, s.contact.email,
+// s.project.details, etc). Every real submission was silently rejected with
+// "A company or a contact is required" before this fix. Now the handler
+// stores the submission object as-is (sanitized/size-capped), matching the
+// intake_v1 shape the form and Inbox already agree on.
 
 import { getSession } from "../lib/session.js";
 import { KEYS, readKey, kvSet, isConfigured } from "../lib/backbone-store.js";
 
 const MAX_SUBMISSIONS = 2000;
+const MAX_STRING = 4000;
+const MAX_ARRAY = 25;
+const MAX_DEPTH = 6;
 
-function clean(v, max) {
-  if (v == null) return "";
-  return String(v).trim().slice(0, max || 2000);
+// Recursively trims strings, caps string/array size, and drops anything past
+// MAX_DEPTH, so a hostile POST can't blow up KV value size or nest forever.
+// The public path is unauthenticated by design, so this is the only guard.
+function sanitize(val, depth) {
+  depth = depth || 0;
+  if (val == null) return val;
+  if (depth > MAX_DEPTH) return null;
+  if (typeof val === "string") return val.trim().slice(0, MAX_STRING);
+  if (typeof val === "boolean" || typeof val === "number") return val;
+  if (Array.isArray(val)) {
+    return val.slice(0, MAX_ARRAY).map((v) => sanitize(v, depth + 1));
+  }
+  if (typeof val === "object") {
+    const out = {};
+    for (const k of Object.keys(val).slice(0, 40)) {
+      out[k] = sanitize(val[k], depth + 1);
+    }
+    return out;
+  }
+  return null;
+}
+
+function clean(v) {
+  return v == null ? "" : String(v).trim();
 }
 
 export default async function handler(req, res) {
@@ -81,24 +115,31 @@ export default async function handler(req, res) {
 
     // ---- a new submission from the public form ----
     // No session required, and none possible. This path can only append.
+    // intake.html posts { submission: { entry, company, contact, project,
+    // vision, internal } } — the same nested shape the Inbox reads back.
+    const submission = (body.submission && typeof body.submission === "object")
+      ? body.submission
+      : body; // tolerate a bare object too, in case a future caller skips the wrapper
+
+    const company = sanitize(submission.company, 0) || {};
+    const contact = sanitize(submission.contact, 0) || {};
+
+    if (!clean(company.name) && !clean(contact.name) && !clean(contact.email) && !clean(contact.phone)) {
+      return res.status(400).json({ error: "A company or a contact is required" });
+    }
+
     const entry = {
       id: "SUB-" + Date.now().toString(36).toUpperCase(),
       submitted_at: new Date().toISOString(),
       status: "new",
-      company: clean(body.company, 200),
-      contact: clean(body.contact, 200),
-      project: clean(body.project, 400),
-      vision: clean(body.vision, 4000),
-      links: clean(body.links, 1000),
-      entry: clean(body.entry, 200),
-      // Anything else the form sends is kept verbatim so a field added to the
-      // form is not silently dropped before anyone notices it is missing.
-      extra: body,
+      entry: sanitize(submission.entry, 0) || {},
+      company: company,
+      contact: contact,
+      project: sanitize(submission.project, 0) || {},
+      vision: sanitize(submission.vision, 0) || null,
+      internal: !!submission.internal,
+      links: {}, // filled in later by attach-to-client / convert-to-lead
     };
-
-    if (!entry.company && !entry.contact) {
-      return res.status(400).json({ error: "A company or a contact is required" });
-    }
 
     const data = await readKey(KEYS.intake);
     const submissions = (data && Array.isArray(data.submissions)) ? data.submissions : [];
