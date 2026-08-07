@@ -9301,7 +9301,19 @@ export async function start(ctx) {
         ["Brand guide", vis.has_brand_guide ? "Yes" : ""], ["Brand guide link", vis.brand_guide_url],
         ["Wants art meeting", vis.talk_to_art ? "Yes" : ""], ["Vision", vis.vision_description],
         ["Inspiration", (vis.inspo || []).join(", ")]];
-      html += '<div class="qual-section"><h4>Vision board</h4>' + kvRows(visEntries) + '</div>';
+      html += '<div class="qual-section"><h4>Vision board</h4>' + kvRows(visEntries);
+      // Uploaded art files (from the intake form's drag & drop, api/intake-upload.js).
+      // Rendered separately from kvRows because these need real <a> links, not
+      // escaped plain text.
+      const artFiles = Array.isArray(vis.art_files) ? vis.art_files.filter(function(f) { return f && f.url; }) : [];
+      if (artFiles.length) {
+        html += '<div class="qual-row"><span>Uploaded art</span><span>' +
+          artFiles.map(function(f) {
+            return '<a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener">' + escapeHtml(f.filename || "file") + '</a>';
+          }).join('<br>') +
+          '</span></div>';
+      }
+      html += '</div>';
     }
 
     // ---- Actions ----
