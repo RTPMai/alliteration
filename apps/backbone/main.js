@@ -9281,7 +9281,7 @@ export async function start(ctx) {
       (s.links && s.links.lead_id ? ' · lead created' : "") + '</div>';
 
     html += '<div class="qual-section"><h4>Contact</h4>' +
-      kvRows([["Company", co.name], ["Industry", co.industry], ["Contact", c.name], ["Title", c.job_title],
+      kvRows([["Company", co.name], ["Contact", c.name], ["Title", c.job_title],
               ["Email", c.email], ["Phone", c.phone], ["Website", c.url]]) + '</div>';
 
     const srcParts = s.entry && s.entry.source ? [s.entry.source.channel, s.entry.source.detail].filter(Boolean).join(" — ") : "";
