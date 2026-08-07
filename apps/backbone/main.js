@@ -3615,6 +3615,17 @@ export async function start(ctx) {
     return first + "@pmapparel.com";
   }
 
+  // Notifications assignedTo is a real account username, not a display name —
+  // same firstname-lowercase convention as amEmail() above (Alexis Davis ->
+  // "alexis"). If an account's username ever stops following that pattern,
+  // the notification POST below will fail its own server-side validation
+  // (assignedTo must be a known account), which fails quietly rather than
+  // crashing the handoff — see createLeadNotifications/createInquiryNotification.
+  function amUsername(amName) {
+    if (!amName) return "";
+    return amName.trim().split(/\s+/)[0].toLowerCase();
+  }
+
   // Maps loose / model-invented industry strings onto our exact lane names. The qualify agent
   // (and older pasted JSON) sometimes returns labels like "Construction" or "Manufacturing" that
   // don't match a lane verbatim, which used to silently fall through to the Abby Penton fallback
@@ -7358,6 +7369,7 @@ export async function start(ctx) {
         setTimeout(function() { btn.textContent = orig; btn.disabled = false; }, 6000);
         // Only this AM's leads went out — offer to flag just those.
         offerAMNotified(d.leads);
+        createLeadNotifications(d.leads, d.am);
       });
     });
   }
@@ -7405,11 +7417,38 @@ export async function start(ctx) {
     if (handoffDrafts.length === 1 && handoffDrafts[0].to && !handoffDrafts[0].truncated) {
       openMailto(handoffDrafts[0].href);
       offerAMNotified(chosen);
+      createLeadNotifications(chosen, handoffDrafts[0].am);
       return;
     }
 
     renderHandoffModal();
     $id("handoffOverlay").classList.add("open");
+  }
+
+  // Auto-creates a shell Notification for the AM when leads get handed off by
+  // email — Ryan's ask (Aug 2026): assigning a lead or inquiry to an AM
+  // should populate a notification, not rely on them noticing an email.
+  // Best-effort and silent on failure: the email itself is the real handoff,
+  // this is a bonus in-app reminder, so a hiccup here must never block or
+  // interrupt the send that already happened.
+  async function createLeadNotifications(leads, am) {
+    const username = amUsername(am);
+    if (!username || !leads || !leads.length) return; // "Unassigned" group has no am — nothing to notify
+    try {
+      await Promise.all(leads.map(function(l) {
+        const qs = (l.qualification && l.qualification.qualification_scoring) || {};
+        const tier = qs.qualification_tier || "";
+        const title = "New lead: " + l.company_name + (tier ? " (" + tier + ")" : "");
+        return api.post(ENDPOINTS.notifications, {
+          title: title,
+          types: ["handoff"],
+          appIds: ["backbone"],
+          assignedTo: username,
+        });
+      }));
+    } catch (e) {
+      console.warn("Could not create lead notification(s):", e);
+    }
   }
 
   // A draft opening isn't proof it was sent, so ask rather than flipping status silently.
@@ -9386,6 +9425,26 @@ export async function start(ctx) {
     return { to: to, subject: subject, body: body, href: href };
   }
 
+  // Same bonus-reminder pattern as createLeadNotifications: best-effort,
+  // silent on failure, never blocks the email that already went out.
+  async function createInquiryNotification(s, am) {
+    const username = amUsername(am);
+    if (!username) return;
+    const co = s.company || {}, p = s.project || {};
+    const title = "New inquiry: " + (co.name || "New inquiry") +
+      (p.type ? " (" + (PROJECT_TYPE_LABELS[p.type] || p.type) + ")" : "");
+    try {
+      await api.post(ENDPOINTS.notifications, {
+        title: title,
+        types: ["handoff"],
+        appIds: ["backbone"],
+        assignedTo: username,
+      });
+    } catch (e) {
+      console.warn("Could not create inquiry notification:", e);
+    }
+  }
+
   async function emailInquiryToAM(s) {
     const sel = $id("inqAmSelect");
     const am = sel ? sel.value : "";
@@ -9404,6 +9463,7 @@ export async function start(ctx) {
     }
 
     openMailto(buildInquiryMailto(s, am, url).href);
+    createInquiryNotification(s, am);
     if (btn) {
       btn.textContent = "Opened \u2713";
       setTimeout(function() { btn.textContent = orig; btn.disabled = false; }, 3000);
