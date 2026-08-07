@@ -9312,6 +9312,104 @@ export async function start(ctx) {
     }
   }
 
+  // ---- Inquiry Brief: a sendable, nice-looking sheet for the Inbox ---------
+  // Ryan's ask (Aug 2026): Leads have a hosted brief link that goes in the
+  // handoff email; the Inbox had nothing equivalent. This mirrors that same
+  // pattern (api/inquiry-brief.js renders + uploads + short-links, exactly
+  // like api/brief.js does for Leads) but scoped to what an inquiry actually
+  // has — no AI qualification/score/tier exists pre-conversion, so this is a
+  // clean readout of the submission itself: contact, project, vision board,
+  // any uploaded art, and whatever the Inbox already flagged (bot signals,
+  // address mismatch) so the AM sees those warnings too, not just BackBone.
+  //
+  // Unlike Leads (routed by industry via leadSuggestedAM), an inquiry has no
+  // industry — the field was removed from the intake form — so there's no
+  // reliable auto-routing target. The AM picker is a manual choice, same
+  // pattern already used for "unassigned" leads in the handoff modal.
+  const inquiryBriefUrls = {};
+  const inquiryBriefErrors = {};
+
+  async function generateInquiryBrief(s, am, warnings) {
+    if (inquiryBriefUrls[s.id]) return inquiryBriefUrls[s.id];
+    delete inquiryBriefErrors[s.id];
+    try {
+      const d = await api.post(ENDPOINTS.bbInquiryBrief, { submission: s, am: am, warnings: warnings || [] });
+      inquiryBriefUrls[s.id] = d.url;
+      return d.url;
+    } catch (err) {
+      inquiryBriefErrors[s.id] = (err && err.body && err.body.error) || (err && err.message) || "Network error";
+      return null;
+    }
+  }
+
+  // Every mismatch/bot signal currently known for this inquiry, in plain
+  // English, for the brief's "Worth a second look" section. Reuses the same
+  // caches the Inbox UI already populated — no extra network calls.
+  function inquiryWarnings(s) {
+    const bot = botSignals(s).hits.slice();
+    const addr = findAddressClaims(s).filter(claimMismatched).map(function(c) {
+      const r = addressCheckCache[c.zip];
+      return (r && r.valid === false)
+        ? c.raw + " \u2014 doesn't look like a real ZIP code."
+        : c.raw + " \u2014 ZIP " + c.zip + " usually maps to " + (r ? r.city + ", " + r.state : "somewhere else") + ".";
+    });
+    return bot.concat(addr);
+  }
+
+  function buildInquiryMailto(s, am, url) {
+    const co = s.company || {}, c = s.contact || {}, p = s.project || {};
+    const to = amEmail(am);
+    const subject = (co.name || "New inquiry") + " \u2014 " + (PROJECT_TYPE_LABELS[p.type] || "New inquiry");
+
+    const lines = [];
+    lines.push("Hi " + am.split(" ")[0] + ",");
+    lines.push("");
+    lines.push("A new inquiry came in through the intake form.");
+    lines.push("");
+    lines.push("FULL DETAILS HERE:");
+    lines.push(url);
+    lines.push("");
+    lines.push((co.name || "(no company name)").toUpperCase());
+    if (p.name) lines.push(p.name);
+    if (p.type) lines.push(PROJECT_TYPE_LABELS[p.type] || p.type);
+    if (p.in_hands_date) lines.push("In-hands date: " + p.in_hands_date);
+    lines.push("");
+    lines.push("CONTACT");
+    lines.push("  " + (c.name || "Name not given"));
+    if (c.email) lines.push("  Email: " + c.email);
+    if (c.phone) lines.push("  Phone: " + c.phone);
+    lines.push("");
+    lines.push("\u2014 BackBone");
+
+    const body = lines.join("\n");
+    const href = "mailto:" + encodeURIComponent(to) + "?subject=" + encodeURIComponent(subject) + "&body=" + encodeURIComponent(body);
+    return { to: to, subject: subject, body: body, href: href };
+  }
+
+  async function emailInquiryToAM(s) {
+    const sel = $id("inqAmSelect");
+    const am = sel ? sel.value : "";
+    if (!am) { alert("Pick an AM first, then click Email to AM again."); return; }
+
+    const btn = $id("inqEmailAm");
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Building brief\u2026"; }
+
+    const url = await generateInquiryBrief(s, am, inquiryWarnings(s));
+
+    if (!url) {
+      alert("Couldn't generate the brief" + (inquiryBriefErrors[s.id] ? ": " + inquiryBriefErrors[s.id] : "") + ". Nothing was emailed.");
+      if (btn) { btn.disabled = false; btn.textContent = orig; }
+      return;
+    }
+
+    openMailto(buildInquiryMailto(s, am, url).href);
+    if (btn) {
+      btn.textContent = "Opened \u2713";
+      setTimeout(function() { btn.textContent = orig; btn.disabled = false; }, 3000);
+    }
+  }
+
   function projectSummary(s) {
     const p = s.project || {};
     const parts = [];
@@ -9496,7 +9594,18 @@ export async function start(ctx) {
     }
 
     // ---- Actions ----
-    html += '<div class="qual-section"><h4>Route this inquiry</h4><div id="inqActions">';
+    html += '<div class="qual-section"><h4>Route this inquiry</h4>' +
+      // Email-to-AM: available regardless of routing status, since an AM may
+      // want the brief link before you've decided whether to attach or
+      // convert this inquiry. Mirrors the Lead Brief's link-in-email pattern.
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)">' +
+        '<select id="inqAmSelect" class="field" style="width:auto;font-size:12px;padding:6px 8px">' +
+          '<option value="">Choose AM\u2026</option>' +
+          ACCOUNT_MANAGERS.map(function(a) { return '<option value="' + escapeHtml(a) + '">' + escapeHtml(a) + '</option>'; }).join("") +
+        '</select>' +
+        '<button class="btn btn-gray btn-sm" id="inqEmailAm">Email to AM</button>' +
+      '</div>' +
+      '<div id="inqActions">';
 
     if (s.status === "attached_to_client" || s.status === "converted_lead" || s.status === "dismissed") {
       html += '<div class="help">This inquiry is <b>' + s.status.replace(/_/g, " ") + '</b>. ' +
@@ -9538,6 +9647,8 @@ export async function start(ctx) {
     if (reopen) reopen.addEventListener("click", function(e) {
       e.preventDefault(); s.status = "reviewed"; saveInbox().then(function() { renderInquiryBody(s); renderInbox(); });
     });
+    const emailAmBtn = $id("inqEmailAm");
+    if (emailAmBtn) emailAmBtn.addEventListener("click", function() { emailInquiryToAM(s); });
 
     if (addressClaims.length) verifyAddressClaims(s, addressClaims);
   }
