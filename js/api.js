@@ -62,7 +62,7 @@ const LIVE_PREFIXES = [
   '/api/giving-requests', '/api/giving-intake',
   // BackBone: roster, leads, inbox and the AI endpoints are all deployed.
   '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
-  '/api/intake', '/api/zip-check', '/api/qualify', '/api/brief', '/api/scan-card',
+  '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
@@ -153,6 +153,7 @@ export const ENDPOINTS = {
   bbPrintavoSchema:'/api/printavo-schema',
   bbCustomerMatch: '/api/customer-match',
   bbZipCheck:      '/api/zip-check',
+  bbInquiryBrief:  '/api/inquiry-brief',
 
   // ---- ErrorEngine (collisions resolved) ----
   eeErrors:        ERRORS_ENDPOINT,        // renamed from /api/intake
