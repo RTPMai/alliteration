@@ -207,4 +207,78 @@ t.test('ops partial saves are stamped and stale partials restart fresh', () => {
     'the ops partial no longer has a freshness window; day-old cursors will be resumed');
 });
 
+/* ---- Inbox: city/state/ZIP sanity check (Ryan's ask, Aug 2026) --------- */
+// "Polk City IA 50014" was submitted — that ZIP is actually Ames, not Polk
+// City. The intake form has no dedicated address field, so this scans every
+// free-text field on an inquiry for anything address-shaped and verifies the
+// ZIP against a real ZIP database.
+
+const zipCheckApi = fs.existsSync(path.join(ROOT, 'api/zip-check.js'))
+  ? read('api/zip-check.js')
+  : null;
+
+if (zipCheckApi) {
+  t.test('the ZIP check endpoint is session-gated, not public', () => {
+    t.assert(/requireAuth\(req/.test(zipCheckApi),
+      'api/zip-check.js should require a session — unlike the public intake endpoints, there is no reason for an anonymous caller to get a free ZIP-lookup proxy');
+  });
+
+  t.test('ZIP lookups are cached in KV so repeat inquiries do not re-hit the external API', () => {
+    t.assert(/zipcache:/.test(zipCheckApi), 'the KV cache key prefix is missing');
+    t.assert(/kvGet\(cacheKey/.test(zipCheckApi) && /kvSet\(cacheKey/.test(zipCheckApi),
+      'lookupOne() should check the cache before fetching and populate it after — otherwise every inquiry re-hits the external API for the same ZIP');
+  });
+
+  t.test('a failed upstream lookup is never cached as a false negative', () => {
+    // valid:null (unknown/failed) must not get written to KV, or a transient
+    // outage would permanently "poison" that ZIP as unverifiable.
+    const failBlock = zipCheckApi.slice(zipCheckApi.indexOf('valid: null'), zipCheckApi.indexOf('valid: null') + 400);
+    t.assert(!/kvSet\(cacheKey/.test(failBlock),
+      'a valid:null (failed lookup) result path must return before reaching kvSet, or a transient failure gets cached permanently');
+  });
+
+  t.test('main.js scans free-text fields (not a dedicated address field, since none exists) for city/state/ZIP claims', () => {
+    t.assert(/function findAddressClaims/.test(main), 'findAddressClaims() is missing from main.js');
+    t.assert(/function inquiryFieldsRaw/.test(main),
+      'inquiryFieldsRaw() is missing — address scanning should reuse the same free-text sources as bot screening (inquiryFieldsRaw), not duplicate the field list');
+  });
+
+  t.test('city comparison tolerates over-captured filler words without false-flagging correct addresses', () => {
+    t.assert(/function citiesMatch/.test(main), 'citiesMatch() is missing');
+    t.assert(/endsWith/.test(main.slice(main.indexOf('function citiesMatch'), main.indexOf('function citiesMatch') + 500)),
+      'citiesMatch() should tolerate a captured city like "are in Des Moines" matching the real "Des Moines" — a strict equality check would falsely flag correct addresses embedded in ordinary prose');
+  });
+
+  t.test('the address check is advisory only — a failed/offline lookup never shows a false alarm', () => {
+    const idx = main.indexOf('async function verifyAddressClaims');
+    const block = main.slice(idx, idx + 1500);
+    t.assert(/box\.remove\(\)/.test(block),
+      'verifyAddressClaims() should remove its placeholder rather than show anything when a ZIP could not be verified');
+  });
+
+  t.test('a stale/late lookup response cannot land on the wrong (already-navigated-away-from) inquiry', () => {
+    const idx = main.indexOf('async function verifyAddressClaims');
+    const block = main.slice(idx, idx + 800);
+    t.assert(/activeInquiryId !== s\.id/.test(block),
+      'verifyAddressClaims() must bail out if the AM has already opened a different inquiry by the time the ZIP lookup resolves');
+  });
+
+  t.test('the Inbox list shows a chip for a mismatched address without re-checking per row', () => {
+    t.assert(/function addressChip/.test(main), 'addressChip() is missing from the list-row renderer');
+    t.assert(/addressCheckCache/.test(main.slice(main.indexOf('function addressChip'), main.indexOf('function addressChip') + 400)),
+      'addressChip() should read from the shared addressCheckCache rather than triggering its own network call per row');
+  });
+
+  t.test('js/api.js exposes the ZIP check endpoint and routes it live (not mock)', () => {
+    const apiJs = read('js/api.js');
+    t.assert(/bbZipCheck:\s*'\/api\/zip-check'/.test(apiJs), 'ENDPOINTS.bbZipCheck is missing from js/api.js');
+    t.assert(/'\/api\/zip-check'/.test(apiJs.slice(apiJs.indexOf('LIVE_PREFIXES'), apiJs.indexOf('LIVE_PREFIXES') + 2000)),
+      '/api/zip-check must be listed in LIVE_PREFIXES or MOCK mode will silently fake every ZIP lookup');
+  });
+} else {
+  t.test('api/zip-check.js exists (Inbox address sanity check)', () => {
+    t.assert(false, 'api/zip-check.js is missing — the Inbox address check has nothing to verify a ZIP against');
+  });
+}
+
 process.exit(t.report());
