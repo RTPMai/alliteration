@@ -342,4 +342,53 @@ if (inquiryBriefApi) {
   });
 }
 
+/* ---- Auto-notification on lead/inquiry assignment (Ryan's ask) --------- */
+// Assigning a lead or inquiry to an AM (emailing them the handoff) should
+// also populate a shell Notification, so it's not just an email they might
+// not see right away.
+
+t.test('a username helper exists for turning an AM display name into a real account username', () => {
+  t.assert(/function amUsername/.test(main), 'amUsername() is missing from main.js');
+});
+
+t.test('lead handoff creates a notification for the AM, best-effort and non-blocking', () => {
+  t.assert(/function createLeadNotifications/.test(main), 'createLeadNotifications() is missing from main.js');
+  const idx = main.indexOf('async function createLeadNotifications');
+  const block = main.slice(idx, idx + 900);
+  t.assert(/ENDPOINTS\.notifications/.test(block), 'createLeadNotifications() should POST to ENDPOINTS.notifications');
+  t.assert(/types:\s*\["handoff"\]/.test(block), 'lead notifications should carry the "handoff" type tag');
+  t.assert(/appIds:\s*\["backbone"\]/.test(block), 'lead notifications should be tagged to the backbone app');
+  t.assert(/catch/.test(block),
+    'createLeadNotifications() must catch its own failures — a notification hiccup should never interrupt a handoff email that already sent');
+});
+
+t.test('createLeadNotifications is called from both lead handoff paths (single-AM and multi-AM modal)', () => {
+  const calls = (main.match(/createLeadNotifications\(/g) || []).length;
+  // 1 for the definition itself is not a match (different signature: "function createLeadNotifications"),
+  // so every match here is a real call site. Expect at least the two known paths.
+  t.assert(calls >= 2, 'createLeadNotifications() should be called from both the single-AM auto-send path and the multi-AM handoff modal\'s Open Draft button — found ' + calls + ' call site(s)');
+});
+
+t.test('inquiry email-to-AM creates a notification for that AM too', () => {
+  t.assert(/function createInquiryNotification/.test(main), 'createInquiryNotification() is missing from main.js');
+  const idx = main.indexOf('async function createInquiryNotification');
+  const block = main.slice(idx, idx + 700);
+  t.assert(/ENDPOINTS\.notifications/.test(block), 'createInquiryNotification() should POST to ENDPOINTS.notifications');
+  t.assert(/catch/.test(block), 'createInquiryNotification() must catch its own failures, same as the lead version');
+});
+
+t.test('emailInquiryToAM actually calls createInquiryNotification after opening the mailto', () => {
+  const idx = main.indexOf('async function emailInquiryToAM');
+  const block = main.slice(idx, idx + 900);
+  t.assert(/createInquiryNotification\(s, am\)/.test(block),
+    'emailInquiryToAM() built the notification helper but never calls it');
+});
+
+t.test('no AM means no notification (an unrouted lead group has nothing to assign)', () => {
+  const idx = main.indexOf('async function createLeadNotifications');
+  const block = main.slice(idx, idx + 400);
+  t.assert(/if \(!username/.test(block),
+    'createLeadNotifications() should bail out quietly when there is no real AM username (e.g. the "Unassigned" group), not try to notify a blank assignee');
+});
+
 process.exit(t.report());
