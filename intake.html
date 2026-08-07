@@ -73,6 +73,27 @@
   .check { display: flex; align-items: flex-start; gap: 10px; font-size: 13.5px; line-height: 1.5; }
   .check input { margin-top: 3px; }
   .done-icon { width: 56px; height: 56px; border-radius: 50%; background: #E7F4EC; color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 26px; margin: 0 auto 16px; }
+  .dropzone {
+    border: 1.5px dashed var(--line); border-radius: 12px; padding: 22px 16px;
+    text-align: center; cursor: pointer; background: #FAFBFA; transition: border-color .15s, background .15s;
+  }
+  .dropzone:hover, .dropzone:focus-visible { border-color: var(--green); background: #F3FAF6; outline: none; }
+  .dropzone.dragover { border-color: var(--green); background: #EAF6EF; }
+  .dropzone-hint { font-size: 13px; color: var(--muted); }
+  .upload-list { margin-top: 10px; display: grid; gap: 6px; }
+  .upload-item {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px;
+    background: #F4F6F8; border-radius: 8px; padding: 7px 10px;
+  }
+  .upload-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .upload-status { color: var(--muted); font-size: 11.5px; flex-shrink: 0; }
+  .upload-status.upload-ok { color: var(--green-dark); }
+  .upload-status.upload-error { color: var(--danger); }
+  .upload-remove {
+    background: none; border: none; color: var(--muted); font-size: 16px; line-height: 1;
+    cursor: pointer; padding: 0 2px; flex-shrink: 0;
+  }
+  .upload-remove:hover { color: var(--danger); }
   .center { text-align: center; }
   .review dt { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-top: 12px; }
   .review dd { font-size: 14px; margin: 2px 0 0; }
@@ -378,7 +399,12 @@ const STEPS = {
       '<div class="field"><label>Do you have art ready?</label>' +
       '<select id="hasArt" onchange="STEPS._visionToggle()"><option value="">Choose…</option><option value="yes">Yes</option><option value="no">No</option></select></div>' +
       '<div id="artYes" style="display:none">' +
-      '<div class="field"><label>Link to your art <span class="hint">(Drive, Dropbox, your site — or reply to our confirmation email with files)</span></label><input type="url" id="artUrl" placeholder="https://"></div></div>' +
+      '<div class="field"><label>Upload your art <span class="hint">(drag & drop, or click to browse — images, PDF, AI, EPS, SVG, PSD, up to 15MB each)</span></label>' +
+      '<div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload art files">' +
+      '<div class="dropzone-hint">Drop files here, or click to browse</div>' +
+      '<input type="file" id="fileInput" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.svg,.pdf,.ai,.eps,.psd" style="display:none"></div>' +
+      '<div id="uploadList" class="upload-list"></div></div>' +
+      '<div class="field"><label>Or link to your art <span class="hint">(Drive, Dropbox, your site — optional if you uploaded files above)</span></label><input type="url" id="artUrl" placeholder="https://"></div></div>' +
       '<div id="artNo" style="display:none">' +
       '<div class="field"><label>Do you have a brand guide?</label>' +
       '<select id="hasGuide" onchange="STEPS._visionToggle()"><option value="">Choose…</option><option value="yes">Yes</option><option value="no">No</option></select></div>' +
@@ -401,6 +427,7 @@ const STEPS = {
     const gy = document.getElementById("guideYes"); if (gy) gy.style.display = hasGuide === "yes" ? "block" : "none";
     const db = document.getElementById("describeBlock"); if (db) db.style.display = talk === "no" ? "block" : "none";
     const mn = document.getElementById("meetingNote"); if (mn) mn.style.display = talk === "yes" ? "block" : "none";
+    if (hasArt === "yes") initDropzone();
   },
 
   /* REVIEW + SUBMIT -------------------------------------------------------- */
@@ -495,12 +522,98 @@ function saveStore(kind) {
   };
   go("vision", 70);
 }
+/* ------------------------------------------------------------- art upload */
+// Tracks files across the whole vision step (survives yes/no toggling since
+// the DOM inside #artYes isn't re-created by that toggle — only go()'s
+// full re-render clears it, same as every other field on this form).
+let uploadedArt = [];
+const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+
+function initDropzone() {
+  const dz = document.getElementById("dropzone");
+  const input = document.getElementById("fileInput");
+  if (!dz || !input || dz.dataset.bound) { renderUploadList(); return; }
+  dz.dataset.bound = "1";
+  dz.addEventListener("click", () => input.click());
+  dz.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); } });
+  dz.addEventListener("dragover", (e) => { e.preventDefault(); dz.classList.add("dragover"); });
+  dz.addEventListener("dragleave", () => dz.classList.remove("dragover"));
+  dz.addEventListener("drop", (e) => {
+    e.preventDefault(); dz.classList.remove("dragover");
+    handleFiles(e.dataTransfer.files);
+  });
+  input.addEventListener("change", () => { handleFiles(input.files); input.value = ""; });
+  renderUploadList();
+}
+
+function handleFiles(fileList) {
+  Array.from(fileList || []).forEach(uploadOneFile);
+}
+
+function escapeHtmlClient(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+async function uploadOneFile(file) {
+  if (file.size > MAX_UPLOAD_BYTES) {
+    alert(file.name + " is over 15MB — try a smaller file, or paste a link instead.");
+    return;
+  }
+  const item = { filename: file.name, status: "uploading", url: null };
+  uploadedArt.push(item);
+  renderUploadList();
+  try {
+    const dataUrl = await new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(r.result);
+      r.onerror = () => reject(new Error("Couldn't read the file"));
+      r.readAsDataURL(file);
+    });
+    const res = await fetch("/api/intake-upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_url: dataUrl, filename: file.name })
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.url) throw new Error(data.error || "Upload failed");
+    item.status = "done";
+    item.url = data.url;
+  } catch (e) {
+    item.status = "error";
+    item.error = e.message || "Upload failed";
+  }
+  renderUploadList();
+}
+
+function removeUpload(idx) {
+  uploadedArt.splice(idx, 1);
+  renderUploadList();
+}
+
+function renderUploadList() {
+  const list = document.getElementById("uploadList");
+  if (!list) return;
+  list.innerHTML = uploadedArt.map((f, i) => {
+    const status = f.status === "uploading" ? '<span class="upload-status">Uploading…</span>'
+      : f.status === "error" ? '<span class="upload-status upload-error">' + escapeHtmlClient(f.error || "Failed") + '</span>'
+      : '<span class="upload-status upload-ok">Uploaded</span>';
+    return '<div class="upload-item"><span class="upload-name">' + escapeHtmlClient(f.filename) + '</span>' + status +
+      '<button type="button" class="upload-remove" onclick="removeUpload(' + i + ')" aria-label="Remove ' + escapeHtmlClient(f.filename) + '">&times;</button></div>';
+  }).join("");
+}
+
 function saveVision() {
   const hasArt = v("hasArt");
   if (!hasArt) return fail("Let us know if you have art ready.");
+  if (hasArt === "yes" && uploadedArt.some(function(f) { return f.status === "uploading"; })) {
+    return fail("Hang on — a file is still uploading. Give it a few seconds and try again.");
+  }
   form.vision = {
     colors: v("colors"), deco_method: v("deco"),
     has_art: hasArt === "yes", art_url: v("artUrl") || null,
+    art_files: hasArt === "yes"
+      ? uploadedArt.filter(function(f) { return f.status === "done"; }).map(function(f) { return { url: f.url, filename: f.filename }; })
+      : [],
     has_brand_guide: v("hasGuide") === "yes" || null, brand_guide_url: v("guideUrl") || null,
     talk_to_art: v("talkArt") === "yes" || null,
     vision_description: v("visionDesc") || null,
