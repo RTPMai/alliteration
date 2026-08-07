@@ -281,4 +281,65 @@ if (zipCheckApi) {
   });
 }
 
+/* ---- Inbox: sendable brief link, matching the Lead Brief (Ryan's ask) --- */
+// Leads have a hosted brief link that goes in the AM handoff email; the
+// Inbox had nothing equivalent. This mirrors that same short-link pattern.
+
+const inquiryBriefApi = fs.existsSync(path.join(ROOT, 'api/inquiry-brief.js'))
+  ? read('api/inquiry-brief.js')
+  : null;
+
+if (inquiryBriefApi) {
+  t.test('the inquiry brief endpoint is session-gated, like the Lead Brief', () => {
+    t.assert(/requireAuth\(req/.test(inquiryBriefApi),
+      'api/inquiry-brief.js should require a session, same as api/brief.js');
+  });
+
+  t.test('the inquiry brief reuses the Lead Brief\'s short-link namespace, not a new one', () => {
+    t.assert(/backbone_brief:/.test(inquiryBriefApi),
+      'api/inquiry-brief.js must write to the same backbone_brief: KV prefix api/b.js already reads — a different prefix would need api/b.js changes too, or the short link would 404');
+  });
+
+  t.test('the inquiry brief uploads to the same public Blob store as the Lead Brief', () => {
+    t.assert(/access:\s*"public"/.test(inquiryBriefApi),
+      'the brief must be uploaded with public access or the emailed link will fail for an AM who is not signed into BackBone');
+  });
+
+  t.test('the inquiry brief surfaces uploaded art files and Inbox warnings, not just the Lead Brief\'s fields', () => {
+    t.assert(/art_files/.test(inquiryBriefApi), 'the brief should show uploaded art files (from api/intake-upload.js) as links');
+    t.assert(/warnings/.test(inquiryBriefApi), 'the brief should have a section for warnings passed in from the Inbox (bot signals, address mismatch)');
+  });
+
+  t.test('main.js can generate and cache an inquiry brief URL, mirroring generateBrief() for Leads', () => {
+    t.assert(/function generateInquiryBrief/.test(main), 'generateInquiryBrief() is missing from main.js');
+    t.assert(/inquiryBriefUrls\[s\.id\]/.test(main),
+      'generateInquiryBrief() should cache by inquiry id so re-opening the same inquiry does not regenerate/re-upload a brief');
+  });
+
+  t.test('the Email to AM button requires picking an AM first, same as the unassigned-lead pattern', () => {
+    const idx = main.indexOf('async function emailInquiryToAM');
+    const block = main.slice(idx, idx + 600);
+    t.assert(/if \(!am\)/.test(block), 'emailInquiryToAM() should refuse to send with no AM selected, rather than mailto: to a blank address');
+  });
+
+  t.test('the brief mailto pulls the warnings already known to the Inbox, without a fresh network round trip', () => {
+    t.assert(/function inquiryWarnings/.test(main), 'inquiryWarnings() is missing');
+    const idx = main.indexOf('function inquiryWarnings');
+    const block = main.slice(idx, idx + 500);
+    t.assert(/addressCheckCache/.test(block),
+      'inquiryWarnings() should read from the already-populated addressCheckCache, not trigger a new ZIP lookup just to build an email');
+  });
+
+  t.test('js/api.js exposes the inquiry brief endpoint and routes it live (not mock)', () => {
+    const apiJs = read('js/api.js');
+    t.assert(/bbInquiryBrief:\s*'\/api\/inquiry-brief'/.test(apiJs), 'ENDPOINTS.bbInquiryBrief is missing from js/api.js');
+    t.assert(/'\/api\/inquiry-brief'/.test(apiJs.slice(apiJs.indexOf('LIVE_PREFIXES'), apiJs.indexOf('LIVE_PREFIXES') + 2000)),
+      '/api/inquiry-brief must be listed in LIVE_PREFIXES or MOCK mode will silently fake it');
+  });
+} else {
+  t.test('api/inquiry-brief.js exists (Inbox brief link, mirroring the Lead Brief)', () => {
+    t.assert(false, 'api/inquiry-brief.js is missing — the Inbox has no equivalent of the Lead Brief link yet');
+  });
+}
+
 process.exit(t.report());
