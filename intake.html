@@ -124,17 +124,6 @@
 const API = "/api/intake";
 const STATE_STORE_URL = ""; // TODO: paste the real state-store form URL; blank shows a notice instead of redirecting
 
-// Industry list mirrors INDUSTRY_LANES in the app — exact Monday.com spellings
-// (yes, "Heathcare & Wellness" is intentional; matching depends on it).
-const INDUSTRIES = [
-  "Blue Collar/Agriculture","Cities/Associations","City Fire, EMS & Police","Contract",
-  "Military/Reserve","Heathcare & Wellness","Church","Clubs - Non sports","Dance","Events",
-  "FART: Fun Activities & Rec","Marketing Firm","Music & Entertainment","Real Estate",
-  "Lifestyle Brands","Food & Hospitality","Club Sports/School Athletics",
-  "Higher Education/Universities","K-12","PTO/Boosters","Star wars - pew pew",
-  "Corporate/Small Business","Personal Order","Other / Not Listed"
-];
-
 const SOURCES = ["Social media","Event","Search engine","Word of mouth","Other"];
 const PROJECT_TYPES = [
   { key: "live_activation", label: "Live Activation", desc: "On-site printing or merch at your event" },
@@ -156,7 +145,7 @@ if (isInternal) document.getElementById("internalBadge").style.display = "block"
 // Accumulated answers — mirrors the intake_v1 schema stored in backbone_intake
 let form = {
   entry: { existing_client: null, source: { channel: null, detail: null } },
-  company: { name: "", industry: "" },
+  company: { name: "" },
   contact: { name: "", phone: "", email: "", url: "", job_title: "" },
   project: { name: "", in_hands_date: "", type: null, store_kind: null, description: "", details: {} },
   vision: null,
@@ -167,10 +156,34 @@ const card = document.getElementById("card");
 const bar = document.getElementById("bar");
 let history = [];
 
+// Field-level draft store, keyed by element id, kept separate from `form`.
+// `form` only gets updated when a step's save*() function runs on Continue —
+// so typing into a field and then hitting Back (without clicking Continue)
+// used to lose that text, since the previous render had nothing to restore
+// it from. draftFields() re-applies whatever was last typed/selected into
+// any field on the page, every time a step renders, so Back and Continue
+// both preserve in-progress input.
+let draft = {};
+
+function draftFields() {
+  card.querySelectorAll("input[id], select[id], textarea[id]").forEach(function(el) {
+    const id = el.id;
+    if (draft[id] !== undefined) {
+      if (el.type === "checkbox") el.checked = !!draft[id];
+      else el.value = draft[id];
+    }
+    const evt = (el.tagName === "SELECT" || el.type === "checkbox") ? "change" : "input";
+    el.addEventListener(evt, function() {
+      draft[id] = el.type === "checkbox" ? el.checked : el.value;
+    });
+  });
+}
+
 function go(step, pct) {
   history.push(step);
   bar.style.width = pct + "%";
   STEPS[step]();
+  draftFields();
   card.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function back() {
@@ -182,10 +195,6 @@ function h(html) { card.innerHTML = html; }
 function v(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
 function fail(msg) { const e = document.getElementById("err"); e.textContent = msg; e.style.display = "block"; }
 function backBtn() { return '<button class="btn btn-ghost" onclick="back()">&larr; Back</button>'; }
-function industrySelect(id, val) {
-  return '<select id="' + id + '"><option value="">Select an industry…</option>' +
-    INDUSTRIES.map(i => '<option' + (val === i ? " selected" : "") + '>' + i + '</option>').join("") + '</select>';
-}
 
 /* ------------------------------------------------------------------ steps */
 const STEPS = {
@@ -258,7 +267,6 @@ const STEPS = {
     h('<div class="step-label">The basics</div>' +
       '<h2>A little about you</h2>' +
       '<div class="field"><label>Company name</label><input type="text" id="company" value="' + form.company.name + '"></div>' +
-      '<div class="field"><label>Select your industry</label>' + industrySelect("industry", form.company.industry) + '</div>' +
       '<div class="row">' +
       '<div class="field"><label>Your name</label><input type="text" id="cname" value="' + form.contact.name + '"></div>' +
       '<div class="field"><label>Job title</label><input type="text" id="ctitle" value="' + form.contact.job_title + '"></div></div>' +
@@ -436,7 +444,7 @@ const STEPS = {
     const typeLabel = p.type ? (PROJECT_TYPES.find(t => t.key === p.type) || {}).label || p.type : "—";
     h('<div class="step-label">Almost done</div><h2>Review your inquiry</h2>' +
       '<dl class="review">' +
-      '<dt>Company</dt><dd>' + (form.company.name || "—") + (form.company.industry ? " · " + form.company.industry : "") + '</dd>' +
+      '<dt>Company</dt><dd>' + (form.company.name || "—") + '</dd>' +
       '<dt>Contact</dt><dd>' + [form.contact.name, form.contact.email, form.contact.phone].filter(Boolean).join(" · ") + '</dd>' +
       '<dt>Project</dt><dd>' + (p.name || "—") + ' · ' + typeLabel + (p.store_kind ? " (" + p.store_kind.replace("_", "-") + ")" : "") + (p.in_hands_date ? " · in hands " + p.in_hands_date : "") + '</dd>' +
       (p.description ? '<dt>Notes</dt><dd>' + p.description + '</dd>' : '') +
@@ -472,7 +480,7 @@ function saveSource() {
 function saveExisting() {
   if (!v("company")) return fail("Company is required.");
   if (!v("cname") || (!v("cemail") && !v("cphone"))) return fail("Your name plus an email or phone are required.");
-  form.company = { name: v("company"), industry: "" };
+  form.company = { name: v("company") };
   form.contact = { name: v("cname"), phone: v("cphone"), email: v("cemail"), url: v("curl"), job_title: "" };
   form.project.name = v("pname"); form.project.in_hands_date = v("ihd");
   go("projectType", 45);
@@ -488,9 +496,8 @@ function saveManual() {
 }
 function saveInfoDump() {
   if (!v("company")) return fail("Company name is required.");
-  if (!v("industry")) return fail("Select your industry.");
   if (!v("cname") || (!v("cemail") && !v("cphone"))) return fail("Your name plus an email or phone are required.");
-  form.company = { name: v("company"), industry: v("industry") };
+  form.company = { name: v("company") };
   form.contact = { name: v("cname"), phone: v("cphone"), email: v("cemail"), url: v("curl"), job_title: v("ctitle") };
   form.project.name = v("pname"); form.project.in_hands_date = v("ihd");
   go("projectType", 45);
