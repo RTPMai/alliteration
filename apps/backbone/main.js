@@ -9068,6 +9068,7 @@ export async function start(ctx) {
       state_intake = [];
     }
     renderInbox();
+    refreshAddressChecks(); // background pass so list chips catch up once ZIPs are verified
   }
 
   async function saveInbox() {
@@ -9099,11 +9100,21 @@ export async function start(ctx) {
   // "check legitimacy" caution. A human always makes the call.
   const BOT_SERVICE_PHRASES = ["wholesale trading", "general merchandise", "business consulting", "contract solutions"];
 
-  function inquiryText(s) {
+  // Raw (case-preserved) text from every free-text field on an inquiry. The
+  // intake form has no dedicated address field, so a city/state/zip mention
+  // could show up almost anywhere — the Live Activation "Location" field,
+  // CSG order/item info, Manual Entry notes, the vision description, wherever
+  // someone typed it. Shared by both botSignals() (lowercased) and
+  // findAddressClaims() (case preserved, since city names need it).
+  function inquiryFieldsRaw(s) {
     const c = s.contact || {}, co = s.company || {}, p = s.project || {}, det = p.details || {}, vis = s.vision || {};
-    const parts = [co.name, co.industry, c.url, p.name, p.description, vis.vision_description];
+    const parts = [co.name, c.url, p.name, p.description, vis.vision_description];
     Object.keys(det).forEach(function(k) { if (typeof det[k] === "string") parts.push(det[k]); });
-    return parts.filter(Boolean).join(" \n ").toLowerCase();
+    return parts.filter(Boolean);
+  }
+
+  function inquiryText(s) {
+    return inquiryFieldsRaw(s).join(" \n ").toLowerCase();
   }
 
   function botSignals(s) {
@@ -9138,6 +9149,167 @@ export async function start(ctx) {
       return '<span class="chip chip-caution" title="' + b.hits.length + ' of 3 fake-website signals tripped:\n\u2022 ' + b.hits.join("\n\u2022 ").replace(/"/g, "&quot;") + '\n\nSmall businesses use templates too — one signal alone is not proof.">Check legitimacy</span>';
     }
     return "";
+  }
+
+  // ---- City/state/zip sanity check ------------------------------------------
+  // Ryan's ask (Aug 2026): a submission listed "Polk City IA 50014" — that
+  // ZIP is actually Ames, not Polk City. The intake form has no dedicated
+  // address field, so this scans every free-text field on the inquiry for
+  // anything shaped like a US address, then checks each ZIP found against a
+  // real ZIP database (via api/zip-check.js, which proxies zippopotam.us).
+  // Advisory only, same spirit as TravelTrack's receipt extraction: it flags
+  // a possible mismatch for a human to double-check, never blocks or edits
+  // anything on its own. If the ZIP lookup fails (offline, upstream down),
+  // it fails silently rather than showing a false alarm.
+  const STATE_ABBR = {
+    AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California",
+    CO: "Colorado", CT: "Connecticut", DE: "Delaware", FL: "Florida", GA: "Georgia",
+    HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
+    KS: "Kansas", KY: "Kentucky", LA: "Louisiana", ME: "Maine", MD: "Maryland",
+    MA: "Massachusetts", MI: "Michigan", MN: "Minnesota", MS: "Mississippi", MO: "Missouri",
+    MT: "Montana", NE: "Nebraska", NV: "Nevada", NH: "New Hampshire", NJ: "New Jersey",
+    NM: "New Mexico", NY: "New York", NC: "North Carolina", ND: "North Dakota", OH: "Ohio",
+    OK: "Oklahoma", OR: "Oregon", PA: "Pennsylvania", RI: "Rhode Island", SC: "South Carolina",
+    SD: "South Dakota", TN: "Tennessee", TX: "Texas", UT: "Utah", VT: "Vermont",
+    VA: "Virginia", WA: "Washington", WV: "West Virginia", WI: "Wisconsin", WY: "Wyoming",
+    DC: "District of Columbia"
+  };
+  const ADDRESS_RE = (function() {
+    const names = Object.keys(STATE_ABBR).concat(Object.values(STATE_ABBR))
+      .sort(function(a, b) { return b.length - a.length; }); // longest first so "New York" beats "New"
+    return new RegExp(
+      "([A-Za-z][A-Za-z.'-]*(?:\\s+[A-Za-z][A-Za-z.'-]*){0,3})\\s*,?\\s+(" + names.join("|") + ")\\b[.,]?\\s*(\\d{5})(?:-\\d{4})?",
+      "g"
+    );
+  })();
+  function normalizeCityForCompare(name) {
+    return String(name || "").trim().toLowerCase().replace(/\s+/g, " ");
+  }
+  // The regex's city capture can grab a stray leading word or two from
+  // surrounding prose ("we are in Des Moines" catches "are in Des Moines" as
+  // the "city"). Comparing with endsWith in both directions absorbs that —
+  // real city names are almost always the tail of whatever got captured —
+  // without falsely flagging a perfectly correct address as a mismatch.
+  function citiesMatch(a, b) {
+    const na = normalizeCityForCompare(a), nb = normalizeCityForCompare(b);
+    if (!na || !nb) return false;
+    return na === nb || na.endsWith(" " + nb) || nb.endsWith(" " + na) || na === nb;
+  }
+
+  // Finds every "City, ST 12345"-shaped mention across the inquiry's free
+  // text. Best-effort: the city group can over-match a couple of stray
+  // words, which just means an extra harmless lookup, not a false mismatch
+  // (the compare is against the real place name, so extra leading words
+  // simply fail to match and get silently ignored below).
+  function findAddressClaims(s) {
+    const claims = [];
+    const seen = {};
+    inquiryFieldsRaw(s).forEach(function(text) {
+      ADDRESS_RE.lastIndex = 0;
+      let m;
+      while ((m = ADDRESS_RE.exec(text))) {
+        const rawCity = m[1].trim();
+        const rawState = m[2].trim();
+        const zip = m[3];
+        const stateAbbr = rawState.length === 2 && STATE_ABBR[rawState.toUpperCase()]
+          ? rawState.toUpperCase()
+          : Object.keys(STATE_ABBR).find(function(ab) { return STATE_ABBR[ab].toLowerCase() === rawState.toLowerCase(); });
+        if (!stateAbbr || !rawCity) continue;
+        const key = zip + "|" + normalizeCityForCompare(rawCity) + "|" + stateAbbr;
+        if (seen[key]) continue;
+        seen[key] = true;
+        claims.push({ raw: m[0].trim(), city: rawCity, state: stateAbbr, zip: zip });
+      }
+    });
+    return claims;
+  }
+
+  // Fire-and-forget: called after renderInquiryBody() has already painted the
+  // rest of the inquiry, so a slow or failed ZIP lookup never blocks the AM
+  // from seeing everything else. Guards against a late response landing on
+  // the wrong (since-navigated-away-from) inquiry.
+  async function verifyAddressClaims(s, claims) {
+    const zips = Array.from(new Set(claims.map(function(c) { return c.zip; })));
+    const missing = zips.filter(function(z) { return !(z in addressCheckCache); });
+    if (missing.length) {
+      try {
+        const res = await api.post(ENDPOINTS.bbZipCheck, { zips: missing });
+        if (res && res.results) Object.assign(addressCheckCache, res.results);
+      } catch (e) { /* whatever's already cached is all we'll have this round */ }
+    }
+    if (activeInquiryId !== s.id) return; // AM already moved to a different inquiry
+    const box = $id("addrCheckBox");
+    if (!box) return;
+
+    const mismatches = [];
+    claims.forEach(function(c) {
+      const r = addressCheckCache[c.zip];
+      if (!r) return; // couldn't verify — advisory only, say nothing rather than guess
+      if (r.valid === false) {
+        mismatches.push(c.raw + " — " + c.zip + " doesn't look like a real ZIP code.");
+        return;
+      }
+      if (r.valid == null) return;
+      if (!citiesMatch(r.city, c.city) || (r.state || "").toUpperCase() !== c.state) {
+        mismatches.push(c.raw + " — ZIP " + c.zip + " usually maps to " + r.city + ", " + r.state + ". Worth double-checking.");
+      }
+    });
+
+    if (!mismatches.length) { box.remove(); return; }
+
+    box.outerHTML = '<div class="qual-section" id="addrCheckBox" style="border-left:3px solid var(--amber);padding-left:10px">' +
+      '<h4>Address doesn\'t match</h4>' +
+      '<div class="help">Found a possible city/state/ZIP mismatch — worth a quick check before quoting shipping or printing a label.</div>' +
+      '<ul style="font-size:12px;color:var(--muted);margin:8px 0 0 16px">' +
+        mismatches.map(function(m2) { return "<li>" + escapeHtml(m2) + "</li>"; }).join("") +
+      '</ul></div>';
+  }
+
+  // Cache of ZIP -> { valid, city, state } (or null while unknown), so the
+  // Inbox LIST can show a chip without re-fetching per row, and repeat opens
+  // of the same inquiry don't re-hit the network. Populated by
+  // refreshAddressChecks(), which runs once after the Inbox loads and batches
+  // every distinct ZIP across every inquiry into a single lookup call.
+  let addressCheckCache = {};
+
+  function claimMismatched(c) {
+    const r = addressCheckCache[c.zip];
+    if (!r) return false; // not checked yet, or lookup failed — say nothing rather than guess
+    if (r.valid === false) return true;
+    if (r.valid == null) return false;
+    return !citiesMatch(r.city, c.city) || (r.state || "").toUpperCase() !== c.state;
+  }
+
+  function addressChip(s) {
+    const claims = findAddressClaims(s);
+    if (!claims.length) return "";
+    if (!claims.some(function(c) { return c.zip in addressCheckCache; })) return ""; // not verified yet
+    if (!claims.some(claimMismatched)) return "";
+    return '<span class="chip chip-caution" title="A city/state/ZIP in this inquiry doesn\'t look right — open it to see details.">Address mismatch</span>';
+  }
+
+  async function refreshAddressChecks() {
+    const allZips = new Set();
+    state_intake.forEach(function(s) {
+      findAddressClaims(s).forEach(function(c) { if (!(c.zip in addressCheckCache)) allZips.add(c.zip); });
+    });
+    if (!allZips.size) return;
+    let results;
+    try {
+      const res = await api.post(ENDPOINTS.bbZipCheck, { zips: Array.from(allZips) });
+      results = res && res.results;
+    } catch (e) {
+      return; // offline or upstream down — try again next Inbox load, no error shown
+    }
+    if (!results) return;
+    Object.assign(addressCheckCache, results);
+    renderInbox();
+    // If an inquiry is open right now and has claims, refresh its detail box too.
+    if (activeInquiryId) {
+      const open = state_intake.find(function(x) { return x.id === activeInquiryId; });
+      const claims = open ? findAddressClaims(open) : [];
+      if (claims.length && $id("addrCheckBox")) verifyAddressClaims(open, claims);
+    }
   }
 
   function projectSummary(s) {
@@ -9204,7 +9376,7 @@ export async function start(ctx) {
         '<div class="inbox-top"><div class="inbox-co">' + escapeHtml(co) + '</div>' +
         '<div style="font-size:11px;color:var(--faint)">' + when + '</div></div>' +
         '<div class="inbox-meta">' + escapeHtml(projectSummary(s)) + (contact ? " — " + escapeHtml(contact) : "") + '</div>' +
-        '<div class="inbox-chips">' + gateChip + botChip(s) + (statusChip[s.status] || "") + '</div>' +
+        '<div class="inbox-chips">' + gateChip + botChip(s) + addressChip(s) + (statusChip[s.status] || "") + '</div>' +
       '</div>';
     }).join("");
 
@@ -9271,6 +9443,13 @@ export async function start(ctx) {
         '<ul style="font-size:12px;color:var(--muted);margin:8px 0 0 16px">' +
           bot.hits.map(function(h) { return "<li>" + escapeHtml(h) + "</li>"; }).join("") +
         '</ul></div>';
+    }
+
+    // City/state/ZIP sanity check — placeholder only, filled in async once
+    // the ZIP lookup returns (see verifyAddressClaims below).
+    const addressClaims = findAddressClaims(s);
+    if (addressClaims.length) {
+      html += '<div id="addrCheckBox"></div>';
     }
 
     // status line
@@ -9359,6 +9538,8 @@ export async function start(ctx) {
     if (reopen) reopen.addEventListener("click", function(e) {
       e.preventDefault(); s.status = "reviewed"; saveInbox().then(function() { renderInquiryBody(s); renderInbox(); });
     });
+
+    if (addressClaims.length) verifyAddressClaims(s, addressClaims);
   }
 
   async function attachInquiryToClient(s, customerId) {
