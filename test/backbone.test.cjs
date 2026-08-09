@@ -1,3 +1,6 @@
+// PUT IN: test/backbone.test.cjs (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 // test/backbone.test.cjs
 /**
  * BackBone contract tests.
@@ -367,6 +370,32 @@ t.test('createLeadNotifications is called from both lead handoff paths (single-A
   // 1 for the definition itself is not a match (different signature: "function createLeadNotifications"),
   // so every match here is a real call site. Expect at least the two known paths.
   t.assert(calls >= 2, 'createLeadNotifications() should be called from both the single-AM auto-send path and the multi-AM handoff modal\'s Open Draft button — found ' + calls + ' call site(s)');
+});
+
+t.test('changing a lead\'s Account Manager on its own edit form also notifies the new AM', () => {
+  // Ryan's ask, Aug 2026: the Account Manager dropdown on a lead's own edit
+  // form (handleSaveLeadIntake, Save changes) was a silent path around the
+  // handoff notification — reassigning a lead there never told anyone.
+  t.assert(/async function handleSaveLeadIntake/.test(main), 'handleSaveLeadIntake() is missing from main.js');
+  const idx = main.indexOf('async function handleSaveLeadIntake');
+  const block = main.slice(idx, idx + 2000);
+  t.assert(/const previousAM/.test(block),
+    'handleSaveLeadIntake() should capture the AM before the save so it can tell whether it actually changed');
+  t.assert(/createLeadNotifications\(\[lead\],\s*newAM/.test(block),
+    'handleSaveLeadIntake() should call createLeadNotifications() for the newly-assigned AM');
+  t.assert(/newAM\s*&&\s*newAM\s*!==\s*previousAM/.test(block),
+    'the notification should only fire when the AM actually changed, not on every save of the form');
+});
+
+t.test('createLeadNotifications takes an optional title verb, so a reassignment reads differently than a new lead', () => {
+  const idx = main.indexOf('async function createLeadNotifications');
+  const block = main.slice(idx, idx + 700);
+  t.assert(/function createLeadNotifications\(leads,\s*am,\s*titleVerb\)/.test(block),
+    'createLeadNotifications() should accept a titleVerb parameter');
+  t.assert(/titleVerb\s*\|\|\s*["']New lead["']/.test(block),
+    'omitting titleVerb should keep the original "New lead: ..." wording for the handoff paths');
+  t.assert(/"Lead assigned to you"/.test(main),
+    'the Account Manager edit-form path should use a reassignment-specific title, not "New lead"');
 });
 
 t.test('inquiry email-to-AM creates a notification for that AM too', () => {
