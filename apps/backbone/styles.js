@@ -294,6 +294,17 @@ textarea.field{min-height:60px;resize:vertical}
 .brief-sheet .warn-l{font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--danger-dk);margin-bottom:5px}
 .brief-sheet .warn p{font-size:13px;color:var(--danger-dk);line-height:1.5}
 .brief-sheet .foot{text-align:center;font-size:11px;color:var(--faint);margin-top:16px}
+/* Added for the Inquiry Brief (Aug 9, 2026) — label/value rows and a gate
+   pill, which the Lead/AM/Dormant briefs never needed (they don't show a
+   flat field list). Same token-based approach as everything else here. */
+.brief-sheet .gate-pill{display:inline-block;padding:4px 12px;border-radius:99px;font-size:11px;font-weight:700;background:var(--bt-bg);color:var(--bt-fg);margin-bottom:10px}
+.brief-sheet .when{font-size:12px;color:var(--faint);margin-top:6px}
+.brief-sheet .sec-l{font-size:10.5px;font-weight:800;text-transform:uppercase;letter-spacing:.08em;color:var(--bt-bar);margin-bottom:10px}
+.brief-sheet .row{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line-soft);font-size:13px}
+.brief-sheet .row:last-child{border-bottom:none}
+.brief-sheet .row-l{flex:0 0 128px;color:var(--faint);text-transform:capitalize}
+.brief-sheet .row-v{flex:1;color:var(--ink);font-weight:500;word-break:break-word}
+.brief-sheet .row-v a{color:var(--bt-bar)}
 @media print{.brief-sheet .card,.brief-sheet .call,.brief-sheet .pb{box-shadow:none;border:1px solid var(--line)}}
 /* Grey backdrop behind the cards, bleeding to the modal-body edges, so it reads like
    the standalone emailed brief (cards floating on var(--bg)) rather than white-on-white. */
