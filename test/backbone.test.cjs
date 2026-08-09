@@ -391,4 +391,19 @@ t.test('no AM means no notification (an unrouted lead group has nothing to assig
     'createLeadNotifications() should bail out quietly when there is no real AM username (e.g. the "Unassigned" group), not try to notify a blank assignee');
 });
 
+t.test('inquiry brief errors use err.message, never err.body.error directly', () => {
+  // js/api.js's errorText() already handles the case where the server's error
+  // payload is an object (Vercel platform errors come back as
+  // { error: { code, message } }, not a string). Reading err.body.error
+  // directly bypasses that safety net and can hand an object straight into a
+  // template string — which is exactly how this showed up as the useless
+  // "[object Object]" in an alert instead of the real failure reason.
+  const idx = main.indexOf('async function generateInquiryBrief');
+  const block = main.slice(idx, main.indexOf('}', main.indexOf('catch', idx)) + 1);
+  t.assert(!/err\.body\.error/.test(block),
+    'generateInquiryBrief() reads err.body.error directly again — this can be a non-string object and will render as "[object Object]"');
+  t.assert(/err\.message/.test(block),
+    'generateInquiryBrief() should fall back to err.message, which js/api.js already guarantees is a safe string');
+});
+
 process.exit(t.report());
