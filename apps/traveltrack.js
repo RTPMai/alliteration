@@ -1,3 +1,6 @@
+// PUT IN: apps/traveltrack.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * TravelTrack — trips, expenses, mileage, and loyalty miles.
  *
@@ -1327,6 +1330,37 @@ export default {
       return `<div class="section-hd">Detail</div>` + lines;
     }
 
+    // Tells the person who submitted an expense what happened to it — Ryan's
+    // ask (Aug 2026): approving, rejecting, or marking reimbursed only
+    // updated the record; the submitter had to go check for themselves.
+    // Best-effort and silent on failure, same pattern as BackBone's lead/
+    // inquiry notifications: a notification hiccup must never block the
+    // approve/reject/reimburse action that already succeeded. Skipped when
+    // the approver is also the submitter (self-review), and skipped on
+    // "pending" (reopening is a correction, not a decision worth a ping).
+    async function notifyExpenseStatus(exp, status) {
+      const who = String(exp.submitted_by || '').toLowerCase();
+      if (!who || who === me.toLowerCase()) return;
+      const STATUS_TITLE = {
+        approved: 'Expense approved',
+        rejected: 'Expense rejected',
+        reimbursed: 'Expense reimbursed',
+      };
+      const verb = STATUS_TITLE[status];
+      if (!verb) return;
+      try {
+        await ctx.api.post(ENDPOINTS.notifications, {
+          title: verb + ': ' + fmtMoney(exp.amount) + ' \u2014 ' + (exp.category || 'Expense'),
+          types: ['handoff'],
+          appIds: ['traveltrack'],
+          assignedTo: who,
+          link: { type: 'expense', id: exp.id, label: (exp.category || 'Expense') + ' \u2014 ' + fmtMoney(exp.amount) },
+        });
+      } catch (e) {
+        console.warn('Could not create expense status notification:', e);
+      }
+    }
+
     function openExpensePanel(exp, prefillTripId) {
       openPanel(expenseFormHtml(exp, prefillTripId));
       panelIn.querySelectorAll('[data-close]').forEach((b) => b.addEventListener('click', closePanel));
@@ -1461,6 +1495,7 @@ export default {
             await ctx.api.request(ENDPOINTS.ttExpenses + '?id=' + encodeURIComponent(exp.id), {
               method: 'PATCH', body: { status: btn.dataset.status }
             });
+            notifyExpenseStatus(exp, btn.dataset.status);
             await loadAll();
             closePanel();
             renderExpenses();
@@ -2521,9 +2556,13 @@ export default {
     // Exposed so showView() can render lazily on first visit to each tab.
     this._renders = { trips: renderTrips, expenses: renderExpenses, miles: renderMiles, reports: renderReports, settings: renderSettings };
     this._rendered = { dashboard: true };
+    // Exposed for the deep-link opener below — same reasoning as _renders,
+    // showView() runs outside mount()'s closure.
+    this._data = data;
+    this._openExpensePanel = openExpensePanel;
   },
 
-  showView(view) {
+  showView(view, param) {
     const root = this._root;
     if (!root) return;
     const ids = { dashboard: 'ttDash', trips: 'ttTrips', expenses: 'ttExpenses', miles: 'ttMiles', reports: 'ttReports', settings: 'ttSettings' };
@@ -2532,6 +2571,17 @@ export default {
       if (el) el.hidden = v !== view;
     });
     if (this._renders[view]) this._renders[view]();
+
+    // A route param is a deep link into one specific expense — a
+    // Notification carrying a link to it opens straight to that expense's
+    // panel (Ryan's ask, Aug 2026), same idea as BackBone's lead/inquiry
+    // links. mount() awaits loadAll() before this can run, so data.expenses
+    // is already populated — no retry needed the way BackBone's leads/inbox
+    // background loads required.
+    if (view === 'expenses' && param) {
+      const exp = this._data && this._data.expenses.find((e) => e.id === param);
+      if (exp) this._openExpensePanel(exp);
+    }
   },
 
   unmount() {
