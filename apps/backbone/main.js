@@ -9433,7 +9433,7 @@ export async function start(ctx) {
   }
 
   // Same bonus-reminder pattern as createLeadNotifications: best-effort,
-  // silent on failure, never blocks the email that already went out.
+  // silent on failure, never blocks whatever triggered it.
   async function createInquiryNotification(s, am) {
     const username = amUsername(am);
     if (!username) return;
@@ -9452,10 +9452,34 @@ export async function start(ctx) {
     }
   }
 
-  async function emailInquiryToAM(s) {
+  // THE primary routing action (Ryan's ask, Aug 9, 2026): saves the AM on
+  // the inquiry and fires the notification immediately — no email involved.
+  // Not every inquiry gets emailed, but every routed one should still notify
+  // the AM, so this has to work standalone rather than being a side effect
+  // of sending mail.
+  async function assignInquiryToAM(s) {
     const sel = $id("inqAmSelect");
     const am = sel ? sel.value : "";
-    if (!am) { alert("Pick an AM first, then click Email to AM again."); return; }
+    if (!am) { alert("Pick an AM first, then click Assign to AM again."); return; }
+
+    const btn = $id("inqAssignAm");
+    const orig = btn ? btn.textContent : "";
+    if (btn) { btn.disabled = true; btn.textContent = "Assigning\u2026"; }
+
+    s.assignedAM = am;
+    s.assignedAMAt = new Date().toISOString();
+    s.assignedBy = currentUser ? (currentUser.name || currentUser.username || "") : "";
+    await saveInbox();
+    createInquiryNotification(s, am);
+
+    renderInbox();
+    renderInquiryBody(s); // re-render: shows "Routed to ..." and relabels the button
+  }
+
+  async function emailInquiryToAM(s) {
+    const sel = $id("inqAmSelect");
+    const am = sel ? sel.value : (s.assignedAM || "");
+    if (!am) { alert("Pick an AM first, then click Email brief to AM again."); return; }
 
     const btn = $id("inqEmailAm");
     const orig = btn ? btn.textContent : "";
@@ -9470,10 +9494,22 @@ export async function start(ctx) {
     }
 
     openMailto(buildInquiryMailto(s, am, url).href);
-    createInquiryNotification(s, am);
+
+    // Emailing someone doesn't duplicate the notification if they were
+    // already assigned (assignInquiryToAM already fired it) — this is only
+    // a safety net for emailing an AM who hadn't been formally routed yet.
+    const alreadyAssigned = s.assignedAM === am;
+    s.assignedAM = am;
+    s.assignedAMAt = new Date().toISOString();
+    s.assignedBy = currentUser ? (currentUser.name || currentUser.username || "") : "";
+    saveInbox().then(function() { renderInbox(); });
+    if (!alreadyAssigned) createInquiryNotification(s, am);
+
     if (btn) {
       btn.textContent = "Opened \u2713";
-      setTimeout(function() { btn.textContent = orig; btn.disabled = false; }, 3000);
+      setTimeout(function() {
+        renderInquiryBody(s); // picks up the saved assignment: help text + relabeled buttons
+      }, 1200);
     }
   }
 
@@ -9536,12 +9572,15 @@ export async function start(ctx) {
       if (gate === "no") gateChip = '<span class="chip chip-new">New client</span>';
       else if (gate === "manual") gateChip = '<span class="chip chip-internal">Manual entry</span>';
       else if (gate) gateChip = '<span class="chip chip-existing">' + (GATE_LABELS[gate] || gate) + '</span>';
+      const assignedChip = s.assignedAM
+        ? '<span class="chip chip-existing" title="Routed ' + (s.assignedAMAt ? new Date(s.assignedAMAt).toLocaleString() : "") + '">\u2192 ' + escapeHtml(s.assignedAM) + '</span>'
+        : '';
       return '<div class="inbox-item ' + (s.status === "new" ? "is-new" : "") + (done ? " is-done" : "") +
         '" data-id="' + s.id + '">' +
         '<div class="inbox-top"><div class="inbox-co">' + escapeHtml(co) + '</div>' +
         '<div style="font-size:11px;color:var(--faint)">' + when + '</div></div>' +
         '<div class="inbox-meta">' + escapeHtml(projectSummary(s)) + (contact ? " — " + escapeHtml(contact) : "") + '</div>' +
-        '<div class="inbox-chips">' + gateChip + botChip(s) + addressChip(s) + (statusChip[s.status] || "") + '</div>' +
+        '<div class="inbox-chips">' + gateChip + assignedChip + botChip(s) + addressChip(s) + (statusChip[s.status] || "") + '</div>' +
       '</div>';
     }).join("");
 
@@ -9589,88 +9628,155 @@ export async function start(ctx) {
       .join("");
   }
 
+  // ---- In-app Inquiry Brief card ------------------------------------------
+  // Ryan's ask (Aug 9, 2026): the card shown when you click an inquiry should
+  // BE the brief, not a separate plain field list next to it. This mirrors
+  // renderInquiryBrief() in api/inquiry-brief.js almost line for line, but
+  // built with the shell's own .brief-sheet classes (styles.js — the same
+  // token-based system already used for the AM/Dormant briefs) instead of
+  // that file's standalone hardcoded-hex CSS, so it fits the app's design
+  // system rather than duplicating a separate stylesheet into it. The two
+  // are meant to look the same; they just draw from different palettes for
+  // the same reason the emailed brief has its own <style> block at all — one
+  // is a standalone page for someone not signed into BackBone, the other
+  // lives inside the shell and must obey css/tokens.css.
+  function inquiryBriefRow(label, value) {
+    if (!value) return "";
+    return '<div class="row"><span class="row-l">' + escapeHtml(label) + '</span><span class="row-v">' + escapeHtml(value) + '</span></div>';
+  }
+
+  function inquiryBriefHtml(s, warnings) {
+    const co = s.company || {}, c = s.contact || {}, p = s.project || {}, det = p.details || {}, vis = s.vision;
+    const gate = s.entry ? s.entry.existing_client : null;
+    const company = co.name || "New inquiry";
+    const submitted = s.submitted_at ? new Date(s.submitted_at).toLocaleString() : "";
+
+    const email = String(c.email || "").trim();
+    const phone = String(c.phone || "").trim();
+    const callHtml =
+      '<div class="call-hd"><div class="call-name">' + escapeHtml(c.name || "Name not given") + '</div></div>' +
+      (c.job_title ? '<div class="call-title">' + escapeHtml(c.job_title) + '</div>' : '') +
+      '<div class="call-acts">' +
+        (email
+          ? '<a class="act act-primary" href="mailto:' + escapeHtml(email) + '"><span class="act-i">\u2709</span> Email ' + escapeHtml(email) + '</a>'
+          : '<div class="act act-none">No email given</div>') +
+        (phone
+          ? '<a class="act act-secondary" href="tel:' + escapeHtml(phone.replace(/[^\d+]/g, "")) + '"><span class="act-i">\u2706</span> Call ' + escapeHtml(phone) + '</a>'
+          : '') +
+      '</div>' +
+      (c.url ? '<a class="site-btn" href="' + escapeHtml(c.url) + '" target="_blank" rel="noopener"><span class="act-i">\u2197</span> ' + escapeHtml(c.url.replace(/^https?:\/\//, "")) + '</a>' : '');
+
+    const srcParts = s.entry && s.entry.source ? [s.entry.source.channel, s.entry.source.detail].filter(Boolean).join(" \u2014 ") : "";
+    const projectRows =
+      inquiryBriefRow("Entry path", GATE_LABELS[gate] || gate) +
+      inquiryBriefRow("Heard about us", srcParts) +
+      inquiryBriefRow("Project name", p.name) +
+      inquiryBriefRow("Type", PROJECT_TYPE_LABELS[p.type] || p.type) +
+      inquiryBriefRow("Store kind", p.store_kind ? p.store_kind.replace(/_/g, "-") : "") +
+      inquiryBriefRow("In-hands date", p.in_hands_date) +
+      inquiryBriefRow("Description", p.description);
+    const detailRows = Object.keys(det)
+      .filter(function(k) { return det[k] && k !== "csg_waiver_accepted_at"; })
+      .map(function(k) { return inquiryBriefRow(k.replace(/_/g, " "), typeof det[k] === "boolean" ? (det[k] ? "Yes" : "No") : det[k]); })
+      .join("");
+
+    let visionHtml = "";
+    if (vis) {
+      const artFiles = Array.isArray(vis.art_files) ? vis.art_files.filter(function(f) { return f && f.url; }) : [];
+      visionHtml =
+        '<div class="card">' +
+          '<div class="sec-l">Vision board</div>' +
+          inquiryBriefRow("Colors", vis.colors) +
+          inquiryBriefRow("Decoration", vis.deco_method) +
+          inquiryBriefRow("Has art", vis.has_art ? "Yes" : "No") +
+          (vis.art_url ? '<div class="row"><span class="row-l">Art link</span><span class="row-v"><a href="' + escapeHtml(vis.art_url) + '" target="_blank" rel="noopener">' + escapeHtml(vis.art_url) + '</a></span></div>' : '') +
+          (artFiles.length
+            ? '<div class="row"><span class="row-l">Uploaded art</span><span class="row-v">' +
+                artFiles.map(function(f) { return '<a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener">' + escapeHtml(f.filename || "file") + '</a>'; }).join("<br>") +
+              '</span></div>'
+            : '') +
+          inquiryBriefRow("Brand guide", vis.brand_guide_url) +
+          inquiryBriefRow("Wants art meeting", vis.talk_to_art ? "Yes" : "") +
+          inquiryBriefRow("Vision", vis.vision_description) +
+          inquiryBriefRow("Inspiration", (vis.inspo || []).join(", ")) +
+        '</div>';
+    }
+
+    const warnHtml = (warnings && warnings.length)
+      ? '<div class="warn"><div class="warn-l">Worth a second look</div>' +
+          warnings.map(function(w) { return "<p>" + escapeHtml(w) + "</p>"; }).join("") +
+        '</div>'
+      : "";
+
+    return '<div class="top"><div class="badge">I</div><div class="top-t">INQUIRY BRIEF</div>' +
+        (s.assignedAM ? '<div class="top-am">' + escapeHtml(s.assignedAM) + '</div>' : '') + '</div>' +
+      '<div class="card hero">' +
+        '<div class="gate-pill">' + escapeHtml(GATE_LABELS[gate] || "New inquiry") + '</div>' +
+        '<div class="co">' + escapeHtml(company) + '</div>' +
+        (submitted ? '<div class="when">Submitted ' + escapeHtml(submitted) + '</div>' : '') +
+      '</div>' +
+      warnHtml +
+      '<div class="call">' + callHtml + '</div>' +
+      '<div class="card"><div class="sec-l">Project</div>' + projectRows + detailRows + '</div>' +
+      visionHtml;
+  }
+
+
   function renderInquiryBody(s) {
-    const c = s.contact || {}, co = s.company || {}, p = s.project || {}, det = p.details || {}, vis = s.vision;
+    const co = s.company || {};
     const gate = s.entry ? s.entry.existing_client : null;
     const isExisting = ["yes", "yes_new", "not_sure"].indexOf(gate) !== -1;
 
-    let html = "";
-
-    // Fake-website screening verdict, shown before anything else so nobody
-    // routes a bot to an AM without seeing the warning.
+    // Fake-website screening feeds the brief card's own "Worth a second
+    // look" section (folded in below), rather than a separate box — one
+    // warnings section, not two competing ones.
     const bot = botSignals(s);
-    if (bot.hits.length) {
-      html += '<div class="qual-section" style="border-left:3px solid ' + (bot.suspected ? "var(--danger)" : "var(--amber)") + ';padding-left:10px">' +
-        '<h4>' + (bot.suspected ? "Suspected fake/placeholder website" : "Legitimacy check") + '</h4>' +
-        '<div class="help">' + (bot.suspected
-          ? "All three screening signals tripped. This inquiry looks like a bot or shell-site submission. Verify before spending AM time on it — and dismiss it manually if it's fake. Nothing is excluded automatically."
-          : bot.hits.length + " of 3 screening signals tripped. One or two signals alone are not proof — plenty of real small businesses use website templates. Worth a quick look before routing.") + '</div>' +
-        '<ul style="font-size:12px;color:var(--muted);margin:8px 0 0 16px">' +
-          bot.hits.map(function(h) { return "<li>" + escapeHtml(h) + "</li>"; }).join("") +
-        '</ul></div>';
-    }
+
+    let html = '<div class="brief-sheet" style="--bt-bar:var(--green);--bt-bg:var(--green-tint);--bt-fg:var(--green-dk)">' +
+      inquiryBriefHtml(s, bot.hits);
 
     // City/state/ZIP sanity check — placeholder only, filled in async once
-    // the ZIP lookup returns (see verifyAddressClaims below).
+    // the ZIP lookup returns (see verifyAddressClaims below). Kept as its
+    // own box rather than folded into inquiryBriefHtml's warnings, since
+    // this one updates asynchronously after the initial render.
     const addressClaims = findAddressClaims(s);
     if (addressClaims.length) {
       html += '<div id="addrCheckBox"></div>';
     }
 
+    html += '</div>'; // close .brief-sheet
+
     // status line
-    html += '<div class="help" style="margin-bottom:14px">Submitted ' +
+    html += '<div class="help" style="margin:14px 0">Submitted ' +
       (s.submitted_at ? new Date(s.submitted_at).toLocaleString() : "") +
       ' · status: <b>' + (s.status || "new").replace(/_/g, " ") + '</b>' +
       (s.links && s.links.customer_id ? ' · attached to ' + s.links.customer_id : "") +
       (s.links && s.links.lead_id ? ' · lead created' : "") + '</div>';
 
-    html += '<div class="qual-section"><h4>Contact</h4>' +
-      kvRows([["Company", co.name], ["Contact", c.name], ["Title", c.job_title],
-              ["Email", c.email], ["Phone", c.phone], ["Website", c.url]]) + '</div>';
-
-    const srcParts = s.entry && s.entry.source ? [s.entry.source.channel, s.entry.source.detail].filter(Boolean).join(" — ") : "";
-    html += '<div class="qual-section"><h4>Project</h4>' +
-      kvRows([["Entry path", GATE_LABELS[gate] || gate], ["Heard about us", srcParts],
-              ["Project name", p.name], ["Type", PROJECT_TYPE_LABELS[p.type] || p.type],
-              ["Store kind", p.store_kind ? p.store_kind.replace(/_/g, "-") : ""],
-              ["In-hands date", p.in_hands_date], ["Description", p.description]]) + '</div>';
-
-    const detEntries = Object.keys(det).filter(function(k) { return det[k] && k !== "csg_waiver_accepted_at"; })
-      .map(function(k) { return [k.replace(/_/g, " "), typeof det[k] === "boolean" ? (det[k] ? "Yes" : "No") : det[k]]; });
-    if (detEntries.length) html += '<div class="qual-section"><h4>Details</h4>' + kvRows(detEntries) + '</div>';
-
-    if (vis) {
-      const visEntries = [["Colors", vis.colors], ["Decoration", vis.deco_method],
-        ["Has art", vis.has_art ? "Yes" : "No"], ["Art link", vis.art_url],
-        ["Brand guide", vis.has_brand_guide ? "Yes" : ""], ["Brand guide link", vis.brand_guide_url],
-        ["Wants art meeting", vis.talk_to_art ? "Yes" : ""], ["Vision", vis.vision_description],
-        ["Inspiration", (vis.inspo || []).join(", ")]];
-      html += '<div class="qual-section"><h4>Vision board</h4>' + kvRows(visEntries);
-      // Uploaded art files (from the intake form's drag & drop, api/intake-upload.js).
-      // Rendered separately from kvRows because these need real <a> links, not
-      // escaped plain text.
-      const artFiles = Array.isArray(vis.art_files) ? vis.art_files.filter(function(f) { return f && f.url; }) : [];
-      if (artFiles.length) {
-        html += '<div class="qual-row"><span>Uploaded art</span><span>' +
-          artFiles.map(function(f) {
-            return '<a href="' + escapeHtml(f.url) + '" target="_blank" rel="noopener">' + escapeHtml(f.filename || "file") + '</a>';
-          }).join('<br>') +
-          '</span></div>';
-      }
-      html += '</div>';
-    }
-
     // ---- Actions ----
     html += '<div class="qual-section"><h4>Route this inquiry</h4>' +
-      // Email-to-AM: available regardless of routing status, since an AM may
-      // want the brief link before you've decided whether to attach or
-      // convert this inquiry. Mirrors the Lead Brief's link-in-email pattern.
-      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)">' +
-        '<select id="inqAmSelect" class="field" style="width:auto;font-size:12px;padding:6px 8px">' +
-          '<option value="">Choose AM\u2026</option>' +
-          ACCOUNT_MANAGERS.map(function(a) { return '<option value="' + escapeHtml(a) + '">' + escapeHtml(a) + '</option>'; }).join("") +
-        '</select>' +
-        '<button class="btn btn-gray btn-sm" id="inqEmailAm">Email to AM</button>' +
+      // ASSIGN and EMAIL are deliberately separate actions (Ryan's ask, Aug
+      // 9, 2026): not every inquiry gets emailed, but every routed inquiry
+      // should still notify the AM. Assign saves the AM on the record and
+      // fires the notification immediately, with no email involved.
+      // Emailing the brief link is a second, optional step — see
+      // emailInquiryToAM(), which only assigns+notifies as a safety net if
+      // the inquiry wasn't already assigned before you emailed it.
+      '<div style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line)">' +
+        '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+          '<select id="inqAmSelect" class="field" style="width:auto;font-size:12px;padding:6px 8px">' +
+            '<option value="">Choose AM\u2026</option>' +
+            ACCOUNT_MANAGERS.map(function(a) {
+              return '<option value="' + escapeHtml(a) + '"' + (s.assignedAM === a ? ' selected' : '') + '>' + escapeHtml(a) + '</option>';
+            }).join("") +
+          '</select>' +
+          '<button class="btn btn-green btn-sm" id="inqAssignAm">' + (s.assignedAM ? 'Update assignment' : 'Assign to AM') + '</button>' +
+          '<button class="btn btn-gray btn-sm" id="inqEmailAm">Email brief to AM</button>' +
+        '</div>' +
+        (s.assignedAM
+          ? '<div class="help" style="margin-top:6px">Routed to <b>' + escapeHtml(s.assignedAM) + '</b>' +
+              (s.assignedAMAt ? ' on ' + new Date(s.assignedAMAt).toLocaleString() : '') + '.</div>'
+          : '<div class="help" style="margin-top:6px">Assigning notifies that AM right away. Emailing the brief link is optional — not every inquiry needs to go out by email.</div>') +
       '</div>' +
       '<div id="inqActions">';
 
@@ -9716,6 +9822,8 @@ export async function start(ctx) {
     });
     const emailAmBtn = $id("inqEmailAm");
     if (emailAmBtn) emailAmBtn.addEventListener("click", function() { emailInquiryToAM(s); });
+    const assignBtn = $id("inqAssignAm");
+    if (assignBtn) assignBtn.addEventListener("click", function() { assignInquiryToAM(s); });
 
     if (addressClaims.length) verifyAddressClaims(s, addressClaims);
   }
