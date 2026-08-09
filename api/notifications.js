@@ -1,6 +1,9 @@
 // PUT IN: api/notifications.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: api/notifications.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 // api/notifications.js — shell-level notifications / to-do list.
 //
 // Every signed-in user can create a notification and assign it to anyone
@@ -49,6 +52,79 @@ import {
   listNotifications, saveNotification, nextNotificationId,
   getNotification, updateNotification, deleteNotification,
 } from "../lib/notifications/store.js";
+import { KEYS, readKey, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
+
+// Backs the "link to a record" picker on manual notifications (Ryan's ask,
+// Aug 2026): search BackBone's own data by company name and hand back just
+// enough to label a chip {id, label, sublabel} — never the full record, this
+// is a picker not a data export. Read-only, capped at 20 results.
+//
+// "client" gets the same "own" scoping api/data.js applies to the roster: an
+// AM scoped to their own accounts must not be able to search up (or link to)
+// accounts outside that scope just because the picker is a different screen.
+// Leads and inquiries have no such scoping anywhere else in the app (every
+// signed-in user already sees the full pipeline and the full inbox), so the
+// search here matches that existing behavior rather than inventing a new
+// restriction.
+async function searchLinkable(type, q, sess) {
+  if (!backboneConfigured()) return [];
+  const needle = String(q || "").trim().toLowerCase();
+
+  if (type === "lead") {
+    const data = await readKey(KEYS.leads);
+    const leads = data && Array.isArray(data.leads) ? data.leads : [];
+    return leads
+      .filter((l) => !needle || String(l.company_name || "").toLowerCase().includes(needle))
+      .sort((a, b) => String(a.company_name || "").localeCompare(String(b.company_name || "")))
+      .slice(0, 20)
+      .map((l) => ({ id: l.lead_id, label: l.company_name || l.lead_id, sublabel: l.status || "" }));
+  }
+
+  if (type === "inquiry") {
+    const data = await readKey(KEYS.intake);
+    const subs = data && Array.isArray(data.submissions) ? data.submissions : [];
+    return subs
+      .filter((s) => {
+        const name = (s.company && s.company.name) || "";
+        return !needle || name.toLowerCase().includes(needle);
+      })
+      .sort((a, b) => {
+        const an = (a.company && a.company.name) || "";
+        const bn = (b.company && b.company.name) || "";
+        return an.localeCompare(bn);
+      })
+      .slice(0, 20)
+      .map((s) => ({ id: s.id, label: (s.company && s.company.name) || "New inquiry", sublabel: s.status || "" }));
+  }
+
+  if (type === "client") {
+    const data = await readKey(KEYS.data);
+    let synced = data && Array.isArray(data.synced) ? data.synced : [];
+
+    const user = sess.username ? await getUser(sess.username) : null;
+    const role = await getRole(user ? user.role : sess.role);
+    const scope = (role && role.data_scope) || "all";
+    if (scope === "own") {
+      const amName = (user && (user.am_name || user.name)) || "";
+      const mine = String(amName).trim().toLowerCase();
+      const enrichment = (data && data.enrichment) || {};
+      synced = mine
+        ? synced.filter((c) => {
+            const enr = enrichment[c.customer_id] || {};
+            return String(enr.account_manager || "").trim().toLowerCase() === mine;
+          })
+        : [];
+    }
+
+    return synced
+      .filter((c) => !needle || String(c.company_name || "").toLowerCase().includes(needle))
+      .sort((a, b) => String(a.company_name || "").localeCompare(String(b.company_name || "")))
+      .slice(0, 20)
+      .map((c) => ({ id: c.customer_id, label: c.company_name || c.customer_id, sublabel: "" }));
+  }
+
+  return [];
+}
 
 // The app-id allowlist lives server-side rather than importing js/registry.js
 // (browser code), so it is kept in sync by hand. Covers the nine apps plus
@@ -119,6 +195,19 @@ export default async function handler(req, res) {
         return res.status(200).json({
           people: users.map((u) => ({ username: u.username, name: u.name })),
         });
+      }
+
+      // Link picker data for the create/edit form. ?linkSearch=lead|inquiry|client
+      // with an optional ?q= filter. Open to any signed-in user, same as the
+      // people picker above — the "own" scope check for clients happens
+      // inside searchLinkable(), not here.
+      if (req.query && req.query.linkSearch) {
+        const type = String(req.query.linkSearch);
+        if (!["lead", "inquiry", "client"].includes(type)) {
+          return res.status(400).json({ error: "linkSearch must be lead, inquiry, or client" });
+        }
+        const results = await searchLinkable(type, req.query.q, sess);
+        return res.status(200).json({ results });
       }
 
       const id = req.query && req.query.id;
@@ -240,7 +329,7 @@ export default async function handler(req, res) {
       // that entry's own message covers the "why." Each entry keeps the
       // actual before/after values (not just field names) so the trail
       // answers "what did it used to say," not only "something changed."
-      const editedFields = ["title", "types", "appIds", "dueDate"].filter((f) => patch[f] !== undefined);
+      const editedFields = ["title", "types", "appIds", "dueDate", "link"].filter((f) => patch[f] !== undefined);
       if (editedFields.length && !entries.length) {
         const changes = editedFields.map((f) => ({ field: f, from: existing[f], to: patch[f] }));
         entries.push(historyEntry("edited", me, myName, { fields: editedFields, changes, message: message || undefined }));
