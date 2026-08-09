@@ -4,6 +4,9 @@
 // PUT IN: apps/notifications.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: apps/notifications.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * Notifications — shell-level to-do / hand-off list.
  *
@@ -48,13 +51,20 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
-import { TYPES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS } from '../lib/notifications/schema.js';
+import { TYPES, GENERAL_APP, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES } from '../lib/notifications/schema.js';
 
-// Where a link opens. "client" has no top-level BackBone view of its own —
-// the roster lives inside the dashboard page as a sub-tab — so it routes to
-// dashboard and BackBone's showView() switches to that sub-tab itself. See
-// openDeepLink() in apps/backbone/main.js.
-const LINK_VIEW = { inquiry: 'inbox', lead: 'leads', client: 'dashboard' };
+// Where a link opens, per type: { app, view }. "client" has no top-level
+// BackBone view of its own — the roster lives inside the dashboard page as
+// a sub-tab — so it routes to dashboard and BackBone's showView() switches
+// to that sub-tab itself. See openDeepLink() in apps/backbone/main.js (and
+// the TravelTrack/GivingGauge equivalents for expense/donation).
+const LINK_ROUTE = {
+  inquiry: { app: 'backbone', view: 'inbox' },
+  lead: { app: 'backbone', view: 'leads' },
+  client: { app: 'backbone', view: 'dashboard' },
+  expense: { app: 'traveltrack', view: 'expenses' },
+  donation: { app: 'givinggauge', view: 'requests' },
+};
 
 const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
   .concat([{ id: GENERAL_APP, name: 'General', accent: 'var(--muted)' }]);
@@ -453,7 +463,7 @@ export default {
       const type = link ? link.type : '';
       const id = link ? link.id : '';
       const label = link ? link.label : '';
-      const typeOptions = LINK_TYPES.map((t) =>
+      const typeOptions = PICKABLE_LINK_TYPES.map((t) =>
         '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t]) + '</option>'
       ).join('');
       return '' +
@@ -644,8 +654,8 @@ export default {
     root.addEventListener('click', async (e) => {
       const linkOpen = e.target.closest('[data-link-open]');
       if (linkOpen) {
-        const view = LINK_VIEW[linkOpen.dataset.linkType];
-        if (view && ctx.goApp) ctx.goApp('backbone', view, linkOpen.dataset.linkId);
+        const route = LINK_ROUTE[linkOpen.dataset.linkType];
+        if (route && ctx.goApp) ctx.goApp(route.app, route.view, linkOpen.dataset.linkId);
         return;
       }
 
