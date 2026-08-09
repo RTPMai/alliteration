@@ -4,6 +4,9 @@
 // PUT IN: test/notifications.test.cjs (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: test/notifications.test.cjs (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 // PUT IN: test/notifications.test.cjs
 /**
  * Notifications tests (v3 — back to a routed screen, plus reassignment and
@@ -36,7 +39,7 @@ Promise.all([
   import(path.join(ROOT, 'js/registry.js')),
   import(path.join(ROOT, 'lib/users.js')),
 ]).then(([schema, reg, users]) => {
-  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, keys } = schema;
+  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES, keys } = schema;
   const { APPS, SHELL_APPS } = reg;
   const { DEFAULT_ROLES, permsFor } = users;
 
@@ -95,12 +98,42 @@ Promise.all([
 
   /* ---- link to a record (Ryan's ask, Aug 2026) --------------------------- */
 
-  t.test('exactly three link types: inquiry, lead, client', () => {
-    t.equal(LINK_TYPES.length, 3, 'expected exactly three link types');
-    ['inquiry', 'lead', 'client'].forEach((v) =>
+  t.test('five link types total: inquiry, lead, client, expense, donation', () => {
+    t.equal(LINK_TYPES.length, 5, 'expected exactly five link types');
+    ['inquiry', 'lead', 'client', 'expense', 'donation'].forEach((v) =>
       t.assert(LINK_TYPES.includes(v), 'missing link type ' + v));
     LINK_TYPES.forEach((v) =>
       t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));
+  });
+
+  t.test('only the three original types are pickable via manual search', () => {
+    // expense/donation only ever get attached automatically, by TravelTrack/
+    // GivingGauge themselves — there's no "search by company name" for them,
+    // so the manual link picker on the notification form should not offer
+    // them as choices even though they're valid, storable link types.
+    t.equal(PICKABLE_LINK_TYPES.length, 3, 'expected exactly three pickable link types');
+    ['inquiry', 'lead', 'client'].forEach((v) =>
+      t.assert(PICKABLE_LINK_TYPES.includes(v), 'missing pickable link type ' + v));
+    ['expense', 'donation'].forEach((v) =>
+      t.assert(!PICKABLE_LINK_TYPES.includes(v), 'expense/donation should not be manually pickable — ' + v + ' is'));
+  });
+
+  t.test('a notification can carry a link to an expense or a donation, not just BackBone records', () => {
+    const { ok: okExp, record: recExp } = validateNew(
+      { title: 'Expense approved: $42.00', types: ['handoff'], appIds: ['traveltrack'], assignedTo: 'ryan',
+        link: { type: 'expense', id: 'EXP-00012', label: 'Meals \u2014 $42.00' } },
+      APP_IDS, USERS
+    );
+    t.equal(okExp, true, 'an expense link should validate');
+    t.equal(recExp.link.type, 'expense', 'link.type should be expense');
+
+    const { ok: okGiv, record: recGiv } = validateNew(
+      { title: 'Donation approved \u2014 log the cost: Acme 5k', types: ['handoff', 'need'], appIds: ['givinggauge'], assignedTo: 'ryan',
+        link: { type: 'donation', id: 'GG-00034', label: 'Acme 5k' } },
+      APP_IDS, USERS
+    );
+    t.equal(okGiv, true, 'a donation link should validate');
+    t.equal(recGiv.link.type, 'donation', 'link.type should be donation');
   });
 
   t.test('a notification can carry a link to a lead, inquiry, or client', () => {
@@ -395,9 +428,12 @@ t.test('apps/notifications.js sends the picked link on both create and edit', ()
   t.assert(/link:\s*readLinkPicker\(id\)/.test(src), 'editing a notification should include the picker\'s current link');
 });
 
-t.test('apps/notifications.js shows a clickable link pill that opens the record in BackBone', () => {
+t.test('apps/notifications.js shows a clickable link pill that opens the record in its own app', () => {
   const src = read('apps/notifications.js');
   t.assert(src.includes('data-link-open'), 'no clickable link pill found on the notification card');
-  t.assert(src.includes('LINK_VIEW') && src.includes("ctx.goApp('backbone'"),
-    'clicking the link pill should route into BackBone via ctx.goApp with the right view');
+  t.assert(src.includes('LINK_ROUTE'), 'clicking the link pill should route via a per-type {app, view} table');
+  t.assert(src.includes('ctx.goApp(route.app, route.view'),
+    'the pill should call ctx.goApp with the app/view looked up for that link\'s type, not a hardcoded app');
+  ['backbone', 'traveltrack', 'givinggauge'].forEach((app) =>
+    t.assert(src.includes("app: '" + app + "'"), 'LINK_ROUTE is missing an entry that opens into ' + app));
 });
