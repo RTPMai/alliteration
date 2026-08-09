@@ -1,3 +1,6 @@
+// PUT IN: apps/givinggauge.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * GivingGauge — donation and sponsorship scoring.
  *
@@ -940,6 +943,43 @@ export default {
         '</div>';
     }
 
+    // Same first-name-lowercase convention BackBone's amUsername() uses —
+    // GivingGauge's "owner" (the Rep shown on the account card) is the same
+    // account_manager name BackBone carries, just under a different label.
+    function ownerUsername(name) {
+      return name ? String(name).trim().split(/\s+/)[0].toLowerCase() : '';
+    }
+
+    // Tells the account's Rep what happened to a donation ask on their
+    // account — Ryan's ask (Aug 2026): approving or declining only updated
+    // the request; the Rep had to go check. Approved asks also still need
+    // the actual cost logged afterward (the "not yet entered" flag on the
+    // account card), so those get tagged "need" too, not just "handoff".
+    // Best-effort and silent on failure, same as BackBone's notifications:
+    // a hiccup here must never block a decision that already saved.
+    async function notifyOwnerOfDecision(row, status) {
+      var owner = (row.meta.account && row.meta.account.owner) || '';
+      var username = ownerUsername(owner);
+      var me = ctx.user ? String(ctx.user.username || '').toLowerCase() : '';
+      if (!username || username === me) return; // no real owner, or the approver owns the account themselves
+      var org = (row.meta.request && row.meta.request.orgName) || 'Request';
+      var title = status === 'approved'
+        ? 'Donation approved \u2014 log the cost: ' + org
+        : 'Donation declined: ' + org;
+      var types = status === 'approved' ? ['handoff', 'need'] : ['handoff'];
+      try {
+        await ctx.api.post(ENDPOINTS.notifications, {
+          title: title,
+          types: types,
+          appIds: ['givinggauge'],
+          assignedTo: username,
+          link: { type: 'donation', id: row.meta.id, label: org }
+        });
+      } catch (e) {
+        console.warn('[givinggauge] Could not create decision notification:', e);
+      }
+    }
+
     function openPanel(id) {
       var row = evaluated().filter(function (r) { return r.meta.id === id; })[0];
       if (!row) return;
@@ -1042,6 +1082,9 @@ export default {
         // Persist. Before there was a backend this lived only in memory and a
         // refresh silently undid every decision.
         saveDecision(decId, status);
+
+        var decidedRow = evaluated().filter(function (r) { return r.meta.id === decId; })[0];
+        if (decidedRow) notifyOwnerOfDecision(decidedRow, status);
         return;
       }
 
@@ -1457,6 +1500,9 @@ export default {
 
     // Exposed so showView can render on first visit to the tab.
     this._renderGiving = renderGiving;
+    // Exposed for the deep-link opener below — showView() runs outside
+    // mount()'s closure, same reasoning as _renderGiving.
+    this._openPanel = openPanel;
 
     var measureToggle = $('#measureToggle');
     if (measureToggle) {
@@ -1481,7 +1527,7 @@ export default {
     };
   },
 
-  showView(view) {
+  showView(view, param) {
     var root = this._root;
     if (!root) return;
     var queue = root.querySelector('#queuePage');
@@ -1495,6 +1541,13 @@ export default {
     // Rendered on first visit rather than at mount, so opening the queue does
     // not pay for a summary nobody asked for.
     if (showGiving && this._renderGiving) this._renderGiving();
+
+    // A route param is a deep link into one specific request — a
+    // Notification carrying a link to a donation decision opens straight to
+    // that request's panel (Ryan's ask, Aug 2026), same idea as BackBone's
+    // lead/inquiry links. renderQueue() already ran at the end of mount(),
+    // so ctx.data is populated by the time this can run.
+    if (view === 'requests' && param && this._openPanel) this._openPanel(param);
   },
 
   unmount() {
