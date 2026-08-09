@@ -1,6 +1,9 @@
 // PUT IN: test/notifications.test.cjs (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: test/notifications.test.cjs (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 // PUT IN: test/notifications.test.cjs
 /**
  * Notifications tests (v3 — back to a routed screen, plus reassignment and
@@ -33,7 +36,7 @@ Promise.all([
   import(path.join(ROOT, 'js/registry.js')),
   import(path.join(ROOT, 'lib/users.js')),
 ]).then(([schema, reg, users]) => {
-  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, keys } = schema;
+  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, keys } = schema;
   const { APPS, SHELL_APPS } = reg;
   const { DEFAULT_ROLES, permsFor } = users;
 
@@ -88,6 +91,76 @@ Promise.all([
       APP_IDS, USERS
     );
     t.equal(record.notes, undefined, 'notes field should not be carried through — it was removed');
+  });
+
+  /* ---- link to a record (Ryan's ask, Aug 2026) --------------------------- */
+
+  t.test('exactly three link types: inquiry, lead, client', () => {
+    t.equal(LINK_TYPES.length, 3, 'expected exactly three link types');
+    ['inquiry', 'lead', 'client'].forEach((v) =>
+      t.assert(LINK_TYPES.includes(v), 'missing link type ' + v));
+    LINK_TYPES.forEach((v) =>
+      t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));
+  });
+
+  t.test('a notification can carry a link to a lead, inquiry, or client', () => {
+    const { ok, errors, record } = validateNew(
+      { title: 'New lead: Acme', types: ['handoff'], appIds: ['backbone'], assignedTo: 'ryan',
+        link: { type: 'lead', id: 'LD-00042', label: 'Acme Corp' } },
+      APP_IDS, USERS
+    );
+    t.equal(ok, true, 'expected valid: ' + (errors || []).join(', '));
+    t.equal(record.link.type, 'lead', 'link.type should be carried through');
+    t.equal(record.link.id, 'LD-00042', 'link.id should be carried through');
+    t.equal(record.link.label, 'Acme Corp', 'link.label should be carried through');
+  });
+
+  t.test('a notification with no link at all still validates — link stays null', () => {
+    const { ok, record } = validateNew(
+      { title: 'Restock coffee', types: ['task'], appIds: [GENERAL_APP], assignedTo: 'ryan' },
+      APP_IDS, USERS
+    );
+    t.equal(ok, true, 'a notification with no link should still validate');
+    t.equal(record.link, null, 'link should default to null, not undefined or {}');
+  });
+
+  t.test('an unknown link type is rejected', () => {
+    const { ok, errors } = validateNew(
+      { title: 'x', types: ['task'], appIds: [GENERAL_APP], assignedTo: 'ryan',
+        link: { type: 'customer', id: '5860474' } },
+      APP_IDS, USERS
+    );
+    t.equal(ok, false, 'an unrecognized link.type should not validate');
+    t.assert((errors || []).some((e) => e.includes('link.type')), 'error should mention link.type');
+  });
+
+  t.test('a link with a type but no id is rejected', () => {
+    const { ok, errors } = validateNew(
+      { title: 'x', types: ['task'], appIds: [GENERAL_APP], assignedTo: 'ryan', link: { type: 'lead', id: '' } },
+      APP_IDS, USERS
+    );
+    t.equal(ok, false, 'link.type without link.id should not validate');
+    t.assert((errors || []).some((e) => e.includes('link.id')), 'error should mention link.id');
+  });
+
+  t.test('a patch can attach a link to an existing notification', () => {
+    const { ok, patch } = validatePatch(
+      { link: { type: 'inquiry', id: 'IQ-00007', label: 'New inquiry' } }, APP_IDS, USERS
+    );
+    t.equal(ok, true, 'patch with a valid link should validate');
+    t.equal(patch.link.type, 'inquiry', 'patch.link.type should be carried through');
+  });
+
+  t.test('a patch can explicitly clear a link with { link: null }', () => {
+    const { ok, patch } = validatePatch({ link: null }, APP_IDS, USERS);
+    t.equal(ok, true, 'link: null should validate');
+    t.equal(patch.link, null, 'patch.link should be null, clearing the existing link');
+  });
+
+  t.test('a patch that omits link entirely leaves it untouched (not present in the patch)', () => {
+    const { ok, patch } = validatePatch({ status: 'done' }, APP_IDS, USERS);
+    t.equal(ok, true, 'status-only patch should validate');
+    t.equal('link' in patch, false, 'omitting link should not add a link key to the patch at all');
   });
 
   /* ---- validatePatch: reassignment + message ----------------------------- */
@@ -264,4 +337,67 @@ t.test('apps/notifications.js offers an Edit control that anyone who can act on 
 t.test('apps/notifications.js hides the Delete button when the role does not allow it', () => {
   const src = read('apps/notifications.js');
   t.assert(src.includes('canDelete'), 'no client-side canDelete gate found for the Delete button');
+});
+
+/* ---- link to a record (Ryan's ask, Aug 2026) ------------------------------ */
+
+t.test('api/notifications.js exposes a link search for the picker, scoped like the roster', () => {
+  const src = read('api/notifications.js');
+  t.assert(src.includes('linkSearch'), 'no linkSearch branch found in api/notifications.js');
+  t.assert(src.includes('searchLinkable'), 'searchLinkable helper is missing');
+  t.assert(src.includes('KEYS.leads') && src.includes('KEYS.intake') && src.includes('KEYS.data'),
+    'link search should read from all three BackBone data sets (leads, intake, roster)');
+  t.assert(src.includes('data_scope') && src.includes('"own"'),
+    'client link search should respect the same "own" AM scoping as the roster endpoint');
+});
+
+t.test('api/notifications.js lets a link be attached, changed, or cleared, and logs it as an edit', () => {
+  const src = read('api/notifications.js');
+  t.assert(/["']link["']/.test(src), 'link should appear in the editable-fields list');
+});
+
+t.test('apps/backbone/main.js attaches a link when auto-creating lead and inquiry notifications', () => {
+  const src = read('apps/backbone/main.js');
+  t.assert(/link:\s*\{\s*type:\s*["']lead["']/.test(src),
+    'createLeadNotifications should attach link: { type: "lead", ... }');
+  t.assert(/link:\s*\{\s*type:\s*["']inquiry["']/.test(src),
+    'createInquiryNotification should attach link: { type: "inquiry", ... }');
+});
+
+t.test('apps/backbone/main.js opens a deep-linked record when a route param is present', () => {
+  const src = read('apps/backbone/main.js');
+  t.assert(src.includes('openDeepLink'), 'showView should hand a route param off to a deep-link opener');
+  t.assert(src.includes('pendingDeepLink'),
+    'a deep link arriving before leads/inbox finish loading should be retried, not silently dropped');
+  t.assert(/function showView\(view,\s*param\)/.test(src),
+    'showView must accept a param the way index.js already passes one through');
+});
+
+t.test('js/shell.js forwards a param through goApp for cross-app deep links', () => {
+  const src = read('js/shell.js');
+  t.assert(/goApp:\s*\(a,\s*v,\s*p\)\s*=>\s*router\.go\(a,\s*v,\s*\{\s*param:\s*p\s*\}\)/.test(src),
+    'goApp should accept and forward a third param argument to the router');
+});
+
+t.test('apps/notifications.js offers a link-to-a-record picker spanning all three link types', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('LINK_TYPES') && src.includes('LINK_TYPE_LABELS'),
+    'notifications.js should import the link type constants from the schema');
+  t.assert(src.includes('linkPickerHtml'), 'no link picker markup helper found');
+  t.assert(src.includes('data-link-search') && src.includes('doLinkSearch'),
+    'the picker should support live search-as-you-type against the linkSearch endpoint');
+  t.assert(src.includes('readLinkPicker'), 'save handlers need a way to read the chosen link back out of the DOM');
+});
+
+t.test('apps/notifications.js sends the picked link on both create and edit', () => {
+  const src = read('apps/notifications.js');
+  t.assert(/link:\s*readLinkPicker\(['"]new['"]\)/.test(src), 'creating a notification should include the picked link');
+  t.assert(/link:\s*readLinkPicker\(id\)/.test(src), 'editing a notification should include the picker\'s current link');
+});
+
+t.test('apps/notifications.js shows a clickable link pill that opens the record in BackBone', () => {
+  const src = read('apps/notifications.js');
+  t.assert(src.includes('data-link-open'), 'no clickable link pill found on the notification card');
+  t.assert(src.includes('LINK_VIEW') && src.includes("ctx.goApp('backbone'"),
+    'clicking the link pill should route into BackBone via ctx.goApp with the right view');
 });
