@@ -1,6 +1,9 @@
 // PUT IN: apps/backbone/main.js (REPLACES the current one — GIT CLONE-AND-PUSH ONLY, do not use the web uploader, file is 630KB+)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: apps/backbone/main.js (REPLACES the current one — GIT CLONE-AND-PUSH ONLY, do not use the web uploader, file is 630KB+)
+// (this banner line is for verification only, delete it after checking the path)
+
 // PUT IN: apps/backbone/main.js
 /**
  * BackBone — application code.
@@ -7434,14 +7437,15 @@ export async function start(ctx) {
   // Best-effort and silent on failure: the email itself is the real handoff,
   // this is a bonus in-app reminder, so a hiccup here must never block or
   // interrupt the send that already happened.
-  async function createLeadNotifications(leads, am) {
+  async function createLeadNotifications(leads, am, titleVerb) {
     const username = amUsername(am);
     if (!username || !leads || !leads.length) return; // "Unassigned" group has no am — nothing to notify
+    const verb = titleVerb || "New lead";
     try {
       await Promise.all(leads.map(function(l) {
         const qs = (l.qualification && l.qualification.qualification_scoring) || {};
         const tier = qs.qualification_tier || "";
-        const title = "New lead: " + l.company_name + (tier ? " (" + tier + ")" : "");
+        const title = verb + ": " + l.company_name + (tier ? " (" + tier + ")" : "");
         return api.post(ENDPOINTS.notifications, {
           title: title,
           types: ["handoff"],
@@ -8303,6 +8307,7 @@ export async function start(ctx) {
   async function handleSaveLeadIntake() {
     const lead = state_leads.find(function(l) { return l.lead_id === activeLeadId; });
     if (!lead) return;
+    const previousAM = (lead.account_manager || "").trim();
     lead.website_url = $id("editLeadWebsite").value.trim();
     lead.contact_first_name = $id("editLeadFirst").value.trim();
     lead.contact_last_name = $id("editLeadLast").value.trim();
@@ -8323,6 +8328,16 @@ export async function start(ctx) {
       statusEl.textContent = "Saved";
       renderLeadDetailBody(lead);
       renderLeadsPage();
+
+      // Notify the AM the same way a handoff does, but only when this save
+      // actually CHANGED who it's assigned to — not on every save of the
+      // form, and not when the field was already blank and stays blank
+      // (Ryan's ask, Aug 2026: the Account Manager dropdown on a lead's own
+      // edit form was a silent path around the handoff notification).
+      const newAM = (lead.account_manager || "").trim();
+      if (newAM && newAM !== previousAM) {
+        createLeadNotifications([lead], newAM, "Lead assigned to you");
+      }
     } catch (e) {
       statusEl.textContent = "Save failed, try again";
     }
