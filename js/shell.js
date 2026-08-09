@@ -1,6 +1,9 @@
 // PUT IN: js/shell.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: js/shell.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * alliteration. — shell
  *
@@ -244,7 +247,7 @@ async function activate(meta, view, param) {
       user: state.user,
       perms: state.perms,
       go: (v) => router.goView(v),
-      goApp: (a, v) => router.go(a, v),
+      goApp: (a, v, p) => router.go(a, v, { param: p }),
       setBadge: (n) => setBadge(meta.id, n)
     });
     const spinner = host.querySelector(':scope > .shell-spinner');
