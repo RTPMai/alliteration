@@ -1,3 +1,6 @@
+// PUT IN: test/shell.test.cjs (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * Shell contract tests.
  *
@@ -314,6 +317,59 @@ t.test('traveltrack API routes require auth and scope by data_scope', () => {
   const expenses = read('api/traveltrack/expenses.js');
   t.assert(trips.includes("data_scope"), 'trips.js should scope by data_scope');
   t.assert(expenses.includes("data_scope"), 'expenses.js should scope by data_scope');
+});
+
+t.test('approving, rejecting, or reimbursing an expense notifies whoever submitted it', () => {
+  // Ryan's ask, Aug 2026: an approver's decision only updated the record —
+  // the submitter had to go check for themselves.
+  const src = read('apps/traveltrack.js');
+  t.assert(/async function notifyExpenseStatus/.test(src), 'notifyExpenseStatus() is missing from traveltrack.js');
+  const idx = src.indexOf('async function notifyExpenseStatus');
+  const block = src.slice(idx, idx + 1400);
+  t.assert(/ENDPOINTS\.notifications/.test(block), 'notifyExpenseStatus() should POST to ENDPOINTS.notifications');
+  t.assert(/appIds:\s*\['traveltrack'\]/.test(block), 'expense notifications should be tagged to the traveltrack app');
+  t.assert(/link:\s*\{\s*type:\s*'expense'/.test(block), 'expense notifications should link back to the expense');
+  t.assert(/who\s*===\s*me\.toLowerCase\(\)/.test(block) || /===\s*me\b/.test(block),
+    'should skip notifying when the approver is also the submitter (self-review)');
+  t.assert(/catch/.test(block), 'notifyExpenseStatus() must catch its own failures, same as BackBone\'s notification helpers');
+  t.assert(/notifyExpenseStatus\(exp,\s*btn\.dataset\.status\)/.test(src),
+    'the approve/reject/reimburse buttons should call notifyExpenseStatus()');
+});
+
+t.test('traveltrack opens a deep-linked expense when a route param is present', () => {
+  const src = read('apps/traveltrack.js');
+  t.assert(/showView\(view,\s*param\)/.test(src), 'showView should accept a param the way the shell already passes one');
+  t.assert(src.includes('_openExpensePanel') && src.includes('_data'),
+    'showView() runs outside mount()\'s closure — it needs data/openExpensePanel exposed on `this`, same pattern as _renders');
+});
+
+/* ---- GivingGauge notifications (Ryan's ask, Aug 2026) ------------------ */
+
+t.test('approving or declining a donation ask notifies the account\'s Rep', () => {
+  const src = read('apps/givinggauge.js');
+  t.assert(/async function notifyOwnerOfDecision/.test(src), 'notifyOwnerOfDecision() is missing from givinggauge.js');
+  const idx = src.indexOf('async function notifyOwnerOfDecision');
+  const block = src.slice(idx, idx + 1400);
+  t.assert(/ENDPOINTS\.notifications/.test(block), 'notifyOwnerOfDecision() should POST to ENDPOINTS.notifications');
+  t.assert(/appIds:\s*\['givinggauge'\]/.test(block), 'donation notifications should be tagged to the givinggauge app');
+  t.assert(/link:\s*\{\s*type:\s*'donation'/.test(block), 'donation notifications should link back to the request');
+  t.assert(/catch/.test(block), 'notifyOwnerOfDecision() must catch its own failures');
+  t.assert(/notifyOwnerOfDecision\(decidedRow,\s*status\)/.test(src),
+    'the Approve/Decline buttons should call notifyOwnerOfDecision()');
+});
+
+t.test('an approved donation is tagged "need" (cost still has to be logged), a decline is not', () => {
+  const src = read('apps/givinggauge.js');
+  const idx = src.indexOf('async function notifyOwnerOfDecision');
+  const block = src.slice(idx, idx + 1400);
+  t.assert(/status === 'approved'[\s\S]{0,40}\['handoff',\s*'need'\]/.test(block),
+    'an approved donation should carry both the handoff and need type tags');
+});
+
+t.test('givinggauge opens a deep-linked request when a route param is present', () => {
+  const src = read('apps/givinggauge.js');
+  t.assert(/showView\(view,\s*param\)/.test(src), 'showView should accept a param the way the shell already passes one');
+  t.assert(src.includes('_openPanel'), 'showView() runs outside mount()\'s closure — it needs openPanel exposed on `this`');
 });
 
 /* ---- Session ----------------------------------------------------------- */
