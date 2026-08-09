@@ -1,3 +1,6 @@
+// PUT IN: apps/backbone/main.js (REPLACES the current one — GIT CLONE-AND-PUSH ONLY, do not use the web uploader, file is 630KB+)
+// (this banner line is for verification only, delete it after checking the path)
+
 // PUT IN: apps/backbone/main.js
 /**
  * BackBone — application code.
@@ -7444,6 +7447,7 @@ export async function start(ctx) {
           types: ["handoff"],
           appIds: ["backbone"],
           assignedTo: username,
+          link: { type: "lead", id: l.lead_id, label: l.company_name },
         });
       }));
     } catch (e) {
@@ -9446,6 +9450,7 @@ export async function start(ctx) {
         types: ["handoff"],
         appIds: ["backbone"],
         assignedTo: username,
+        link: { type: "inquiry", id: s.id, label: co.name || "New inquiry" },
       });
     } catch (e) {
       console.warn("Could not create inquiry notification:", e);
@@ -9915,7 +9920,7 @@ export async function start(ctx) {
   // The RAIL drives navigation now, so there are no .nav-btn elements to wire.
   // This is what the shell calls on every route change; it owns only what each
   // page does on entry, which the old click handler did too.
-  function showView(view) {
+  function showView(view, param) {
     $all(".page").forEach(function(p) { p.classList.remove("active"); });
     var page = $id("page-" + view);
     if (page) page.classList.add("active");
@@ -9925,6 +9930,41 @@ export async function start(ctx) {
     if (view === "inbox") renderInbox();
     if (view === "leads") renderLeadsPage();
     if (view === "scorecard") renderScorecard();
+
+    // A route param is a deep link into one specific record — a Notification
+    // carrying a link to an inquiry, lead, or roster client opens straight
+    // to it instead of just landing on the page (Ryan's ask, Aug 2026).
+    if (param) openDeepLink(view, param);
+  }
+
+  // Leads and inquiries load in the background (loadLeads()/loadInbox()
+  // below are fired at startup but not awaited before this module returns),
+  // so on a cold landing — someone clicking a notification before BackBone
+  // has ever been open — the record may not be in state yet. pendingDeepLink
+  // holds the request until the matching load resolves; see the .then()
+  // calls near the bottom of start().
+  var pendingDeepLink = null;
+
+  function openDeepLink(view, id) {
+    if (view === "leads") {
+      var lead = state_leads.find(function(l) { return l.lead_id === id; });
+      if (lead) { pendingDeepLink = null; openLeadDetail(id); }
+      else { pendingDeepLink = { view: "leads", id: id }; }
+      return;
+    }
+    if (view === "inbox") {
+      var inq = state_intake.find(function(x) { return x.id === id; });
+      if (inq) { pendingDeepLink = null; openInquiry(id); }
+      else { pendingDeepLink = { view: "inbox", id: id }; }
+      return;
+    }
+    if (view === "dashboard") {
+      // Roster clients load with the initial, AWAITED loadData(), so they're
+      // already in state by the time this can run — no retry needed.
+      var rosterTab = $one('[data-page="roster"]');
+      if (rosterTab) rosterTab.click();
+      openDetail(id);
+    }
   }
   $id("searchBox").addEventListener("input", function(e) {
     searchQuery = e.target.value;
@@ -10085,8 +10125,20 @@ export async function start(ctx) {
   // login gate cleared; the shell has already authenticated by the time we run.
   await loadData();
   loadOpsData();
-  loadInbox();
-  loadLeads();
+  loadInbox().then(function() {
+    if (pendingDeepLink && pendingDeepLink.view === "inbox") {
+      var id = pendingDeepLink.id;
+      pendingDeepLink = null;
+      openInquiry(id);
+    }
+  });
+  loadLeads().then(function() {
+    if (pendingDeepLink && pendingDeepLink.view === "leads") {
+      var id = pendingDeepLink.id;
+      pendingDeepLink = null;
+      openLeadDetail(id);
+    }
+  });
 
   return {
     showView,
