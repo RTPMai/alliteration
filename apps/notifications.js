@@ -1,6 +1,9 @@
 // PUT IN: apps/notifications.js (REPLACES the current one)
 // (this banner line is for verification only, delete it after checking the path)
 
+// PUT IN: apps/notifications.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * Notifications — shell-level to-do / hand-off list.
  *
@@ -45,7 +48,13 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
-import { TYPES, GENERAL_APP } from '../lib/notifications/schema.js';
+import { TYPES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS } from '../lib/notifications/schema.js';
+
+// Where a link opens. "client" has no top-level BackBone view of its own —
+// the roster lives inside the dashboard page as a sub-tab — so it routes to
+// dashboard and BackBone's showView() switches to that sub-tab itself. See
+// openDeepLink() in apps/backbone/main.js.
+const LINK_VIEW = { inquiry: 'inbox', lead: 'leads', client: 'dashboard' };
 
 const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
   .concat([{ id: GENERAL_APP, name: 'General', accent: 'var(--muted)' }]);
@@ -82,6 +91,7 @@ function relTime(iso) {
 }
 
 function fmtChangeValue(field, v) {
+  if (field === 'link') return fmtLinkValue(v);
   if (v == null || v === '') return '(none)';
   if (field === 'appIds') return (Array.isArray(v) ? v : [v]).map((id) => appMeta(id).name).join(', ');
   if (field === 'types') return (Array.isArray(v) ? v : [v]).map(typeLabel).join(', ');
@@ -89,7 +99,12 @@ function fmtChangeValue(field, v) {
   return String(v);
 }
 
-const FIELD_LABEL = { title: 'title', types: 'type', appIds: 'app', dueDate: 'due date' };
+const FIELD_LABEL = { title: 'title', types: 'type', appIds: 'app', dueDate: 'due date', link: 'linked record' };
+
+function fmtLinkValue(v) {
+  if (!v || !v.id) return '(none)';
+  return (LINK_TYPE_LABELS[v.type] || v.type) + ': ' + (v.label || v.id);
+}
 
 function historyLine(e) {
   switch (e.action) {
@@ -212,7 +227,37 @@ export default {
   .nt-pill.type-task{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
   .nt-pill.type-need{background:var(--warn-tint);color:var(--warn-dk);border:1px solid var(--warn-tint)}
   .nt-pill.type-handoff{background:var(--accent-tint);color:var(--accent-deep);border:1px solid transparent}
+  .nt-pill.link{
+    background:none;border:1px solid var(--line);color:var(--accent-deep);
+    cursor:pointer;font-family:inherit;padding:2px 9px 2px 7px;
+  }
+  .nt-pill.link:hover{border-color:var(--accent)}
   .nt-meta{font-size:11.5px;color:var(--faint);margin-top:6px}
+
+  /* Link-to-record picker — a type select plus a live search-as-you-type
+     result list, same idea as the assignee dropdown but needs its own
+     lookup since it spans three different BackBone data sets. */
+  .nt-link-picker{border:1px solid var(--line);border-radius:var(--radius-sm);padding:10px;margin-top:4px}
+  .nt-link-row{display:flex;gap:6px;flex-wrap:wrap}
+  .nt-link-row select{flex:1;min-width:110px}
+  .nt-link-row input{flex:2;min-width:160px}
+  .nt-link-results{margin-top:6px;max-height:160px;overflow-y:auto}
+  .nt-link-opt{
+    display:flex;justify-content:space-between;gap:8px;padding:6px 8px;
+    border-radius:var(--radius-sm);cursor:pointer;font-size:12.5px;
+  }
+  .nt-link-opt:hover{background:var(--bg)}
+  .nt-link-opt .sub{color:var(--faint);font-size:11px}
+  .nt-link-empty{padding:6px 8px;color:var(--faint);font-size:12px}
+  .nt-link-chip{
+    display:inline-flex;align-items:center;gap:8px;margin-top:8px;
+    background:var(--accent-tint);color:var(--accent-deep);border-radius:var(--radius-pill);
+    padding:5px 6px 5px 12px;font-size:12px;font-weight:600;
+  }
+  .nt-link-chip button{
+    border:none;background:none;color:inherit;cursor:pointer;font-family:inherit;
+    font-size:14px;line-height:1;padding:0 4px;
+  }
   .nt-actions{display:flex;gap:6px;flex:none;flex-wrap:wrap;justify-content:flex-end}
 
   .nt-sub{border-top:1px solid var(--line-soft);margin-top:11px;padding-top:10px}
@@ -372,6 +417,9 @@ export default {
         '</div></div>' +
         '<div class="nt-field"><label>Due date (optional)</label>' +
           '<input type="date" data-edit-due="' + esc(n.id) + '" value="' + esc(n.dueDate || '') + '"></div>' +
+        '<div class="nt-field"><label>Link to a record (optional)</label>' +
+          linkPickerHtml(n.id, n.link || null) +
+        '</div>' +
         '<div class="nt-field"><label>What changed (optional, goes in History)</label>' +
           '<input type="text" data-edit-msg="' + esc(n.id) + '" maxlength="500" placeholder="e.g. wrong app selected the first time"></div>' +
         '<button class="nt-btn small primary" data-edit-save="' + esc(n.id) + '">Save changes</button>' +
@@ -388,6 +436,86 @@ export default {
       return [...sel.querySelectorAll('[aria-pressed="true"]')].map((b) => b.dataset['edit' + kind[0].toUpperCase() + kind.slice(1)]);
     }
 
+    // ---- Link-to-record picker (Ryan's ask, Aug 2026) ----------------------
+    // A type select plus a live search-as-you-type list, spanning three
+    // different BackBone data sets (inquiries, leads, roster clients) via
+    // GET ?linkSearch=. The chosen value lives in data-* attributes on the
+    // wrapper (data-link-type/-id/-label), not module state, so the same
+    // markup works for the one create form and for however many edit forms
+    // are open at once — same reasoning as the edit toggle-pills.
+    const linkSearchTimers = {};
+
+    function pickerEl(scope) {
+      return root.querySelector('[data-link-picker="' + scope + '"]');
+    }
+
+    function linkPickerHtml(scope, link) {
+      const type = link ? link.type : '';
+      const id = link ? link.id : '';
+      const label = link ? link.label : '';
+      const typeOptions = LINK_TYPES.map((t) =>
+        '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t]) + '</option>'
+      ).join('');
+      return '' +
+        '<div class="nt-link-picker" data-link-picker="' + esc(scope) + '"' +
+          ' data-link-type="' + esc(type) + '" data-link-id="' + esc(id) + '" data-link-label="' + esc(label) + '">' +
+          '<div class="nt-link-row">' +
+            '<select data-link-type-select="' + esc(scope) + '">' +
+              '<option value="">No link</option>' + typeOptions +
+            '</select>' +
+            (type && !id
+              ? '<input type="text" data-link-search="' + esc(scope) + '" autocomplete="off" ' +
+                'placeholder="Search ' + esc((LINK_TYPE_LABELS[type] || '').toLowerCase()) + 's by company name">'
+              : '') +
+          '</div>' +
+          (id
+            ? '<div class="nt-link-chip" data-link-chip="' + esc(scope) + '">' +
+                esc(LINK_TYPE_LABELS[type] || type) + ': ' + esc(label || id) +
+                '<button type="button" data-link-clear="' + esc(scope) + '" title="Remove link">\u00d7</button>' +
+              '</div>'
+            : '') +
+          '<div class="nt-link-results" data-link-results="' + esc(scope) + '"></div>' +
+        '</div>';
+    }
+
+    function doLinkSearch(scope, type, q) {
+      const resultsEl = root.querySelector('[data-link-results="' + scope + '"]');
+      if (!resultsEl) return;
+      ctx.api.get(ENDPOINTS.notifications, { linkSearch: type, q: q || '' })
+        .then((res) => {
+          const items = (res && res.results) || [];
+          resultsEl.innerHTML = items.length
+            ? items.map((it) =>
+                '<div class="nt-link-opt" data-link-pick="' + esc(scope) + '"' +
+                  ' data-pick-id="' + esc(it.id) + '" data-pick-label="' + esc(it.label) + '">' +
+                  '<span>' + esc(it.label) + '</span>' +
+                  (it.sublabel ? '<span class="sub">' + esc(it.sublabel) + '</span>' : '') +
+                '</div>'
+              ).join('')
+            : '<div class="nt-link-empty">No matches.</div>';
+        })
+        .catch(() => {
+          resultsEl.innerHTML = '<div class="nt-link-empty">Could not search right now.</div>';
+        });
+    }
+
+    // Full re-render of one picker (type change, a result gets picked, or
+    // clearing) — cheap since it's one small block, not the whole card list,
+    // so it doesn't disturb anything else on screen mid-edit.
+    function applyLinkSelection(scope, type, id, label) {
+      const el = pickerEl(scope);
+      if (!el) return;
+      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null);
+      if (type && !id) doLinkSearch(scope, type, '');
+    }
+
+    function readLinkPicker(scope) {
+      const el = pickerEl(scope);
+      if (!el) return null;
+      const type = el.dataset.linkType, id = el.dataset.linkId, label = el.dataset.linkLabel;
+      return type && id ? { type, id, label } : null;
+    }
+
     function cardHtml(n) {
       const app0 = appMeta((n.appIds || [])[0]);
       const done = n.status === 'done';
@@ -402,6 +530,12 @@ export default {
       }).join('');
       const typePills = (n.types || []).map((t) =>
         '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('');
+      const linkPill = (n.link && n.link.id)
+        ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
+            ' data-link-id="' + esc(n.link.id) + '" title="Open in BackBone">' +
+            '\u2192 ' + esc(LINK_TYPE_LABELS[n.link.type] || n.link.type) + ': ' + esc(n.link.label || n.link.id) +
+          '</button>'
+        : '';
       const histCount = Array.isArray(n.history) ? n.history.length : 0;
       const showReassign = openReassign.has(n.id);
       const showHistory = openHistory.has(n.id);
@@ -414,7 +548,7 @@ export default {
               (done ? ' checked' : '') + ' title="' + (done ? 'Reopen' : 'Mark done') + '">' +
             '<div class="nt-body">' +
               '<div class="nt-title' + (done ? ' done' : '') + '">' + esc(n.title) + '</div>' +
-              '<div class="nt-tags">' + appPills + typePills + '</div>' +
+              '<div class="nt-tags">' + appPills + typePills + linkPill + '</div>' +
               '<div class="nt-meta">' + who + due + completed + ' \u00b7 ' + esc(relTime(n.createdAt)) + '</div>' +
             '</div>' +
             '<div class="nt-actions">' +
@@ -477,6 +611,9 @@ export default {
           '</div></div>' +
           '<div class="nt-field"><label>Assign to</label><select id="nf-who"></select></div>' +
           '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
+          '<div class="nt-field"><label>Link to a record (optional)</label>' +
+            linkPickerHtml('new', null) +
+          '</div>' +
           '<button class="nt-btn primary" id="nf-save">Create</button>' +
           '<button class="nt-btn" id="nf-cancel">Cancel</button>' +
         '</div>';
@@ -505,6 +642,28 @@ export default {
     // pickers, and every card, including ones re-rendered after a reload. ----
 
     root.addEventListener('click', async (e) => {
+      const linkOpen = e.target.closest('[data-link-open]');
+      if (linkOpen) {
+        const view = LINK_VIEW[linkOpen.dataset.linkType];
+        if (view && ctx.goApp) ctx.goApp('backbone', view, linkOpen.dataset.linkId);
+        return;
+      }
+
+      const linkPick = e.target.closest('[data-link-pick]');
+      if (linkPick) {
+        const scope = linkPick.dataset.linkPick;
+        const el = pickerEl(scope);
+        const type = el ? el.dataset.linkType : '';
+        applyLinkSelection(scope, type, linkPick.dataset.pickId, linkPick.dataset.pickLabel);
+        return;
+      }
+
+      const linkClear = e.target.closest('[data-link-clear]');
+      if (linkClear) {
+        applyLinkSelection(linkClear.dataset.linkClear, '', '', '');
+        return;
+      }
+
       const typeToggle = e.target.closest('[data-type]');
       if (typeToggle && typeToggle.closest('#nfTypeToggles')) {
         const v = typeToggle.dataset.type;
@@ -536,7 +695,8 @@ export default {
             types: [...formTypes],
             appIds: [...formApps],
             assignedTo: $('#nf-who').value,
-            dueDate: $('#nf-due').value || null
+            dueDate: $('#nf-due').value || null,
+            link: readLinkPicker('new')
           });
           $('#ntForm').style.display = 'none';
           $('#ntForm').innerHTML = '';
@@ -593,7 +753,7 @@ export default {
         editSave.disabled = true;
         try {
           await ctx.api.patch(ENDPOINTS.notifications,
-            { title, types, appIds: apps, dueDate: due, message: msg || undefined },
+            { title, types, appIds: apps, dueDate: due, link: readLinkPicker(id), message: msg || undefined },
             { query: { id } });
           openEdit.delete(id);
           say('Notification updated.', 'ok');
@@ -652,10 +812,30 @@ export default {
       }
     });
 
+    root.addEventListener('input', (e) => {
+      const search = e.target.closest('[data-link-search]');
+      if (!search) return;
+      const scope = search.dataset.linkSearch;
+      const el = pickerEl(scope);
+      const type = el ? el.dataset.linkType : '';
+      if (!type) return;
+      clearTimeout(linkSearchTimers[scope]);
+      const q = search.value;
+      linkSearchTimers[scope] = setTimeout(() => doLinkSearch(scope, type, q), 200);
+    });
+
     root.addEventListener('change', async (e) => {
       if (e.target.id === 'ntShowDone') {
         showDone = e.target.checked;
         renderList();
+        return;
+      }
+
+      const linkTypeSelect = e.target.closest('[data-link-type-select]');
+      if (linkTypeSelect) {
+        const scope = linkTypeSelect.dataset.linkTypeSelect;
+        const type = linkTypeSelect.value;
+        applyLinkSelection(scope, type, '', '');
         return;
       }
 
