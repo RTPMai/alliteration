@@ -9376,7 +9376,14 @@ export async function start(ctx) {
       inquiryBriefUrls[s.id] = d.url;
       return d.url;
     } catch (err) {
-      inquiryBriefErrors[s.id] = (err && err.body && err.body.error) || (err && err.message) || "Network error";
+      // err.message is already a safe string — js/api.js's errorText() handles
+      // the case where the server's error payload is an object (Vercel platform
+      // errors come back as { error: { code, message } }, not a string). Reading
+      // err.body.error directly, like this used to, bypasses that and can hand
+      // an object straight to a template string — which is exactly how this
+      // showed up as "[object Object]" in the alert instead of a real reason.
+      inquiryBriefErrors[s.id] = (err && err.message) || "Network error";
+      console.warn("Inquiry brief generation failed:", err);
       return null;
     }
   }
