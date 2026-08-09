@@ -377,11 +377,26 @@ t.test('inquiry email-to-AM creates a notification for that AM too', () => {
   t.assert(/catch/.test(block), 'createInquiryNotification() must catch its own failures, same as the lead version');
 });
 
-t.test('emailInquiryToAM actually calls createInquiryNotification after opening the mailto', () => {
-  const idx = main.indexOf('async function emailInquiryToAM');
-  const block = main.slice(idx, idx + 900);
+t.test('routing an inquiry (assignInquiryToAM) creates the notification independent of any email', () => {
+  // Ryan's ask, Aug 9, 2026: not every inquiry gets emailed, so the
+  // notification must not be a side effect of sending mail — assigning an
+  // AM has to notify them on its own.
+  t.assert(/async function assignInquiryToAM/.test(main), 'assignInquiryToAM() is missing from main.js');
+  const idx = main.indexOf('async function assignInquiryToAM');
+  const block = main.slice(idx, idx + 700);
   t.assert(/createInquiryNotification\(s, am\)/.test(block),
-    'emailInquiryToAM() built the notification helper but never calls it');
+    'assignInquiryToAM() should call createInquiryNotification() directly — no email should be required to notify an AM');
+  t.assert(!/generateInquiryBrief|openMailto/.test(block),
+    'assignInquiryToAM() should not generate a brief or open a mailto — that is emailInquiryToAM()\'s job, kept separate on purpose');
+});
+
+t.test('emailing only notifies as a safety net for an inquiry that was not already assigned', () => {
+  const idx = main.indexOf('async function emailInquiryToAM');
+  const block = main.slice(idx, idx + 1600);
+  t.assert(/alreadyAssigned/.test(block),
+    'emailInquiryToAM() should track whether the AM was already assigned, so emailing an already-routed inquiry does not fire a duplicate notification');
+  t.assert(/if \(!alreadyAssigned\) createInquiryNotification/.test(block),
+    'emailInquiryToAM() should only call createInquiryNotification() when the inquiry was not already assigned to this AM');
 });
 
 t.test('no AM means no notification (an unrouted lead group has nothing to assign)', () => {
@@ -404,6 +419,83 @@ t.test('inquiry brief errors use err.message, never err.body.error directly', ()
     'generateInquiryBrief() reads err.body.error directly again — this can be a non-string object and will render as "[object Object]"');
   t.assert(/err\.message/.test(block),
     'generateInquiryBrief() should fall back to err.message, which js/api.js already guarantees is a safe string');
+});
+
+/* ---- Routing an inquiry persists the AM, not just an email fire-and-forget --- */
+// Ryan's ask (Aug 9, 2026): routing an inquiry needs to SAVE the account
+// manager (survive a reload), not just fire an email that's forgotten.
+
+t.test('emailInquiryToAM saves assignedAM/assignedAMAt on the inquiry and persists it', () => {
+  const idx = main.indexOf('async function emailInquiryToAM');
+  const block = main.slice(idx, idx + 1500);
+  t.assert(/s\.assignedAM\s*=\s*am/.test(block), 'emailInquiryToAM() should set s.assignedAM = am');
+  t.assert(/s\.assignedAMAt\s*=/.test(block), 'emailInquiryToAM() should stamp when the assignment happened');
+  t.assert(/saveInbox\(\)/.test(block), 'the assignment must be persisted via saveInbox(), or it disappears on reload');
+});
+
+t.test('the AM picker remembers the saved assignment when the inquiry is reopened', () => {
+  const idx = main.indexOf('Route this inquiry');
+  const block = main.slice(idx, idx + 1300);
+  t.assert(/s\.assignedAM === a/.test(block),
+    'the AM <select> should pre-select s.assignedAM so re-opening a routed inquiry shows who it went to, not a blank picker');
+});
+
+t.test('the Inbox list shows an assigned-AM chip without needing to open the inquiry', () => {
+  const idx = main.indexOf('const assignedChip');
+  t.assert(idx !== -1, 'assignedChip is missing from the list-row renderer');
+  const block = main.slice(idx, idx + 300);
+  t.assert(/s\.assignedAM/.test(block), 'assignedChip should read s.assignedAM');
+});
+
+t.test('routing still creates the notification (save + notify happen together)', () => {
+  const idx = main.indexOf('async function emailInquiryToAM');
+  const block = main.slice(idx, idx + 1500);
+  t.assert(/createInquiryNotification\(s, am\)/.test(block),
+    'emailInquiryToAM() should still call createInquiryNotification — saving the AM should not have replaced notifying them');
+});
+
+/* ---- Inquiry detail view IS the brief card, not a separate plain list --- */
+// Ryan's ask (Aug 9, 2026): the card that pops up when you click an inquiry
+// should be the brief, matching the emailed one visually, not a plain
+// field-by-field list next to it.
+
+t.test('inquiryBriefHtml exists and is what renderInquiryBody actually renders', () => {
+  t.assert(/function inquiryBriefHtml/.test(main), 'inquiryBriefHtml() is missing from main.js');
+  const idx = main.indexOf('function renderInquiryBody');
+  const block = main.slice(idx, idx + 700);
+  t.assert(/inquiryBriefHtml\(s,/.test(block),
+    'renderInquiryBody() should call inquiryBriefHtml() as its primary content, not build a separate plain field list');
+  t.assert(/class="brief-sheet"/.test(block),
+    'the inquiry detail view should wrap its content in .brief-sheet, the same token-based card system the AM/Dormant briefs already use');
+});
+
+t.test('the in-app brief card reuses the shell\'s token-based .brief-sheet classes, not hardcoded colors', () => {
+  const idx = main.indexOf('function inquiryBriefHtml');
+  const block = main.slice(idx, idx + 4000);
+  t.assert(!/#[0-9A-Fa-f]{3,6}/.test(block),
+    'inquiryBriefHtml() has a hardcoded hex color — it must use the existing .brief-sheet classes/CSS vars from styles.js instead, or it will fail the tokens-only color rule');
+});
+
+t.test('styles.js has the row/label classes inquiryBriefHtml() depends on', () => {
+  t.assert(/\.brief-sheet \.row\{/.test(styles), '.brief-sheet .row is missing from styles.js');
+  t.assert(/\.brief-sheet \.row-l\{/.test(styles), '.brief-sheet .row-l is missing from styles.js');
+  t.assert(/\.brief-sheet \.row-v\{/.test(styles), '.brief-sheet .row-v is missing from styles.js');
+  t.assert(/\.brief-sheet \.gate-pill\{/.test(styles), '.brief-sheet .gate-pill is missing from styles.js');
+  t.assert(/\.brief-sheet \.sec-l\{/.test(styles), '.brief-sheet .sec-l is missing from styles.js');
+});
+
+t.test('bot screening warnings feed the brief card\'s own warning section instead of a duplicate box', () => {
+  const idx = main.indexOf('function renderInquiryBody');
+  const block = main.slice(idx, idx + 700);
+  t.assert(/inquiryBriefHtml\(s, bot\.hits\)/.test(block),
+    'renderInquiryBody() should pass bot.hits into inquiryBriefHtml() so there is one warnings section, not a separate qual-section box duplicating it');
+});
+
+t.test('the address mismatch check still gets its own async-updated placeholder inside the brief card', () => {
+  const idx = main.indexOf('function renderInquiryBody');
+  const block = main.slice(idx, idx + 1200);
+  t.assert(/id="addrCheckBox"/.test(block),
+    'the addrCheckBox placeholder is missing — verifyAddressClaims() has nothing to update asynchronously');
 });
 
 process.exit(t.report());
