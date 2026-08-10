@@ -560,6 +560,10 @@ export default {
               <span style="width:10px;height:10px;border-radius:50%;background:${sec.color};display:inline-block;flex-shrink:0"></span>
               ${sec.label}
               <span class="dept-count" style="color:${sec.color}">${sec.items.length} item${sec.items.length!==1?"s":""}</span>
+              ${sec.items.length ? `<label style="display:flex;align-items:center;gap:4px;font-size:12px;font-weight:600;cursor:pointer" onclick="event.stopPropagation()">
+                <input type="checkbox" onclick="event.stopPropagation();ShopStock.toggleSectionChecks(this)" title="Select all in this section" style="cursor:pointer;accent-color:${sec.color}"/>
+                Select all
+              </label>` : ""}
             </div>
             <span class="dept-toggle">▼</span>
           </div>
@@ -759,6 +763,15 @@ export default {
       const n = getDashSelection().length;
       const el = $id("bulk-count");
       if(el) el.textContent = n ? `${n} selected` : "";
+    }
+
+    // "Select all" checkbox in a dashboard section header (Needs Ordered or
+    // On Order). Scoped to just that section's items, not the whole page.
+    function toggleSectionChecks(master) {
+      const section = master.closest(".dept-section");
+      if(!section) return;
+      section.querySelectorAll(".dash-check").forEach(c=>c.checked=master.checked);
+      updateBulkCount();
     }
 
     async function bulkStatusChange() {
@@ -1334,6 +1347,7 @@ export default {
       showQR,
       toggleAllChecks,
       toggleDept,
+      toggleSectionChecks,
       updateBulkCount,
       updateDeptColor,
       updateStatus,
