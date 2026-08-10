@@ -1,4 +1,3 @@
-PUT IN: apps/shopstock.js
 /**
  * ShopStock — supply inventory, ordering, and QR labels.
  *
