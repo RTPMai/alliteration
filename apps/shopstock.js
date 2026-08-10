@@ -1,3 +1,4 @@
+PUT IN: apps/shopstock.js
 /**
  * ShopStock — supply inventory, ordering, and QR labels.
  *
@@ -218,6 +219,7 @@ export default {
             <span id="bulk-count" style="font-size:12px;color:var(--accent);font-weight:600;white-space:nowrap"></span>
             <button class="btn btn-green btn-sm" onclick="ShopStock.bulkStatusChange()">Apply</button>
           </div>
+          <button class="btn btn-gray" onclick="ShopStock.bulkPrintQR()" title="Print QR codes for checked items, or all items if none checked">🖨️ Print QR Codes</button>
           <button class="btn btn-green" onclick="ShopStock.openAddModal()">Add item</button>
         </div>
       </div>
@@ -1055,8 +1057,10 @@ export default {
 
     // TOKEN-EXEMPT: separate print window; see printQR.
     async function bulkPrintQR() {
-      // Get all checked items, or all items if none checked
-      const checked = [...$all(".bulk-check:checked")].map(c=>c.dataset.id);
+      // Get all checked items, or all items if none checked. Full Inventory
+      // uses .bulk-check, the dashboard uses .dash-check — this button can be
+      // clicked from either page, so both are checked.
+      const checked = [...$all(".bulk-check:checked"), ...$all(".dash-check:checked")].map(c=>c.dataset.id);
       const items = checked.length > 0
         ? allItems.filter(i=>checked.includes(i.id))
         : allItems;
