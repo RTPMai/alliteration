@@ -19,6 +19,21 @@
 import { buildRequest, saveRequest, alreadyHave, attachAccount } from "../lib/giving.js";
 import { applyClassification } from "../lib/giving-classify.js";
 import { isConfigured } from "../lib/kv.js";
+import { isRateLimited } from "../lib/rate-limit.js";
+
+// This endpoint is public by design (see note below), so it's the one place
+// on the whole shell where a stranger can make it write to storage with no
+// login and no per-account limit to fall back on. A real Jotform submitter
+// fires this once per form fill; 10 hits/hour from one IP is already far
+// more than that, so this only catches scripted spam, not real donors.
+const INTAKE_MAX_PER_IP = 10;
+const INTAKE_WINDOW_SECONDS = 60 * 60;
+
+function clientIp(req) {
+  const fwd = req.headers && req.headers["x-forwarded-for"];
+  if (fwd) return String(fwd).split(",")[0].trim();
+  return (req.socket && req.socket.remoteAddress) || "unknown";
+}
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -34,6 +49,14 @@ export default async function handler(req, res) {
 
   if (!isConfigured()) {
     return res.status(503).json({ error: "Storage is not configured." });
+  }
+
+  const ipKey = "giving-intake:ip:" + clientIp(req);
+  if (await isRateLimited(ipKey, INTAKE_MAX_PER_IP, INTAKE_WINDOW_SECONDS)) {
+    // Same 200-avoidance logic as below: a webhook sender may retry on
+    // anything but 2xx, so use a code that clearly won't be retried forever
+    // but also won't look like a green light to a human skimming logs.
+    return res.status(429).json({ error: "Too many submissions from this source." });
   }
 
   // Optional shared secret. Set JOTFORM_WEBHOOK_TOKEN and append
