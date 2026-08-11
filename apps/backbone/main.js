@@ -3411,6 +3411,7 @@ export async function start(ctx) {
   let scoreBasis = "all"; // "all" = lifetime totals, "ytd" = current calendar year so far
   let scoreSearchQuery = "";
   let scorePageSize = 25;   // 25 | 50 | 100 | "all"
+  let scoreHideContract = false; // hides contract-client rows from the Scorecard table; scoring is unaffected
   let scorePage = 1;        // 1-indexed current page
   let activeCustomerId = null;
   let state_leads = [];
@@ -3567,6 +3568,18 @@ export async function start(ctx) {
   function hasEnrichment(rec) {
     const e = state.enrichment[rec.customer_id];
     return e && Object.values(e).some(function(v) { return v && v.toString().trim() !== ""; });
+  }
+
+  // Contract clients: printing-only relationships (we do the work, revenue isn't the point).
+  // This is a display tag only — it does NOT change scoring or tier math, on purpose (Ryan's
+  // call, Aug 2026), so a contract client still scores normally but is visibly marked wherever
+  // company names show up.
+  function isContractClient(customerId) {
+    const e = state.enrichment[customerId];
+    return !!(e && (e.contract_client === true || e.contract_client === "true"));
+  }
+  function contractBadgeHtml() {
+    return ' <span class="badge" style="background:var(--line-soft);color:var(--muted);font-size:10px;padding:1px 6px;vertical-align:middle" title="Contract client — we print for them, not scored for revenue potential">Contract</span>';
   }
 
   // Industry Classification -> Account Manager, rebuilt from the real "🏢 Company Profiles"
@@ -3776,6 +3789,7 @@ export async function start(ctx) {
         ACCOUNT_MANAGERS.map(function(a) { return [a, a]; })
       )
     },
+    { key: "contract_client", label: "Contract client (we just do the printing for them — not a revenue focus)", type: "checkbox" },
     { key: "employees", label: "Employee count (scorecard)", type: "select", section: "Scorecard criteria (1–5) — these drive the client's tier", options: [
       ["", "Not set"],
       ["501+", "5 – 501+ employees"],
@@ -4106,7 +4120,7 @@ export async function start(ctx) {
               (lane.varies ? "Varies — set directly" : lane.am + (lane.isFallback ? " *" : "")) + '</span>';
         }
         html += '<tr class="row" data-id="' + r.customer_id + '">' +
-          '<td class="company-cell">' + r.company_name + '</td>' +
+          '<td class="company-cell">' + r.company_name + (isContractClient(r.customer_id) ? contractBadgeHtml() : '') + '</td>' +
           '<td>' + fmtMoney(r.total_revenue) + '</td>' +
           '<td>' + r.invoice_count + '</td>' +
           '<td>' + fmtDate(r.last_invoice_date) + '</td>' +
@@ -4219,6 +4233,12 @@ export async function start(ctx) {
       const q = scoreSearchQuery.trim().toLowerCase();
       rows = rows.filter(function(r) { return r.company_name.toLowerCase().indexOf(q) !== -1; });
     }
+    // Hiding contract clients only affects what's SHOWN in this table — the tier KPI counts above
+    // are computed from `scored` (the full roster), and each contract client's score/tier is still
+    // calculated normally. This is a view filter, not a scoring exclusion.
+    if (scoreHideContract) {
+      rows = rows.filter(function(r) { return !isContractClient(r.customer_id); });
+    }
     const scoreColMap = {
       company_name: "company_name", total: "total", tier: "tier_sort", completeness: "completeness_sort",
       total_revenue: "revenue_sort", avg_invoice: "avg_invoice_sort"
@@ -4259,7 +4279,7 @@ export async function start(ctx) {
       // Distance) are edited inside each company's detail panel now, not inline here. This table is
       // read-only; clicking a row opens that company to edit them.
       html += '<tr class="row" data-id="' + r.customer_id + '" style="cursor:pointer">' +
-        '<td class="sc-company company-cell" title="' + r.company_name.replace(/"/g, "&quot;") + '">' + r.company_name + '</td>' +
+        '<td class="sc-company company-cell" title="' + r.company_name.replace(/"/g, "&quot;") + '">' + r.company_name + (isContractClient(r.customer_id) ? contractBadgeHtml() : '') + '</td>' +
         '<td class="sc-num">' + r.total.toFixed(2) + '</td>' +
         '<td class="sc-num"><span class="badge" style="background:var(--line-soft);color:' + color + '">' + r.tier + '</span></td>' +
         '<td class="sc-num">' + r.completeness + '</td>' +
@@ -5797,7 +5817,13 @@ export async function start(ctx) {
       const input = f.key === "notes" ? document.createElement("textarea")
         : f.type === "select" ? document.createElement("select")
         : document.createElement("input");
-      input.className = "field";
+      if (f.type === "checkbox") {
+        input.type = "checkbox";
+        input.className = "enrich-checkbox";
+        input.style.cssText = "width:16px;height:16px;margin:4px 0 0";
+      } else {
+        input.className = "field";
+      }
       input.dataset.key = f.key;
       if (f.type === "select") {
         f.options.forEach(function(opt) {
@@ -5807,7 +5833,11 @@ export async function start(ctx) {
           input.appendChild(o);
         });
       }
-      input.value = enrichment[f.key] || "";
+      if (f.type === "checkbox") {
+        input.checked = enrichment[f.key] === true || enrichment[f.key] === "true";
+      } else {
+        input.value = enrichment[f.key] || "";
+      }
       // Surface the Printavo-synced contact as a placeholder when the AM hasn't
       // hand-entered one. The field stays editable (manual entry overrides), but the
       // synced value is visible instead of a blank box. primary_contact.name is a
@@ -6192,7 +6222,7 @@ export async function start(ctx) {
     const grid = $id("enrichGrid");
     const values = {};
     grid.querySelectorAll("[data-key]").forEach(function(el) {
-      values[el.dataset.key] = el.value;
+      values[el.dataset.key] = el.type === "checkbox" ? (el.checked ? "true" : "") : el.value;
     });
     // Merge onto the existing record rather than replacing it, so non-form fields the grid doesn't
     // render (computed distance_miles, attached inquiries, etc.) survive a save.
@@ -9999,6 +10029,11 @@ export async function start(ctx) {
   });
   $id("scorePageSize").addEventListener("change", function(e) {
     scorePageSize = e.target.value === "all" ? "all" : parseInt(e.target.value, 10);
+    scorePage = 1;
+    renderScorecard();
+  });
+  $id("scoreHideContract").addEventListener("change", function(e) {
+    scoreHideContract = e.target.checked;
     scorePage = 1;
     renderScorecard();
   });
