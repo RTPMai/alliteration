@@ -271,7 +271,7 @@ export default `
       <div class="card dash-card w-half" data-card="top10">
         <div class="card-hd"><span class="dash-grip">⠿</span><h3>Top 20% of clients</h3></div>
         <div class="card-bd">
-          <div class="help">Your top fifth of clients by revenue, and the share of the total they bring in. Uses the Year filter above (all time, a specific year, or the current year for YTD). Click any client to open its record.</div>
+          <div class="help">Whichever clients, ranked by how much they spend with us, add up to the top 20% of total revenue. Usually a small handful of your biggest spenders. Uses the Year filter above (all time, a specific year, or the current year for YTD). Click any client to open its record.</div>
           <div id="dashConcentrationWrap"></div>
         </div>
       </div>
