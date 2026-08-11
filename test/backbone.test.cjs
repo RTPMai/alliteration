@@ -1,6 +1,3 @@
-// PUT IN: test/backbone.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 // test/backbone.test.cjs
 /**
  * BackBone contract tests.
@@ -21,6 +18,7 @@ const ROOT = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 const main = read('apps/backbone/main.js');
+const template = read('apps/backbone/template.js');
 const styles = read('apps/backbone/styles.js');
 const sync = read('api/printavo-sync.js');
 const vercel = JSON.parse(read('vercel.json'));
@@ -525,6 +523,58 @@ t.test('the address mismatch check still gets its own async-updated placeholder 
   const block = main.slice(idx, idx + 1200);
   t.assert(/id="addrCheckBox"/.test(block),
     'the addrCheckBox placeholder is missing — verifyAddressClaims() has nothing to update asynchronously');
+});
+
+/* ---- contract clients (Aug 11, 2026) -------------------------------------
+ * A visible tag for printing-only relationships that aren't a revenue focus.
+ * Ryan's explicit call: this is a DISPLAY tag only. It must never change
+ * scoring or tier math — a contract client still scores normally, it's just
+ * marked wherever the company name shows up (Roster + Scorecard tables).
+ */
+
+t.test('contract_client is a real enrichment field, editable as a checkbox', () => {
+  t.assert(/key:\s*"contract_client"/.test(main), 'contract_client is missing from ENRICHMENT_FIELDS');
+  const idx = main.indexOf('key: "contract_client"');
+  const line = main.slice(idx, idx + 200);
+  t.assert(/type:\s*"checkbox"/.test(line), 'contract_client should render as a checkbox, not a text field or dropdown');
+});
+
+t.test('the enrichment form reads/writes checkboxes by .checked, not .value', () => {
+  t.assert(/input\.checked = enrichment\[f\.key\] === true \|\| enrichment\[f\.key\] === "true"/.test(main),
+    'openDetail() should set checkbox .checked from the stored value');
+  t.assert(/el\.type === "checkbox" \? \(el\.checked \? "true" : ""\) : el\.value/.test(main),
+    'handleSaveEnrichment() should read checkbox state via .checked, not .value (a checkbox\'s .value is always "on")');
+});
+
+t.test('isContractClient() and the badge are display-only — no scoring involvement', () => {
+  t.assert(/function isContractClient\(customerId\)/.test(main), 'isContractClient() helper is missing');
+  t.assert(/function contractBadgeHtml\(\)/.test(main), 'contractBadgeHtml() helper is missing');
+  // The scoring functions (computeScorecard, the star-band helpers, SCORECARD_WEIGHTS) must not
+  // reference contract_client anywhere — the flag is not allowed to touch the composite.
+  const scoreFnIdx = main.indexOf('function computeScorecard');
+  const scoreFnEnd = main.indexOf('\n  const TIER_COLORS', scoreFnIdx);
+  const scoreBlock = main.slice(scoreFnIdx, scoreFnEnd > scoreFnIdx ? scoreFnEnd : scoreFnIdx + 4000);
+  t.assert(!/contract_client/.test(scoreBlock), 'computeScorecard() must not reference contract_client — the tag is display-only, scoring is unaffected');
+});
+
+t.test('the contract badge is shown on both the Roster and Scorecard company cells', () => {
+  t.assert(/company-cell">' \+ r\.company_name \+ \(isContractClient\(r\.customer_id\) \? contractBadgeHtml\(\) : ''\)/.test(main),
+    'Roster company cell should show the contract badge when isContractClient() is true');
+  t.assert(/sc-company company-cell[\s\S]{0,150}r\.company_name \+ \(isContractClient\(r\.customer_id\) \? contractBadgeHtml\(\) : ''\)/.test(main),
+    'Scorecard company cell should show the contract badge when isContractClient() is true');
+});
+
+t.test('Scorecard has a "Hide contract clients" filter that only affects the visible rows, not the tier KPI counts', () => {
+  t.assert(/id="scoreHideContract"/.test(template), 'scoreHideContract checkbox is missing from the Scorecard toolbar markup');
+  t.assert(/scoreHideContract = e\.target\.checked/.test(main), 'the scoreHideContract checkbox is not wired up');
+  const fnIdx = main.indexOf('function renderScorecard');
+  const fnEnd = main.indexOf('\n  // ---- Dashboard', fnIdx);
+  const block = main.slice(fnIdx, fnEnd > fnIdx ? fnEnd : fnIdx + 5000);
+  t.assert(/tierCounts\[s\.tier\]\+\+/.test(block), 'sanity: tier KPI counts should iterate the full scored list');
+  const tierCountsIdx = block.indexOf('scored.forEach');
+  const hideFilterIdx = block.indexOf('scoreHideContract');
+  t.assert(tierCountsIdx !== -1 && hideFilterIdx !== -1 && tierCountsIdx < hideFilterIdx,
+    'the tier KPI count must be computed from the full `scored` list BEFORE the hide-contract filter runs, so hiding contract clients from the table never changes the KPI numbers above it');
 });
 
 process.exit(t.report());
