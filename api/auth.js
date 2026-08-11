@@ -18,6 +18,26 @@
 import { setSessionCookie, clearSessionCookie, getSession } from "../lib/session.js";
 import { authenticate, createUser, noUsersYet, touchLastLogin, permsFor } from "../lib/users.js";
 import { isConfigured } from "../lib/kv.js";
+import { isRateLimited, resetKey } from "../lib/rate-limit.js";
+
+// Login lockout. Two keys checked together:
+//   - per-username, so a guessed/scripted attack against ONE account gets
+//     shut down fast (5 tries / 15 min).
+//   - per-IP, looser (20 tries / 15 min), so a script rotating through many
+//     usernames from one machine still gets caught even though no single
+//     username crossed its own limit.
+// Window and limits are deliberately generous for a team this size — this is
+// meant to stop a brute-force script, not to lock Ryan out after a couple of
+// typos.
+const LOGIN_MAX_PER_USER = 5;
+const LOGIN_MAX_PER_IP = 20;
+const LOGIN_WINDOW_SECONDS = 15 * 60;
+
+function clientIp(req) {
+  const fwd = req.headers && req.headers["x-forwarded-for"];
+  if (fwd) return String(fwd).split(",")[0].trim();
+  return (req.socket && req.socket.remoteAddress) || "unknown";
+}
 
 /**
  * A missing env var should produce a readable message, not Vercel's generic
@@ -109,8 +129,29 @@ export default async function handler(req, res) {
 
     // ---- login ----
     if (action === "login" || (body.username && body.password)) {
+      const usernameRaw = String(body.username || "");
+      const userKey = "login:user:" + usernameRaw.trim().toLowerCase();
+      const ipKey = "login:ip:" + clientIp(req);
+
+      // Check both before touching the password. A locked-out request should
+      // never reach scrypt, or the lockout does nothing to reduce load.
+      const [userLimited, ipLimited] = await Promise.all([
+        isRateLimited(userKey, LOGIN_MAX_PER_USER, LOGIN_WINDOW_SECONDS),
+        isRateLimited(ipKey, LOGIN_MAX_PER_IP, LOGIN_WINDOW_SECONDS),
+      ]);
+      if (userLimited || ipLimited) {
+        res.setHeader("Retry-After", String(LOGIN_WINDOW_SECONDS));
+        return res.status(429).json({
+          error: "Too many login attempts. Wait 15 minutes and try again.",
+        });
+      }
+
       const user = await authenticate(body.username, body.password);
       if (!user) return res.status(401).json({ error: "Invalid username or password" });
+
+      // Success — clear this user's counter so a couple of earlier typos in
+      // this window don't count against their next login.
+      await resetKey(userKey);
 
       await touchLastLogin(user.username);
       setSessionCookie(res, { username: user.username, name: user.name, role: user.role });
