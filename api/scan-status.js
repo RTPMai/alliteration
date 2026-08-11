@@ -19,6 +19,23 @@
 // from outside the shop. Ryan chose this over reprinting every label with a
 // secret token. If that ever needs tightening, add a token column to the
 // item record and require it here without touching item ids or old labels.
+//
+// Rate limited per IP as a light guard against a script scanning through IDs
+// (GET, to harvest the item list) or flooding status flips (POST). Limits
+// are generous on purpose: real scanning, even a fast warehouse session
+// scanning dozens of labels back to back, should never come close.
+
+import { isRateLimited } from "../lib/rate-limit.js";
+
+const SCAN_GET_MAX_PER_IP = 300;
+const SCAN_POST_MAX_PER_IP = 120;
+const SCAN_WINDOW_SECONDS = 60 * 60;
+
+function clientIp(req) {
+  const fwd = req.headers && req.headers["x-forwarded-for"];
+  if (fwd) return String(fwd).split(",")[0].trim();
+  return (req.socket && req.socket.remoteAddress) || "unknown";
+}
 
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -57,6 +74,18 @@ export default async function handler(req, res) {
 
   const id = req.query.id;
   if (!id) return res.status(400).json({ error: "Missing id" });
+
+  const ip = clientIp(req);
+  if (req.method === "GET") {
+    if (await isRateLimited("scan-status:get:" + ip, SCAN_GET_MAX_PER_IP, SCAN_WINDOW_SECONDS)) {
+      return res.status(429).json({ error: "Too many requests, try again shortly." });
+    }
+  }
+  if (req.method === "POST") {
+    if (await isRateLimited("scan-status:post:" + ip, SCAN_POST_MAX_PER_IP, SCAN_WINDOW_SECONDS)) {
+      return res.status(429).json({ error: "Too many requests, try again shortly." });
+    }
+  }
 
   const item = await kvGet(`supply_item_${id}`);
   if (!item) return res.status(404).json({ error: "Item not found" });
