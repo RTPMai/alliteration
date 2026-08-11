@@ -1,10 +1,3 @@
-// PUT IN: apps/backbone/main.js (REPLACES the current one — GIT CLONE-AND-PUSH ONLY, do not use the web uploader, file is 630KB+)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: apps/backbone/main.js (REPLACES the current one — GIT CLONE-AND-PUSH ONLY, do not use the web uploader, file is 630KB+)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: apps/backbone/main.js
 /**
  * BackBone — application code.
  *
@@ -5533,11 +5526,17 @@ export async function start(ctx) {
         '<div class="kpi"><div class="kpi-lbl">New quotes this week</div><div class="kpi-val">' + (opsData.quotesThisWeek || 0) + '</div><div class="kpi-s">created in last 7 days</div></div>'
         : '');
 
-    // --- Top 10 clients: share of total revenue, expandable to full list ---
+    // --- Top 20% of clients by revenue: share of total revenue, expandable to full list ---
+    // "Top 20%" is a count-based cutoff (the top fifth of the client list, ranked by
+    // revenue), not a Pareto revenue-share cutoff. Always at least 1 client so a small
+    // or filtered roster never shows an empty card. Respects dashYear like the rest of
+    // this dashboard: "all" is lifetime, a specific past year uses that year's revenue,
+    // and the current year is YTD by definition (revenue_by_year only has data through today).
     const sortedByRev = rows.slice().sort(function(a, b) { return b.total_revenue - a.total_revenue; });
-    const top10 = sortedByRev.slice(0, 10);
-    const top10Revenue = top10.reduce(function(s, r) { return s + r.total_revenue; }, 0);
-    const top10Share = totalRevenue > 0 ? (top10Revenue / totalRevenue * 100) : 0;
+    const topCount = Math.max(1, Math.round(sortedByRev.length * 0.2));
+    const topClients = sortedByRev.slice(0, topCount);
+    const topRevenue = topClients.reduce(function(s, r) { return s + r.total_revenue; }, 0);
+    const topShare = totalRevenue > 0 ? (topRevenue / totalRevenue * 100) : 0;
     function concClientRow(r, rank) {
       const share = totalRevenue > 0 ? (r.total_revenue / totalRevenue * 100) : 0;
       return '<div class="alert-row" data-id="' + r.customer_id + '" style="cursor:pointer">' +
@@ -5547,12 +5546,12 @@ export async function start(ctx) {
     }
     $id("dashConcentrationWrap").innerHTML =
       '<div class="mix-bar-row">' +
-        '<div class="mix-bar-lbl">Top 10 share</div>' +
-        '<div class="mix-bar-track"><div class="mix-bar-fill" style="width:' + top10Share.toFixed(1) + '%;background:var(--accent)"></div></div>' +
-        '<div class="mix-bar-val">' + top10Share.toFixed(0) + '% of revenue</div>' +
+        '<div class="mix-bar-lbl">Top 20% (' + topCount + ' of ' + sortedByRev.length + ')</div>' +
+        '<div class="mix-bar-track"><div class="mix-bar-fill" style="width:' + topShare.toFixed(1) + '%;background:var(--accent)"></div></div>' +
+        '<div class="mix-bar-val">' + topShare.toFixed(0) + '% of revenue</div>' +
       '</div>' +
       '<div class="alert-group-body" style="margin-top:8px">' +
-        top10.map(function(r, i) { return concClientRow(r, i + 1); }).join("") +
+        topClients.map(function(r, i) { return concClientRow(r, i + 1); }).join("") +
       '</div>' +
       '<details class="alert-group sev-low" style="margin-top:8px"' + (dashConcentrationOpen ? " open" : "") + '>' +
         '<summary>See all ' + sortedByRev.length + ' clients by revenue</summary>' +
