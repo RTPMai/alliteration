@@ -18,6 +18,7 @@
 // no changes at all.
 
 import { put } from "@vercel/blob";
+import { randomShortCode } from "../lib/short-code.js";
 import { requireAuth } from "../lib/session.js";
 
 const BUILD = "inquiry-brief-v1";
@@ -219,9 +220,8 @@ export default async function handler(req, res) {
     let shortUrl = null;
     try {
       if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-        const code = Array.from({ length: 8 }, () =>
-          "abcdefghijkmnpqrstuvwxyz23456789"[Math.floor(Math.random() * 32)]
-        ).join("");
+        // Real CSPRNG, not Math.random() — see lib/short-code.js.
+        const code = randomShortCode(8);
         const kv = await fetch(process.env.KV_REST_API_URL + "/pipeline", {
           method: "POST",
           headers: { Authorization: "Bearer " + process.env.KV_REST_API_TOKEN, "Content-Type": "application/json" },
