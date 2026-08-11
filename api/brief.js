@@ -18,6 +18,7 @@
 
 import { put } from "@vercel/blob";
 import { requireAuth } from "../lib/session.js";
+import { randomShortCode } from "../lib/short-code.js";
 import { FEATURES, LANES, MOTIONS } from "../lib/playbook.js";
 
 // Bump this whenever brief.js changes. It's echoed in every error so we can tell at a
@@ -591,10 +592,10 @@ export default async function handler(req, res) {
     let shortUrl = null;
     try {
       if (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) {
-        // 8 chars of base36 ~ 2.8e12 combinations. Unguessable, and short.
-        const code = Array.from({ length: 8 }, function() {
-          return "abcdefghijkmnpqrstuvwxyz23456789"[Math.floor(Math.random() * 32)];
-        }).join("");
+        // 8 chars from a 32-letter alphabet ~ 1.1e12 combinations. Unguessable,
+        // and short. Uses a real CSPRNG (see lib/short-code.js) — Math.random()
+        // is not safe for anything that gates access, even with this much space.
+        const code = randomShortCode(8);
 
         // Upstash writes must use /pipeline + SET. The /set/key form double-JSON-
         // stringifies the value and fails silently.
