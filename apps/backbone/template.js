@@ -223,6 +223,9 @@ export default `
         <div class="toolbar" style="justify-content:space-between">
           <input class="search" id="scoreSearchBox" placeholder="Search company name"/>
           <div style="display:inline-flex;align-items:center;gap:12px">
+            <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted);white-space:nowrap">
+              <input type="checkbox" id="scoreHideContract"/> Hide contract clients
+            </label>
             <div style="display:inline-flex;align-items:center;gap:6px">
               <label style="font-size:12px;color:var(--muted)">Show</label>
               <select class="search" id="scorePageSize" style="min-width:76px;padding:6px 8px">
