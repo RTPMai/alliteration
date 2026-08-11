@@ -5526,16 +5526,24 @@ export async function start(ctx) {
         '<div class="kpi"><div class="kpi-lbl">New quotes this week</div><div class="kpi-val">' + (opsData.quotesThisWeek || 0) + '</div><div class="kpi-s">created in last 7 days</div></div>'
         : '');
 
-    // --- Top 20% of clients by revenue: share of total revenue, expandable to full list ---
-    // "Top 20%" is a count-based cutoff (the top fifth of the client list, ranked by
-    // revenue), not a Pareto revenue-share cutoff. Always at least 1 client so a small
-    // or filtered roster never shows an empty card. Respects dashYear like the rest of
-    // this dashboard: "all" is lifetime, a specific past year uses that year's revenue,
-    // and the current year is YTD by definition (revenue_by_year only has data through today).
+    // --- Top 20% of revenue: which clients, by how much they spend with us, add up to the
+    // top fifth of total revenue. This is a SPEND cutoff, not a headcount cutoff — rank
+    // clients highest revenue first and keep adding them until their combined revenue
+    // reaches 20% of the total. That's usually a small handful of clients, since revenue
+    // concentrates at the top. Stops as soon as the running total reaches (or just passes)
+    // 20%, so the shown share is always >= 20%, never short of it. Respects dashYear like
+    // the rest of this dashboard: "all" is lifetime, a specific past year uses that year's
+    // revenue, and the current year is YTD by definition (revenue_by_year only has data
+    // through today).
     const sortedByRev = rows.slice().sort(function(a, b) { return b.total_revenue - a.total_revenue; });
-    const topCount = Math.max(1, Math.round(sortedByRev.length * 0.2));
-    const topClients = sortedByRev.slice(0, topCount);
-    const topRevenue = topClients.reduce(function(s, r) { return s + r.total_revenue; }, 0);
+    const revenueThreshold = totalRevenue * 0.2;
+    const topClients = [];
+    let topRevenue = 0;
+    for (let i = 0; i < sortedByRev.length; i++) {
+      topClients.push(sortedByRev[i]);
+      topRevenue += sortedByRev[i].total_revenue;
+      if (topRevenue >= revenueThreshold) break;
+    }
     const topShare = totalRevenue > 0 ? (topRevenue / totalRevenue * 100) : 0;
     function concClientRow(r, rank) {
       const share = totalRevenue > 0 ? (r.total_revenue / totalRevenue * 100) : 0;
@@ -5546,8 +5554,8 @@ export async function start(ctx) {
     }
     $id("dashConcentrationWrap").innerHTML =
       '<div class="mix-bar-row">' +
-        '<div class="mix-bar-lbl">Top 20% (' + topCount + ' of ' + sortedByRev.length + ')</div>' +
-        '<div class="mix-bar-track"><div class="mix-bar-fill" style="width:' + topShare.toFixed(1) + '%;background:var(--accent)"></div></div>' +
+        '<div class="mix-bar-lbl">Top 20% of revenue (' + topClients.length + ' client' + (topClients.length === 1 ? "" : "s") + ')</div>' +
+        '<div class="mix-bar-track"><div class="mix-bar-fill" style="width:' + Math.min(100, topShare).toFixed(1) + '%;background:var(--accent)"></div></div>' +
         '<div class="mix-bar-val">' + topShare.toFixed(0) + '% of revenue</div>' +
       '</div>' +
       '<div class="alert-group-body" style="margin-top:8px">' +
