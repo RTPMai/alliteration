@@ -1,6 +1,3 @@
-// PUT IN: js/api.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * alliteration. — THE SEAM
  *
@@ -194,6 +191,9 @@ export const ENDPOINTS = {
   mmSettings:      '/api/mailme/settings',
   // Public, called from unsubscribe.html rather than the shell.
   mmUnsubscribe:   '/api/mailme/unsubscribe',
+  // Public, called from flyover-con-signup.html (and any future event
+  // signup page) rather than the shell.
+  mmSignup:        '/api/mailme/signup',
 
   // ---- CrewCore ----
   // Fresh build, no standalone to port: the P&M internal Wix site (Company
