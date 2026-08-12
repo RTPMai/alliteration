@@ -112,3 +112,5 @@ t.test('js/api.js lists mmSignup alongside the other MailMe endpoints', () => {
   t.assert(/mmSignup:\s*['"]\/api\/mailme\/signup['"]/.test(apiSrc),
     'js/api.js should list the signup endpoint next to mmUnsubscribe for consistency');
 });
+
+process.exit(t.report());
