@@ -1,3 +1,4 @@
+<!-- PUT IN: api/mailme/settings.js (rename this file, drop the .txt) -->
 // api/mailme/settings.js — MailMe configuration.
 //
 // GET   -> current settings plus the compliance blockers standing between you
