@@ -1,3 +1,4 @@
+<!-- PUT IN: js/api.js (rename this file, drop the .txt) -->
 /**
  * alliteration. — THE SEAM
  *
@@ -83,11 +84,7 @@ const LIVE_PREFIXES = [
   '/api/crewcore/',
   // Notifications: api/notifications.js is deployed. Shell-level, not one of
   // the nine apps, same as auth/users/health above.
-  '/api/notifications',
-  // WebsiteWidget: api/websitewidget.js is deployed. Always answers 200 —
-  // when GA4 isn't configured yet it returns configured:false rather than
-  // erroring, so this counts as live even before the service account exists.
-  '/api/websitewidget'
+  '/api/notifications'
 ];
 
 function isLive(path) {
@@ -109,8 +106,7 @@ export function appsOnSampleData() {
     errorengine: [ENDPOINTS.eeErrors],
     traveltrack: [ENDPOINTS.ttTrips],
     mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists],
-    crewcore:    [ENDPOINTS.ccEmployees],
-    websitewidget: [ENDPOINTS.wwStats]
+    crewcore:    [ENDPOINTS.ccEmployees]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -213,10 +209,7 @@ export const ENDPOINTS = {
   ccSettings:      '/api/crewcore/settings',
 
   // ---- Notifications (shell-level) ----
-  notifications:   '/api/notifications',
-
-  // ---- WebsiteWidget ----
-  wwStats:         '/api/websitewidget'
+  notifications:   '/api/notifications'
 };
 
 /* ------------------------------------------------------------------ *
@@ -439,19 +432,6 @@ const MOCK_DATA = {
   // working when the flag flips. Empty by default: unlike the other apps,
   // TravelTrack never shipped sample rows on the standalone, so there is
   // nothing plausible to fake here.
-  // Shape mirrors api/websitewidget.js's "not configured" response — the
-  // real endpoint answers this same shape until GA4 env vars are set, so
-  // MOCK and the live-but-unconfigured state look identical on purpose.
-  [ENDPOINTS.wwStats]: () => ({
-    configured: false,
-    generatedAt: new Date().toISOString(),
-    days: 30,
-    totals: { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0 },
-    trend: [],
-    channels: [],
-    topPages: []
-  }),
-
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
   [ENDPOINTS.ttMiles]: () => ({ accounts: [] }),
