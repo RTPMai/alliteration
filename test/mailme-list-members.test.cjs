@@ -99,3 +99,13 @@ t.test('the member row actions refresh contacts, lists, and the open panel after
   t.assert(/loadContacts\(\)/.test(removeBody) && /loadLists\(\)/.test(removeBody) && /viewListMembers\(list\.id\)/.test(removeBody),
     'removeListMember should reload contacts/lists and refresh the open panel');
 });
+
+t.test('the Dashboard view has a message target, so a failed refresh is visible instead of silently showing zeros', () => {
+  t.assert(/dashboard:\s*['"]#mm\w+['"]/.test(src),
+    'MSG_TARGET is missing a "dashboard" entry — a failed Dashboard refresh currently fails ' +
+    'silently (shows 0s with no error), because refreshView() only announces errors when ' +
+    'opts.announce is set, and that comes from MSG_TARGET[view]');
+});
+
+
+process.exit(t.report());
