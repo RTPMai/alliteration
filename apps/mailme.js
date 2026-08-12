@@ -1,3 +1,4 @@
+<!-- PUT IN: apps/mailme.js (rename this file, drop the .txt) -->
 /**
  * MailMe — email marketing.
  *
@@ -46,6 +47,12 @@ function fmtDate(iso) {
   if (!iso) return '';
   const d = new Date(iso);
   return isNaN(d) ? '' : d.toLocaleDateString();
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toLocaleString();
 }
 
 function pct(n) { return (Math.round(n * 10) / 10) + '%'; }
@@ -1510,10 +1517,20 @@ export default {
               <textarea id="mmBody" placeholder="Write the email here.">${esc(d.body)}</textarea>
               <div class="hint">
                 {{first_name}} and {{company_name}} fill in per recipient when this sends.
+                Formatting: **bold**, [link text](https://example.com), and lines starting
+                with "- " become a bullet list. Everything else is a plain paragraph.
               </div>
+            </div>
+            <div class="mm-field">
+              <label for="mmScheduleAt">Schedule for (optional)</label>
+              <input id="mmScheduleAt" type="datetime-local">
+              <div class="hint">Leave blank to just save as a draft and send it manually later.
+                Scheduling saves your other changes above too.</div>
             </div>
             <div class="mm-actions">
               <button class="mm-btn" id="mmSaveDraft">Save draft</button>
+              <button class="mm-btn ghost" id="mmSendTest">Send test to me</button>
+              <button class="mm-btn ghost" id="mmScheduleDraft">Schedule send</button>
               <button class="mm-btn ghost" id="mmCancelDraft">Cancel</button>
               ${d.id ? '<button class="mm-btn ghost" id="mmDeleteDraft">Delete</button>' : ''}
             </div>
@@ -1551,6 +1568,8 @@ export default {
       $('#mmSegment').addEventListener('input', refresh);
 
       $('#mmSaveDraft').addEventListener('click', saveDraft);
+      $('#mmSendTest').addEventListener('click', sendTestFromComposer);
+      $('#mmScheduleDraft').addEventListener('click', scheduleDraft);
       $('#mmCancelDraft').addEventListener('click', () => { state.editingCampaign = null; renderComposer(); });
       const del = $('#mmDeleteDraft');
       if (del) del.addEventListener('click', () => deleteDraft(d.id));
@@ -1569,7 +1588,11 @@ export default {
         c.tags.some((t) => want.has(String(t).trim().toLowerCase())));
     }
 
-    async function saveDraft() {
+    // Shared by the plain Save button and the two actions (test send,
+    // schedule) that need a saved campaign id to act on before they can do
+    // anything else. Returns the saved campaign on success rather than
+    // mutating state itself, so each caller decides what happens next.
+    async function saveDraftInternal() {
       const d = state.editingCampaign;
       const payload = {
         subject: $('#mmSubject').value,
@@ -1580,18 +1603,69 @@ export default {
         segmentTags: $('#mmSegment').value.split(',').map((t) => t.trim()).filter(Boolean)
       };
       if (!payload.subject.trim() || !payload.body.trim()) {
-        msg('#mmCampaignMsg', 'A draft needs both a subject and a body.', 'mm-err');
-        return;
+        return { ok: false, error: 'A draft needs both a subject and a body.' };
       }
       try {
-        if (d.id) await api.patch(ENDPOINTS.mmCampaigns, { id: d.id, ...payload });
-        else await api.post(ENDPOINTS.mmCampaigns, payload);
-        state.editingCampaign = null;
-        await loadCampaigns();
-        renderComposer(); renderCampaignList();
-        msg('#mmCampaignMsg', 'Draft saved.', 'mm-ok');
+        const res = d.id
+          ? await api.patch(ENDPOINTS.mmCampaigns, { id: d.id, ...payload })
+          : await api.post(ENDPOINTS.mmCampaigns, payload);
+        return { ok: true, campaign: res.campaign };
       } catch (e) {
-        msg('#mmCampaignMsg', 'Could not save: ' + esc(e.message), 'mm-err');
+        return { ok: false, error: e.message };
+      }
+    }
+
+    async function saveDraft() {
+      const result = await saveDraftInternal();
+      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+      state.editingCampaign = null;
+      await loadCampaigns();
+      renderComposer(); renderCampaignList();
+      msg('#mmCampaignMsg', 'Draft saved.', 'mm-ok');
+    }
+
+    async function sendTestFromComposer() {
+      // Saves first so the test reflects exactly what's on screen, including
+      // any edits not yet saved — matches what pressing Save would have done.
+      const result = await saveDraftInternal();
+      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+
+      const to = window.prompt('Send a test to which email address?', '');
+      if (!to || !to.trim()) return;
+
+      try {
+        await api.post(ENDPOINTS.mmCampaigns, {}, { query: { id: result.campaign.id, action: 'test', to: to.trim() } });
+        state.editingCampaign = { ...result.campaign, segmentTags: result.campaign.segmentTags || [] };
+        await loadCampaigns(); renderCampaignList();
+        msg('#mmCampaignMsg', `Test sent to ${esc(to.trim())}. Check that inbox (and spam folder) in a minute.`, 'mm-ok');
+      } catch (e) {
+        msg('#mmCampaignMsg', 'Could not send test: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    async function scheduleDraft() {
+      const dtInput = $('#mmScheduleAt');
+      if (!dtInput || !dtInput.value) {
+        msg('#mmCampaignMsg', 'Pick a date and time to schedule for first.', 'mm-err');
+        return;
+      }
+      const when = new Date(dtInput.value);
+      if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
+        msg('#mmCampaignMsg', 'That has to be a real time in the future.', 'mm-err');
+        return;
+      }
+
+      const result = await saveDraftInternal();
+      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+
+      try {
+        await api.post(ENDPOINTS.mmCampaigns, { scheduledAt: when.toISOString() },
+          { query: { id: result.campaign.id, action: 'schedule' } });
+        state.editingCampaign = null;
+        await loadCampaigns(); renderComposer(); renderCampaignList();
+        msg('#mmCampaignMsg', `Scheduled for ${esc(fmtDateTime(when.toISOString()))}.`, 'mm-ok');
+      } catch (e) {
+        msg('#mmCampaignMsg', 'Could not schedule: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -1620,7 +1694,7 @@ export default {
         // Same gate as building/editing a draft: superuser, or a granted role
         // that isn't explicitly read-only. Mirrors canEditMailMe() server-side.
         const canSendUI = !!(ctx.perms && (ctx.perms.superuser === true || ctx.perms.can_edit !== false));
-        const canTriggerSend = ['draft', 'sending'].includes(status);
+        const canTriggerSend = ['draft', 'scheduled', 'sending'].includes(status);
 
         box.hidden = false;
         box.innerHTML = `
@@ -1629,6 +1703,7 @@ export default {
               <h3>Results: ${esc(d.campaign.subject)}</h3>
               <span class="meta">${esc(d.campaign.id)} · ${status === 'sent' ? 'sent ' + esc(fmtDate(sent))
                 : status === 'sending' ? `sending — ${d.sendPlan && d.sendPlan.queueRemaining != null ? d.sendPlan.queueRemaining : '?'} left`
+                : status === 'scheduled' ? `scheduled for ${esc(fmtDateTime(d.campaign.scheduledAt))}`
                 : 'not sent'}</span>
             </div>
             <div class="mm-card-bd">
@@ -1636,6 +1711,11 @@ export default {
                 `<div class="mm-notice ${w.level === 'danger' ? 'danger' : ''}">${esc(w.text)}</div>`).join('')}
               ${status === 'draft' ? `<div class="mm-notice">This campaign has not been sent, so there is
                 nothing to report yet. These are the figures that will appear once it sends.</div>` : ''}
+              ${status === 'scheduled' ? `<div class="mm-notice">
+                <b>Scheduled for ${esc(fmtDateTime(d.campaign.scheduledAt))}.</b> It will send
+                automatically around then — nobody needs to be signed in or press anything.
+                ${canSendUI ? '<button class="mm-btn ghost sm" id="mmUnschedule" style="margin-left:8px">Cancel schedule</button>' : ''}
+                </div>` : ''}
               ${canTriggerSend ? renderSendBlock(d, canSendUI) : ''}
               ${d.heldCount ? `<div class="mm-notice">
                 <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} held back</b> by the
@@ -1686,6 +1766,9 @@ export default {
 
         const sendBtn = $('#mmSendCampaign');
         if (sendBtn) sendBtn.addEventListener('click', () => triggerSend(id, status === 'sending'));
+
+        const unschedBtn = $('#mmUnschedule');
+        if (unschedBtn) unschedBtn.addEventListener('click', () => unscheduleCampaign(id));
       } catch (e) {
         msg('#mmCampaignMsg', 'Could not load results: ' + esc(e.message), 'mm-err');
       }
@@ -1720,10 +1803,11 @@ export default {
 
       const multiDay = plan.days > 1 || (plan.queueRemaining && plan.queueRemaining > 0);
       const rampNote = multiDay ? `<div class="mm-notice">
-        <b>This send takes more than one call.</b> The ${plan.isCold ? 'cold' : 'client'}
+        <b>This send takes more than one batch.</b> The ${plan.isCold ? 'cold' : 'client'}
         daily cap is ${plan.dailyCap}${plan.isCold ? ` (day ${plan.rampDay} of the warm-up)` : ''}.
-        Press Send again each time you want the next batch to go out — nothing repeats
-        automatically.</div>` : '';
+        Once started, it continues on its own — a check every 15 minutes picks up
+        wherever it left off, so nobody needs to keep pressing Send. Pressing Send
+        yourself just pushes the next batch out immediately instead of waiting.</div>` : '';
 
       if (!canSendUI) {
         return `${rampNote}<div class="mm-notice">
@@ -1742,7 +1826,7 @@ export default {
     }
 
     async function triggerSend(id, isContinuation) {
-      const label = isContinuation ? 'Send the next batch of this campaign?'
+      const label = isContinuation ? 'Send the next batch of this campaign now, rather than waiting for it to continue automatically?'
         : 'Send this campaign for real? This will email everyone eligible right now.';
       if (!window.confirm(label)) return;
       try {
@@ -1754,7 +1838,7 @@ export default {
         msg('#mmCampaignMsg',
           done
             ? `Sent. ${result.sentThisRun} email${result.sentThisRun === 1 ? '' : 's'} handed to Resend.`
-            : `Sent this batch: ${result.sentThisRun} email${result.sentThisRun === 1 ? '' : 's'}. ${result.remaining} left — press Send again to continue.`,
+            : `Sent this batch: ${result.sentThisRun} email${result.sentThisRun === 1 ? '' : 's'}. ${result.remaining} left — it'll continue on its own within about 15 minutes, or press Send again to push the next batch out now.`,
           'mm-ok');
         if (result.failedThisRun) {
           msg('#mmCampaignMsg',
@@ -1766,9 +1850,28 @@ export default {
       }
     }
 
+    async function unscheduleCampaign(id) {
+      if (!window.confirm('Cancel this scheduled send and go back to editing it as a draft?')) return;
+      try {
+        await api.post(ENDPOINTS.mmCampaigns, {}, { query: { id, action: 'unschedule' } });
+        await loadCampaigns();
+        renderCampaignList();
+        await showResults(id);
+        msg('#mmCampaignMsg', 'Schedule cancelled. Back to a draft.', 'mm-ok');
+      } catch (e) {
+        msg('#mmCampaignMsg', 'Could not cancel the schedule: ' + esc(e.message), 'mm-err');
+      }
+    }
+
     function renderCampaignList() {
-      $('#mmCampaignCount').textContent =
-        state.campaigns.length + ' draft' + (state.campaigns.length === 1 ? '' : 's');
+      const drafts = state.campaigns.filter((c) => c.status === 'draft').length;
+      const scheduled = state.campaigns.filter((c) => c.status === 'scheduled').length;
+      const sending = state.campaigns.filter((c) => c.status === 'sending').length;
+      $('#mmCampaignCount').textContent = [
+        drafts + ' draft' + (drafts === 1 ? '' : 's'),
+        scheduled ? scheduled + ' scheduled' : '',
+        sending ? sending + ' sending' : ''
+      ].filter(Boolean).join(' · ');
 
       if (!state.campaigns.length) {
         $('#mmCampaignList').innerHTML =
@@ -1786,10 +1889,17 @@ export default {
             ${state.campaigns.map((c) => {
               const list = c.listId ? state.lists.find((l) => l.id === c.listId) : null;
               const src = SOURCE_META[c.source] || SOURCE_META.client;
+              // A scheduled campaign's whole point is WHEN, so the row says
+              // when rather than just repeating the word "scheduled".
+              const statusText = c.status === 'scheduled' && c.scheduledAt
+                ? 'scheduled for ' + fmtDateTime(c.scheduledAt)
+                : c.status === 'sending' && c.sendState && c.sendState.queue
+                  ? `sending, ${c.sendState.queue.length} left`
+                  : c.status;
               return `
               <tr>
                 <td><div class="co">${esc(c.subject)}</div>
-                    <div class="who">${esc(c.id)} · ${esc(c.status)}</div></td>
+                    <div class="who">${esc(c.id)} · ${esc(statusText)}</div></td>
                 <td><span class="pill src">${esc(src.label)}</span></td>
                 <td class="em">${list ? esc(list.name)
                   : (c.segmentTags && c.segmentTags.length
