@@ -75,6 +75,13 @@ export default async function handler(req, res) {
       if (b.replyToFixed !== undefined) patch.replyToFixed = String(b.replyToFixed).trim();
       if (b.unsubscribeUrl !== undefined) patch.unsubscribeUrl = String(b.unsubscribeUrl).trim();
 
+      if (b.fromAddress && typeof b.fromAddress === "object") {
+        patch.fromAddress = {};
+        ["warm", "cold"].forEach((k) => {
+          if (b.fromAddress[k] !== undefined) patch.fromAddress[k] = String(b.fromAddress[k]).trim();
+        });
+      }
+
       if (b.postalAddress && typeof b.postalAddress === "object") {
         patch.postalAddress = {};
         ["line1", "line2", "city", "state", "postalCode"].forEach((k) => {
