@@ -1,4 +1,3 @@
-<!-- PUT IN: api/mailme/domains.js (rename this file, drop the .txt) -->
 // api/mailme/domains.js — Resend sending-domain verification status.
 //
 // GET -> { warm: {name, status, region} | null, cold: {...} | null }
