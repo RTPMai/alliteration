@@ -186,6 +186,13 @@ export default {
   .mm-linklike:hover{text-decoration:underline}
   .mm-linklike:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
+  .mm-hint{font-size:12.5px;color:var(--muted);line-height:1.5}
+  .mm-add-row{display:flex;gap:10px;align-items:center;padding:12px 16px;
+    border-bottom:1px solid var(--line)}
+  .mm-add-row input{flex:1;padding:9px 11px;border:1px solid var(--line);
+    border-radius:var(--radius-sm);font-size:13px;font-family:inherit;background:var(--card)}
+  .mm-add-row input:focus{outline:2px solid var(--accent);outline-offset:1px}
+
   .mm-field{margin-bottom:14px}
   .mm-field label{display:block;font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:5px}
@@ -868,24 +875,116 @@ export default {
       }
     }
 
+    // A dynamic list's membership can only be edited by hand when its rule
+    // is (at least partly) tag-based: adding/removing the rule's tags is
+    // exactly the same thing as adding/removing membership. A rule built
+    // only on source or free-text search has no per-contact toggle that
+    // means "in this list" — changing that would mean editing the contact's
+    // source or search-matched fields, not list membership — so those lists
+    // are edited via the rule (the existing Edit button) rather than here.
+    function listRuleTags(list) {
+      if (!list || list.kind !== 'dynamic') return [];
+      const tags = (list.rule && Array.isArray(list.rule.tags)) ? list.rule.tags : [];
+      return tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+    }
+
+    function listIsMemberEditable(list) {
+      return list && (list.kind === 'static' || listRuleTags(list).length > 0);
+    }
+
+    async function removeListMember(list, member) {
+      try {
+        if (list.kind === 'static') {
+          const members = (list.members || []).filter((id) => String(id) !== String(member.id));
+          await api.patch(ENDPOINTS.mmLists, { id: list.id, members });
+        } else {
+          const ruleTags = listRuleTags(list);
+          const tags = (member.tags || []).filter(
+            (t) => !ruleTags.includes(String(t).trim().toLowerCase())
+          );
+          await api.patch(ENDPOINTS.mmContacts, { id: member.id, tags });
+        }
+        await Promise.all([loadContacts(), loadLists()]);
+        renderListTable();
+        await viewListMembers(list.id);
+      } catch (e) {
+        msg('#mmListMembersMsg', 'Could not remove: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    async function addListMemberByEmail(list, rawEmail) {
+      const email = String(rawEmail || '').trim().toLowerCase();
+      if (!email) return msg('#mmListMembersMsg', 'Enter an email address.', 'mm-err');
+
+      const candidate = state.contacts.find((c) => String(c.email || '').trim().toLowerCase() === email);
+      if (!candidate) {
+        return msg('#mmListMembersMsg',
+          'No contact with that email in MailMe yet. Import them as a prospect first, ' +
+          'or check the address against Contacts.', 'mm-err');
+      }
+
+      const alreadyIn = list.kind === 'static'
+        ? (list.members || []).map(String).includes(String(candidate.id))
+        : listRuleTags(list).every((t) => (candidate.tags || []).map((x) => String(x).trim().toLowerCase()).includes(t));
+      if (alreadyIn) {
+        return msg('#mmListMembersMsg', esc(candidate.email) + ' is already on this list.', 'mm-err');
+      }
+
+      try {
+        if (list.kind === 'static') {
+          const members = [...new Set([...(list.members || []).map(String), String(candidate.id)])];
+          await api.patch(ENDPOINTS.mmLists, { id: list.id, members });
+        } else {
+          const ruleTags = listRuleTags(list);
+          const tags = [...new Set([
+            ...(candidate.tags || []).map((t) => String(t).trim().toLowerCase()),
+            ...ruleTags,
+          ])];
+          await api.patch(ENDPOINTS.mmContacts, { id: candidate.id, tags });
+        }
+        await Promise.all([loadContacts(), loadLists()]);
+        renderListTable();
+        await viewListMembers(list.id);
+      } catch (e) {
+        msg('#mmListMembersMsg', 'Could not add: ' + esc(e.message), 'mm-err');
+      }
+    }
+
     function renderListMembersPanel(list, members, memberCount, mailableCount) {
       const box = $('#mmListMembers');
       box.hidden = false;
+      const editable = listIsMemberEditable(list);
+
+      const addRow = editable ? `
+        <div class="mm-add-row">
+          <input id="mmAddMemberEmail" type="text" placeholder="Add by email, e.g. name@example.com">
+          <button class="mm-btn sm" id="mmAddMemberBtn">Add to list</button>
+        </div>` : `
+        <div class="mm-hint" style="padding:12px 16px;border-bottom:1px solid var(--line)">
+          This list's rule isn't tag-based (it filters by source or text match), so members
+          can't be added or removed one by one here. Edit the list's rule instead.
+        </div>`;
+
+      const editBtn = `<button class="mm-btn ghost sm" id="mmEditListFromPanel">Edit list</button>`;
+      const closeBtn = `<button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>`;
+      const headerActions = `<div style="display:flex;gap:8px">${editBtn}${closeBtn}</div>`;
 
       if (!members.length) {
         box.innerHTML = `
           <div class="mm-card">
             <div class="mm-card-hd">
               <h3>${esc(list.name)}</h3>
-              <button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>
+              ${headerActions}
             </div>
+            ${addRow}
+            <div id="mmListMembersMsg"></div>
             <div class="mm-card-bd"><div class="mm-empty"><h4>No members yet</h4>
               <div>${list.kind === 'static'
                 ? 'This list has no fixed contacts saved to it.'
                 : 'No contact currently matches this list\u2019s rule.'}</div>
             </div></div>
           </div>`;
-        $('#mmCloseListMembers').addEventListener('click', closeListMembers);
+        wireListMembersPanel(list);
         return;
       }
 
@@ -894,12 +993,15 @@ export default {
           <div class="mm-card-hd">
             <h3>${esc(list.name)}</h3>
             <span class="meta">${memberCount} member${memberCount === 1 ? '' : 's'}, ${mailableCount} mailable</span>
-            <button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>
+            ${headerActions}
           </div>
+          ${addRow}
+          <div id="mmListMembersMsg"></div>
           <div class="mm-card-bd flush">
             <table class="mm-table">
               <thead><tr><th>Company</th><th>Contact</th><th>Email</th>
-                <th>Source</th><th>Status</th><th>Tags</th></tr></thead>
+                <th>Source</th><th>Status</th><th>Tags</th>
+                ${editable ? '<th></th>' : ''}</tr></thead>
               <tbody>
                 ${members.map((m) => {
                   const meta = STATUS_META[m.status] || STATUS_META.subscribed;
@@ -912,6 +1014,8 @@ export default {
                     <td><span class="pill src">${esc(src.label)}</span></td>
                     <td><span class="pill ${meta.cls}">${esc(meta.label)}</span></td>
                     <td class="who">${esc((m.tags || []).join(', '))}</td>
+                    ${editable ? `<td style="text-align:right">
+                      <button class="mm-btn ghost sm" data-removemember="${esc(m.id)}">Remove</button></td>` : ''}
                   </tr>`;
                 }).join('')}
               </tbody>
@@ -919,7 +1023,35 @@ export default {
           </div>
         </div>`;
 
+      wireListMembersPanel(list);
+      $('#mmListMembers').querySelectorAll('[data-removemember]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const m = members.find((x) => x.id === b.dataset.removemember);
+          if (m) removeListMember(list, m);
+        });
+      });
+    }
+
+    function wireListMembersPanel(list) {
       $('#mmCloseListMembers').addEventListener('click', closeListMembers);
+      const editBtn = $('#mmEditListFromPanel');
+      if (editBtn) {
+        editBtn.addEventListener('click', () => {
+          closeListMembers();
+          state.editingList = { ...list };
+          renderListEditor();
+        });
+      }
+      const addBtn = $('#mmAddMemberBtn');
+      if (addBtn) {
+        addBtn.addEventListener('click', () => addListMemberByEmail(list, $('#mmAddMemberEmail').value));
+      }
+      const addInput = $('#mmAddMemberEmail');
+      if (addInput) {
+        addInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') addListMemberByEmail(list, addInput.value);
+        });
+      }
     }
 
     function renderListTable() {
