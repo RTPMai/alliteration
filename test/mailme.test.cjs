@@ -13,7 +13,9 @@
  *   - suppression is enforced BEFORE segment filtering, so no ordering of
  *     filters can produce a recipient who unsubscribed
  *   - bounce/complaint states cannot be set or cleared by hand
- *   - sending is refused outright while it is unwired
+ *   - a plain PATCH/POST can never change a campaign's status; the ONLY path
+ *     that can send is the dedicated, superuser-gated send action, and it
+ *     re-checks compliance, domain verification and suppression itself
  *   - the API routes gate on MailMe access server-side, not just in the rail
  *
  * If a future change makes one of these fail, that is the test working.
@@ -175,15 +177,39 @@ t.test('bounce and complaint states cannot be set by hand', () => {
     'contacts route must explicitly refuse bounced/complained from a client');
 });
 
-t.test('sending is refused while it is unwired', () => {
+t.test('a plain PATCH/POST can never change a campaign to a non-draft status', () => {
   const src = stripComments(read('api/mailme/campaigns.js'));
-  t.assert(/Sending is not enabled yet/.test(src),
-    'campaigns route must refuse a non-draft status while sending is unwired');
   // Both write paths must consult the refusal, not just one.
   const guards = src.match(/refuseSend\(body\)/g) || [];
   t.assert(guards.length >= 2,
-    'POST and PATCH must each call the send refusal guard');
-  t.assert(!/\bawait\s+send\w*\(/.test(src), 'no send call should exist yet');
+    'POST and PATCH must each call the status-change refusal guard');
+});
+
+t.test('sending only happens through the dedicated, superuser-gated send action', () => {
+  const src = stripComments(read('api/mailme/campaigns.js'));
+  t.assert(/action.*===\s*["']send["']/.test(src),
+    'campaigns route must gate real sending behind an explicit action=send trigger');
+  t.assert(/perms\.superuser === true/.test(src),
+    'the send action must require the superuser flag, not just ordinary edit access');
+  t.assert(/sendCampaign\(/.test(src),
+    'the send action must call the real send orchestration in lib/mailme/send.js');
+});
+
+t.test('send orchestration re-verifies compliance, domain readiness and suppression before dispatch', () => {
+  const src = stripComments(read('lib/mailme/send.js'));
+  t.assert(/complianceBlockers\(/.test(src), 'sendReadiness must reuse the CAN-SPAM blockers');
+  t.assert(/domainStatus\(/.test(src), 'send.js must check live Resend domain verification, not a cached flag');
+  t.assert(/getSuppression\(/.test(src) && /suppression\[/.test(src),
+    'send.js must re-check suppression immediately before dispatch, not just at queue-build time');
+  t.assert(/campaignSourceConflict\(/.test(src),
+    'send.js must refuse to send a campaign that mixes warm and cold recipients');
+});
+
+t.test('the Resend API key is an env var, never a Settings field a client could read back', () => {
+  const src = stripComments(read('lib/mailme/resend-client.js'));
+  t.assert(/process\.env\.RESEND_API_KEY/.test(src), 'resend-client.js must read the key from env');
+  const settingsSrc = stripComments(read('api/mailme/settings.js'));
+  t.assert(!/RESEND_API_KEY/.test(settingsSrc), 'the settings route must never accept or echo the API key');
 });
 
 t.test('contacts cannot be created in MailMe', () => {
@@ -353,13 +379,20 @@ t.test('freshness is visible, not assumed', () => {
 
 t.test('the unsubscribe endpoint is public by design and token-verified', () => {
   // An opt-out behind a login is not an opt-out. It must be reachable without
-  // a session, but every request must still carry a signed token.
+  // a session, but every request must still carry a signed token. The token
+  // make/read logic itself lives in lib/mailme/unsub-token.js (a pure lib
+  // module the send path also uses to embed tokens), and this route
+  // re-exports it, so the safety properties are checked there.
   const src = read('api/mailme/unsubscribe.js');
   t.assert(src.includes('PUBLIC BY DESIGN'),
     'the public opt-out must document why it has no session check');
-  t.assert(src.includes('safeEqual'), 'tokens must be compared with safeEqual, not ===');
-  t.assert(/createHmac/.test(src), 'tokens must be HMAC-signed, not guessable ids');
-  t.assert(/if \(!s\) throw new Error\("SESSION_SECRET is not set"\)/.test(src),
+  t.assert(/makeToken.*readToken/.test(src) || /readToken.*makeToken/.test(src),
+    'the route must use the shared token make/read functions');
+
+  const tokenSrc = read('lib/mailme/unsub-token.js');
+  t.assert(tokenSrc.includes('safeEqual'), 'tokens must be compared with safeEqual, not ===');
+  t.assert(/createHmac/.test(tokenSrc), 'tokens must be HMAC-signed, not guessable ids');
+  t.assert(/if \(!s\) throw new Error\("SESSION_SECRET is not set"\)/.test(tokenSrc),
     'a missing secret must fail closed rather than accept unverified tokens');
 });
 
