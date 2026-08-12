@@ -1,6 +1,3 @@
-// PUT IN: api/mailme/contacts.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 // api/mailme/contacts.js — the unified contact list.
 //
 // GET   -> { contacts, counts, tags }. Both sources in one normalized shape:
