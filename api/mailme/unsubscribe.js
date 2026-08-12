@@ -23,9 +23,8 @@
 //
 // ESM handler.
 
-import crypto from "crypto";
-import { safeEqual } from "../../lib/session.js";
 import { resolveContacts, suppressEmail, getSettings } from "../../lib/mailme/store.js";
+import { makeToken, readToken } from "../../lib/mailme/unsub-token.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -33,43 +32,10 @@ function parseBody(req) {
   return b && typeof b === "object" ? b : {};
 }
 
-function b64url(buf) {
-  return Buffer.from(buf).toString("base64")
-    .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-function secret() {
-  const s = process.env.SESSION_SECRET;
-  // Fail closed. Without the secret no token can be verified, and accepting
-  // unverified tokens would let anyone unsubscribe anyone.
-  if (!s) throw new Error("SESSION_SECRET is not set");
-  return s;
-}
-
-/** Build a token for a contact id. Exported so the send path can embed it. */
-export function makeToken(contactId) {
-  const id = b64url(String(contactId));
-  const sig = b64url(crypto.createHmac("sha256", secret()).update(id).digest());
-  return `${id}.${sig}`;
-}
-
-/** Verify a token, returning the contact id or null. */
-export function readToken(token) {
-  try {
-    const raw = String(token || "");
-    const dot = raw.lastIndexOf(".");
-    if (dot === -1) return null;
-    const id = raw.slice(0, dot);
-    const sig = raw.slice(dot + 1);
-    // Verify BEFORE decoding: an unverified payload is attacker-controlled.
-    const expected = b64url(crypto.createHmac("sha256", secret()).update(id).digest());
-    if (!safeEqual(sig, expected)) return null;
-    const pad = id.length % 4 ? "=".repeat(4 - (id.length % 4)) : "";
-    return Buffer.from(id.replace(/-/g, "+").replace(/_/g, "/") + pad, "base64").toString("utf8");
-  } catch (e) {
-    return null;
-  }
-}
+// Re-exported so nothing that previously imported makeToken/readToken from
+// this file needs to change. The real implementation lives in
+// lib/mailme/unsub-token.js, a pure lib module the send path also uses.
+export { makeToken, readToken };
 
 // Shown on the page so someone knows which company the opt-out is for,
 // WITHOUT echoing the email address back. Echoing it would turn the link into
