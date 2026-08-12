@@ -16,9 +16,10 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
-import { resolveContacts, setContactStatus, deleteProspect } from "../../lib/mailme/store.js";
+import { resolveContacts, setContactStatus, deleteProspect, updateProspect } from "../../lib/mailme/store.js";
 import {
   SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts, CONTACT_SOURCES,
+  PROSPECT_EDITABLE_FIELDS, validateProspectPatch,
 } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
@@ -103,6 +104,31 @@ export default async function handler(req, res) {
       const id = body.id || (req.query && req.query.id);
       if (!id) return res.status(400).json({ error: "Missing contact id" });
 
+      // ---- detail fields (company/name/title/phone/city/state) ----
+      //
+      // Prospect-only, and checked BEFORE the status/tags block below so a
+      // request that only sends field edits can't fall through to "Nothing
+      // to update". Client/lead/giving contacts are resolved live from
+      // BackBone/GivingGauge and are not MailMe's to edit — hand-editing a
+      // copy here would silently diverge from the app that actually owns
+      // the record the next time it synced.
+      const hasFieldEdits = PROSPECT_EDITABLE_FIELDS.some((f) => body[f] !== undefined);
+      if (hasFieldEdits) {
+        if (!String(id).startsWith("prospect:")) {
+          return res.status(400).json({
+            error: "Only prospect contacts can be edited here. Client, lead, and giving " +
+              "contact details come from BackBone or GivingGauge — fix them there instead.",
+          });
+        }
+        const { ok, errors, patch: fieldPatch } = validateProspectPatch(body);
+        if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
+        if (Object.keys(fieldPatch).length) {
+          const localId = String(id).slice("prospect:".length);
+          const updated = await updateProspect(localId, fieldPatch);
+          if (!updated) return res.status(404).json({ error: "Prospect not found" });
+        }
+      }
+
       const patch = {};
 
       if (body.status !== undefined) {
@@ -130,7 +156,11 @@ export default async function handler(req, res) {
       }
 
       if (body.reason !== undefined) patch.reason = String(body.reason).trim() || null;
-      if (!Object.keys(patch).length) return res.status(400).json({ error: "Nothing to update" });
+
+      if (!Object.keys(patch).length) {
+        if (hasFieldEdits) return res.status(200).json({ ok: true, id: String(id) });
+        return res.status(400).json({ error: "Nothing to update" });
+      }
 
       const result = await setContactStatus(id, patch, sess);
       if (!result.ok) {
