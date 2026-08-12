@@ -181,6 +181,11 @@ export default {
   .mm-btn.danger{background:var(--danger);border-color:var(--danger)}
   .mm-btn.danger:hover{background:var(--danger-dk);border-color:var(--danger-dk)}
 
+  .mm-linklike{background:none;border:none;padding:0;margin:0;font:inherit;
+    color:var(--accent-deep);font-weight:600;cursor:pointer;text-align:left}
+  .mm-linklike:hover{text-decoration:underline}
+  .mm-linklike:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
   .mm-field{margin-bottom:14px}
   .mm-field label{display:block;font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:5px}
@@ -294,6 +299,7 @@ export default {
         </div>
         <div id="mmListMsg"></div>
         <div id="mmListEditor" hidden></div>
+        <div id="mmListMembers" hidden></div>
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>Saved lists</h3><span class="meta" id="mmListCount"></span>
@@ -840,6 +846,82 @@ export default {
       }
     }
 
+    /**
+     * "Who's on this list" panel. Fetches the SAME resolved membership the
+     * server uses for member/mailable counts (GET /api/mailme/lists?id=),
+     * rather than re-deriving it client-side from state.contacts + the
+     * list's rule — a static list's members are stored ids, and a client
+     * copy of matchesRule() would be a second implementation to keep in
+     * step with schema.js. One source of truth, same as loadContacts().
+     */
+    async function viewListMembers(listId) {
+      const box = $('#mmListMembers');
+      box.hidden = false;
+      box.innerHTML = '<div class="mm-card"><div class="mm-card-bd">Loading members...</div></div>';
+      try {
+        const d = await api.get(ENDPOINTS.mmLists, { id: listId });
+        renderListMembersPanel(d.list, d.members || [], d.memberCount, d.mailableCount);
+      } catch (e) {
+        box.innerHTML = `<div class="mm-card"><div class="mm-card-bd">
+          <div class="mm-err">Could not load members: ${esc(e.message)}</div>
+        </div></div>`;
+      }
+    }
+
+    function renderListMembersPanel(list, members, memberCount, mailableCount) {
+      const box = $('#mmListMembers');
+      box.hidden = false;
+
+      if (!members.length) {
+        box.innerHTML = `
+          <div class="mm-card">
+            <div class="mm-card-hd">
+              <h3>${esc(list.name)}</h3>
+              <button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>
+            </div>
+            <div class="mm-card-bd"><div class="mm-empty"><h4>No members yet</h4>
+              <div>${list.kind === 'static'
+                ? 'This list has no fixed contacts saved to it.'
+                : 'No contact currently matches this list\u2019s rule.'}</div>
+            </div></div>
+          </div>`;
+        $('#mmCloseListMembers').addEventListener('click', closeListMembers);
+        return;
+      }
+
+      box.innerHTML = `
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>${esc(list.name)}</h3>
+            <span class="meta">${memberCount} member${memberCount === 1 ? '' : 's'}, ${mailableCount} mailable</span>
+            <button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>
+          </div>
+          <div class="mm-card-bd flush">
+            <table class="mm-table">
+              <thead><tr><th>Company</th><th>Contact</th><th>Email</th>
+                <th>Source</th><th>Status</th><th>Tags</th></tr></thead>
+              <tbody>
+                ${members.map((m) => {
+                  const meta = STATUS_META[m.status] || STATUS_META.subscribed;
+                  const src = SOURCE_META[m.source] || SOURCE_META.client;
+                  return `
+                  <tr>
+                    <td class="co">${esc(m.company_name || '\u2014')}</td>
+                    <td>${esc(m.contact_name || '\u2014')}</td>
+                    <td class="em">${esc(m.email)}</td>
+                    <td><span class="pill src">${esc(src.label)}</span></td>
+                    <td><span class="pill ${meta.cls}">${esc(meta.label)}</span></td>
+                    <td class="who">${esc((m.tags || []).join(', '))}</td>
+                  </tr>`;
+                }).join('')}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+
+      $('#mmCloseListMembers').addEventListener('click', closeListMembers);
+    }
+
     function renderListTable() {
       $('#mmListCount').textContent =
         state.lists.length + ' list' + (state.lists.length === 1 ? '' : 's');
@@ -866,13 +948,15 @@ export default {
               if (r.search) bits.push('matching "' + r.search + '"');
               return `
               <tr>
-                <td><div class="co">${esc(l.name)}</div><div class="who">${esc(l.id)}</div></td>
+                <td><button class="mm-linklike" data-viewlist="${esc(l.id)}">${esc(l.name)}</button>
+                  <div class="who">${esc(l.id)}</div></td>
                 <td><span class="pill ${l.kind === 'static' ? 'mute' : 'src'}">${esc(l.kind)}</span></td>
                 <td class="em">${l.kind === 'static'
                   ? 'Fixed set' : (bits.length ? esc(bits.join(' · ')) : 'Everyone')}</td>
                 <td class="num">${l.memberCount != null ? l.memberCount : '—'}</td>
                 <td class="num">${l.mailableCount != null ? l.mailableCount : '—'}</td>
                 <td style="text-align:right">
+                  <button class="mm-btn ghost sm" data-viewlist="${esc(l.id)}">View</button>
                   <button class="mm-btn ghost sm" data-editlist="${esc(l.id)}">Edit</button></td>
               </tr>`;
             }).join('')}
@@ -883,13 +967,28 @@ export default {
         b.addEventListener('click', () => {
           const l = state.lists.find((x) => x.id === b.dataset.editlist);
           if (!l) return;
+          closeListMembers();
           state.editingList = { ...l };
           renderListEditor();
         });
       });
+      $('#mmListTable').querySelectorAll('[data-viewlist]').forEach((b) => {
+        b.addEventListener('click', () => {
+          state.editingList = null;
+          renderListEditor();
+          viewListMembers(b.dataset.viewlist);
+        });
+      });
+    }
+
+    function closeListMembers() {
+      const box = $('#mmListMembers');
+      box.hidden = true;
+      box.innerHTML = '';
     }
 
     $('#mmNewList').addEventListener('click', () => {
+      closeListMembers();
       state.editingList = { name: '', kind: 'dynamic', rule: { source: '', tags: [], tagMatch: 'any', search: '' } };
       renderListEditor(); msg('#mmListMsg', '', '');
     });
