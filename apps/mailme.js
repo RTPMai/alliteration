@@ -1,4 +1,3 @@
-<!-- PUT IN: apps/mailme.js (rename this file, drop the .txt) -->
 /**
  * MailMe — email marketing.
  *
