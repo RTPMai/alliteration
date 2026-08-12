@@ -1,4 +1,3 @@
-<!-- PUT IN: js/api.js (rename this file, drop the .txt) -->
 /**
  * alliteration. — THE SEAM
  *
