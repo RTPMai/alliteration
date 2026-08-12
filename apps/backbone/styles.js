@@ -93,6 +93,22 @@ export default `
 table{width:100%;border-collapse:collapse;font-size:13px}
 #tableWrap,#dashAmWrap{overflow-x:auto}
 #tableWrap table,#dashAmWrap table{min-width:100%}
+/* Roster: on a laptop-width screen the 8 columns are wider than the viewport, so this
+   table scrolls sideways inside #tableWrap. Two problems with a plain overflow-x:auto
+   scroller: (1) most laptops (Mac trackpads especially) hide the scrollbar until you're
+   mid-scroll, so it LOOKS cut off with no way out, and (2) once you scroll right you lose
+   the Company column and can't tell which row you're looking at. Fixed both: the
+   scrollbar is always visible (thin, styled, not the OS auto-hide one), and the Company
+   column is sticky so it stays put while the rest of the row scrolls under it. */
+#tableWrap{scrollbar-width:thin;scrollbar-color:var(--faint) transparent}
+#tableWrap::-webkit-scrollbar{height:10px}
+#tableWrap::-webkit-scrollbar-track{background:transparent}
+#tableWrap::-webkit-scrollbar-thumb{background:var(--line);border-radius:99px;border:2px solid var(--card)}
+#tableWrap::-webkit-scrollbar-thumb:hover{background:var(--faint)}
+#tableWrap th:first-child,#tableWrap td:first-child{position:sticky;left:0;z-index:1;background:var(--card)}
+#tableWrap th:first-child{background:var(--head-bg);z-index:2}
+#tableWrap tr.row:hover td:first-child{background:var(--head-bg)}
+#tableWrap th:first-child,#tableWrap td:first-child{box-shadow:1px 0 0 var(--line)}
 /* Scorecard: keep the columns clustered together on the left so the eye doesn't travel across
    empty space. Company gets a comfortable but capped width and truncates; the number columns are
    fixed-width and left-aligned right beside it; a trailing spacer column soaks up all leftover
