@@ -61,6 +61,7 @@ const SUPPRESSED = ['unsubscribed', 'bounced', 'complained'];
 // Where a view's refresh feedback goes. Dashboard has no message strip of its
 // own, so its refresh reports through the stamp alone.
 const MSG_TARGET = {
+  dashboard: '#mmDashMsg',
   contacts: '#mmContactsMsg',
   lists: '#mmListMsg',
   campaigns: '#mmCampaignMsg',
@@ -248,6 +249,7 @@ export default {
           </div>
         </div>
         <div class="mm-notice" id="mmSendNotice"></div>
+        <div id="mmDashMsg"></div>
         <div id="mmDeliverability"></div>
         <div class="mm-tiles" id="mmTiles"></div>
         <div class="mm-card">
@@ -666,9 +668,9 @@ export default {
                     : `<button class="mm-btn ghost sm" data-toggle="${esc(ct.id)}">${
                         ct.status === 'unsubscribed' ? 'Resubscribe' : 'Unsubscribe'}</button>`}
                   <button class="mm-btn ghost sm" data-tags="${esc(ct.id)}">Tags</button>
+                  <button class="mm-btn ghost sm" data-editct="${esc(ct.id)}">Edit</button>
                   ${ct.source === 'prospect'
-                    ? `<button class="mm-btn ghost sm" data-editct="${esc(ct.id)}">Edit</button>
-                       <button class="mm-btn ghost sm" data-del="${esc(ct.id)}">Delete</button>` : ''}
+                    ? `<button class="mm-btn ghost sm" data-del="${esc(ct.id)}">Delete</button>` : ''}
                 </td>
               </tr>`;
             }).join('')}
@@ -754,13 +756,12 @@ export default {
 
     /* ---------------- contact detail editor ---------------- */
     //
-    // Only PROSPECT contacts can have their company/name/title/phone/city/
-    // state edited here. Client contacts are resolved live from the BackBone
-    // roster and never stored in MailMe (fix them in BackBone and it fixes
-    // here too); lead and giving contacts belong to BackBone's pipeline and
-    // GivingGauge respectively. Editing any of those here would silently
-    // diverge from the app that actually owns the record until the next
-    // sync overwrote it — worse than not offering the edit at all.
+    // Works on any source now. For a prospect this edits MailMe's own
+    // record. For client/lead/giving contacts, it writes a MailMe-local
+    // correction layered on top of whatever BackBone or GivingGauge
+    // resolved — the owning app's real record is never touched, so this
+    // can't drift from or fight with a future sync from there. It only
+    // changes what MailMe itself shows and sends to.
     //
     // One shared editor (#mmContactEditor, mounted once at the top of the
     // template) rather than one per view, so it works the same whether it
@@ -768,17 +769,9 @@ export default {
 
     function openContactEditor(ct) {
       if (!ct) return;
-      if (ct.source !== 'prospect') {
-        const owner = ct.source === 'client' ? 'the BackBone roster'
-          : ct.source === 'lead' ? 'BackBone leads'
-          : 'GivingGauge';
-        msg('#mmContactsMsg',
-          'Only prospects can be edited here. This contact\u2019s details come from ' +
-          esc(owner) + ' — fix it there and it will update here too.', 'mm-err');
-        return;
-      }
       state.editingContact = {
         id: ct.id,
+        source: ct.source,
         company_name: ct.company_name || '',
         contact_name: ct.contact_name || '',
         title: ct.title || '',
@@ -799,6 +792,15 @@ export default {
       const e = state.editingContact;
       if (!e) { box.hidden = true; box.innerHTML = ''; return; }
       box.hidden = false;
+      const overlayNote = e.source && e.source !== 'prospect'
+        ? `<div class="mm-hint" style="margin-bottom:14px">
+             This contact's info is normally set by ${
+               e.source === 'client' ? 'the BackBone roster'
+                 : e.source === 'lead' ? "BackBone's leads pipeline"
+                 : 'GivingGauge'
+             }. Saving here only corrects what MailMe shows and mails to — it does not change
+             the original record there.
+           </div>` : '';
       box.innerHTML = `
         <div class="mm-card">
           <div class="mm-card-hd">
@@ -807,6 +809,7 @@ export default {
           </div>
           <div class="mm-card-bd">
             <div id="mmContactEditorMsg"></div>
+            ${overlayNote}
             <div class="mm-edit-grid">
               <div class="mm-field full">
                 <label for="mmEditCompany">Company</label>
@@ -1142,8 +1145,7 @@ export default {
                     <td><span class="pill ${meta.cls}">${esc(meta.label)}</span></td>
                     <td class="who">${esc((m.tags || []).join(', '))}</td>
                     <td style="text-align:right;white-space:nowrap">
-                      ${m.source === 'prospect'
-                        ? `<button class="mm-btn ghost sm" data-editmember="${esc(m.id)}">Edit</button>` : ''}
+                      <button class="mm-btn ghost sm" data-editmember="${esc(m.id)}">Edit</button>
                       ${editable
                         ? `<button class="mm-btn ghost sm" data-removemember="${esc(m.id)}">Remove</button>` : ''}
                     </td>
