@@ -189,6 +189,8 @@ export const ENDPOINTS = {
   // provider dashboard from memory.
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
+  // Read-only Resend domain verification check, surfaced in Settings.
+  mmDomains:       '/api/mailme/domains',
   // Public, called from unsubscribe.html rather than the shell.
   mmUnsubscribe:   '/api/mailme/unsubscribe',
   // Public, called from flyover-con-signup.html (and any future event
@@ -485,6 +487,7 @@ const MOCK_DATA = {
     footerPreview: '', coldCapToday: 20, rampDay: 0
   }),
   [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } }),
+  [ENDPOINTS.mmDomains]: () => ({ configured: false, warm: null, cold: null }),
 
   // CrewCore. Shapes mirror api/crewcore/*.js. MOCK_USER (below) is admin, so
   // the admin-view shape is what renders offline by default; the self-serve
