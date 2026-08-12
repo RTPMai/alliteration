@@ -1,4 +1,3 @@
-// PUT IN: vercel.json (rename this file, drop the .txt). NOTE: strip this banner line, vercel.json must be pure JSON.
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
