@@ -1,3 +1,4 @@
+// PUT IN: vercel.json (rename this file, drop the .txt). NOTE: strip this banner line, vercel.json must be pure JSON.
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "functions": {
@@ -13,6 +14,10 @@
     {
       "path": "/api/printavo-sync?mode=ops",
       "schedule": "*/10 11-12 * * *"
+    },
+    {
+      "path": "/api/mailme/cron-send",
+      "schedule": "*/15 * * * *"
     }
   ],
   "headers": [
