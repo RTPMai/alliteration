@@ -6,17 +6,13 @@
 // PATCH  -> edit a draft. Sent campaigns are locked.
 // DELETE -> delete a draft. Sent campaigns are never deletable.
 //
-// SENDING IS NOT WIRED, ON PURPOSE. No send action, no provider client. Three
-// things must exist before one real email leaves this app:
-//
-//   1. A provider account (Postmark / Resend / SendGrid) and its API key.
-//   2. TWO authenticated sending domains, one per audience. Cold outreach
-//      bounces and draws complaints at rates a client list never does, and
-//      mailbox providers score reputation per DOMAIN. Sending cold mail from
-//      the domain that also sends quotes and invoices risks putting ordinary
-//      customer email in spam folders. See SENDING_IDENTITIES in schema.js.
-//   3. The tokenized unsubscribe page and the webhook receiver, since
-//      CAN-SPAM requires a working opt-out in every commercial message.
+// SENDING. A campaign only ever leaves draft status through the dedicated
+// `action=send` path below, never through a plain PATCH — refuseSend() still
+// blocks PATCH/POST from setting status directly, so the only way a real
+// email goes out is the explicit, superuser-gated send trigger, which
+// re-checks compliance, domain verification, and suppression itself right
+// before dispatch (see lib/mailme/send.js). Ordinary edit access lets someone
+// build and refine a draft; only a superuser can actually fire it.
 //
 // Results are computed from raw events every read rather than stored on the
 // campaign: a counter that drifts from its events is a number nobody can
@@ -26,6 +22,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
+import { permsFor } from "../../lib/users.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign,
   resolveContacts, getList, campaignResults,
@@ -37,11 +34,24 @@ import {
 import {
   applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
 } from "../../lib/mailme/audience.js";
+import { sendCampaign, sendReadiness } from "../../lib/mailme/send.js";
 
 function parseBody(req) {
   let b = req.body;
   if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
   return b && typeof b === "object" ? b : {};
+}
+
+function sendFailureMessage(result) {
+  switch (result.reason) {
+    case "not_found": return "Campaign not found";
+    case "not_sendable": return result.detail || "This campaign cannot be sent from its current status.";
+    case "missing_list": return "The list this campaign points at no longer exists.";
+    case "source_conflict": return result.detail;
+    case "not_ready": return "This campaign isn't ready to send yet. See the blockers list.";
+    case "no_recipients": return "There is nobody left to send this campaign to.";
+    default: return "Could not send this campaign.";
+  }
 }
 
 /**
@@ -101,6 +111,10 @@ export default async function handler(req, res) {
           ? coldDailyCap(rampDay, settings.policy)
           : settings.policy.clientDailyCap;
 
+        const identity = identityForSource(campaign.source);
+        const sendBlockers = await sendReadiness(settings, identity.key);
+        const queueRemaining = campaign.sendState ? campaign.sendState.queue.length : null;
+
         return res.status(200).json({
           campaign,
           list: list || null,
@@ -108,14 +122,21 @@ export default async function handler(req, res) {
           recipientCount: recipients.length,
           heldCount: (held || []).length,
           held: (held || []).slice(0, 50),
-          identity: identityForSource(campaign.source),
+          identity,
           conflict: campaignSourceConflict(recipients),
+          // Two blocker lists on purpose: `blockers` is the CAN-SPAM-only set
+          // (unchanged shape, still used by Settings' own checklist), while
+          // `sendBlockers` is everything that actually stands between this
+          // campaign and a real send, including provider/domain readiness.
           blockers: complianceBlockers(settings),
+          sendBlockers,
+          canSend: sendBlockers.length === 0 && !campaignSourceConflict(recipients) && recipients.length > 0,
           sendPlan: {
             dailyCap,
             isCold,
             rampDay,
             days: dailyCap > 0 ? Math.ceil(recipients.length / dailyCap) : 0,
+            queueRemaining,
           },
           results: {
             stats,
@@ -152,8 +173,27 @@ export default async function handler(req, res) {
     }
 
     const refuseSend = (body) => (body.status && body.status !== "draft")
-      ? "Sending is not enabled yet. Campaigns can only be saved as drafts."
+      ? "Campaigns can only be saved as drafts here. Use the send action to actually send one."
       : null;
+
+    // The ONLY path that can turn a draft into a real send. Superuser-gated
+    // on top of ordinary edit access: building and refining a draft is one
+    // thing, firing it at real customers is another.
+    if (req.method === "POST" && ((req.query && req.query.action) || parseBody(req).action) === "send") {
+      const perms = await permsFor(sess.username);
+      if (!(perms && perms.superuser === true)) {
+        return res.status(403).json({ error: "Only a superuser can send a campaign." });
+      }
+      const id = (req.query && req.query.id) || parseBody(req).id;
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+
+      const result = await sendCampaign(id, sess);
+      if (!result.ok) {
+        const status = result.reason === "not_found" ? 404 : 409;
+        return res.status(status).json({ error: sendFailureMessage(result), reason: result.reason, blockers: result.blockers });
+      }
+      return res.status(200).json({ ok: true, ...result });
+    }
 
     if (req.method === "POST") {
       const body = parseBody(req);
