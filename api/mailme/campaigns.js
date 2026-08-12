@@ -9,10 +9,12 @@
 // SENDING. A campaign only ever leaves draft status through the dedicated
 // `action=send` path below, never through a plain PATCH — refuseSend() still
 // blocks PATCH/POST from setting status directly, so the only way a real
-// email goes out is the explicit, superuser-gated send trigger, which
-// re-checks compliance, domain verification, and suppression itself right
-// before dispatch (see lib/mailme/send.js). Ordinary edit access lets someone
-// build and refine a draft; only a superuser can actually fire it.
+// email goes out is the explicit send trigger, which re-checks compliance,
+// domain verification, and suppression itself right before dispatch (see
+// lib/mailme/send.js). Anyone with ordinary MailMe edit access (same gate as
+// building and editing a draft) can send, not just superusers — the safety
+// property here is the pre-send checks, not restricting who can click the
+// button.
 //
 // Results are computed from raw events every read rather than stored on the
 // campaign: a counter that drifts from its events is a number nobody can
@@ -22,7 +24,6 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
-import { permsFor } from "../../lib/users.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign,
   resolveContacts, getList, campaignResults,
@@ -176,14 +177,13 @@ export default async function handler(req, res) {
       ? "Campaigns can only be saved as drafts here. Use the send action to actually send one."
       : null;
 
-    // The ONLY path that can turn a draft into a real send. Superuser-gated
-    // on top of ordinary edit access: building and refining a draft is one
-    // thing, firing it at real customers is another.
+    // The ONLY path that can turn a draft into a real send. Gated on the same
+    // MailMe edit access as everything else in this file (the canEditMailMe
+    // check above already ran) — anyone who can build and edit a campaign can
+    // also send it. Real safety comes from sendCampaign() itself re-checking
+    // compliance, domain verification and suppression right before dispatch,
+    // not from restricting who can press the button.
     if (req.method === "POST" && ((req.query && req.query.action) || parseBody(req).action) === "send") {
-      const perms = await permsFor(sess.username);
-      if (!(perms && perms.superuser === true)) {
-        return res.status(403).json({ error: "Only a superuser can send a campaign." });
-      }
       const id = (req.query && req.query.id) || parseBody(req).id;
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
 
