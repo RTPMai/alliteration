@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flyover Con — Join the list</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<!--
+  PUBLIC signup page for Flyover Con. Anyone clicking a link on the Flyover
+  Con or P&M Apparel website lands here with no login, no shell, and no app
+  rail — same reasoning as unsubscribe.html: loading the whole shell for a
+  logged-out stranger would bounce them to a login screen, which defeats the
+  point of a public signup link.
+
+  It carries its own minimal styles for the same reason unsubscribe.html
+  does: tokens.css is the shell's file, and this page is not part of the
+  shell, so a small standalone palette here is intentional.
+
+  Posts to /api/mailme/signup with list: "flyover-con". That endpoint tags an
+  existing MailMe contact or creates a new one, and creates the "Flyover Con"
+  list on the very first signup. No admin setup step is required before
+  sharing this link.
+-->
+<style>
+  :root {
+    --ink: #1C2430; --muted: #6B7684; --line: #E4E8EC;
+    --bg: #F4F6F8; --card: #FFFFFF; --accent: #8CA9CC; --accent-deep: #7087A3;
+    --success-tint: #EAF5EE; --success-dk: #2F7A48; --danger-dk: #96271B;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; padding: 24px; background: var(--bg); color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 32px; max-width: 460px; width: 100%;
+  }
+  h1 { font-size: 20px; margin: 0 0 8px; letter-spacing: -.02em; }
+  p { font-size: 14px; line-height: 1.6; color: var(--muted); margin: 0 0 20px; }
+  label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
+  input {
+    width: 100%; padding: 10px 12px; border: 1px solid var(--line);
+    border-radius: 8px; font-family: inherit; font-size: 14px; margin-bottom: 14px;
+  }
+  button {
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
+    font-family: inherit; width: 100%;
+  }
+  button:hover { background: var(--accent-deep); }
+  button[disabled] { opacity: .5; cursor: not-allowed; }
+  .done { background: var(--success-tint); color: var(--success-dk);
+    padding: 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
+  .err { color: var(--danger-dk); font-size: 13px; line-height: 1.5; margin: -6px 0 14px; }
+</style>
+</head>
+<body>
+<div class="card" id="root">
+  <h1>Flyover Con</h1>
+  <p>Join the list to hear about Flyover Con news and updates from P&amp;M Apparel.</p>
+  <form id="form">
+    <label for="name">Name</label>
+    <input id="name" type="text" autocomplete="name" required>
+    <label for="email">Email</label>
+    <input id="email" type="email" autocomplete="email" required>
+    <div class="err" id="err" style="display:none"></div>
+    <button id="go" type="submit">Join the list</button>
+  </form>
+</div>
+
+<script>
+(function () {
+  var root = document.getElementById('root');
+  var form = document.getElementById('form');
+  var err = document.getElementById('err');
+  var btn = document.getElementById('go');
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function showError(text) {
+    err.textContent = text;
+    err.style.display = 'block';
+  }
+
+  form.addEventListener('submit', function (e) {
+    e.preventDefault();
+    err.style.display = 'none';
+    var name = document.getElementById('name').value.trim();
+    var email = document.getElementById('email').value.trim();
+    if (!name || !email) return showError('Please fill in both fields.');
+
+    btn.disabled = true;
+    btn.textContent = 'Joining...';
+
+    fetch('/api/mailme/signup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, email: email, list: 'flyover-con' })
+    })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          btn.disabled = false;
+          btn.textContent = 'Join the list';
+          return showError(res.j.error || 'Something went wrong. Please try again.');
+        }
+        root.innerHTML = '<h1>You\'re on the list</h1>' +
+          '<div class="done">Thanks, ' + esc(name) + '. We\'ll be in touch with Flyover Con news and updates.</div>';
+      })
+      .catch(function () {
+        btn.disabled = false;
+        btn.textContent = 'Join the list';
+        showError('Could not reach the server. Please try again shortly.');
+      });
+  });
+})();
+</script>
+</body>
+</html>
