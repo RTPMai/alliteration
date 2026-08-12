@@ -16,11 +16,19 @@
 // Without this guard, anyone who found the URL could forge opens and clicks,
 // or worse, forge unsubscribes for customers who never asked to leave.
 //
-// WHAT IT DOES NOT DO YET: no provider is chosen, so normalizeEvent() below
-// handles the common shapes (Postmark, Resend, SendGrid) rather than one
-// vendor's exact payload. When the provider is picked, verify its real
-// signature scheme here too — most providers sign the raw body, which is
-// strictly better than a shared secret in a query string.
+// PROVIDER: Resend. normalizeEvent() reads Resend's actual shape first
+// (a "data" wrapper, event type prefixed "email.", recipients in data.to as
+// an array, and campaignId/contactId carried as data.tags entries set at
+// send time in lib/mailme/send.js) and falls back to the flatter Postmark/
+// SendGrid-style shapes so this receiver isn't locked to one vendor if that
+// ever changes.
+//
+// SIGNATURE VERIFICATION: Resend signs webhook bodies via Svix
+// (svix-id / svix-timestamp / svix-signature headers) if a signing secret is
+// configured in the Resend dashboard. The shared-secret check below (
+// MAILME_WEBHOOK_SECRET) is the baseline and stays regardless; Svix
+// verification can be layered on top later without changing this file's
+// shape, and is worth adding before this domain sends real cold volume.
 //
 // ESM handler.
 
@@ -46,37 +54,66 @@ function authorized(req) {
 // Provider payloads differ in field names but carry the same facts. This maps
 // the common shapes onto our own event vocabulary; unknown types are dropped
 // rather than stored as junk that would skew aggregation.
+//
+// Resend's own type strings ("email.delivered", "email.opened", ...) have
+// their "email." prefix stripped before this lookup, so they land on the
+// same aliases as everyone else's flatter "delivered" / "opened" strings.
 const TYPE_ALIASES = {
+  sent: "sent",
   delivered: "delivered", delivery: "delivered",
+  delayed: "delayed", deliverydelayed: "delayed",
   open: "open", opened: "open",
   click: "click", clicked: "click",
   bounce: "bounce", bounced: "bounce", hardbounce: "bounce", "hard_bounce": "bounce",
-  complaint: "complaint", spamcomplaint: "complaint", "spam_complaint": "complaint", spamreport: "complaint",
+  complaint: "complaint", complained: "complaint", spamcomplaint: "complaint", "spam_complaint": "complaint", spamreport: "complaint",
   unsubscribe: "unsubscribe", unsubscribed: "unsubscribe", subscriptionchange: "unsubscribe",
 };
+
+/** Pull { campaignId, contactId } out of Resend's tags array, which is how
+ *  lib/mailme/send.js attaches them to every outgoing message. */
+function tagsToMap(tags) {
+  const out = {};
+  (Array.isArray(tags) ? tags : []).forEach((t) => {
+    if (t && t.name) out[t.name] = t.value;
+  });
+  return out;
+}
 
 export function normalizeEvent(raw) {
   if (!raw || typeof raw !== "object") return null;
 
+  // Resend wraps the actual payload in `data`; other providers (Postmark,
+  // SendGrid) send it flat. Fold both into one shape to read from.
+  const d = (raw.data && typeof raw.data === "object") ? raw.data : raw;
+
   const rawType = String(
     raw.type || raw.event || raw.RecordType || raw.eventType || ""
-  ).trim().toLowerCase().replace(/[\s-]+/g, "");
+  ).trim().toLowerCase().replace(/^email\./, "").replace(/[\s-]+/g, "");
 
   const type = TYPE_ALIASES[rawType];
+  // EVENT_TYPES doesn't carry "sent" or "delayed" (they're not tracked
+  // outcomes, just useful to not misclassify as unknown); only forward the
+  // types the rest of the app actually aggregates.
   if (!type || !EVENT_TYPES.includes(type)) return null;
 
+  // Resend's recipient is data.to, an ARRAY (a message can have multiple
+  // recipients in general, though this app's own sends are always one-to-
+  // one). Other providers send a single string field under various names.
+  const toRaw = Array.isArray(d.to) ? d.to[0] : d.to;
   const email = normalizeEmail(
-    raw.email || raw.Email || raw.Recipient || raw.recipient || raw.to || ""
+    toRaw || raw.email || raw.Email || raw.Recipient || raw.recipient || ""
   );
+
+  const tags = tagsToMap(d.tags);
 
   return {
     type,
-    campaignId: raw.campaignId || raw.CampaignId || (raw.metadata && raw.metadata.campaignId) || null,
-    contactId: raw.contactId || raw.ContactId || (raw.metadata && raw.metadata.contactId) || null,
+    campaignId: tags.campaignId || raw.campaignId || raw.CampaignId || (raw.metadata && raw.metadata.campaignId) || null,
+    contactId: tags.contactId || raw.contactId || raw.ContactId || (raw.metadata && raw.metadata.contactId) || null,
     email: email || null,
-    linkUrl: type === "click" ? (raw.linkUrl || raw.url || raw.OriginalLink || raw.link || null) : null,
-    reason: raw.reason || raw.Description || raw.Details || null,
-    at: raw.at || raw.timestamp || raw.ReceivedAt || new Date().toISOString(),
+    linkUrl: type === "click" ? (d.link || raw.linkUrl || raw.url || raw.OriginalLink || null) : null,
+    reason: (d.bounce && d.bounce.message) || raw.reason || raw.Description || raw.Details || null,
+    at: raw.created_at || d.created_at || raw.at || raw.timestamp || raw.ReceivedAt || new Date().toISOString(),
   };
 }
 
