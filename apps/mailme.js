@@ -22,10 +22,12 @@
  * source therefore sends from its own domain, and a campaign targets exactly
  * one of them.
  *
- * SENDING IS NOT WIRED. Campaigns save as drafts and the API refuses any
- * status but "draft". The UI says so plainly rather than showing a Send
- * button that fails: a marketing tool where you are unsure whether something
- * went out is worse than one that clearly cannot send yet.
+ * SENDING is wired through Resend, gated behind a dedicated, superuser-only
+ * send action (see api/mailme/campaigns.js and lib/mailme/send.js). A draft
+ * is never one accidental status edit away from going out: the ordinary
+ * save/edit path can only ever produce a draft, and every real send re-
+ * checks compliance, domain verification and suppression itself right
+ * before dispatch.
  *
  * No fetch() here: everything goes through ctx.api and ENDPOINTS, per the
  * seam rule. No hex colors: tokens.css owns theming via data-app="mailme".
@@ -388,7 +390,7 @@ export default {
         <div class="mm-hd">
           <div>
             <h1>Campaigns<span class="dot">.</span></h1>
-            <div class="sub">Drafts. Sending is not switched on yet.</div>
+            <div class="sub">Drafts and campaigns. Sending needs a superuser and a verified domain.</div>
           </div>
           <div class="mm-refresh">
             <span class="stamp" data-mm-stamp></span>
@@ -423,6 +425,7 @@ export default {
       editingList: null, editingCampaign: null, editingContact: null, viewingListId: null,
       importPreview: null, importCsv: '',
       settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
+      domains: null,
       viewingResults: null
     };
     this._state = state;
@@ -467,10 +470,10 @@ export default {
       const c = state.counts;
 
       $('#mmSendNotice').innerHTML =
-        '<b>Sending is not switched on.</b> Campaigns save as drafts only. ' +
-        'Before real email goes out this needs a sending provider, two authenticated ' +
-        'sending domains (one for clients, one for cold outreach), and the unsubscribe ' +
-        'page wired up. Until then nothing here can email anyone.';
+        '<b>Sending is wired, but gated.</b> A superuser can send a campaign from ' +
+        'its results panel once the compliance basics are filled in and Resend shows ' +
+        'the matching domain as verified. Check Settings → Sending for live status on ' +
+        'mail.pmapparel.com and outreach.pmapparel.com.';
 
       // Bounce/complaint rates are the early warning that a sending domain is
       // in trouble. Surfaced on the dashboard because by the time someone
@@ -1460,7 +1463,7 @@ export default {
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>${d.id ? 'Edit draft ' + esc(d.id) : 'New draft'}</h3>
-            <span class="meta">Saved as a draft. Nothing sends.</span>
+            <span class="meta">Saved as a draft. Sending happens from the results panel.</span>
           </div>
           <div class="mm-card-bd">
             <div class="mm-recip" id="mmRecipCount"></div>
@@ -1505,7 +1508,7 @@ export default {
               <label for="mmBody">Body</label>
               <textarea id="mmBody" placeholder="Write the email here.">${esc(d.body)}</textarea>
               <div class="hint">
-                {{first_name}} and {{company_name}} fill in per recipient once sending is wired.
+                {{first_name}} and {{company_name}} fill in per recipient when this sends.
               </div>
             </div>
             <div class="mm-actions">
@@ -1611,29 +1614,26 @@ export default {
         const s = r.stats || {};
         const rates = r.rates || {};
         const warnings = r.warnings || [];
+        const status = d.campaign && d.campaign.status;
         const sent = d.campaign && d.campaign.sentAt;
+        const isSuperuser = !!(ctx.perms && ctx.perms.superuser === true);
+        const canTriggerSend = ['draft', 'sending'].includes(status);
 
         box.hidden = false;
         box.innerHTML = `
           <div class="mm-card">
             <div class="mm-card-hd">
               <h3>Results: ${esc(d.campaign.subject)}</h3>
-              <span class="meta">${esc(d.campaign.id)} · ${sent ? 'sent ' + esc(fmtDate(sent)) : 'not sent'}</span>
+              <span class="meta">${esc(d.campaign.id)} · ${status === 'sent' ? 'sent ' + esc(fmtDate(sent))
+                : status === 'sending' ? `sending — ${d.sendPlan && d.sendPlan.queueRemaining != null ? d.sendPlan.queueRemaining : '?'} left`
+                : 'not sent'}</span>
             </div>
             <div class="mm-card-bd">
               ${warnings.map((w) =>
                 `<div class="mm-notice ${w.level === 'danger' ? 'danger' : ''}">${esc(w.text)}</div>`).join('')}
-              ${!sent ? `<div class="mm-notice">This campaign has not been sent, so there is
-                nothing to report yet. These are the figures that will appear once sending is
-                switched on.</div>` : ''}
-              ${(d.blockers || []).length ? `<div class="mm-notice danger">
-                <b>Not legal to send yet.</b> ${esc(d.blockers.map((b) => b.text).join(' '))}
-                Fix these in Settings.</div>` : ''}
-              ${d.sendPlan && d.sendPlan.days > 1 ? `<div class="mm-notice">
-                <b>This send would take ${d.sendPlan.days} days.</b> The
-                ${d.sendPlan.isCold ? 'cold' : 'client'} daily cap is ${d.sendPlan.dailyCap}
-                ${d.sendPlan.isCold ? `(day ${d.sendPlan.rampDay} of the warm-up)` : ''}.
-                Sending it all at once would look like a spam run.</div>` : ''}
+              ${status === 'draft' ? `<div class="mm-notice">This campaign has not been sent, so there is
+                nothing to report yet. These are the figures that will appear once it sends.</div>` : ''}
+              ${canTriggerSend ? renderSendBlock(d, isSuperuser) : ''}
               ${d.heldCount ? `<div class="mm-notice">
                 <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} held back</b> by the
                 frequency cap, an open quote, or failed verification. They are excluded from
@@ -1680,8 +1680,86 @@ export default {
             </div>
           </div>`;
         $('#mmCloseResults').addEventListener('click', () => { box.hidden = true; box.innerHTML = ''; });
+
+        const sendBtn = $('#mmSendCampaign');
+        if (sendBtn) sendBtn.addEventListener('click', () => triggerSend(id, status === 'sending'));
       } catch (e) {
         msg('#mmCampaignMsg', 'Could not load results: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    // Everything standing between this campaign and a real send, or the
+    // button to actually fire it. Separate from the CAN-SPAM-only blockers
+    // used elsewhere: sendBlockers is the full set (provider, domain
+    // verification, from-address, AND the CAN-SPAM basics), computed fresh
+    // by the server on every load.
+    function renderSendBlock(d, isSuperuser) {
+      const plan = d.sendPlan || {};
+      const blockers = d.sendBlockers || [];
+      const conflict = d.conflict;
+
+      if (conflict) {
+        return `<div class="mm-notice danger"><b>Cannot send.</b> ${esc(conflict)}</div>`;
+      }
+      if (d.missingList) {
+        return `<div class="mm-notice danger"><b>Cannot send.</b> The list this campaign
+          points at no longer exists.</div>`;
+      }
+      if (blockers.length) {
+        return `<div class="mm-notice danger">
+          <b>Not ready to send.</b> <ul style="margin:8px 0 0 18px">
+          ${blockers.map((b) => `<li>${esc(b.text)}</li>`).join('')}</ul></div>`;
+      }
+      if (!d.recipientCount) {
+        return `<div class="mm-notice">There is nobody eligible to send this campaign to
+          right now.</div>`;
+      }
+
+      const multiDay = plan.days > 1 || (plan.queueRemaining && plan.queueRemaining > 0);
+      const rampNote = multiDay ? `<div class="mm-notice">
+        <b>This send takes more than one call.</b> The ${plan.isCold ? 'cold' : 'client'}
+        daily cap is ${plan.dailyCap}${plan.isCold ? ` (day ${plan.rampDay} of the warm-up)` : ''}.
+        Press Send again each time you want the next batch to go out — nothing repeats
+        automatically.</div>` : '';
+
+      if (!isSuperuser) {
+        return `${rampNote}<div class="mm-notice">
+          <b>Ready to send${plan.queueRemaining ? ` — ${plan.queueRemaining} left in this run` : ''}.</b>
+          Only a superuser (Ryan, Jacob, or Margo) can actually press Send.</div>`;
+      }
+
+      return `${rampNote}
+        <div class="mm-notice"><b>Ready to send</b> to ${d.recipientCount} recipient${d.recipientCount === 1 ? '' : 's'}
+          from ${esc((d.identity && d.identity.domain) || '')}.</div>
+        <div class="mm-actions" style="margin-bottom:14px">
+          <button class="mm-btn" id="mmSendCampaign">
+            ${plan.queueRemaining ? 'Send next batch' : 'Send now'}
+          </button>
+        </div>`;
+    }
+
+    async function triggerSend(id, isContinuation) {
+      const label = isContinuation ? 'Send the next batch of this campaign?'
+        : 'Send this campaign for real? This will email everyone eligible right now.';
+      if (!window.confirm(label)) return;
+      try {
+        const result = await api.post(ENDPOINTS.mmCampaigns, {}, { query: { id, action: 'send' } });
+        await loadCampaigns();
+        renderCampaignList();
+        await showResults(id);
+        const done = result.done;
+        msg('#mmCampaignMsg',
+          done
+            ? `Sent. ${result.sentThisRun} email${result.sentThisRun === 1 ? '' : 's'} handed to Resend.`
+            : `Sent this batch: ${result.sentThisRun} email${result.sentThisRun === 1 ? '' : 's'}. ${result.remaining} left — press Send again to continue.`,
+          'mm-ok');
+        if (result.failedThisRun) {
+          msg('#mmCampaignMsg',
+            `${result.failedThisRun} email${result.failedThisRun === 1 ? '' : 's'} failed to send: ${esc((result.providerErrors || []).join('; '))}`,
+            'mm-err');
+        }
+      } catch (e) {
+        msg('#mmCampaignMsg', 'Could not send: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -1693,7 +1771,7 @@ export default {
         $('#mmCampaignList').innerHTML =
           '<div class="mm-empty"><h4>No drafts yet</h4>' +
           '<div>Start one to work out the wording and the segment. ' +
-          'Nothing will send until sending is switched on.</div></div>';
+          'A superuser can send it once it is ready.</div></div>';
         return;
       }
 
@@ -1718,7 +1796,7 @@ export default {
                 <td class="em">${esc(fmtDate(c.updatedAt))}</td>
                 <td style="text-align:right;white-space:nowrap">
                   <button class="mm-btn ghost sm" data-results="${esc(c.id)}">Results</button>
-                  <button class="mm-btn ghost sm" data-edit="${esc(c.id)}">Edit</button></td>
+                  ${c.status === 'draft' ? `<button class="mm-btn ghost sm" data-edit="${esc(c.id)}">Edit</button>` : ''}</td>
               </tr>`;
             }).join('')}
           </tbody>
@@ -1768,15 +1846,20 @@ export default {
       state.blockers = (d && d.blockers) || [];
       state.footerPreview = (d && d.footerPreview) || '';
       state.coldCapToday = (d && d.coldCapToday) || 0;
+      try {
+        state.domains = await api.get(ENDPOINTS.mmDomains);
+      } catch (e) {
+        state.domains = null;
+      }
     }
 
     function renderBlockers() {
       const box = $('#mmBlockers');
       if (!box) return;
       if (!state.blockers || !state.blockers.length) {
-        box.innerHTML = '<div class="mm-notice"><b>Compliance looks complete.</b> ' +
-          'Sending is still switched off in code until a provider and the sending ' +
-          'domains are set up.</div>';
+        box.innerHTML = '<div class="mm-notice"><b>CAN-SPAM basics look complete.</b> ' +
+          'Each identity still needs its own from-address and a verified domain in ' +
+          'Resend before it can actually send — see Sending below.</div>';
         return;
       }
       // These are hard blockers, not suggestions. CAN-SPAM requires a real
@@ -1784,6 +1867,30 @@ export default {
       box.innerHTML = '<div class="mm-notice danger"><b>Not legal to send yet.</b> ' +
         'Every commercial email needs these, and they are missing:<ul style="margin:8px 0 0 18px">' +
         state.blockers.map((b) => `<li>${esc(b.text)}</li>`).join('') + '</ul></div>';
+    }
+
+    function renderDomainRow(key, label, domain, inputId, st) {
+      const d = state.domains && state.domains[key];
+      const status = d ? d.status : (state.domains && state.domains.configured ? 'not_added' : 'unknown');
+      const meta = {
+        verified: { cls: 'ok', text: 'Verified, ready to send' },
+        pending: { cls: 'warn', text: 'Pending — DNS added, waiting on propagation' },
+        not_started: { cls: 'warn', text: 'Added in Resend, DNS not yet added' },
+        not_added: { cls: 'bad', text: 'Not added to Resend yet' },
+        failed: { cls: 'bad', text: 'Verification failed — check the DNS records' },
+        unknown: { cls: 'mute', text: 'Connect a provider to check status' }
+      }[status] || { cls: 'mute', text: status };
+      const from = (st.fromAddress && st.fromAddress[key]) || '';
+      return `
+        <div class="mm-row" style="align-items:flex-end">
+          <div class="mm-field"><label for="${inputId}">${esc(label)} from-address</label>
+            <input id="${inputId}" type="text" value="${esc(from)}"
+              placeholder="P&amp;M Apparel &lt;hello@${esc(domain)}&gt;">
+            <div class="hint">Sends from <b>${esc(domain)}</b>.</div></div>
+          <div class="mm-field" style="max-width:260px">
+            <span class="pill ${meta.cls}">${esc(meta.text)}</span>
+          </div>
+        </div>`;
     }
 
     function renderSettings() {
@@ -1850,6 +1957,24 @@ export default {
               <input id="setZip" type="text" value="${esc(a.postalCode || '')}"></div>
             ${state.footerPreview ? `<div class="mm-field"><label>Footer preview</label>
               <div class="mm-recip" style="white-space:pre-wrap">${esc(state.footerPreview)}</div></div>` : ''}
+          </div>
+        </div>
+
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Sending</h3>
+            <span class="meta">Resend, one domain per audience</span></div>
+          <div class="mm-card-bd">
+            <div class="hint" style="margin-bottom:12px">
+              Each identity needs its own from-address AND a verified domain in
+              Resend before it can send. This checks Resend directly, so it
+              reflects real DNS status, not a guess.
+            </div>
+            ${renderDomainRow('warm', 'Client mail', 'mail.pmapparel.com', 'setFromWarm', st)}
+            ${renderDomainRow('cold', 'Cold outreach', 'outreach.pmapparel.com', 'setFromCold', st)}
+            ${!state.domains || !state.domains.configured ? `<div class="mm-notice">
+              <b>No provider connected yet.</b> RESEND_API_KEY needs to be set in Vercel
+              before either identity can send, regardless of what's filled in above.
+              </div>` : ''}
           </div>
         </div>
 
@@ -1931,6 +2056,10 @@ export default {
         replyToMode: val('setReplyMode'),
         replyToFixed: val('setReplyFixed'),
         unsubscribeUrl: val('setUnsub'),
+        fromAddress: {
+          warm: val('setFromWarm'),
+          cold: val('setFromCold')
+        },
         postalAddress: {
           line1: val('setLine1'), line2: val('setLine2'), city: val('setCity'),
           state: val('setState'), postalCode: val('setZip')
