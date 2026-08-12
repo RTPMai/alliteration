@@ -193,6 +193,9 @@ export default {
     border-radius:var(--radius-sm);font-size:13px;font-family:inherit;background:var(--card)}
   .mm-add-row input:focus{outline:2px solid var(--accent);outline-offset:1px}
 
+  .mm-edit-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  .mm-edit-grid .mm-field.full{grid-column:1/-1}
+
   .mm-field{margin-bottom:14px}
   .mm-field label{display:block;font-size:11px;text-transform:uppercase;
     letter-spacing:.05em;color:var(--muted);font-weight:700;margin-bottom:5px}
@@ -231,6 +234,7 @@ export default {
 
   template: `
     <div class="mm-page">
+      <div id="mmContactEditor" hidden></div>
       <!-- Dashboard -->
       <section id="mmDash" hidden>
         <div class="mm-hd">
@@ -414,7 +418,7 @@ export default {
       lists: [], campaigns: [],
       source: 'all', status: 'all', search: '',
       sort: 'company_name', dir: 'asc',
-      editingList: null, editingCampaign: null,
+      editingList: null, editingCampaign: null, editingContact: null, viewingListId: null,
       importPreview: null, importCsv: '',
       settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
       viewingResults: null
@@ -663,7 +667,8 @@ export default {
                         ct.status === 'unsubscribed' ? 'Resubscribe' : 'Unsubscribe'}</button>`}
                   <button class="mm-btn ghost sm" data-tags="${esc(ct.id)}">Tags</button>
                   ${ct.source === 'prospect'
-                    ? `<button class="mm-btn ghost sm" data-del="${esc(ct.id)}">Delete</button>` : ''}
+                    ? `<button class="mm-btn ghost sm" data-editct="${esc(ct.id)}">Edit</button>
+                       <button class="mm-btn ghost sm" data-del="${esc(ct.id)}">Delete</button>` : ''}
                 </td>
               </tr>`;
             }).join('')}
@@ -678,6 +683,12 @@ export default {
       });
       $('#mmContactsTable').querySelectorAll('[data-tags]').forEach((b) => {
         b.addEventListener('click', () => editTags(b.dataset.tags));
+      });
+      $('#mmContactsTable').querySelectorAll('[data-editct]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const ct = state.contacts.find((x) => x.id === b.dataset.editct);
+          if (ct) openContactEditor(ct);
+        });
       });
       $('#mmContactsTable').querySelectorAll('[data-del]').forEach((b) => {
         b.addEventListener('click', () => deleteProspect(b.dataset.del));
@@ -738,6 +749,122 @@ export default {
         msg('#mmContactsMsg', 'Prospect deleted.', 'mm-ok');
       } catch (e) {
         msg('#mmContactsMsg', 'Could not delete: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    /* ---------------- contact detail editor ---------------- */
+    //
+    // Only PROSPECT contacts can have their company/name/title/phone/city/
+    // state edited here. Client contacts are resolved live from the BackBone
+    // roster and never stored in MailMe (fix them in BackBone and it fixes
+    // here too); lead and giving contacts belong to BackBone's pipeline and
+    // GivingGauge respectively. Editing any of those here would silently
+    // diverge from the app that actually owns the record until the next
+    // sync overwrote it — worse than not offering the edit at all.
+    //
+    // One shared editor (#mmContactEditor, mounted once at the top of the
+    // template) rather than one per view, so it works the same whether it
+    // was opened from the Contacts table or from a list's members panel.
+
+    function openContactEditor(ct) {
+      if (!ct) return;
+      if (ct.source !== 'prospect') {
+        const owner = ct.source === 'client' ? 'the BackBone roster'
+          : ct.source === 'lead' ? 'BackBone leads'
+          : 'GivingGauge';
+        msg('#mmContactsMsg',
+          'Only prospects can be edited here. This contact\u2019s details come from ' +
+          esc(owner) + ' — fix it there and it will update here too.', 'mm-err');
+        return;
+      }
+      state.editingContact = {
+        id: ct.id,
+        company_name: ct.company_name || '',
+        contact_name: ct.contact_name || '',
+        title: ct.title || '',
+        phone: ct.phone || '',
+        city: ct.city || '',
+        state: ct.state || '',
+      };
+      renderContactEditor();
+    }
+
+    function closeContactEditor() {
+      state.editingContact = null;
+      renderContactEditor();
+    }
+
+    function renderContactEditor() {
+      const box = $('#mmContactEditor');
+      const e = state.editingContact;
+      if (!e) { box.hidden = true; box.innerHTML = ''; return; }
+      box.hidden = false;
+      box.innerHTML = `
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Edit contact</h3>
+            <span class="meta">${esc(e.id)}</span>
+          </div>
+          <div class="mm-card-bd">
+            <div id="mmContactEditorMsg"></div>
+            <div class="mm-edit-grid">
+              <div class="mm-field full">
+                <label for="mmEditCompany">Company</label>
+                <input id="mmEditCompany" type="text" value="${esc(e.company_name)}">
+              </div>
+              <div class="mm-field">
+                <label for="mmEditContactName">Contact name</label>
+                <input id="mmEditContactName" type="text" value="${esc(e.contact_name)}">
+              </div>
+              <div class="mm-field">
+                <label for="mmEditTitle">Title</label>
+                <input id="mmEditTitle" type="text" value="${esc(e.title)}">
+              </div>
+              <div class="mm-field">
+                <label for="mmEditPhone">Phone</label>
+                <input id="mmEditPhone" type="text" value="${esc(e.phone)}">
+              </div>
+              <div class="mm-field">
+                <label for="mmEditCity">City</label>
+                <input id="mmEditCity" type="text" value="${esc(e.city)}">
+              </div>
+              <div class="mm-field">
+                <label for="mmEditState">State</label>
+                <input id="mmEditState" type="text" value="${esc(e.state)}">
+              </div>
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmSaveContactEdit">Save</button>
+              <button class="mm-btn ghost" id="mmCancelContactEdit">Cancel</button>
+            </div>
+          </div>
+        </div>`;
+
+      $('#mmSaveContactEdit').addEventListener('click', saveContactEditor);
+      $('#mmCancelContactEdit').addEventListener('click', closeContactEditor);
+    }
+
+    async function saveContactEditor() {
+      const e = state.editingContact;
+      if (!e) return;
+      const payload = {
+        id: e.id,
+        company_name: $('#mmEditCompany').value,
+        contact_name: $('#mmEditContactName').value,
+        title: $('#mmEditTitle').value,
+        phone: $('#mmEditPhone').value,
+        city: $('#mmEditCity').value,
+        state: $('#mmEditState').value,
+      };
+      try {
+        await api.patch(ENDPOINTS.mmContacts, payload);
+        closeContactEditor();
+        await Promise.all([loadContacts(), loadLists()]);
+        renderFilters(); renderContactsTable();
+        if (state.viewingListId) await viewListMembers(state.viewingListId);
+        msg('#mmContactsMsg', 'Contact updated.', 'mm-ok');
+      } catch (err) {
+        msg('#mmContactEditorMsg', 'Could not save: ' + esc(err.message), 'mm-err');
       }
     }
 
@@ -862,6 +989,7 @@ export default {
      * step with schema.js. One source of truth, same as loadContacts().
      */
     async function viewListMembers(listId) {
+      state.viewingListId = listId;
       const box = $('#mmListMembers');
       box.hidden = false;
       box.innerHTML = '<div class="mm-card"><div class="mm-card-bd">Loading members...</div></div>';
@@ -1000,8 +1128,7 @@ export default {
           <div class="mm-card-bd flush">
             <table class="mm-table">
               <thead><tr><th>Company</th><th>Contact</th><th>Email</th>
-                <th>Source</th><th>Status</th><th>Tags</th>
-                ${editable ? '<th></th>' : ''}</tr></thead>
+                <th>Source</th><th>Status</th><th>Tags</th><th></th></tr></thead>
               <tbody>
                 ${members.map((m) => {
                   const meta = STATUS_META[m.status] || STATUS_META.subscribed;
@@ -1014,8 +1141,12 @@ export default {
                     <td><span class="pill src">${esc(src.label)}</span></td>
                     <td><span class="pill ${meta.cls}">${esc(meta.label)}</span></td>
                     <td class="who">${esc((m.tags || []).join(', '))}</td>
-                    ${editable ? `<td style="text-align:right">
-                      <button class="mm-btn ghost sm" data-removemember="${esc(m.id)}">Remove</button></td>` : ''}
+                    <td style="text-align:right;white-space:nowrap">
+                      ${m.source === 'prospect'
+                        ? `<button class="mm-btn ghost sm" data-editmember="${esc(m.id)}">Edit</button>` : ''}
+                      ${editable
+                        ? `<button class="mm-btn ghost sm" data-removemember="${esc(m.id)}">Remove</button>` : ''}
+                    </td>
                   </tr>`;
                 }).join('')}
               </tbody>
@@ -1028,6 +1159,12 @@ export default {
         b.addEventListener('click', () => {
           const m = members.find((x) => x.id === b.dataset.removemember);
           if (m) removeListMember(list, m);
+        });
+      });
+      $('#mmListMembers').querySelectorAll('[data-editmember]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const m = members.find((x) => x.id === b.dataset.editmember);
+          if (m) openContactEditor(m);
         });
       });
     }
@@ -1114,6 +1251,7 @@ export default {
     }
 
     function closeListMembers() {
+      state.viewingListId = null;
       const box = $('#mmListMembers');
       box.hidden = true;
       box.innerHTML = '';
