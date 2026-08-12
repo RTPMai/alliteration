@@ -2,13 +2,15 @@
 // external signup pages (Flyover Con today, any future event/campaign page
 // tomorrow).
 //
-// POST { name, email, list? } -> adds the person to a MailMe list. Tags an
-// existing contact if the email is already known (client/lead/giving, or a
-// previously-imported prospect) instead of duplicating it; otherwise creates
-// a new prospect record, same shape as a one-row CSV import. The target list
-// itself is created lazily on the first-ever signup for that `list` key —
-// dynamic and tag-matched, so no admin setup step is needed before a signup
-// page goes live, and every later signup lands in it automatically.
+// POST { name, email, company?, attended?, list? } -> adds the person to a
+// MailMe list. company and attended ("yes"/"no", whether they've been to
+// this event before) are both optional. Tags an existing contact if the
+// email is already known (client/lead/giving, or a previously-imported
+// prospect) instead of duplicating it; otherwise creates a new prospect
+// record, same shape as a one-row CSV import. The target list itself is
+// created lazily on the first-ever signup for that `list` key — dynamic
+// and tag-matched, so no admin setup step is needed before a signup page
+// goes live, and every later signup lands in it automatically.
 //
 // Same shape as api/giving-intake.js and api/scan-status.js: no session,
 // IP rate-limited, deliberately narrow blast radius. The worst a bad actor
@@ -79,6 +81,12 @@ export default async function handler(req, res) {
 
   const name = String(body.name || "").trim().slice(0, 200);
   const email = normalizeEmail(body.email);
+  const company = String(body.company || "").trim().slice(0, 200);
+  // "attended" arrives as "yes" / "no" / null from the form. Anything else
+  // (missing, blank, unrecognized) is treated the same as "no answer" —
+  // optional means optional, not "guess what they meant."
+  const attendedRaw = body.attended == null ? null : String(body.attended).trim().toLowerCase();
+  const attendedBefore = attendedRaw === "yes" ? true : attendedRaw === "no" ? false : null;
 
   if (!name) return res.status(400).json({ error: "Name is required." });
   if (!email || !isValidEmail(email)) {
@@ -90,7 +98,7 @@ export default async function handler(req, res) {
 
   try {
     const result = await publicListSignup({
-      email, name, tag: target.tag, listName: target.listName,
+      email, name, company, attendedBefore, tag: target.tag, listName: target.listName,
     });
     return res.status(201).json({ ok: true, ...result });
   } catch (e) {
