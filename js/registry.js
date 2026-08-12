@@ -1,6 +1,3 @@
-// PUT IN: js/registry.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * alliteration. — app registry
  *
@@ -221,14 +218,16 @@ export const APPS = [
     role: 'What the website is doing',
     blurb: 'Visitors, traffic sources, site performance for PMApparel.com.',
     accent: '#00BBB4',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #02A9A5, close but off)
+    // Real build, Aug 2026. Pulls from GA4 via api/websitewidget.js — see
+    // lib/websitewidget/ga4.js. GA4_PROPERTY_ID, GA4_CLIENT_EMAIL and
+    // GA4_PRIVATE_KEY still need to be set in Vercel from a service account
+    // granted Viewer on the PMApparel.com GA4 property; until then the
+    // dashboard shows a plain setup notice instead of any invented numbers.
     views: [
       ['dashboard', 'Dashboard']
     ],
     defaultView: 'dashboard',
-    stub: true,
-    stubNote: 'Planned. Web analytics for PMApparel.com: visitors, page ' +
-      'views, and sessions, traffic source, which content converts, and ' +
-      'overall site performance and trends.'
+    stub: false
   }
 ];
 
