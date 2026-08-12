@@ -87,21 +87,68 @@ t.test('publicListSignup creates the target list lazily and reuses it on later s
     'the auto-created list should be dynamic/tag-matched so later signups need no extra write');
 });
 
+/* ---- company + attended-before: both optional, both safe ---- */
+
+t.test('signup.js accepts optional company and attended fields', () => {
+  t.assert(/body\.company/.test(handlerSrc), 'signup.js must read company from the request body');
+  t.assert(/body\.attended/.test(handlerSrc), 'signup.js must read attended from the request body');
+  // Neither is in the required-field checks (only name/email are).
+  const requiredChecks = handlerSrc.slice(handlerSrc.indexOf('if (!name)'), handlerSrc.indexOf('try {'));
+  t.assert(!/company/.test(requiredChecks) && !/attended/.test(requiredChecks),
+    'company and attended must stay optional — not required alongside name/email');
+});
+
+t.test('an unrecognized or missing "attended" value is treated as no answer, not an error', () => {
+  const idx = handlerSrc.indexOf('attendedRaw');
+  const body = handlerSrc.slice(idx, handlerSrc.indexOf('if (!name)'));
+  t.assert(/attendedRaw === ["']yes["'] \? true/.test(body) && /attendedRaw === ["']no["'] \? false/.test(body),
+    'attended must map "yes"/"no" to true/false and anything else to null, never throw');
+});
+
+t.test('publicListSignup never overwrites an existing contact\'s real company name', () => {
+  const fn = storeSrc.slice(storeSrc.indexOf('export async function publicListSignup'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function', 1));
+  t.assert(/cleanCompany && !existing\.company_name/.test(body),
+    'a public form must only fill in company_name when the existing contact has none on file — ' +
+    'never overwrite a real value with whatever a stranger typed');
+});
+
+t.test('an attendance answer becomes its own tag alongside the event tag', () => {
+  const fn = storeSrc.slice(storeSrc.indexOf('export async function publicListSignup'));
+  const body = fn.slice(0, fn.indexOf('\nexport async function', 1));
+  t.assert(/returning attendee/.test(body) && /first-time attendee/.test(body),
+    'publicListSignup must tag "returning attendee" or "first-time attendee" based on the answer');
+});
+
 /* ---- the public page itself ---- */
 
 if (exists('flyover-con-signup.html')) {
   const pageHtml = read('flyover-con-signup.html');
 
-  t.test('flyover-con-signup.html posts name/email/list to /api/mailme/signup', () => {
+  t.test('flyover-con-signup.html posts name/email/company/attended/list to /api/mailme/signup', () => {
     t.assert(/\/api\/mailme\/signup/.test(pageHtml), 'the page must POST to /api/mailme/signup');
     t.assert(/list:\s*['"]flyover-con['"]/.test(pageHtml), 'the page must send list: "flyover-con"');
     t.assert(/name:\s*name/.test(pageHtml) && /email:\s*email/.test(pageHtml),
       'the page must send both name and email in the POST body');
+    t.assert(/company:\s*company/.test(pageHtml), 'the page must send the company field');
+    t.assert(/attended:\s*attendedVal/.test(pageHtml), 'the page must send the attended-before answer');
+  });
+
+  t.test('company and attended-before are optional on the page, not required inputs', () => {
+    const companyField = pageHtml.slice(pageHtml.indexOf('id="company"') - 60, pageHtml.indexOf('id="company"') + 120);
+    t.assert(!/required/.test(companyField), 'the Company input must not be marked required');
+    t.assert(/optional/i.test(pageHtml), 'the page should visibly label these fields as optional');
   });
 
   t.test('flyover-con-signup.html is standalone, not wired into the shell', () => {
     t.assert(!/js\/shell\.js/.test(pageHtml), 'this page must stay outside the shell, like unsubscribe.html');
     t.assert(!/js\/registry\.js/.test(pageHtml), 'this page must stay outside the shell, like unsubscribe.html');
+  });
+
+  t.test('the page matches Flyover Con branding: FOC logo asset and its gold accent color', () => {
+    t.assert(/foc-peach\.vercel\.app\/assets\/img\/logo/.test(pageHtml),
+      'the page should use the real FOC logo asset, not a placeholder');
+    t.assert(/#F5A623/i.test(pageHtml), 'the page should use FOC\'s actual gold/amber accent color');
   });
 }
 
