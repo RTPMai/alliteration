@@ -26,7 +26,7 @@ import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign,
-  resolveContacts, getList, campaignResults,
+  applyCampaignPatch, resolveContacts, getList, campaignResults,
 } from "../../lib/mailme/store.js";
 import {
   validateCampaignPatch, selectRecipients, resolveList,
@@ -35,7 +35,7 @@ import {
 import {
   applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
 } from "../../lib/mailme/audience.js";
-import { sendCampaign, sendReadiness } from "../../lib/mailme/send.js";
+import { sendCampaign, sendReadiness, sendTestEmail } from "../../lib/mailme/send.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -52,6 +52,16 @@ function sendFailureMessage(result) {
     case "not_ready": return "This campaign isn't ready to send yet. See the blockers list.";
     case "no_recipients": return "There is nobody left to send this campaign to.";
     default: return "Could not send this campaign.";
+  }
+}
+
+function testFailureMessage(result) {
+  switch (result.reason) {
+    case "not_found": return "Campaign not found";
+    case "invalid_email": return "That doesn't look like a valid email address.";
+    case "not_ready": return "Can't send a test yet. See the blockers list.";
+    case "provider_error": return "Resend rejected the test send: " + (result.detail || "unknown error");
+    default: return "Could not send a test.";
   }
 }
 
@@ -173,6 +183,8 @@ export default async function handler(req, res) {
       return res.status(403).json({ error: "Your role is read-only in MailMe" });
     }
 
+    const action = (req.query && req.query.action) || parseBody(req).action;
+
     const refuseSend = (body) => (body.status && body.status !== "draft")
       ? "Campaigns can only be saved as drafts here. Use the send action to actually send one."
       : null;
@@ -183,7 +195,7 @@ export default async function handler(req, res) {
     // also send it. Real safety comes from sendCampaign() itself re-checking
     // compliance, domain verification and suppression right before dispatch,
     // not from restricting who can press the button.
-    if (req.method === "POST" && ((req.query && req.query.action) || parseBody(req).action) === "send") {
+    if (req.method === "POST" && action === "send") {
       const id = (req.query && req.query.id) || parseBody(req).id;
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
 
@@ -193,6 +205,67 @@ export default async function handler(req, res) {
         return res.status(status).json({ error: sendFailureMessage(result), reason: result.reason, blockers: result.blockers });
       }
       return res.status(200).json({ ok: true, ...result });
+    }
+
+    // A preview copy to one address, deliberately lighter-weight than a real
+    // send — see sendTestEmail's own comment for exactly what it skips and
+    // why. Never moves a campaign's status, queue, or stats.
+    if (req.method === "POST" && action === "test") {
+      const body = parseBody(req);
+      const id = (req.query && req.query.id) || body.id;
+      const to = body.to || (req.query && req.query.to);
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+      if (!to) return res.status(400).json({ error: "Missing test recipient email" });
+
+      const result = await sendTestEmail(id, to);
+      if (!result.ok) {
+        const status = result.reason === "not_found" ? 404 : 400;
+        return res.status(status).json({ error: testFailureMessage(result), reason: result.reason, blockers: result.blockers });
+      }
+      return res.status(200).json({ ok: true, id: result.id });
+    }
+
+    // Moves a DRAFT to "scheduled" with a future send time. Only a draft can
+    // be scheduled (locked the same way a draft is locked from PATCH edits
+    // once it's anything else). The actual firing happens later, either via
+    // api/mailme/cron-send.js noticing scheduledAt has passed, or via the
+    // ordinary send action if someone wants to fire it early.
+    if (req.method === "POST" && action === "schedule") {
+      const body = parseBody(req);
+      const id = (req.query && req.query.id) || body.id;
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+
+      const campaign = await getCampaign(id);
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      if (campaign.status !== "draft") {
+        return res.status(409).json({ error: "Only a draft can be scheduled." });
+      }
+
+      const when = new Date(body.scheduledAt);
+      if (!body.scheduledAt || isNaN(when.getTime())) {
+        return res.status(400).json({ error: "Provide a valid date and time to schedule for." });
+      }
+      if (when.getTime() <= Date.now()) {
+        return res.status(400).json({ error: "Scheduled time must be in the future." });
+      }
+
+      const result = await applyCampaignPatch(id, { status: "scheduled", scheduledAt: when.toISOString() });
+      return res.status(200).json({ ok: true, campaign: result.campaign });
+    }
+
+    // Reverts a scheduled campaign back to a plain, editable draft.
+    if (req.method === "POST" && action === "unschedule") {
+      const id = (req.query && req.query.id) || parseBody(req).id;
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+
+      const campaign = await getCampaign(id);
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      if (campaign.status !== "scheduled") {
+        return res.status(409).json({ error: "This campaign isn't scheduled." });
+      }
+
+      const result = await applyCampaignPatch(id, { status: "draft", scheduledAt: null });
+      return res.status(200).json({ ok: true, campaign: result.campaign });
     }
 
     if (req.method === "POST") {
