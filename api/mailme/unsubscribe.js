@@ -1,3 +1,4 @@
+<!-- PUT IN: api/mailme/unsubscribe.js (rename this file, drop the .txt) -->
 // api/mailme/unsubscribe.js — the public opt-out endpoint.
 //
 // PUBLIC BY DESIGN. This is reachable without a session, and it must be:
