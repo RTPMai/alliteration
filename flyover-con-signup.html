@@ -4,8 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Flyover Con — Join the list</title>
-<link rel="icon" href="/favicon.ico" sizes="any">
-<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<link rel="icon" href="https://foc-peach.vercel.app/assets/img/logo-compact.png">
 <!--
   PUBLIC signup page for Flyover Con. Anyone clicking a link on the Flyover
   Con or P&M Apparel website lands here with no login, no shell, and no app
@@ -13,76 +12,183 @@
   logged-out stranger would bounce them to a login screen, which defeats the
   point of a public signup link.
 
-  It carries its own minimal styles for the same reason unsubscribe.html
-  does: tokens.css is the shell's file, and this page is not part of the
-  shell, so a small standalone palette here is intentional.
+  Branding matches foc-peach.vercel.app (the live Flyover Con site) as of
+  Aug 2026: near-black navy background, gold/amber accent (#F5A623), bold
+  condensed all-caps display type, and a small monospace "status board"
+  style eyebrow label echoing the airport-departure-board motif used across
+  the FOC site. Logo images are pulled directly from the live FOC site
+  rather than copied into this repo, so they stay in sync if FOC ever
+  updates its own branding.
 
-  Posts to /api/mailme/signup with list: "flyover-con". That endpoint tags an
-  existing MailMe contact or creates a new one, and creates the "Flyover Con"
-  list on the very first signup. No admin setup step is required before
+  Posts to /api/mailme/signup with list: "flyover-con". That endpoint tags
+  an existing MailMe contact or creates a new one, and creates the
+  "Flyover Con" list on the very first signup. Company and "attended
+  before" are both optional. No admin setup step is required before
   sharing this link.
 -->
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Archivo+Black&family=Inter:wght@400;600;700&display=swap');
+
   :root {
-    --ink: #1C2430; --muted: #6B7684; --line: #E4E8EC;
-    --bg: #F4F6F8; --card: #FFFFFF; --accent: #8CA9CC; --accent-deep: #7087A3;
-    --success-tint: #EAF5EE; --success-dk: #2F7A48; --danger-dk: #96271B;
+    --bg: #0B0E17;
+    --bg2: #131829;
+    --panel: #161C2C;
+    --line: #262E45;
+    --ink: #FFFFFF;
+    --muted: #93A0BE;
+    --accent: #F5A623;
+    --accent-deep: #D98E14;
+    --accent-ink: #1A1406;
+    --success-tint: #16241C;
+    --success-ink: #7BD79A;
+    --danger-tint: #2A1616;
+    --danger-ink: #F2867E;
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; min-height: 100vh; display: flex; align-items: center;
-    justify-content: center; padding: 24px; background: var(--bg); color: var(--ink);
+    justify-content: center; padding: 32px 20px;
+    background: radial-gradient(ellipse 900px 500px at 80% 0%, var(--bg2) 0%, var(--bg) 55%);
+    color: var(--ink);
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
+  .wrap { max-width: 460px; width: 100%; }
+  .logo-row {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 28px;
+  }
+  .logo-row img { height: 40px; width: auto; display: block; }
+  .eyebrow {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 14px;
+    font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    font-size: 12px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+  }
+  .eyebrow .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex: none;
+  }
+  h1 {
+    font-family: 'Archivo Black', 'Arial Black', sans-serif;
+    font-size: 34px; line-height: 1.08; letter-spacing: -.01em;
+    margin: 0 0 14px; text-transform: uppercase;
+  }
+  h1 .accent { color: var(--accent); }
+  p.lede {
+    font-size: 15px; line-height: 1.6; color: var(--muted); margin: 0 0 28px;
+  }
   .card {
-    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
-    padding: 32px; max-width: 460px; width: 100%;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 26px;
   }
-  h1 { font-size: 20px; margin: 0 0 8px; letter-spacing: -.02em; }
-  p { font-size: 14px; line-height: 1.6; color: var(--muted); margin: 0 0 20px; }
-  label { display: block; font-size: 12px; font-weight: 700; margin-bottom: 6px; }
-  input {
-    width: 100%; padding: 10px 12px; border: 1px solid var(--line);
-    border-radius: 8px; font-family: inherit; font-size: 14px; margin-bottom: 14px;
+  label {
+    display: block; font-size: 12px; font-weight: 700; letter-spacing: .03em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 7px;
   }
-  button {
-    background: var(--accent); color: #fff; border: none; border-radius: 8px;
-    padding: 11px 18px; font-size: 14px; font-weight: 600; cursor: pointer;
-    font-family: inherit; width: 100%;
+  .optional { text-transform: none; font-weight: 400; letter-spacing: 0; color: var(--muted); opacity: .75; }
+  .field { margin-bottom: 18px; }
+  input[type="text"], input[type="email"] {
+    width: 100%; padding: 12px 13px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg2); color: var(--ink); font-family: inherit; font-size: 14.5px;
   }
-  button:hover { background: var(--accent-deep); }
-  button[disabled] { opacity: .5; cursor: not-allowed; }
-  .done { background: var(--success-tint); color: var(--success-dk);
-    padding: 14px; border-radius: 8px; font-size: 14px; line-height: 1.5; }
-  .err { color: var(--danger-dk); font-size: 13px; line-height: 1.5; margin: -6px 0 14px; }
+  input[type="text"]::placeholder, input[type="email"]::placeholder { color: #56607C; }
+  input[type="text"]:focus, input[type="email"]:focus {
+    outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(245,166,35,.18);
+  }
+  .pill-row { display: flex; gap: 10px; }
+  .pill {
+    flex: 1; text-align: center; padding: 11px 10px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--bg2); color: var(--muted);
+    font-size: 13.5px; font-weight: 700; cursor: pointer; user-select: none;
+    transition: border-color .15s, color .15s, background .15s;
+  }
+  .pill:hover { border-color: #3A4560; color: var(--ink); }
+  .pill.selected { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button.submit {
+    width: 100%; margin-top: 6px; padding: 14px 18px; border: none; border-radius: 6px;
+    background: var(--accent); color: var(--accent-ink); font-family: inherit;
+    font-size: 14.5px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase;
+    cursor: pointer;
+  }
+  button.submit:hover { background: var(--accent-deep); }
+  button.submit[disabled] { opacity: .55; cursor: not-allowed; }
+  .err {
+    background: var(--danger-tint); border: 1px solid #4A2323; color: var(--danger-ink);
+    border-radius: 6px; padding: 11px 13px; font-size: 13px; line-height: 1.5; margin-bottom: 16px;
+  }
+  .done {
+    background: var(--success-tint); border: 1px solid #234A32; color: var(--success-ink);
+    border-radius: 8px; padding: 16px; font-size: 14px; line-height: 1.6;
+  }
+  .foot {
+    margin-top: 22px; font-size: 12px; color: var(--muted); text-align: center; opacity: .8;
+  }
 </style>
 </head>
 <body>
-<div class="card" id="root">
-  <h1>Flyover Con</h1>
-  <p>Join the list to hear about Flyover Con news and updates from P&amp;M Apparel.</p>
-  <form id="form">
-    <label for="name">Name</label>
-    <input id="name" type="text" autocomplete="name" required>
-    <label for="email">Email</label>
-    <input id="email" type="email" autocomplete="email" required>
-    <div class="err" id="err" style="display:none"></div>
-    <button id="go" type="submit">Join the list</button>
-  </form>
+<div class="wrap">
+  <div class="logo-row">
+    <img src="https://foc-peach.vercel.app/assets/img/logo-compact.png" alt="Flyover Con logo">
+  </div>
+
+  <div id="intro">
+    <div class="eyebrow"><span class="dot"></span>Stay in the loop</div>
+    <h1>Get <span class="accent">FOC27</span> updates first.</h1>
+    <p class="lede">Join the list for Flyover Con news, schedule drops, and registration
+      openings. No spam, just the stuff you actually want to know about.</p>
+  </div>
+
+  <div class="card" id="cardBody">
+    <form id="form">
+      <div class="field">
+        <label for="name">Name</label>
+        <input id="name" type="text" autocomplete="name" placeholder="Jane Smith" required>
+      </div>
+      <div class="field">
+        <label for="email">Email</label>
+        <input id="email" type="email" autocomplete="email" placeholder="jane@yourshop.com" required>
+      </div>
+      <div class="field">
+        <label for="company">Company <span class="optional">(optional)</span></label>
+        <input id="company" type="text" autocomplete="organization" placeholder="Your shop's name">
+      </div>
+      <div class="field">
+        <label>Been to Flyover Con before? <span class="optional">(optional)</span></label>
+        <div class="pill-row" id="attendedRow">
+          <div class="pill" data-val="yes">Yes, I've been</div>
+          <div class="pill" data-val="no">No, first time</div>
+        </div>
+      </div>
+      <div class="err" id="err" style="display:none"></div>
+      <button class="submit" id="go" type="submit">Join the list</button>
+    </form>
+  </div>
+
+  <div class="foot">Flyover Con is hosted by P&amp;M Apparel, Polk City, Iowa.</div>
 </div>
 
 <script>
 (function () {
-  var root = document.getElementById('root');
+  var intro = document.getElementById('intro');
+  var cardBody = document.getElementById('cardBody');
   var form = document.getElementById('form');
   var err = document.getElementById('err');
   var btn = document.getElementById('go');
+  var attendedRow = document.getElementById('attendedRow');
+  var attendedVal = null;
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
       return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
     });
   }
+
+  attendedRow.querySelectorAll('.pill').forEach(function (p) {
+    p.addEventListener('click', function () {
+      var val = p.dataset.val;
+      var already = p.classList.contains('selected');
+      attendedRow.querySelectorAll('.pill').forEach(function (x) { x.classList.remove('selected'); });
+      attendedVal = already ? null : val;
+      if (!already) p.classList.add('selected');
+    });
+  });
 
   function showError(text) {
     err.textContent = text;
@@ -94,7 +200,8 @@
     err.style.display = 'none';
     var name = document.getElementById('name').value.trim();
     var email = document.getElementById('email').value.trim();
-    if (!name || !email) return showError('Please fill in both fields.');
+    var company = document.getElementById('company').value.trim();
+    if (!name || !email) return showError('Please fill in your name and email.');
 
     btn.disabled = true;
     btn.textContent = 'Joining...';
@@ -102,7 +209,10 @@
     fetch('/api/mailme/signup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, email: email, list: 'flyover-con' })
+      body: JSON.stringify({
+        name: name, email: email, company: company,
+        attended: attendedVal, list: 'flyover-con'
+      })
     })
       .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
       .then(function (res) {
@@ -111,8 +221,9 @@
           btn.textContent = 'Join the list';
           return showError(res.j.error || 'Something went wrong. Please try again.');
         }
-        root.innerHTML = '<h1>You\'re on the list</h1>' +
-          '<div class="done">Thanks, ' + esc(name) + '. We\'ll be in touch with Flyover Con news and updates.</div>';
+        intro.style.display = 'none';
+        cardBody.innerHTML = '<div class="done"><b>You\'re on the list, ' + esc(name) + '.</b><br>' +
+          'We\'ll be in touch with Flyover Con news and updates.</div>';
       })
       .catch(function () {
         btn.disabled = false;
