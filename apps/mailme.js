@@ -22,12 +22,13 @@
  * source therefore sends from its own domain, and a campaign targets exactly
  * one of them.
  *
- * SENDING is wired through Resend, gated behind a dedicated, superuser-only
- * send action (see api/mailme/campaigns.js and lib/mailme/send.js). A draft
- * is never one accidental status edit away from going out: the ordinary
- * save/edit path can only ever produce a draft, and every real send re-
- * checks compliance, domain verification and suppression itself right
- * before dispatch.
+ * SENDING is wired through Resend, gated behind a dedicated send action. A
+ * draft is never one accidental status edit away from going out: the
+ * ordinary save/edit path can only ever produce a draft, and every real
+ * send re-checks compliance, domain verification and suppression itself
+ * right before dispatch. Anyone with MailMe edit access can send, not just
+ * a superuser — the safety property is the pre-send checks, not who can
+ * click the button.
  *
  * No fetch() here: everything goes through ctx.api and ENDPOINTS, per the
  * seam rule. No hex colors: tokens.css owns theming via data-app="mailme".
@@ -390,7 +391,7 @@ export default {
         <div class="mm-hd">
           <div>
             <h1>Campaigns<span class="dot">.</span></h1>
-            <div class="sub">Drafts and campaigns. Sending needs a superuser and a verified domain.</div>
+            <div class="sub">Drafts and campaigns. Sending needs a verified domain.</div>
           </div>
           <div class="mm-refresh">
             <span class="stamp" data-mm-stamp></span>
@@ -470,10 +471,10 @@ export default {
       const c = state.counts;
 
       $('#mmSendNotice').innerHTML =
-        '<b>Sending is wired, but gated.</b> A superuser can send a campaign from ' +
-        'its results panel once the compliance basics are filled in and Resend shows ' +
-        'the matching domain as verified. Check Settings → Sending for live status on ' +
-        'mail.pmapparel.com and outreach.pmapparel.com.';
+        '<b>Sending is wired, but gated.</b> Anyone with MailMe edit access can send a ' +
+        'campaign from its results panel once the compliance basics are filled in and ' +
+        'Resend shows the matching domain as verified. Check Settings → Sending for ' +
+        'live status on mail.pmapparel.com and outreach.pmapparel.com.';
 
       // Bounce/complaint rates are the early warning that a sending domain is
       // in trouble. Surfaced on the dashboard because by the time someone
@@ -1616,7 +1617,9 @@ export default {
         const warnings = r.warnings || [];
         const status = d.campaign && d.campaign.status;
         const sent = d.campaign && d.campaign.sentAt;
-        const isSuperuser = !!(ctx.perms && ctx.perms.superuser === true);
+        // Same gate as building/editing a draft: superuser, or a granted role
+        // that isn't explicitly read-only. Mirrors canEditMailMe() server-side.
+        const canSendUI = !!(ctx.perms && (ctx.perms.superuser === true || ctx.perms.can_edit !== false));
         const canTriggerSend = ['draft', 'sending'].includes(status);
 
         box.hidden = false;
@@ -1633,7 +1636,7 @@ export default {
                 `<div class="mm-notice ${w.level === 'danger' ? 'danger' : ''}">${esc(w.text)}</div>`).join('')}
               ${status === 'draft' ? `<div class="mm-notice">This campaign has not been sent, so there is
                 nothing to report yet. These are the figures that will appear once it sends.</div>` : ''}
-              ${canTriggerSend ? renderSendBlock(d, isSuperuser) : ''}
+              ${canTriggerSend ? renderSendBlock(d, canSendUI) : ''}
               ${d.heldCount ? `<div class="mm-notice">
                 <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} held back</b> by the
                 frequency cap, an open quote, or failed verification. They are excluded from
@@ -1693,7 +1696,7 @@ export default {
     // used elsewhere: sendBlockers is the full set (provider, domain
     // verification, from-address, AND the CAN-SPAM basics), computed fresh
     // by the server on every load.
-    function renderSendBlock(d, isSuperuser) {
+    function renderSendBlock(d, canSendUI) {
       const plan = d.sendPlan || {};
       const blockers = d.sendBlockers || [];
       const conflict = d.conflict;
@@ -1722,10 +1725,10 @@ export default {
         Press Send again each time you want the next batch to go out — nothing repeats
         automatically.</div>` : '';
 
-      if (!isSuperuser) {
+      if (!canSendUI) {
         return `${rampNote}<div class="mm-notice">
           <b>Ready to send${plan.queueRemaining ? ` — ${plan.queueRemaining} left in this run` : ''}.</b>
-          Only a superuser (Ryan, Jacob, or Margo) can actually press Send.</div>`;
+          Your MailMe role is read-only, so you can't press Send from here.</div>`;
       }
 
       return `${rampNote}
@@ -1771,7 +1774,7 @@ export default {
         $('#mmCampaignList').innerHTML =
           '<div class="mm-empty"><h4>No drafts yet</h4>' +
           '<div>Start one to work out the wording and the segment. ' +
-          'A superuser can send it once it is ready.</div></div>';
+          'Send it once it is ready.</div></div>';
         return;
       }
 
