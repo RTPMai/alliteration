@@ -220,7 +220,7 @@ export const APPS = [
     accent: '#00BBB4',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #02A9A5, close but off)
     // Real build, Aug 2026, extended the same month for multiple sites
     // (PMApparel.com, IowaOnDemand.com, Flyover Con). Pulls from GA4 via
-    // api/websitewidget.js — see lib/websitewidget/ga4.js. GA4_CLIENT_EMAIL
+    // api/websitewidget/stats.js — see lib/websitewidget/ga4.js. GA4_CLIENT_EMAIL
     // and GA4_PRIVATE_KEY (one shared service account) still need to be set
     // in Vercel; until then the dashboard shows a plain setup notice
     // instead of any invented numbers. Which sites exist is NOT an env var
