@@ -215,16 +215,20 @@ export const APPS = [
     id: 'websitewidget',
     name: 'WebsiteWidget',
     w1: 'Website', w2: 'Widget', letter: 'W',
-    role: 'What the website is doing',
-    blurb: 'Visitors, traffic sources, site performance for PMApparel.com.',
+    role: 'What the websites are doing',
+    blurb: 'Visitors, traffic sources, site performance across every site.',
     accent: '#00BBB4',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #02A9A5, close but off)
-    // Real build, Aug 2026. Pulls from GA4 via api/websitewidget.js — see
-    // lib/websitewidget/ga4.js. GA4_PROPERTY_ID, GA4_CLIENT_EMAIL and
-    // GA4_PRIVATE_KEY still need to be set in Vercel from a service account
-    // granted Viewer on the PMApparel.com GA4 property; until then the
-    // dashboard shows a plain setup notice instead of any invented numbers.
+    // Real build, Aug 2026, extended the same month for multiple sites
+    // (PMApparel.com, IowaOnDemand.com, Flyover Con). Pulls from GA4 via
+    // api/websitewidget.js — see lib/websitewidget/ga4.js. GA4_CLIENT_EMAIL
+    // and GA4_PRIVATE_KEY (one shared service account) still need to be set
+    // in Vercel; until then the dashboard shows a plain setup notice
+    // instead of any invented numbers. Which sites exist is NOT an env var
+    // — see lib/websitewidget/sites-store.js — so adding IowaOnDemand.com
+    // or a future site is a Settings-tab action, not a redeploy.
     views: [
-      ['dashboard', 'Dashboard']
+      ['dashboard', 'Dashboard'],
+      ['settings', 'Manage Sites']
     ],
     defaultView: 'dashboard',
     stub: false
