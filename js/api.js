@@ -84,10 +84,13 @@ const LIVE_PREFIXES = [
   // Notifications: api/notifications.js is deployed. Shell-level, not one of
   // the nine apps, same as auth/users/health above.
   '/api/notifications',
-  // WebsiteWidget: api/websitewidget.js is deployed. Always answers 200 —
-  // when GA4 isn't configured yet it returns configured:false rather than
-  // erroring, so this counts as live even before the service account exists.
-  '/api/websitewidget'
+  // WebsiteWidget: api/websitewidget/{stats,sites}.js are deployed. Both
+  // live under the folder (no flat api/websitewidget.js) because Vercel
+  // treats a same-named file and folder as a route conflict once the .js
+  // is stripped. api/websitewidget/stats.js always answers 200 — when GA4
+  // isn't configured yet it returns configured:false rather than erroring,
+  // so this counts as live even before the service account exists.
+  '/api/websitewidget/'
 ];
 
 function isLive(path) {
@@ -216,7 +219,7 @@ export const ENDPOINTS = {
   notifications:   '/api/notifications',
 
   // ---- WebsiteWidget ----
-  wwStats:         '/api/websitewidget',
+  wwStats:         '/api/websitewidget/stats',
   wwSites:         '/api/websitewidget/sites'
 };
 
@@ -440,7 +443,7 @@ const MOCK_DATA = {
   // working when the flag flips. Empty by default: unlike the other apps,
   // TravelTrack never shipped sample rows on the standalone, so there is
   // nothing plausible to fake here.
-  // Shape mirrors api/websitewidget.js's "not configured" response — the
+  // Shape mirrors api/websitewidget/stats.js's "not configured" response — the
   // real endpoint answers this same shape until GA4 env vars are set, so
   // MOCK and the live-but-unconfigured state look identical on purpose.
   [ENDPOINTS.wwStats]: () => ({
