@@ -17,7 +17,8 @@
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe } from "../../lib/mailme/access.js";
 import { domainStatus, resendConfigured } from "../../lib/mailme/resend-client.js";
-import { SENDING_IDENTITIES } from "../../lib/mailme/schema.js";
+import { sendingIdentities } from "../../lib/mailme/schema.js";
+import { getSettings } from "../../lib/mailme/store.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -33,21 +34,25 @@ export default async function handler(req, res) {
   }
 
   try {
-    const configured = resendConfigured();
-    if (!configured) {
+    const settings = await getSettings();
+    const identities = sendingIdentities(settings);
+
+    if (!resendConfigured()) {
       return res.status(200).json({
         configured: false,
-        warm: null,
-        cold: null,
+        domains: identities.map((i) => ({ key: i.key, domain: i.domain, status: null })),
       });
     }
 
-    const [warm, cold] = await Promise.all([
-      domainStatus(SENDING_IDENTITIES.warm.domain),
-      domainStatus(SENDING_IDENTITIES.cold.domain),
-    ]);
+    // One Resend lookup per identity. listDomains() inside domainStatus()
+    // degrades to [] on failure rather than throwing, so one bad domain
+    // cannot blank out the status of the others.
+    const domains = await Promise.all(identities.map(async (i) => {
+      const s = await domainStatus(i.domain);
+      return { key: i.key, domain: i.domain, status: s ? s.status : null };
+    }));
 
-    return res.status(200).json({ configured: true, warm, cold });
+    return res.status(200).json({ configured: true, domains });
   } catch (e) {
     console.error("mailme domains route error:", e);
     return res.status(500).json({ error: e.message });
