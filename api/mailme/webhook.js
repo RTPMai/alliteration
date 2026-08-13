@@ -34,7 +34,7 @@
 
 import { safeEqual } from "../../lib/session.js";
 import { appendCampaignEvents, suppressEmail } from "../../lib/mailme/store.js";
-import { EVENT_TYPES, normalizeEmail } from "../../lib/mailme/schema.js";
+import { EVENT_TYPES, normalizeEmail, decodeTagValueStrict } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -106,10 +106,18 @@ export function normalizeEvent(raw) {
 
   const tags = tagsToMap(d.tags);
 
+  // Tag values are base64url-encoded on the way out (see encodeTagValue in
+  // schema.js: Resend rejects the colon in our "source:localId" contact
+  // ids). Decode them back so events attribute to the real contact id that
+  // the rest of the app uses. The plain-text fallbacks stay for any other
+  // provider shape, and for events sent before the encoding existed.
+  const decodedCampaign = tags.campaignId ? decodeTagValueStrict(tags.campaignId) : null;
+  const decodedContact = tags.cid ? decodeTagValueStrict(tags.cid) : null;
+
   return {
     type,
-    campaignId: tags.campaignId || raw.campaignId || raw.CampaignId || (raw.metadata && raw.metadata.campaignId) || null,
-    contactId: tags.contactId || raw.contactId || raw.ContactId || (raw.metadata && raw.metadata.contactId) || null,
+    campaignId: decodedCampaign || tags.campaignId || raw.campaignId || raw.CampaignId || (raw.metadata && raw.metadata.campaignId) || null,
+    contactId: decodedContact || tags.contactId || raw.contactId || raw.ContactId || (raw.metadata && raw.metadata.contactId) || null,
     email: email || null,
     linkUrl: type === "click" ? (d.link || raw.linkUrl || raw.url || raw.OriginalLink || null) : null,
     reason: (d.bounce && d.bounce.message) || raw.reason || raw.Description || raw.Details || null,
