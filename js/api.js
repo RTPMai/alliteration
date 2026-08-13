@@ -508,7 +508,7 @@ const MOCK_DATA = {
     footerPreview: '', coldCapToday: 20, rampDay: 0
   }),
   [ENDPOINTS.mmImport]: () => ({ ok: true, dryRun: true, summary: { parsed: 0, importable: 0, duplicate: 0, existingClients: 0, suppressed: 0, invalid: 0, headers: [], unmappedColumns: [], topDomains: [], tags: [] }, preview: [], rejected: { duplicate: [], existingClients: [], suppressed: [], invalid: [] } }),
-  [ENDPOINTS.mmDomains]: () => ({ configured: false, warm: null, cold: null }),
+  [ENDPOINTS.mmDomains]: () => ({ configured: false, domains: [] }),
 
   // CrewCore. Shapes mirror api/crewcore/*.js. MOCK_USER (below) is admin, so
   // the admin-view shape is what renders offline by default; the self-serve
