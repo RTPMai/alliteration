@@ -30,6 +30,22 @@ import { publicListSignup } from "../../lib/mailme/store.js";
 const SIGNUP_MAX_PER_IP = 10;
 const SIGNUP_WINDOW_SECONDS = 60 * 60;
 
+// Sites allowed to call this endpoint directly from their own page's JS
+// (a native embedded form, not just a link to flyover-con-signup.html).
+// Browsers block cross-origin fetch() unless the SERVER explicitly allows
+// the calling origin, so every real site that embeds a form needs to be
+// listed here or its submissions will silently fail in the browser console
+// with a CORS error, not a clear message on the page. Add both the live
+// domain and its Vercel preview domain for each site as they're set up.
+const ALLOWED_ORIGINS = [
+  "https://www.flyovercon.ink",
+  "https://flyovercon.ink",
+  "https://foc-peach.vercel.app",
+  "https://www.pmapparel.com",
+  "https://pmapparel.com",
+  "https://pm-apparel-site.vercel.app",
+];
+
 // Add a new entry here for each future public signup page. Key is whatever
 // the page sends as `list`; tag/listName are what actually gets written.
 const ALLOWED_SIGNUPS = {
@@ -54,6 +70,15 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  // Reflect the calling origin back ONLY if it's on the allowlist above.
+  // flyover-con-signup.html itself doesn't need this (it's served from the
+  // same origin as the API), this is specifically for a form built directly
+  // into the FOC or P&M Apparel site's own HTML/JS.
+  const origin = req.headers && req.headers.origin;
+  if (origin && ALLOWED_ORIGINS.includes(origin)) {
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  }
   if (req.method === "OPTIONS") return res.status(200).end();
   if (req.method !== "POST") {
     res.setHeader("Allow", "POST");
