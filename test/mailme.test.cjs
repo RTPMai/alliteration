@@ -510,8 +510,8 @@ t.test('mixing cold prospects with warm contacts is refused', () => {
   const schema = stripComments(read('lib/mailme/schema.js'));
   const fn = schema.slice(schema.indexOf('export function campaignSourceConflict'));
   const body = fn.slice(0, fn.indexOf('\n}'));
-  t.assert(body.includes('identityForSource'),
-    'the conflict check must compare sending identity, not raw source');
+  t.assert(body.includes('COLD_SOURCES'),
+    'the conflict check must compare cold vs warm, not raw source');
 });
 
 /* ---- v3.1: regressions from the first live run --------------------------- */
