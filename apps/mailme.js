@@ -1992,9 +1992,32 @@ export default {
       const box = $('#mmBlockers');
       if (!box) return;
       if (!state.blockers || !state.blockers.length) {
-        box.innerHTML = '<div class="mm-notice"><b>CAN-SPAM basics look complete.</b> ' +
-          'Each identity still needs its own from-address and a verified domain in ' +
-          'Resend before it can actually send — see Sending below.</div>';
+        // Report ACTUAL readiness rather than a standing reminder. Once a
+        // domain verifies and its from-address is filled in there is nothing
+        // left to do, and a notice that still says otherwise is worse than
+        // no notice: it makes a working setup look broken.
+        const idents = (state.settings && state.settings.identities) || [];
+        const statusFor = (key) => {
+          const d = (state.domains && Array.isArray(state.domains.domains))
+            ? state.domains.domains.find((x) => x.key === key) : null;
+          return d ? d.status : null;
+        };
+        const ready = idents.filter((i) => (i.fromAddress || '').trim() && statusFor(i.key) === 'verified');
+        const notReady = idents.filter((i) => !ready.includes(i));
+
+        if (ready.length) {
+          box.innerHTML = '<div class="mm-notice"><b>Ready to send.</b> ' +
+            esc(ready.map((i) => `${i.label} (${i.domain})`).join(', ')) +
+            (ready.length === 1 ? ' is verified with a from-address set.' : ' are verified with from-addresses set.') +
+            (notReady.length
+              ? ' Still waiting on: ' + esc(notReady.map((i) => i.label || i.domain).join(', ')) + '.'
+              : '') +
+            '</div>';
+        } else {
+          box.innerHTML = '<div class="mm-notice"><b>CAN-SPAM basics look complete.</b> ' +
+            'No identity is ready yet: each one needs a from-address and a verified ' +
+            'domain in Resend. See Sending identities below.</div>';
+        }
         return;
       }
       // These are hard blockers, not suggestions. CAN-SPAM requires a real
@@ -2035,7 +2058,8 @@ export default {
           <div class="mm-field"><label>From-address</label>
             <input data-ident="fromAddress" type="text" value="${esc(identity.fromAddress || '')}"
                    placeholder="PM Apparel &lt;hello@${esc(identity.domain || 'example.com')}&gt;">
-            <div class="hint">The name and address recipients see. Must be at this domain.</div></div>
+            <div class="hint">Must be an address at this domain. A bare address is fine:
+              the name above is used as the sender name.</div></div>
           <div class="mm-row" style="align-items:center">
             <div class="mm-field">
               <label style="font-weight:400">
