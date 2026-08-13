@@ -75,11 +75,38 @@ export default async function handler(req, res) {
       if (b.replyToFixed !== undefined) patch.replyToFixed = String(b.replyToFixed).trim();
       if (b.unsubscribeUrl !== undefined) patch.unsubscribeUrl = String(b.unsubscribeUrl).trim();
 
-      if (b.fromAddress && typeof b.fromAddress === "object") {
-        patch.fromAddress = {};
-        ["warm", "cold"].forEach((k) => {
-          if (b.fromAddress[k] !== undefined) patch.fromAddress[k] = String(b.fromAddress[k]).trim();
+      // Sending identities: one per brand. Validated field by field rather
+      // than stored as handed over, so a malformed client payload cannot
+      // write junk into the object the send path reads its from-address and
+      // domain out of.
+      if (Array.isArray(b.identities)) {
+        const seen = new Set();
+        const cleaned = [];
+        b.identities.forEach((raw) => {
+          if (!raw || typeof raw !== "object") return;
+          const key = String(raw.key || "").trim().toLowerCase().replace(/[^a-z0-9-]/g, "");
+          const domain = String(raw.domain || "").trim().toLowerCase();
+          if (!key || !domain || seen.has(key)) return;
+          seen.add(key);
+          cleaned.push({
+            key,
+            label: String(raw.label || key).trim(),
+            domain,
+            fromAddress: String(raw.fromAddress || "").trim(),
+            cold: raw.cold === true,
+            default: raw.default === true,
+          });
         });
+        if (cleaned.length) {
+          // Exactly one default, so identityForCampaign() always resolves.
+          if (!cleaned.some((i) => i.default)) cleaned[0].default = true;
+          let first = true;
+          cleaned.forEach((i) => {
+            if (i.default && !first) i.default = false;
+            if (i.default) first = false;
+          });
+          patch.identities = cleaned;
+        }
       }
 
       if (b.postalAddress && typeof b.postalAddress === "object") {
