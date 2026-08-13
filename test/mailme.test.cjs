@@ -238,6 +238,47 @@ t.test('the scheduled-send cron is registered in vercel.json', () => {
     'vercel.json must declare the mailme cron-send job or scheduled campaigns will never fire');
 });
 
+t.test('a failed send is retryable: failures requeue and do not count as sent', () => {
+  // Regression: a rejected batch was still added to sentIds and recorded
+  // against the frequency cap, and the campaign flipped to "sent" with
+  // nothing delivered, leaving no Send button and no way to retry.
+  const src = stripComments(read('lib/mailme/send.js'));
+  t.assert(/failedContacts/.test(src) && /sentContacts/.test(src),
+    'successes and failures must be tracked separately');
+  t.assert(/recordSends\(sentContacts/.test(src),
+    'only successfully sent contacts may count against the frequency cap');
+  t.assert(/failedContacts\.map\(\(c\) => c\.id\)\.concat\(remainingIds\)/.test(src),
+    'failed contacts must go back on the queue for a retry');
+  t.assert(/const done = stillQueued\.length === 0/.test(src),
+    'a campaign must not be marked sent while anything is still queued');
+});
+
+t.test('a permanently failing campaign stops being auto-retried', () => {
+  const send = stripComments(read('lib/mailme/send.js'));
+  t.assert(/MAX_CONSECUTIVE_FAILED_RUNS/.test(send),
+    'there must be a ceiling on consecutive failed runs');
+  t.assert(/results\.sent === 0 && results\.failed > 0/.test(send),
+    'a failed run is one that sent nothing and failed something');
+  const cron = stripComments(read('api/mailme/cron-send.js'));
+  t.assert(/failedRuns \|\| 0\) < MAX_CONSECUTIVE_FAILED_RUNS/.test(cron),
+    'the cron must skip campaigns that have hit the failure ceiling');
+});
+
+t.test('any success clears the failure counter, so a transient outage self-heals', () => {
+  const src = stripComments(read('lib/mailme/send.js'));
+  t.assert(/\? priorFailedRuns \+ 1 : 0/.test(src),
+    'a run with any successful send must reset the counter to zero');
+});
+
+t.test('campaign results open in a modal, not inline in the list', () => {
+  const src = read('apps/mailme.js');
+  t.assert(/mm-modal-back/.test(src), 'a modal backdrop must exist');
+  t.assert(!/id="mmResults"/.test(src),
+    'the old inline results container must be gone');
+  t.assert(/this\._closeModal/.test(src),
+    'unmount must be able to tear down the modal Escape listener');
+});
+
 t.test('send orchestration re-verifies compliance, domain readiness and suppression before dispatch', () => {
   const src = stripComments(read('lib/mailme/send.js'));
   t.assert(/complianceBlockers\(/.test(src), 'sendReadiness must reuse the CAN-SPAM blockers');
