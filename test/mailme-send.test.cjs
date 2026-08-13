@@ -328,6 +328,65 @@ Promise.all([
       'reply_to must be resolved from each contact inside the per-message map');
   });
 
+  /* ---- from-name composition --------------------------------------------- */
+
+  const brand = { key: 'pm', label: 'P&M Apparel', domain: 'pmapparel.com',
+                  fromAddress: 'P&M Apparel <hello@pmapparel.com>' };
+  const amOn = schema.mergeSettings({ fromNameIncludesAM: true });
+  const amOff = schema.mergeSettings({ fromNameIncludesAM: false });
+
+  t.test('the account manager first name is appended to the sender name', () => {
+    t.equal(schema.composeFrom(brand, { accountManager: 'Alexis Davis' }, amOn),
+      '"P&M Apparel - Alexis" <hello@pmapparel.com>');
+  });
+
+  t.test('a contact with no account manager gets the brand name alone', () => {
+    t.equal(schema.composeFrom(brand, { accountManager: '' }, amOn),
+      '"P&M Apparel" <hello@pmapparel.com>',
+      'no dangling separator when there is no AM');
+  });
+
+  t.test('the name is normalized to title case', () => {
+    t.equal(schema.composeFrom(brand, { accountManager: 'hannah posey' }, amOn),
+      '"P&M Apparel - Hannah" <hello@pmapparel.com>');
+  });
+
+  t.test('turning the setting off keeps the sender name fixed', () => {
+    t.equal(schema.composeFrom(brand, { accountManager: 'Alexis Davis' }, amOff),
+      '"P&M Apparel" <hello@pmapparel.com>');
+  });
+
+  t.test('the sending ADDRESS never changes, only the display name', () => {
+    // Domain alignment for SPF/DKIM depends on the address, so a varying
+    // display name must never move it off the verified domain.
+    ['Alexis Davis', '', 'Margo'].forEach((am) => {
+      const out = schema.composeFrom(brand, { accountManager: am }, amOn);
+      t.assert(out.includes('<hello@pmapparel.com>'),
+        'address must stay put for AM "' + am + '"');
+    });
+  });
+
+  t.test('a bare address with no display name still works', () => {
+    const bare = { key: 'x', label: 'Flyover Con', domain: 'flyovercon.ink',
+                   fromAddress: 'hello@flyovercon.ink' };
+    t.equal(schema.composeFrom(bare, { accountManager: 'Abby Penton' }, amOn),
+      '"Flyover Con - Abby" <hello@flyovercon.ink>',
+      'the identity label fills in when the from-address carries no name');
+  });
+
+  t.test('a display name cannot break out of the From header', () => {
+    const nasty = { key: 'x', label: 'Bad "Name" <evil@attacker.com>', domain: 'pmapparel.com',
+                    fromAddress: 'hello@pmapparel.com' };
+    const out = schema.composeFrom(nasty, { accountManager: '' }, amOn);
+    t.assert(out.endsWith('<hello@pmapparel.com>'),
+      'the real address must remain the last thing in the header');
+    t.assert(!/^"[^"]*"\s*<evil/.test(out), 'an injected address must not become the sender');
+  });
+
+  t.test('an identity with no from-address yet yields an empty string, not junk', () => {
+    t.equal(schema.composeFrom({ key: 'x', label: 'X', fromAddress: '' }, {}, amOn), '');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
   console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
