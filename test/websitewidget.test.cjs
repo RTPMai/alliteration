@@ -1,3 +1,6 @@
+// PUT IN: test/websitewidget.test.cjs (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * WebsiteWidget contract tests.
  *
@@ -17,7 +20,7 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
 const app = read('apps/websitewidget.js');
-const apiRoute = read('api/websitewidget.js');
+const apiRoute = read('api/websitewidget/stats.js');
 const ga4 = read('lib/websitewidget/ga4.js');
 const store = read('lib/websitewidget/store.js');
 const registry = read('js/registry.js');
@@ -76,10 +79,20 @@ t.test('tokens.css themes websitewidget', () => {
 /* ---- seam / ENDPOINTS ------------------------------------------------------ */
 
 t.test('js/api.js exposes ENDPOINTS.wwStats and routes it live', () => {
-  t.assert(/wwStats:\s*'\/api\/websitewidget'/.test(apiJs),
-    'ENDPOINTS.wwStats must point at /api/websitewidget');
-  t.assert(apiJs.includes("'/api/websitewidget'") && /LIVE_PREFIXES\s*=\s*\[[\s\S]*?'\/api\/websitewidget'[\s\S]*?\]/.test(apiJs),
-    '/api/websitewidget must be listed in LIVE_PREFIXES or the app will silently mock forever');
+  t.assert(/wwStats:\s*'\/api\/websitewidget\/stats'/.test(apiJs),
+    'ENDPOINTS.wwStats must point at /api/websitewidget/stats');
+  t.assert(/LIVE_PREFIXES\s*=\s*\[[\s\S]*?'\/api\/websitewidget\/'[\s\S]*?\]/.test(apiJs),
+    '/api/websitewidget/ must be listed in LIVE_PREFIXES or the app will silently mock forever');
+});
+
+t.test('no flat api/websitewidget.js exists alongside the api/websitewidget/ folder', () => {
+  // The exact bug this guards against: Vercel treats a file and a
+  // same-named folder as the SAME route once the .js is stripped, so
+  // api/websitewidget.js + api/websitewidget/sites.js fails to deploy with
+  // "conflicting paths." Both routes must live inside the folder.
+  t.assert(!exists('api/websitewidget.js'),
+    'a flat api/websitewidget.js has come back — it will collide with the api/websitewidget/ folder and fail to deploy');
+  t.assert(exists('api/websitewidget/stats.js'), 'api/websitewidget/stats.js is missing');
 });
 
 t.test('websitewidget has a MOCK shape so offline dev still works', () => {
@@ -93,27 +106,27 @@ t.test('the hub sample-data banner tracks websitewidget too', () => {
 
 /* ---- API route ------------------------------------------------------------- */
 
-t.test('api/websitewidget.js requires a session', () => {
+t.test('api/websitewidget/stats.js requires a session', () => {
   t.assert(apiRoute.includes('requireAuth'), 'the route must call requireAuth, same as every other app route');
 });
 
-t.test('api/websitewidget.js is GET only', () => {
+t.test('api/websitewidget/stats.js is GET only', () => {
   t.assert(/req\.method !== ["']GET["']/.test(apiRoute), 'non-GET requests should be rejected');
 });
 
-t.test('api/websitewidget.js always answers cleanly, even before GA4 is configured', () => {
+t.test('api/websitewidget/stats.js always answers cleanly, even before GA4 is configured', () => {
   t.assert(apiRoute.includes('isConfigured()'), 'the route must check isConfigured() before calling GA4');
   t.assert(/status\(200\)\.json\(emptyStats/.test(apiRoute),
     'an unconfigured GA4 should return a normal 200 with configured:false, not an error');
 });
 
-t.test('api/websitewidget.js fails open on a GA4 error rather than 500ing the dashboard', () => {
+t.test('api/websitewidget/stats.js fails open on a GA4 error rather than 500ing the dashboard', () => {
   t.assert(/catch\s*\(e\)/.test(apiRoute), 'the route must catch GA4 failures');
   t.assert(/status\(200\)\.json\(\{\s*\.\.\.emptyStats/.test(apiRoute),
     'a GA4 error should still answer 200 with an empty read, not take the dashboard down');
 });
 
-t.test('api/websitewidget.js caches through the shared store, not ad hoc', () => {
+t.test('api/websitewidget/stats.js caches through the shared store, not ad hoc', () => {
   t.assert(apiRoute.includes('getCached') && apiRoute.includes('setCached'),
     'the route should read/write through lib/websitewidget/store.js');
   t.assert(apiRoute.includes("fresh === '1'") || apiRoute.includes('fresh ='),
