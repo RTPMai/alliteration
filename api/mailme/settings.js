@@ -73,6 +73,7 @@ export default async function handler(req, res) {
         patch.replyToMode = m;
       }
       if (b.replyToFixed !== undefined) patch.replyToFixed = String(b.replyToFixed).trim();
+      if (b.replyToDomain !== undefined) patch.replyToDomain = String(b.replyToDomain).trim().toLowerCase();
       if (b.unsubscribeUrl !== undefined) patch.unsubscribeUrl = String(b.unsubscribeUrl).trim();
 
       // Sending identities: one per brand. Validated field by field rather
