@@ -1486,6 +1486,14 @@ export default {
                 <div class="hint" id="mmIdentityHint"></div>
               </div>
               <div class="mm-field">
+                <label for="mmIdentity">Send as</label>
+                <select id="mmIdentity">
+                  ${((state.settings && state.settings.identities) || []).map((i) =>
+                    `<option value="${esc(i.key)}"${d.identityKey === i.key ? ' selected' : ''}>
+                       ${esc(i.label)} (${esc(i.domain)})</option>`).join('')}
+                </select>
+              </div>
+              <div class="mm-field">
                 <label for="mmList">Send to list</label>
                 <select id="mmList">
                   <option value="">No list, use tags below</option>
@@ -1555,14 +1563,24 @@ export default {
             : tags.length ? ' matching ' + tags.join(', ') : ' (everyone mailable)') +
           ' · suppressed contacts are always excluded';
 
-        // The sending domain is shown because it is the consequence of the
-        // audience choice, and it is the thing that protects client mail.
-        $('#mmIdentityHint').textContent = COLD_SOURCES.includes(source)
-          ? 'Sends from outreach.pmapparel.com, kept separate so cold complaints cannot hurt client mail.'
-          : 'Sends from mail.pmapparel.com, the warm domain shared by clients, leads and giving contacts.';
+        // Cold audiences are called out because sending them over a domain
+        // that also carries quotes and invoices is the thing that puts
+        // ordinary customer mail at risk.
+        const identList = (state.settings && state.settings.identities) || [];
+        const chosen = identList.find((i) => i.key === ($('#mmIdentity') ? $('#mmIdentity').value : null));
+        if (COLD_SOURCES.includes(source)) {
+          $('#mmIdentityHint').textContent = chosen && !chosen.cold
+            ? `${chosen.label} is not marked for cold outreach. Cold complaints on this domain can push client mail into spam.`
+            : 'Cold outreach. Kept on a domain marked for it so complaints cannot hurt client mail.';
+        } else {
+          $('#mmIdentityHint').textContent = chosen
+            ? `Sends from ${chosen.domain}.`
+            : 'Pick which brand this sends as.';
+        }
       };
       refresh();
       $('#mmSource').addEventListener('change', refresh);
+      if ($('#mmIdentity')) $('#mmIdentity').addEventListener('change', refresh);
       $('#mmList').addEventListener('change', refresh);
       $('#mmSegment').addEventListener('input', refresh);
 
@@ -1599,7 +1617,8 @@ export default {
         body: $('#mmBody').value,
         source: $('#mmSource').value,
         listId: $('#mmList').value || null,
-        segmentTags: $('#mmSegment').value.split(',').map((t) => t.trim()).filter(Boolean)
+        segmentTags: $('#mmSegment').value.split(',').map((t) => t.trim()).filter(Boolean),
+        identityKey: $('#mmIdentity') ? $('#mmIdentity').value || null : null
       };
       if (!payload.subject.trim() || !payload.body.trim()) {
         return { ok: false, error: 'A draft needs both a subject and a body.' };
@@ -1795,6 +1814,10 @@ export default {
           <b>Not ready to send.</b> <ul style="margin:8px 0 0 18px">
           ${blockers.map((b) => `<li>${esc(b.text)}</li>`).join('')}</ul></div>`;
       }
+      // A warning, not a blocker: which domain carries cold outreach is a
+      // business call, so this states the risk and still allows the send.
+      const identWarn = d.identityWarning
+        ? `<div class="mm-notice"><b>Check the sending domain.</b> ${esc(d.identityWarning)}</div>` : '';
       if (!d.recipientCount) {
         return `<div class="mm-notice">There is nobody eligible to send this campaign to
           right now.</div>`;
@@ -1809,12 +1832,12 @@ export default {
         yourself just pushes the next batch out immediately instead of waiting.</div>` : '';
 
       if (!canSendUI) {
-        return `${rampNote}<div class="mm-notice">
+        return `${identWarn}${rampNote}<div class="mm-notice">
           <b>Ready to send${plan.queueRemaining ? ` — ${plan.queueRemaining} left in this run` : ''}.</b>
           Your MailMe role is read-only, so you can't press Send from here.</div>`;
       }
 
-      return `${rampNote}
+      return `${identWarn}${rampNote}
         <div class="mm-notice"><b>Ready to send</b> to ${d.recipientCount} recipient${d.recipientCount === 1 ? '' : 's'}
           from ${esc((d.identity && d.identity.domain) || '')}.</div>
         <div class="mm-actions" style="margin-bottom:14px">
@@ -1981,26 +2004,51 @@ export default {
         state.blockers.map((b) => `<li>${esc(b.text)}</li>`).join('') + '</ul></div>';
     }
 
-    function renderDomainRow(key, label, domain, inputId, st) {
-      const d = state.domains && state.domains[key];
-      const status = d ? d.status : (state.domains && state.domains.configured ? 'not_added' : 'unknown');
+    // One row per sending identity (brand). Status comes from a live Resend
+    // lookup, so it reflects real DNS rather than something the app cached.
+    function renderIdentityRow(identity, idx) {
+      const byKey = (state.domains && Array.isArray(state.domains.domains))
+        ? state.domains.domains.find((d) => d.key === identity.key) : null;
+      const status = byKey && byKey.status
+        ? byKey.status
+        : (state.domains && state.domains.configured ? 'not_added' : 'unknown');
       const meta = {
         verified: { cls: 'ok', text: 'Verified, ready to send' },
-        pending: { cls: 'warn', text: 'Pending — DNS added, waiting on propagation' },
+        pending: { cls: 'warn', text: 'Pending, waiting on DNS propagation' },
         not_started: { cls: 'warn', text: 'Added in Resend, DNS not yet added' },
         not_added: { cls: 'bad', text: 'Not added to Resend yet' },
-        failed: { cls: 'bad', text: 'Verification failed — check the DNS records' },
+        failed: { cls: 'bad', text: 'Verification failed, check the DNS records' },
         unknown: { cls: 'mute', text: 'Connect a provider to check status' }
       }[status] || { cls: 'mute', text: status };
-      const from = (st.fromAddress && st.fromAddress[key]) || '';
+
       return `
-        <div class="mm-row" style="align-items:flex-end">
-          <div class="mm-field"><label for="${inputId}">${esc(label)} from-address</label>
-            <input id="${inputId}" type="text" value="${esc(from)}"
-              placeholder="P&amp;M Apparel &lt;hello@${esc(domain)}&gt;">
-            <div class="hint">Sends from <b>${esc(domain)}</b>.</div></div>
-          <div class="mm-field" style="max-width:260px">
-            <span class="pill ${meta.cls}">${esc(meta.text)}</span>
+        <div class="mm-ident" data-ident-idx="${idx}"
+             style="border:1px solid var(--line-soft);border-radius:8px;padding:12px;margin-bottom:10px">
+          <div class="mm-row">
+            <div class="mm-field"><label>Name</label>
+              <input data-ident="label" type="text" value="${esc(identity.label || '')}"
+                     placeholder="PM Apparel"></div>
+            <div class="mm-field"><label>Domain</label>
+              <input data-ident="domain" type="text" value="${esc(identity.domain || '')}"
+                     placeholder="pmapparel.com"></div>
+          </div>
+          <div class="mm-field"><label>From-address</label>
+            <input data-ident="fromAddress" type="text" value="${esc(identity.fromAddress || '')}"
+                   placeholder="PM Apparel &lt;hello@${esc(identity.domain || 'example.com')}&gt;">
+            <div class="hint">The name and address recipients see. Must be at this domain.</div></div>
+          <div class="mm-row" style="align-items:center">
+            <div class="mm-field">
+              <label style="font-weight:400">
+                <input data-ident="default" type="radio" name="mmIdentDefault"${identity.default ? ' checked' : ''}>
+                Default for new campaigns</label>
+              <label style="font-weight:400">
+                <input data-ident="cold" type="checkbox"${identity.cold ? ' checked' : ''}>
+                Use for cold outreach</label>
+            </div>
+            <div class="mm-field" style="max-width:280px;text-align:right">
+              <span class="pill ${meta.cls}">${esc(meta.text)}</span><br>
+              <button class="mm-btn ghost sm" data-ident-remove="${idx}" style="margin-top:6px">Remove</button>
+            </div>
           </div>
         </div>`;
     }
@@ -2073,20 +2121,30 @@ export default {
         </div>
 
         <div class="mm-card">
-          <div class="mm-card-hd"><h3>Sending</h3>
-            <span class="meta">Resend, one domain per audience</span></div>
+          <div class="mm-card-hd"><h3>Sending identities</h3>
+            <span class="meta">One per brand</span></div>
           <div class="mm-card-bd">
             <div class="hint" style="margin-bottom:12px">
-              Each identity needs its own from-address AND a verified domain in
-              Resend before it can send. This checks Resend directly, so it
-              reflects real DNS status, not a guess.
+              Each brand sends as itself. An identity needs a from-address AND a
+              verified domain in Resend before it can send. Status is checked against
+              Resend directly, so it reflects real DNS, not a guess.
             </div>
-            ${renderDomainRow('warm', 'Client mail', 'mail.pmapparel.com', 'setFromWarm', st)}
-            ${renderDomainRow('cold', 'Cold outreach', 'outreach.pmapparel.com', 'setFromCold', st)}
+            <div id="mmIdentityList">
+              ${(st.identities || []).map((i, idx) => renderIdentityRow(i, idx)).join('')}
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn ghost sm" id="mmAddIdentity">Add another identity</button>
+            </div>
             ${!state.domains || !state.domains.configured ? `<div class="mm-notice">
               <b>No provider connected yet.</b> RESEND_API_KEY needs to be set in Vercel
-              before either identity can send, regardless of what's filled in above.
+              before anything can send, regardless of what's filled in above.
               </div>` : ''}
+            ${(st.identities || []).some((i) => i.cold) ? '' : `<div class="mm-notice">
+              <b>No identity is marked for cold outreach.</b> Campaigns to imported
+              prospects will warn until one is. Cold email draws complaints at rates a
+              customer list never does, and reputation is scored per domain, so it is
+              worth keeping cold traffic off a domain that also sends quotes and invoices.
+              </div>`}
           </div>
         </div>
 
@@ -2157,6 +2215,55 @@ export default {
         </div>`;
 
       $('#mmSaveSettings').addEventListener('click', saveSettings);
+
+      const addBtn = $('#mmAddIdentity');
+      if (addBtn) addBtn.addEventListener('click', () => {
+        // Read what's on screen first so half-typed edits are not lost when
+        // the list re-renders with the new blank row appended.
+        state.settings.identities = collectIdentities();
+        state.settings.identities.push({
+          key: 'brand' + Date.now().toString(36),
+          label: '', domain: '', fromAddress: '', cold: false, default: false
+        });
+        renderSettings();
+      });
+
+      box.querySelectorAll('[data-ident-remove]').forEach((b) => {
+        b.addEventListener('click', () => {
+          const idx = Number(b.getAttribute('data-ident-remove'));
+          const list = collectIdentities();
+          if (list.length <= 1) {
+            msg('#mmSettingsMsg', 'You need at least one sending identity.', 'mm-err');
+            return;
+          }
+          list.splice(idx, 1);
+          if (!list.some((i) => i.default)) list[0].default = true;
+          state.settings.identities = list;
+          renderSettings();
+        });
+      });
+    }
+
+    // Reads the identity rows straight out of the DOM. Keys are preserved
+    // from the rendered row rather than regenerated, so a campaign that
+    // points at an identity keeps pointing at it across an edit.
+    function collectIdentities() {
+      const rows = Array.from(root.querySelectorAll('.mm-ident'));
+      const existing = (state.settings && state.settings.identities) || [];
+      return rows.map((row, idx) => {
+        const get = (name) => row.querySelector('[data-ident="' + name + '"]');
+        const prior = existing[idx] || {};
+        const label = (get('label').value || '').trim();
+        const domain = (get('domain').value || '').trim().toLowerCase();
+        return {
+          key: prior.key || ('brand' + idx),
+          label: label || domain || prior.key || ('Brand ' + (idx + 1)),
+          domain,
+          fromAddress: (get('fromAddress').value || '').trim(),
+          cold: !!get('cold').checked,
+          default: !!get('default').checked
+        };
+      }).filter((i) => i.domain);
     }
 
     async function saveSettings() {
@@ -2168,10 +2275,7 @@ export default {
         replyToMode: val('setReplyMode'),
         replyToFixed: val('setReplyFixed'),
         unsubscribeUrl: val('setUnsub'),
-        fromAddress: {
-          warm: val('setFromWarm'),
-          cold: val('setFromCold')
-        },
+        identities: collectIdentities(),
         postalAddress: {
           line1: val('setLine1'), line2: val('setLine2'), city: val('setCity'),
           state: val('setState'), postalCode: val('setZip')
@@ -2227,7 +2331,7 @@ export default {
       // Import compares against existing contacts to flag duplicates.
       import: [loadContacts],
       // The composer's dropdown is built from lists, so both are needed.
-      campaigns: [loadContacts, loadLists, loadCampaigns],
+      campaigns: [loadContacts, loadLists, loadCampaigns, loadSettings],
       settings: [loadSettings]
     };
 
