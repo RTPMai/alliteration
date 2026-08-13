@@ -49,29 +49,40 @@ Promise.all([
   // async call is awaited and resolved HERE, outside t.test, and only the
   // synchronous assertion against the already-resolved value goes inside.
 
-  const readinessNoProvider = await send.sendReadiness(schema.mergeSettings({
+  const READY_BASE = {
     fromName: 'P&M Apparel', unsubscribeUrl: 'https://x/unsub',
     postalAddress: { line1: '1 Main St', city: 'Polk City', state: 'IA', postalCode: '50226' },
-    fromAddress: { warm: 'hello@mail.pmapparel.com', cold: 'hello@outreach.pmapparel.com' },
-  }), 'warm');
+  };
+  const ident = (over) => ({
+    key: 'pmapparel', label: 'PM Apparel', domain: 'pmapparel.com',
+    fromAddress: 'PM Apparel <hello@pmapparel.com>', cold: false, default: true, ...over
+  });
+
+  const readinessNoProvider = await send.sendReadiness(
+    schema.mergeSettings(READY_BASE), ident());
 
   t.test('sendReadiness blocks when the provider is not configured', () => {
     t.assert(readinessNoProvider.some((b) => b.field === 'provider'),
       'with no RESEND_API_KEY set, sendReadiness must report the provider as a blocker');
   });
 
-  const readinessNoFromAddress = await send.sendReadiness(schema.mergeSettings({
-    fromName: 'P&M Apparel', unsubscribeUrl: 'https://x/unsub',
-    postalAddress: { line1: '1 Main St', city: 'Polk City', state: 'IA', postalCode: '50226' },
-    fromAddress: { warm: '', cold: 'hello@outreach.pmapparel.com' },
-  }), 'warm');
+  const readinessNoFromAddress = await send.sendReadiness(
+    schema.mergeSettings(READY_BASE), ident({ fromAddress: '' }));
 
-  t.test('sendReadiness blocks a warm send with no warm from-address, independent of the cold one', () => {
-    t.assert(readinessNoFromAddress.some((b) => b.field === 'fromAddress.warm'),
-      'a blank warm from-address must block a warm send even though cold has one');
+  t.test('sendReadiness blocks an identity with no from-address', () => {
+    t.assert(readinessNoFromAddress.some((b) => b.field === 'identity.pmapparel.fromAddress'),
+      'a blank from-address on the chosen identity must block the send');
   });
 
-  const readinessBlank = await send.sendReadiness(schema.mergeSettings({}), 'warm');
+  t.test('sendReadiness blocks when a campaign resolves to no identity at all', () => {
+    // Guards against a campaign pointing at an identity that was deleted in
+    // Settings: better a clear blocker than a crash or a silent wrong sender.
+    return send.sendReadiness(schema.mergeSettings(READY_BASE), null).then((b) => {
+      t.assert(b.some((x) => x.field === 'identity'), 'a missing identity must be a blocker');
+    });
+  });
+
+  const readinessBlank = await send.sendReadiness(schema.mergeSettings({}), ident());
 
   t.test('sendReadiness still carries the CAN-SPAM blockers (postal address, unsubscribe link, from-name)', () => {
     ['postalAddress', 'unsubscribeUrl', 'fromName'].forEach((field) => {
@@ -204,6 +215,59 @@ Promise.all([
     const out = html('Plain body.');
     t.assert(out.includes('unsubscribe.html?t=tok'), 'the tokenized unsubscribe URL must be in the footer');
     t.assert(out.includes('Polk City'), 'the CAN-SPAM postal address must be in the footer');
+  });
+
+  /* ---- sending identities (multi-brand) ---------------------------------- */
+
+  const threeBrands = schema.mergeSettings({
+    identities: [
+      { key: 'pmapparel', label: 'PM Apparel', domain: 'pmapparel.com', fromAddress: 'a@pmapparel.com', cold: false, default: true },
+      { key: 'flyovercon', label: 'Flyover Con', domain: 'flyovercon.ink', fromAddress: 'a@flyovercon.ink', cold: false, default: false },
+      { key: 'iowaondemand', label: 'Iowa On Demand', domain: 'iowaondemand.com', fromAddress: 'a@iowaondemand.com', cold: true, default: false },
+    ]
+  });
+
+  t.test('a campaign sends as the identity it explicitly names', () => {
+    const got = schema.identityForCampaign({ source: 'client', identityKey: 'flyovercon' }, threeBrands);
+    t.equal(got.domain, 'flyovercon.ink', 'an explicit identityKey must win');
+  });
+
+  t.test('a campaign with no identity chosen falls back to the default one', () => {
+    const got = schema.identityForCampaign({ source: 'client', identityKey: null }, threeBrands);
+    t.equal(got.key, 'pmapparel', 'the identity flagged default should be used');
+  });
+
+  t.test('a cold campaign with no identity chosen prefers a cold-marked identity', () => {
+    const got = schema.identityForCampaign({ source: 'prospect', identityKey: null }, threeBrands);
+    t.equal(got.key, 'iowaondemand', 'cold sends should default to an identity marked for cold');
+  });
+
+  t.test('a campaign pointing at a deleted identity still resolves rather than crashing', () => {
+    const got = schema.identityForCampaign({ source: 'client', identityKey: 'gone' }, threeBrands);
+    t.assert(got && got.key === 'pmapparel', 'a stale identityKey should fall back to the default');
+  });
+
+  t.test('settings with no identities saved fall back to the seeded three', () => {
+    const list = schema.sendingIdentities(schema.mergeSettings({}));
+    t.assert(list.length >= 1, 'there must always be at least one identity');
+    t.assert(list.some((i) => i.domain === 'pmapparel.com'), 'pmapparel.com should be seeded');
+  });
+
+  t.test('sending cold prospects over a non-cold identity warns, but does not block', () => {
+    const recips = [{ source: 'prospect', email: 'a@b.com' }];
+    const warm = threeBrands.identities.find((i) => i.key === 'pmapparel');
+    const warning = schema.identityAudienceWarning(recips, warm);
+    t.assert(warning && /cold outreach/i.test(warning),
+      'a cold audience on a warm domain must produce a warning');
+    const cold = threeBrands.identities.find((i) => i.key === 'iowaondemand');
+    t.equal(schema.identityAudienceWarning(recips, cold), null,
+      'a cold audience on a cold-marked identity is fine');
+  });
+
+  t.test('warm contacts never trigger the cold-domain warning', () => {
+    const recips = [{ source: 'client', email: 'a@b.com' }];
+    const warm = threeBrands.identities.find((i) => i.key === 'pmapparel');
+    t.equal(schema.identityAudienceWarning(recips, warm), null);
   });
 
   process.exit(t.report());
