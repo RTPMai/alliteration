@@ -41,6 +41,23 @@ t.test('signup.js rate limits by IP', () => {
   t.assert(/clientIp/.test(handlerSrc), 'signup.js should key its rate limit off the request IP');
 });
 
+/* ---- CORS: an explicit origin allowlist, never a wildcard ---- */
+
+t.test('CORS reflects only an allowlisted origin, never a wildcard', () => {
+  t.assert(/ALLOWED_ORIGINS/.test(handlerSrc), 'signup.js is missing an origin allowlist');
+  t.assert(!/Access-Control-Allow-Origin["'],\s*["']\*["']/.test(handlerSrc),
+    'signup.js must never set Access-Control-Allow-Origin to "*" — that would let ANY site on the ' +
+    'internet call this endpoint from a user\'s browser, not just FOC/P&M\'s own sites');
+  t.assert(/ALLOWED_ORIGINS\.includes\(origin\)/.test(handlerSrc),
+    'the Origin header must be checked against the allowlist before being reflected back');
+});
+
+t.test('the real FOC and P&M domains are on the CORS allowlist', () => {
+  ['flyovercon.ink', 'pmapparel.com'].forEach((domain) => {
+    t.assert(handlerSrc.includes(domain), `CORS allowlist is missing ${domain}`);
+  });
+});
+
 /* ---- allowlist, not free text ---- */
 
 t.test('the target list comes from an allowlist, not raw request input', () => {
