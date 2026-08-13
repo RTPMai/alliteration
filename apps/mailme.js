@@ -2085,6 +2085,12 @@ export default {
                 </select>
                 <div class="hint">BackBone already knows who owns each account, so replies
                   can land with the right person automatically.</div></div>
+              <div class="mm-field"><label style="font-weight:400">
+                  <input id="setFromAM" type="checkbox"${st.fromNameIncludesAM !== false ? ' checked' : ''}>
+                  Add the account manager's name to the sender name</label>
+                <div class="hint">Shows as "P&amp;M Apparel - Alexis" in the inbox. Contacts with
+                  no account manager just see the brand name. The email address itself never
+                  changes.</div></div>
               <div class="mm-field"><label for="setReplyDomain">Account manager email domain</label>
                 <input id="setReplyDomain" type="text" value="${esc(st.replyToDomain || '')}"
                        placeholder="pmapparel.com">
@@ -2281,6 +2287,7 @@ export default {
         replyToMode: val('setReplyMode'),
         replyToFixed: val('setReplyFixed'),
         replyToDomain: val('setReplyDomain'),
+        fromNameIncludesAM: !!$('#setFromAM').checked,
         unsubscribeUrl: val('setUnsub'),
         identities: collectIdentities(),
         postalAddress: {
