@@ -129,11 +129,20 @@ export default {
   /* Results open in a modal rather than expanding the list: a campaign
      report is a thing you read, not a row you skim past, and inline
      expansion pushed the rest of the list off screen. */
+  /* z-index must clear the shell header, which sits at 200. The backdrop is
+     attached to <body> rather than the app root because .view runs a
+     transform animation, and a transformed ancestor makes position:fixed
+     resolve against IT instead of the viewport, which pinned the modal
+     under the header and clipped its top.
+     Theme tokens still apply: tokens.css scopes them to body[data-app], and
+     the backdrop is a body child. */
   .mm-modal-back{position:fixed;inset:0;background:rgba(15,20,28,.55);
-    display:flex;align-items:flex-start;justify-content:center;z-index:60;
-    padding:32px 16px;overflow-y:auto}
+    z-index:400;overflow-y:auto;padding:40px 16px}
+  /* Centred with auto margins rather than flex: a flex item taller than its
+     container gets its overflowing top clipped and unreachable by scroll. */
   .mm-modal{background:var(--card);border-radius:12px;width:100%;
-    max-width:860px;box-shadow:0 18px 50px rgba(0,0,0,.3);position:relative}
+    max-width:860px;margin:0 auto;box-shadow:0 18px 50px rgba(0,0,0,.3);
+    position:relative}
   .mm-modal .mm-card{border:0;box-shadow:none;margin:0}
   .mm-modal-x{position:absolute;top:12px;right:14px;border:0;background:transparent;
     font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:4px 8px}
@@ -1712,6 +1721,11 @@ export default {
     // The modal is created on demand and appended to the app root, not left
     // sitting in the campaigns markup, so it overlays the page instead of
     // pushing the list around.
+    // Held in the closure rather than looked up by id. Other apps are
+    // mounted at the same time, so document-wide lookups are banned in this
+    // file; keeping the node itself sidesteps that entirely.
+    let modalCarrier = null;
+
     function openModal(innerHtml) {
       closeModal();
       const back = document.createElement('div');
@@ -1724,7 +1738,18 @@ export default {
       back.addEventListener('click', (ev) => { if (ev.target === back) closeModal(); });
       back.querySelector('#mmModalX').addEventListener('click', closeModal);
       document.addEventListener('keydown', escClose);
-      root.appendChild(back);
+      // App styles are scoped to [data-app-root="mailme"] (see
+      // js/app-host.js), so a bare body child would render unstyled. The
+      // backdrop is wrapped in a carrier div holding that attribute, which
+      // keeps every .mm-* rule matching while still escaping the app root's
+      // transformed ancestor.
+      const carrier = document.createElement('div');
+      carrier.dataset.appRoot = 'mailme';
+      carrier.appendChild(back);
+      document.body.appendChild(carrier);
+      modalCarrier = carrier;
+      // Stop the page behind the overlay scrolling with the wheel.
+      document.body.style.overflow = 'hidden';
       return back;
     }
 
@@ -1735,9 +1760,12 @@ export default {
     this._closeModal = closeModal;
 
     function closeModal() {
-      const existing = root.querySelector('#mmModalBack');
-      if (existing) existing.remove();
+      if (modalCarrier) {
+        modalCarrier.remove();
+        modalCarrier = null;
+      }
       document.removeEventListener('keydown', escClose);
+      document.body.style.overflow = '';
     }
 
     async function showResults(id) {
@@ -2507,6 +2535,10 @@ export default {
   showView(view) {
     const root = this._root;
     if (!root) return;
+    // The results modal is attached to <body>, so it does not disappear on
+    // its own when the view changes. Close it, or navigating to Contacts
+    // with results open would leave an overlay stranded over the new view.
+    if (this._closeModal) this._closeModal();
     const ids = {
       dashboard: 'mmDash', contacts: 'mmContactsView', lists: 'mmListsView',
       import: 'mmImportView', campaigns: 'mmCampaignsView',
