@@ -30,7 +30,8 @@ import {
 } from "../../lib/mailme/store.js";
 import {
   validateCampaignPatch, selectRecipients, resolveList,
-  computeRates, deliverabilityWarnings, identityForSource, campaignSourceConflict,
+  computeRates, deliverabilityWarnings, identityForCampaign, campaignSourceConflict,
+  identityAudienceWarning, sendingIdentities, COLD_SOURCES,
 } from "../../lib/mailme/schema.js";
 import {
   applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
@@ -115,15 +116,15 @@ export default async function handler(req, res) {
 
         // The cold ramp: a brand-new sending domain must not go from zero to
         // hundreds of cold emails in a day, which is itself a spam signal.
-        const isCold = identityForSource(campaign.source).key === "cold";
+        const isCold = COLD_SOURCES.includes(campaign.source);
         const rampDay = settings.coldStartedAt
           ? Math.floor((Date.now() - new Date(settings.coldStartedAt)) / 86400000) : 0;
         const dailyCap = isCold
           ? coldDailyCap(rampDay, settings.policy)
           : settings.policy.clientDailyCap;
 
-        const identity = identityForSource(campaign.source);
-        const sendBlockers = await sendReadiness(settings, identity.key);
+        const identity = identityForCampaign(campaign, settings);
+        const sendBlockers = await sendReadiness(settings, identity);
         const queueRemaining = campaign.sendState ? campaign.sendState.queue.length : null;
 
         return res.status(200).json({
@@ -134,6 +135,8 @@ export default async function handler(req, res) {
           heldCount: (held || []).length,
           held: (held || []).slice(0, 50),
           identity,
+          identities: sendingIdentities(settings),
+          identityWarning: identityAudienceWarning(recipients, identity),
           conflict: campaignSourceConflict(recipients),
           // Two blocker lists on purpose: `blockers` is the CAN-SPAM-only set
           // (unchanged shape, still used by Settings' own checklist), while
