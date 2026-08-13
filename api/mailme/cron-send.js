@@ -26,7 +26,7 @@
 
 import { safeEqual } from "../../lib/session.js";
 import { listCampaigns } from "../../lib/mailme/store.js";
-import { sendCampaign } from "../../lib/mailme/send.js";
+import { sendCampaign, MAX_CONSECUTIVE_FAILED_RUNS } from "../../lib/mailme/send.js";
 
 function authorizedCron(req) {
   const cronSecret = process.env.CRON_SECRET;
@@ -46,7 +46,11 @@ export default async function handler(req, res) {
     const now = Date.now();
     const due = all.filter((c) =>
       (c.status === "scheduled" && c.scheduledAt && new Date(c.scheduledAt).getTime() <= now) ||
-      (c.status === "sending" && c.sendState && Array.isArray(c.sendState.queue) && c.sendState.queue.length > 0)
+      (c.status === "sending" && c.sendState && Array.isArray(c.sendState.queue) && c.sendState.queue.length > 0 &&
+        // Give up on a campaign that keeps failing rather than retrying it
+        // every 15 minutes indefinitely. It stays visible in the app with a
+        // Send button, so a person can retry once the cause is fixed.
+        ((c.sendState.failedRuns || 0) < MAX_CONSECUTIVE_FAILED_RUNS))
     );
 
     const results = [];
