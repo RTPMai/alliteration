@@ -270,6 +270,64 @@ Promise.all([
     t.equal(schema.identityAudienceWarning(recips, warm), null);
   });
 
+  /* ---- reply-to derivation ----------------------------------------------- */
+
+  const amSettings = schema.mergeSettings({
+    replyToMode: 'account-manager', replyToDomain: 'pmapparel.com',
+    replyToFixed: 'orders@pmapparel.com'
+  });
+
+  t.test('account-manager mode derives firstname@ from a full name', () => {
+    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, amSettings),
+      'alexis@pmapparel.com');
+  });
+
+  t.test('a first name on its own works the same way', () => {
+    t.equal(schema.resolveReplyTo({ accountManager: 'Hannah' }, amSettings),
+      'hannah@pmapparel.com');
+  });
+
+  t.test('punctuation and case in the name are stripped', () => {
+    t.equal(schema.resolveReplyTo({ accountManager: "O'Brien, Margo" }, amSettings),
+      'obrien@pmapparel.com');
+  });
+
+  t.test('a contact with no account manager falls back to the fixed address', () => {
+    // Rather than inventing an inbox. A reply that bounces is worse than a
+    // reply that lands in the shop's main mailbox.
+    t.equal(schema.resolveReplyTo({ accountManager: '' }, amSettings),
+      'orders@pmapparel.com');
+  });
+
+  t.test('an implausible account manager value falls back rather than guessing', () => {
+    t.equal(schema.resolveReplyTo({ accountManager: '-' }, amSettings),
+      'orders@pmapparel.com');
+  });
+
+  t.test('fixed mode ignores the account manager entirely', () => {
+    const fixed = schema.mergeSettings({
+      replyToMode: 'fixed', replyToFixed: 'orders@pmapparel.com', replyToDomain: 'pmapparel.com'
+    });
+    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, fixed),
+      'orders@pmapparel.com');
+  });
+
+  t.test('reply-to is null when nothing usable is configured, not a broken address', () => {
+    const none = schema.mergeSettings({
+      replyToMode: 'account-manager', replyToDomain: '', replyToFixed: ''
+    });
+    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, none), null,
+      'with no domain and no fallback, Reply-To must be omitted rather than malformed');
+  });
+
+  t.test('the send path attaches reply_to per recipient, not per campaign', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
+    const batch = src.slice(src.indexOf('const messages = chunk.map'));
+    t.assert(/resolveReplyTo\(contact, settings\)/.test(batch),
+      'reply_to must be resolved from each contact inside the per-message map');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
   console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
