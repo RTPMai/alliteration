@@ -1,4 +1,3 @@
-<!-- PUT IN: test/mailme.test.cjs (rename this file, drop the .txt) -->
 /**
  * MailMe contract tests.
  *
