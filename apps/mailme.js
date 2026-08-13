@@ -2085,6 +2085,12 @@ export default {
                 </select>
                 <div class="hint">BackBone already knows who owns each account, so replies
                   can land with the right person automatically.</div></div>
+              <div class="mm-field"><label for="setReplyDomain">Account manager email domain</label>
+                <input id="setReplyDomain" type="text" value="${esc(st.replyToDomain || '')}"
+                       placeholder="pmapparel.com">
+                <div class="hint">Replies go to firstname@ this domain, taken from the
+                  account manager on each contact. Anyone without one falls back to the
+                  fixed address below.</div></div>
               <div class="mm-field"><label for="setReplyFixed">Fixed reply-to</label>
                 <input id="setReplyFixed" type="text" value="${esc(st.replyToFixed || '')}"
                   placeholder="hello@pmapparel.com">
@@ -2274,6 +2280,7 @@ export default {
         fromName: val('setFromName'),
         replyToMode: val('setReplyMode'),
         replyToFixed: val('setReplyFixed'),
+        replyToDomain: val('setReplyDomain'),
         unsubscribeUrl: val('setUnsub'),
         identities: collectIdentities(),
         postalAddress: {
