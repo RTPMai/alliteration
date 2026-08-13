@@ -52,9 +52,15 @@ t.test('websitewidget shows a plain setup notice, not invented numbers, when unc
 /* ---- registry ------------------------------------------------------------- */
 
 t.test('websitewidget registry entry is no longer a stub', () => {
-  const block = registry.slice(registry.indexOf("id: 'websitewidget'"), registry.indexOf("id: 'websitewidget'") + 900);
+  const block = registry.slice(registry.indexOf("id: 'websitewidget'"), registry.indexOf("id: 'websitewidget'") + 1300);
   t.assert(/stub:\s*false/.test(block), 'websitewidget should be un-stubbed now that it is built');
   t.assert(!/stubNote:/.test(block), 'a live app should not still carry a stubNote');
+});
+
+t.test('websitewidget has a Manage Sites view alongside Dashboard', () => {
+  const block = registry.slice(registry.indexOf("id: 'websitewidget'"), registry.indexOf("id: 'websitewidget'") + 1300);
+  t.assert(/\['settings',\s*'Manage Sites'\]/.test(block),
+    'the registry should declare a settings view for adding/editing sites');
 });
 
 t.test('websitewidget keeps its confirmed accent color', () => {
@@ -123,8 +129,15 @@ t.test('lib/websitewidget/ga4.js exists and exposes isConfigured + fetchSiteStat
 });
 
 t.test('ga4.js never throws just from missing env vars', () => {
-  t.assert(/if \(!propertyId \|\| !clientEmail \|\| !privateKey\) return null/.test(ga4),
+  t.assert(/if \(!clientEmail \|\| !privateKey\) return null/.test(ga4),
     'creds() must return null rather than throw when env vars are unset, so isConfigured() can answer false cleanly');
+});
+
+t.test('ga4.js no longer ties a property id to the shared service account', () => {
+  t.assert(!ga4.includes('GA4_PROPERTY_ID'),
+    'the property id moved to lib/websitewidget/sites-store.js — ga4.js should only read the two shared credential env vars');
+  t.assert(/fetchSiteStats\(propertyId/.test(ga4),
+    'fetchSiteStats should take propertyId as a parameter, not read a single env var');
 });
 
 t.test('ga4.js unescapes a literal backslash-n in the pasted private key', () => {
@@ -145,6 +158,8 @@ t.test('ga4.js requests read-only analytics scope only', () => {
 
 /* ---- KV cache ------------------------------------------------------------- */
 
+/* ---- KV cache ------------------------------------------------------------- */
+
 t.test('lib/websitewidget/store.js fails open when KV is not configured', () => {
   t.assert(store.includes('if (!cfg) return null'), 'getCached must return null, not throw, when KV is unset');
   t.assert(/if \(!cfg\) return;/.test(store), 'setCached must no-op, not throw, when KV is unset');
@@ -152,6 +167,89 @@ t.test('lib/websitewidget/store.js fails open when KV is not configured', () => 
 
 t.test('lib/websitewidget/store.js uses its own key prefix, not the shell users/roles one', () => {
   t.assert(store.includes('websitewidget_data:'), 'the cache should live under its own prefix, matching the other apps data namespaces');
+});
+
+t.test('the stats cache is keyed per site, not shared across sites', () => {
+  t.assert(/cacheKey\(siteId,\s*days\)/.test(store),
+    'caching by day range alone would leak one site\u2019s cached numbers onto another site\u2019s tab');
+});
+
+/* ---- multi-site sites store ------------------------------------------------ */
+
+const sitesStore = read('lib/websitewidget/sites-store.js');
+
+t.test('lib/websitewidget/sites-store.js exists and exposes the full CRUD set', () => {
+  t.assert(exists('lib/websitewidget/sites-store.js'), 'lib/websitewidget/sites-store.js is missing');
+  ['export async function getSites', 'export async function getSite', 'export async function addSite',
+    'export async function updateSite', 'export async function deleteSite']
+    .forEach((k) => t.assert(sitesStore.includes(k), 'lib/websitewidget/sites-store.js is missing ' + k));
+});
+
+t.test('sites-store migrates a legacy GA4_PROPERTY_ID into the sites list exactly once', () => {
+  t.assert(sitesStore.includes('GA4_PROPERTY_ID'),
+    'an existing single-site deploy (PMApparel.com via env var) must not silently lose its config on this upgrade');
+  t.assert(sitesStore.includes("id: \"pmapparel\""),
+    'the migrated legacy site should keep a stable, recognizable id');
+});
+
+t.test('sites-store requires a label and a property id to add a site', () => {
+  t.assert(sitesStore.includes('Site label is required'), 'addSite must reject a missing label');
+  t.assert(sitesStore.includes('GA4 property id is required'), 'addSite must reject a missing property id');
+});
+
+t.test('sites-store generates unique ids so two sites cannot collide', () => {
+  t.assert(sitesStore.includes('uniqueId'), 'addSite should not trust a slug to already be unique');
+});
+
+/* ---- sites API route -------------------------------------------------------- */
+
+const sitesRoute = read('api/websitewidget/sites.js');
+
+t.test('api/websitewidget/sites.js exists and requires a session for every method', () => {
+  t.assert(exists('api/websitewidget/sites.js'), 'api/websitewidget/sites.js is missing');
+  t.assert(sitesRoute.includes('requireAuth'), 'the route must call requireAuth, same as every other app route');
+});
+
+t.test('reading the site list does not require admin, but changing it does', () => {
+  t.assert(/req\.method === ["']GET["'][\s\S]{0,80}getSites/.test(sitesRoute),
+    'GET should not be gated behind isAdmin — the dashboard needs the list to build its site tabs for everyone');
+  t.assert(/if \(!isAdmin\) return res\.status\(403\)/.test(sitesRoute),
+    'POST/PATCH/DELETE must be blocked for non-admins — this changes what data source the whole team reads from');
+});
+
+t.test('the sites route supports add, edit, and remove', () => {
+  ['req.method === "POST"', 'req.method === "PATCH"', 'req.method === "DELETE"']
+    .forEach((k) => t.assert(sitesRoute.includes(k), 'api/websitewidget/sites.js is missing ' + k));
+});
+
+/* ---- multi-site dashboard behavior ----------------------------------------- */
+
+t.test('the dashboard renders a tab per configured site and reloads stats on switch', () => {
+  t.assert(app.includes('wwSiteTabs'), 'apps/websitewidget.js should render a site-tab bar');
+  t.assert(app.includes('ctx.activeSiteId = btn.dataset.site'),
+    'clicking a site tab must switch the active site before reloading stats');
+  t.assert(/ctx\.api\.get\(ENDPOINTS\.wwStats,\s*params\)/.test(app),
+    'stats must be requested with a site param, not just a day range');
+});
+
+t.test('the app loads the site list before the first stats fetch', () => {
+  const mountBody = app.slice(app.indexOf('async mount(ctx)'));
+  const loadSitesIdx = mountBody.indexOf('await loadSites()');
+  const loadStatsIdx = mountBody.indexOf('await loadStats(false)');
+  t.assert(loadSitesIdx !== -1 && loadStatsIdx !== -1 && loadSitesIdx < loadStatsIdx,
+    'loadSites() must run before the first loadStats() call, or there is no active site to request stats for');
+});
+
+t.test('Manage Sites is gated to admins, matching the API', () => {
+  t.assert(app.includes("ctx.perms.superuser") || app.includes('data_scope'),
+    'the settings view must check the same admin condition the API enforces, so a non-admin never sees edit controls it cannot use');
+  t.assert(app.includes('Managing sites is limited to admins'),
+    'a non-admin should see a plain message, not a broken or empty form');
+});
+
+t.test('a per-site GA4 error is shown distinctly from "not configured"', () => {
+  t.assert(app.includes("Couldn't read this site's data") || app.includes('data.error'),
+    'a 403/denied-access error for one site should explain itself, not look identical to GA4 never having been set up');
 });
 
 process.exit(t.report());
