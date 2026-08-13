@@ -468,6 +468,42 @@ Promise.all([
     t.equal(schema.decodeTagValueStrict(schema.encodeTagValue('client:3310')), 'client:3310');
   });
 
+  /* ---- List-Unsubscribe --------------------------------------------------- */
+
+  t.test('List-Unsubscribe points at an endpoint that accepts POST', () => {
+    const h = schema.listUnsubscribeHeaders(
+      schema.mergeSettings({ unsubscribeUrl: 'https://alliteration-eight.vercel.app/unsubscribe.html' }),
+      'TOK123');
+    t.assert(h, 'headers should be produced when an unsubscribe URL is set');
+    t.assert(/\/api\/mailme\/unsubscribe\?t=TOK123/.test(h['List-Unsubscribe']),
+      'one-click must target the API route, not the HTML page: ' + h['List-Unsubscribe']);
+    t.assert(/^<https:\/\/.*>$/.test(h['List-Unsubscribe']),
+      'the header value must be angle-bracketed per RFC 8058');
+    t.equal(h['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
+  });
+
+  t.test('no unsubscribe URL means no header, rather than one pointing nowhere', () => {
+    t.equal(schema.listUnsubscribeHeaders(schema.mergeSettings({ unsubscribeUrl: '' }), 'TOK'), null);
+    t.equal(schema.listUnsubscribeHeaders(
+      schema.mergeSettings({ unsubscribeUrl: 'https://x/unsubscribe.html' }), ''), null,
+      'no token means no usable header');
+  });
+
+  t.test('a trailing slash on the configured URL does not double up', () => {
+    const h = schema.listUnsubscribeHeaders(
+      schema.mergeSettings({ unsubscribeUrl: 'https://mail.example.com/' }), 'TOK');
+    t.assert(!/\/\/api/.test(h['List-Unsubscribe']), 'got: ' + h['List-Unsubscribe']);
+  });
+
+  t.test('the header token matches the one in the email body', () => {
+    // Both come from the same makeToken call in send.js. If they diverged,
+    // one-click would opt out a different contact than the visible link.
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
+    t.assert(/listUnsubscribeHeaders\(settings, token\)/.test(src),
+      'the header must reuse the same token variable the body link uses');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
   console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
