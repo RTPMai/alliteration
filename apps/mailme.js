@@ -126,6 +126,18 @@ export default {
   .mm-tile.warn .v{color:var(--warn-dk)}
   .mm-tile.bad .v{color:var(--danger-dk)}
 
+  /* Results open in a modal rather than expanding the list: a campaign
+     report is a thing you read, not a row you skim past, and inline
+     expansion pushed the rest of the list off screen. */
+  .mm-modal-back{position:fixed;inset:0;background:rgba(15,20,28,.55);
+    display:flex;align-items:flex-start;justify-content:center;z-index:60;
+    padding:32px 16px;overflow-y:auto}
+  .mm-modal{background:var(--card);border-radius:12px;width:100%;
+    max-width:860px;box-shadow:0 18px 50px rgba(0,0,0,.3);position:relative}
+  .mm-modal .mm-card{border:0;box-shadow:none;margin:0}
+  .mm-modal-x{position:absolute;top:12px;right:14px;border:0;background:transparent;
+    font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:4px 8px}
+  .mm-modal-x:hover{color:var(--ink)}
   .mm-card{background:var(--card);border:1px solid var(--line);
     border-radius:var(--radius-md);margin-bottom:18px;overflow:hidden}
   .mm-card-hd{display:flex;justify-content:space-between;align-items:center;
@@ -407,7 +419,6 @@ export default {
         </div>
         <div id="mmCampaignMsg"></div>
         <div id="mmComposer" hidden></div>
-        <div id="mmResults" hidden></div>
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>Saved drafts</h3><span class="meta" id="mmCampaignCount"></span>
@@ -432,8 +443,7 @@ export default {
       editingList: null, editingCampaign: null, editingContact: null, viewingListId: null,
       importPreview: null, importCsv: '',
       settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
-      domains: null,
-      viewingResults: null
+      domains: null
     };
     this._state = state;
     state.lastLoaded = null;
@@ -1699,8 +1709,38 @@ export default {
       }
     }
 
+    // The modal is created on demand and appended to the app root, not left
+    // sitting in the campaigns markup, so it overlays the page instead of
+    // pushing the list around.
+    function openModal(innerHtml) {
+      closeModal();
+      const back = document.createElement('div');
+      back.className = 'mm-modal-back';
+      back.id = 'mmModalBack';
+      back.innerHTML = `<div class="mm-modal" role="dialog" aria-modal="true">
+        <button class="mm-modal-x" id="mmModalX" aria-label="Close">&times;</button>
+        ${innerHtml}</div>`;
+      // Clicking the backdrop closes; clicking inside must not.
+      back.addEventListener('click', (ev) => { if (ev.target === back) closeModal(); });
+      back.querySelector('#mmModalX').addEventListener('click', closeModal);
+      document.addEventListener('keydown', escClose);
+      root.appendChild(back);
+      return back;
+    }
+
+    function escClose(ev) { if (ev.key === 'Escape') closeModal(); }
+    // Held on the instance so unmount() can tear down the modal's
+    // document-level Escape listener, which would otherwise keep firing
+    // against a detached root.
+    this._closeModal = closeModal;
+
+    function closeModal() {
+      const existing = root.querySelector('#mmModalBack');
+      if (existing) existing.remove();
+      document.removeEventListener('keydown', escClose);
+    }
+
     async function showResults(id) {
-      const box = $('#mmResults');
       try {
         const d = await api.get(ENDPOINTS.mmCampaigns, { id });
         const r = d.results || {};
@@ -1714,8 +1754,7 @@ export default {
         const canSendUI = !!(ctx.perms && (ctx.perms.superuser === true || ctx.perms.can_edit !== false));
         const canTriggerSend = ['draft', 'scheduled', 'sending'].includes(status);
 
-        box.hidden = false;
-        box.innerHTML = `
+        const box = openModal(`
           <div class="mm-card">
             <div class="mm-card-hd">
               <h3>Results: ${esc(d.campaign.subject)}</h3>
@@ -1779,13 +1818,13 @@ export default {
                 <button class="mm-btn ghost" id="mmCloseResults">Close</button>
               </div>
             </div>
-          </div>`;
-        $('#mmCloseResults').addEventListener('click', () => { box.hidden = true; box.innerHTML = ''; });
+          </div>`);
+        box.querySelector('#mmCloseResults').addEventListener('click', closeModal);
 
-        const sendBtn = $('#mmSendCampaign');
+        const sendBtn = box.querySelector('#mmSendCampaign');
         if (sendBtn) sendBtn.addEventListener('click', () => triggerSend(id, status === 'sending'));
 
-        const unschedBtn = $('#mmUnschedule');
+        const unschedBtn = box.querySelector('#mmUnschedule');
         if (unschedBtn) unschedBtn.addEventListener('click', () => unscheduleCampaign(id));
       } catch (e) {
         msg('#mmCampaignMsg', 'Could not load results: ' + esc(e.message), 'mm-err');
@@ -2481,11 +2520,17 @@ export default {
   },
 
   unmount() {
-    // No document-level listeners, but the stamp ticker is a real interval
-    // and would keep firing against a detached root forever.
+    // The stamp ticker is a real interval and would keep firing against a
+    // detached root forever.
     if (this._stampTimer) {
       clearInterval(this._stampTimer);
       this._stampTimer = null;
+    }
+    // The results modal registers a document-level Escape handler. Closing
+    // it removes that listener as well as the node.
+    if (this._closeModal) {
+      this._closeModal();
+      this._closeModal = null;
     }
   }
 };
