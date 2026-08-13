@@ -387,6 +387,87 @@ Promise.all([
     t.equal(schema.composeFrom({ key: 'x', label: 'X', fromAddress: '' }, {}, amOn), '');
   });
 
+  /* ---- Resend tag encoding ------------------------------------------------ */
+  //
+  // Regression: a real send failed with "Tags should only contain ASCII
+  // letters, numbers, underscores, or dashes" because contact ids are
+  // "source:localId" and the colon is not allowed.
+
+  const RESEND_TAG_OK = /^[A-Za-z0-9_-]*$/;
+
+  t.test('every real contact id shape encodes to a legal Resend tag', () => {
+    ['client:3310', 'lead:LD-0042', 'giving:abc-123', 'prospect:PR-00001',
+     'client:ACME/2024', 'prospect:PR 7', 'client:café'].forEach((id) => {
+      const enc = schema.encodeTagValue(id);
+      t.assert(RESEND_TAG_OK.test(enc), 'illegal tag characters produced for ' + id + ': ' + enc);
+    });
+  });
+
+  t.test('encoding round-trips exactly, so open and click attribution survives', () => {
+    // Unique-open counts key on contactId, so a lossy encode would split one
+    // person into two or merge two into one.
+    ['client:3310', 'prospect:PR-00001', 'giving:abc-123', 'client:café'].forEach((id) => {
+      t.equal(schema.decodeTagValue(schema.encodeTagValue(id)), id, 'round trip failed for ' + id);
+    });
+  });
+
+  t.test('two different contacts never encode to the same tag', () => {
+    const a = schema.encodeTagValue('client:331');
+    const b = schema.encodeTagValue('client:3310');
+    t.assert(a !== b, 'distinct contact ids must stay distinct after encoding');
+  });
+
+  t.test('campaign ids encode legally too', () => {
+    t.assert(RESEND_TAG_OK.test(schema.encodeTagValue('MM-00001')));
+    t.equal(schema.decodeTagValue(schema.encodeTagValue('MM-00001')), 'MM-00001');
+  });
+
+  t.test('decodeTagValue returns null on junk rather than throwing', () => {
+    t.equal(schema.decodeTagValue(''), null);
+    t.equal(schema.decodeTagValue(null), null);
+  });
+
+  t.test('the send path encodes both tags, never raw ids', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
+    t.assert(!/value: String\(contact\.id\)/.test(src),
+      'a raw contact id must never be handed to Resend as a tag value');
+    t.assert(/encodeTagValue\(contact\.id\)/.test(src), 'contact id must be encoded');
+    t.assert(/encodeTagValue\(campaign\.id\)/.test(src), 'campaign id must be encoded');
+  });
+
+  t.test('the webhook decodes the cid tag back to the real contact id', () => {
+    const e = webhook.normalizeEvent({
+      type: 'email.clicked',
+      data: {
+        to: ['dana@example.org'],
+        link: 'https://pmapparel.com',
+        tags: [
+          { name: 'campaignId', value: schema.encodeTagValue('MM-00007') },
+          { name: 'cid', value: schema.encodeTagValue('client:3310') },
+        ],
+      },
+    });
+    t.equal(e.campaignId, 'MM-00007', 'campaign id must decode');
+    t.equal(e.contactId, 'client:3310', 'contact id must decode back to its real form');
+  });
+
+  t.test('a plain tag value that happens to look like base64 is left alone', () => {
+    // "MM-00007" decodes without error into mojibake, so a naive decode
+    // would corrupt every plain-text tag from another provider.
+    t.equal(schema.decodeTagValueStrict('MM-00007'), null,
+      'a value that was never encoded must not be decoded');
+    const e = webhook.normalizeEvent({
+      type: 'email.delivered',
+      data: { to: ['x@y.com'], tags: [{ name: 'campaignId', value: 'MM-00007' }] },
+    });
+    t.equal(e.campaignId, 'MM-00007', 'a plain campaign id must pass through unchanged');
+  });
+
+  t.test('strict decode still accepts genuinely encoded values', () => {
+    t.equal(schema.decodeTagValueStrict(schema.encodeTagValue('client:3310')), 'client:3310');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
   console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
