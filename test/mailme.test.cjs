@@ -279,6 +279,36 @@ t.test('campaign results open in a modal, not inline in the list', () => {
     'unmount must be able to tear down the modal Escape listener');
 });
 
+t.test('the modal clears the shell header and carries its style scope', () => {
+  // The shell header is z-index 200. A modal below that renders UNDERNEATH
+  // it, which is what clipped the first version's title bar.
+  const src = stripComments(read('apps/mailme.js'));
+  const shell = read('css/shell.css');
+  const headerZ = Math.max(...(shell.match(/z-index:\s*(\d+)/g) || [])
+    .map((m) => Number(m.replace(/\D/g, ''))));
+  const modalZ = Number((src.match(/\.mm-modal-back\{[^}]*z-index:(\d+)/) || [])[1]);
+  t.assert(modalZ > headerZ,
+    `modal z-index (${modalZ}) must exceed everything in shell.css (${headerZ})`);
+
+  // Attached to body to escape .view's transform animation, which would
+  // otherwise become the containing block for position:fixed. App CSS is
+  // scoped to [data-app-root], so the carrier must restore that scope.
+  t.assert(/document\.body\.appendChild\(carrier\)/.test(src),
+    'the modal must attach to body, not the app root');
+  t.assert(/carrier\.dataset\.appRoot = 'mailme'/.test(src),
+    'the carrier must carry the app-root scope or every .mm- rule stops matching');
+});
+
+t.test('a body-attached modal is cleaned up on view change and unmount', () => {
+  // It lives outside the app root, so nothing removes it automatically.
+  const src = stripComments(read('apps/mailme.js'));
+  const showView = src.slice(src.indexOf('showView(view)'));
+  t.assert(/this\._closeModal\(\)/.test(showView.slice(0, 600)),
+    'showView must close the modal, or it strands over the next view');
+  t.assert(/document\.body\.style\.overflow = ''/.test(src),
+    'closing must restore body scrolling');
+});
+
 t.test('send orchestration re-verifies compliance, domain readiness and suppression before dispatch', () => {
   const src = stripComments(read('lib/mailme/send.js'));
   t.assert(/complianceBlockers\(/.test(src), 'sendReadiness must reuse the CAN-SPAM blockers');
