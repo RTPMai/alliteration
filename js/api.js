@@ -216,7 +216,8 @@ export const ENDPOINTS = {
   notifications:   '/api/notifications',
 
   // ---- WebsiteWidget ----
-  wwStats:         '/api/websitewidget'
+  wwStats:         '/api/websitewidget',
+  wwSites:         '/api/websitewidget/sites'
 };
 
 /* ------------------------------------------------------------------ *
@@ -444,6 +445,7 @@ const MOCK_DATA = {
   // MOCK and the live-but-unconfigured state look identical on purpose.
   [ENDPOINTS.wwStats]: () => ({
     configured: false,
+    siteId: null,
     generatedAt: new Date().toISOString(),
     days: 30,
     totals: { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0 },
@@ -451,6 +453,10 @@ const MOCK_DATA = {
     channels: [],
     topPages: []
   }),
+
+  // Empty by default: unlike the ShopStock/GivingGauge mocks, there is no
+  // plausible sample site list to invent here without it looking real.
+  [ENDPOINTS.wwSites]: () => ({ sites: [] }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
