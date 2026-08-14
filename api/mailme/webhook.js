@@ -33,7 +33,9 @@
 // ESM handler.
 
 import { safeEqual } from "../../lib/session.js";
-import { appendCampaignEvents, suppressEmail, recordWebhookHeartbeat } from "../../lib/mailme/store.js";
+import {
+  appendCampaignEvents, suppressEmail, recordWebhookHeartbeat, lookupSentMessage,
+} from "../../lib/mailme/store.js";
 import { EVENT_TYPES, normalizeEmail, decodeTagValueStrict } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
@@ -71,11 +73,21 @@ const TYPE_ALIASES = {
 
 /** Pull { campaignId, contactId } out of Resend's tags array, which is how
  *  lib/mailme/send.js attaches them to every outgoing message. */
+/**
+ * Tags arrive in one of two shapes depending on the provider and, for
+ * Resend, on the direction of travel: the SEND api takes an array of
+ * { name, value }, but the WEBHOOK payload delivers the same tags as a
+ * plain object. Reading only the array form is why events were arriving
+ * and being counted as orphaned: the tags were present, just not in the
+ * shape this looked for.
+ */
 function tagsToMap(tags) {
   const out = {};
-  (Array.isArray(tags) ? tags : []).forEach((t) => {
-    if (t && t.name) out[t.name] = t.value;
-  });
+  if (Array.isArray(tags)) {
+    tags.forEach((t) => { if (t && t.name) out[t.name] = t.value; });
+  } else if (tags && typeof tags === "object") {
+    Object.keys(tags).forEach((k) => { out[k] = tags[k]; });
+  }
   return out;
 }
 
@@ -116,6 +128,9 @@ export function normalizeEvent(raw) {
 
   return {
     type,
+    // Kept so an event whose tags did not survive can still be attributed
+    // via the message index written at send time.
+    messageId: d.email_id || d.id || raw.email_id || null,
     campaignId: decodedCampaign || tags.campaignId || raw.campaignId || raw.CampaignId || (raw.metadata && raw.metadata.campaignId) || null,
     contactId: decodedContact || tags.contactId || raw.contactId || raw.ContactId || (raw.metadata && raw.metadata.contactId) || null,
     email: email || null,
@@ -193,6 +208,17 @@ export default async function handler(req, res) {
       : [body];
 
     const normalized = incoming.map(normalizeEvent).filter(Boolean);
+
+    // Anything the tags could not identify gets a second chance against the
+    // message index. Tags are the fast path; this is the reliable one.
+    for (const e of normalized) {
+      if (e.campaignId || !e.messageId) continue;
+      const hit = await lookupSentMessage(e.messageId);
+      if (hit) {
+        e.campaignId = hit.campaignId;
+        if (!e.contactId) e.contactId = hit.contactId;
+      }
+    }
     if (!normalized.length) return res.status(200).json({ ok: true, stored: 0, ignored: incoming.length });
 
     // Group by campaign so each campaign key is written once, not once per
