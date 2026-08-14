@@ -90,7 +90,13 @@ const LIVE_PREFIXES = [
   // is stripped. api/websitewidget/stats.js always answers 200 — when GA4
   // isn't configured yet it returns configured:false rather than erroring,
   // so this counts as live even before the service account exists.
-  '/api/websitewidget/'
+  '/api/websitewidget/',
+  // PromoPro: api/promopro/{pos,vendors,printavo}.js are deployed. Folder
+  // form, not a flat api/promopro.js, for the same Vercel file-vs-folder
+  // route conflict WebsiteWidget hit. api/promopro/printavo.js answers 200
+  // with configured:false when the Printavo env vars are missing, so it
+  // counts as live either way.
+  '/api/promopro/'
 ];
 
 function isLive(path) {
@@ -113,7 +119,8 @@ export function appsOnSampleData() {
     traveltrack: [ENDPOINTS.ttTrips],
     mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists],
     crewcore:    [ENDPOINTS.ccEmployees],
-    websitewidget: [ENDPOINTS.wwStats]
+    websitewidget: [ENDPOINTS.wwStats],
+    promopro:    [ENDPOINTS.ppPos]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -225,7 +232,12 @@ export const ENDPOINTS = {
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',
-  wwSites:         '/api/websitewidget/sites'
+  wwSites:         '/api/websitewidget/sites',
+
+  // ---- PromoPro ----
+  ppPos:           '/api/promopro/pos',
+  ppVendors:       '/api/promopro/vendors',
+  ppPrintavo:      '/api/promopro/printavo'
 };
 
 /* ------------------------------------------------------------------ *
@@ -465,6 +477,13 @@ const MOCK_DATA = {
   // Empty by default: unlike the ShopStock/GivingGauge mocks, there is no
   // plausible sample site list to invent here without it looking real.
   [ENDPOINTS.wwSites]: () => ({ sites: [] }),
+
+  // PromoPro. Empty rather than invented: a fake purchase order looks exactly
+  // like a real one on screen, and the whole point of this app is that people
+  // trust what the pipeline says.
+  [ENDPOINTS.ppPos]: () => ({ pos: [] }),
+  [ENDPOINTS.ppVendors]: () => ({ vendors: [] }),
+  [ENDPOINTS.ppPrintavo]: () => ({ configured: false, results: [], invoice: null }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
