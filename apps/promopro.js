@@ -24,9 +24,9 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import {
-  STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate
+  STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
+  withSettingDefaults, ccListFor, parseEmailList
 } from '../lib/promopro/schema.js';
-import { DEFAULT_STAGE_WAITS } from '../lib/promopro/vendors.js';
 
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -190,6 +190,7 @@ export default {
     const st = {
       pos: [],
       vendors: [],
+      settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] },
       filter: 'open',
       draftLines: [],
       picked: null,        // the chosen Printavo invoice, if any
@@ -203,13 +204,23 @@ export default {
     /* ---------------- loading ---------------- */
 
     async function loadAll() {
-      const [posRes, venRes] = await Promise.all([
+      const [posRes, venRes, setRes] = await Promise.all([
         ctx.api.get(ENDPOINTS.ppPos),
         ctx.api.get(ENDPOINTS.ppVendors),
+        ctx.api.get(ENDPOINTS.ppSettings),
       ]);
       st.pos = (posRes && posRes.pos) || [];
       st.vendors = (venRes && venRes.vendors) || [];
+      st.settings = withSettingDefaults(setRes && setRes.settings);
     }
+
+    // One wrapper so every screen judges lateness against the same shop-wide
+    // setting. Calling poHealth directly anywhere would quietly fall back to
+    // the built-in default and disagree with the rest of the app.
+    const health = (p) => poHealth(p, vendorById(p.vendorId), today(), { chaseAfterDays: st.settings.chaseAfterDays });
+
+    const amById = (id) => st.settings.accountManagers.find((a) => a.id === id) || null;
+    const amName = (id) => { const a = amById(id); return a ? a.name : 'Unassigned'; };
 
     /* ---------------- pipeline ---------------- */
 
@@ -226,7 +237,7 @@ export default {
         return;
       }
 
-      const scored = open.map((p) => ({ po: p, health: poHealth(p, vendorById(p.vendorId), today()) }));
+      const scored = open.map((p) => ({ po: p, health: health(p) }));
       const late = scored.filter((x) => x.health.level === 'red').length;
       const soon = scored.filter((x) => x.health.level === 'amber').length;
       $('#ppPipeSub').textContent =
@@ -266,7 +277,7 @@ export default {
     function renderFilters() {
       const counts = {
         open: st.pos.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p))).length,
-        late: st.pos.filter((p) => poHealth(p, vendorById(p.vendorId), today()).level === 'red').length,
+        late: st.pos.filter((p) => health(p).level === 'red').length,
         all: st.pos.length,
       };
       $('#ppOrdersFilters').innerHTML = [
@@ -280,7 +291,7 @@ export default {
 
     function visiblePos() {
       if (st.filter === 'all') return st.pos;
-      if (st.filter === 'late') return st.pos.filter((p) => poHealth(p, vendorById(p.vendorId), today()).level === 'red');
+      if (st.filter === 'late') return st.pos.filter((p) => health(p).level === 'red');
       return st.pos.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p)));
     }
 
@@ -296,16 +307,17 @@ export default {
       }
 
       body.innerHTML = '<table class="pp-table"><thead><tr>' +
-        '<th>PO</th><th>Customer</th><th>Vendor</th><th>Stage</th><th>Needed by</th><th class="num">Total</th><th>Status</th>' +
+        '<th>PO</th><th>Customer</th><th>Vendor</th><th>AM</th><th>Stage</th><th>Needed by</th><th class="num">Total</th><th>Status</th>' +
         '</tr></thead><tbody>' +
         rows.map((p) => {
-          const h = poHealth(p, vendorById(p.vendorId), today());
+          const h = health(p);
           const stageDef = STAGES.find((s) => s.key === h.stage);
           const due = p.neededBy || (p.printavo && p.printavo.dueDate) || '';
           return '<tr data-po="' + esc(p.id) + '">' +
             '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong></td>' +
             '<td>' + esc((p.printavo && p.printavo.customerName) || 'Manual order') + '</td>' +
             '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
+            '<td>' + esc(amName(p.accountManager)) + '</td>' +
             '<td><span class="pp-pill">' + esc(stageDef ? stageDef.label : h.stage) + '</span></td>' +
             '<td>' + esc(due) + '</td>' +
             '<td class="num">' + money(poTotal(p)) + '</td>' +
@@ -331,11 +343,14 @@ export default {
       const wrap = $('#ppFormWrap');
       const vendorOpts = st.vendors.filter((v) => v.active !== false)
         .map((v) => '<option value="' + esc(v.id) + '">' + esc(v.name) + '</option>').join('');
+      const amOpts = st.settings.accountManagers
+        .map((a) => '<option value="' + esc(a.id) + '">' + esc(a.name) + '</option>').join('');
 
       const total = st.draftLines.reduce((a, l) => a + lineTotal(l), 0);
 
       wrap.innerHTML = '<div class="pp-form">' +
         (st.vendors.length ? '' : '<div class="pp-notice">No vendors yet. Add one on the Vendors tab first, since a purchase order has to go to somebody.</div>') +
+        (st.settings.accountManagers.length ? '' : '<div class="pp-notice">No account managers set up yet. Add them in Settings, since every purchase order needs an owner and they get copied on the vendor email.</div>') +
 
         '<div class="pp-field" style="margin-bottom:12px">' +
           '<label>Find the Printavo quote or invoice</label>' +
@@ -353,9 +368,15 @@ export default {
         '<div class="pp-row">' +
           '<div class="pp-field"><label>Vendor</label><select id="ppVendor">' +
             '<option value="">Choose a vendor</option>' + vendorOpts + '</select></div>' +
+          '<div class="pp-field"><label>Account manager (required)</label><select id="ppAm">' +
+            '<option value="">Choose an account manager</option>' + amOpts + '</select></div>' +
           '<div class="pp-field"><label>Needed by</label><input id="ppNeededBy" type="date" value="' + esc((st.picked && st.picked.dueDate) || '') + '"></div>' +
           '<div class="pp-field"><label>Decorating buffer (days)</label><input id="ppBuffer" type="number" min="0" value="0"></div>' +
         '</div>' +
+
+        // Shown before sending, not after. Who gets copied on an email to an
+        // outside party is worth seeing while you can still change it.
+        '<div id="ppCcPreview" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>' +
 
         '<table class="pp-lines"><thead><tr>' +
           '<th>Description</th><th>Detail</th><th>Qty</th><th>Our cost</th><th class="num">Line total</th><th></th>' +
@@ -424,7 +445,7 @@ export default {
     function renderDetail(po) {
       const wrap = $('#ppDetailWrap');
       const v = vendorById(po.vendorId);
-      const h = poHealth(po, v, today());
+      const h = health(po);
       const orderBy = orderByDate(po, v);
 
       wrap.innerHTML = '<div class="pp-detail">' +
@@ -433,6 +454,11 @@ export default {
           '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; ' +
             esc((po.printavo && po.printavo.customerName) || 'Manual order') +
             (po.printavo ? ' &middot; Printavo ' + esc(po.printavo.invoiceNumber) : '') +
+          '</div>' +
+          '<div class="sub" style="font-size:12px">AM ' + esc(amName(po.accountManager)) +
+            (ccListFor(po, v, st.settings).length
+              ? ' &middot; CC ' + esc(ccListFor(po, v, st.settings).join(', '))
+              : '') +
           '</div>' +
         '</div><button class="pp-btn ghost" id="ppCloseDetail">Close</button></div>' +
 
@@ -480,19 +506,6 @@ export default {
       const isEdit = !!v.id;
       const wrap = $('#ppVendorFormWrap');
 
-      // The stage waits are what drive every amber and red in the app, so
-      // they are on the card rather than buried behind a second screen.
-      const waitRows = STAGES.filter((s) => s.dateField && s.key !== 'closed' && s.key !== 'received')
-        .map((s) => {
-          const val = (v.stageWaitDays && v.stageWaitDays[s.key] !== undefined)
-            ? v.stageWaitDays[s.key]
-            : (DEFAULT_STAGE_WAITS[s.key] !== undefined ? DEFAULT_STAGE_WAITS[s.key] : 0);
-          return '<div class="pp-field">' +
-            '<label>' + esc(s.label) + '</label>' +
-            '<input type="number" min="0" data-wait="' + esc(s.key) + '" value="' + esc(val) + '">' +
-          '</div>';
-        }).join('');
-
       wrap.innerHTML = '<div class="pp-form">' +
         '<div class="pp-hd"><div>' +
           '<h1 style="font-size:20px">' + (isEdit ? 'Edit ' + esc(v.name) : 'Add a vendor') + '.</h1>' +
@@ -517,10 +530,12 @@ export default {
             '</select></div>' +
         '</div>' +
 
-        '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:16px 0 8px">' +
-          'How long each step normally takes with this vendor (days)' +
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Slow to reply? Days before we chase</label>' +
+            '<input id="ppVenResponse" type="number" min="1" value="' + esc(v.responseDays == null ? '' : v.responseDays) + '" placeholder="Leave blank for the usual ' + esc(st.settings.chaseAfterDays) + '">' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:4px">Only fill this in for a supplier who is reliably slower than the rest.</div>' +
+          '</div>' +
         '</div>' +
-        '<div class="pp-row">' + waitRows + '</div>' +
 
         '<div class="pp-field"><label>Notes</label><textarea id="ppVenNotes" placeholder="Minimums, rep name, quirks worth remembering">' + esc(v.notes || '') + '</textarea></div>' +
 
@@ -545,12 +560,8 @@ export default {
       const err = $('#ppVenErr');
       err.hidden = true;
 
-      const stageWaitDays = {};
-      root.querySelectorAll('[data-wait]').forEach((el) => {
-        stageWaitDays[el.dataset.wait] = Number(el.value) || 0;
-      });
-
       const id = $('#ppVenId').value;
+      const respRaw = $('#ppVenResponse').value;
       const payload = {
         name: $('#ppVenName').value,
         email: $('#ppVenEmail').value,
@@ -559,7 +570,7 @@ export default {
         leadDays: Number($('#ppVenLead').value) || 0,
         prepay: $('#ppVenPrepay').value === 'yes',
         notes: $('#ppVenNotes').value,
-        stageWaitDays,
+        responseDays: respRaw === '' ? null : Number(respRaw),
       };
       const activeEl = $('#ppVenActive');
       if (activeEl) payload.active = activeEl.value === 'yes';
@@ -607,16 +618,82 @@ export default {
     }
 
     function renderSettings() {
+      const S = st.settings;
+      const amRows = S.accountManagers.length
+        ? S.accountManagers.map((a, i) =>
+            '<tr data-am="' + i + '">' +
+              '<td><input data-amf="name" value="' + esc(a.name) + '"' + (isAdmin ? '' : ' disabled') + '></td>' +
+              '<td><input data-amf="email" type="email" value="' + esc(a.email) + '"' + (isAdmin ? '' : ' disabled') + '></td>' +
+              (isAdmin ? '<td><button class="pp-btn ghost" data-rmam="' + i + '">Remove</button></td>' : '') +
+            '</tr>'
+          ).join('')
+        : '<tr><td colspan="3" style="color:var(--muted);font-size:13px">Nobody yet. A purchase order cannot be created until at least one is here.</td></tr>';
+
       $('#ppSettingsBody').innerHTML =
         '<div class="pp-form">' +
-        '<p style="font-size:13px;color:var(--muted);margin-bottom:12px">' +
-        'PromoPro builds the PO number from the year, the Printavo invoice number, and an imprint sequence when a job has more than one. ' +
-        'A manual web order has no invoice, so it uses an M sequence instead, which makes it obvious that no Printavo job sits behind it.' +
-        '</p>' +
-        '<p style="font-size:13px;color:var(--muted)">' +
-        'Per-vendor lead times and stage waits live on the Vendors tab, since what counts as late depends on who you are waiting for.' +
-        '</p>' +
+          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px">Email</div>' +
+          '<div class="pp-field" style="margin-bottom:12px">' +
+            '<label>Always CC on every purchase order</label>' +
+            '<textarea id="ppAlwaysCc" placeholder="one per line, or comma separated"' + (isAdmin ? '' : ' disabled') + '>' + esc(S.alwaysCc.join('\n')) + '</textarea>' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:4px">Everyone here is copied on every PO, on top of the account manager and the vendor\u2019s own second contact.</div>' +
+          '</div>' +
+
+          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:18px 0 8px">Account managers</div>' +
+          '<table class="pp-table"><thead><tr><th>Name</th><th>Email</th>' + (isAdmin ? '<th></th>' : '') + '</tr></thead>' +
+          '<tbody id="ppAmRows">' + amRows + '</tbody></table>' +
+          (isAdmin ? '<button class="pp-btn ghost" id="ppAddAm" style="margin-top:8px">Add an account manager</button>' : '') +
+
+          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:18px 0 8px">Chasing</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Days of vendor silence before a PO goes amber</label>' +
+              '<input id="ppChase" type="number" min="1" value="' + esc(S.chaseAfterDays) + '"' + (isAdmin ? '' : ' disabled') + '></div>' +
+          '</div>' +
+          '<div style="font-size:11px;color:var(--muted)">' +
+            'This applies only where we are waiting on the vendor. Steps that are ours, like approving art and sending payment, do not raise a vendor alarm. ' +
+            'A single supplier who is reliably slower can override this on their own card.' +
+          '</div>' +
+
+          (isAdmin ? '<div style="margin-top:16px"><button class="pp-btn" id="ppSaveSettings">Save settings</button></div>' : '') +
+          '<div class="pp-err" id="ppSettingsErr" hidden></div>' +
+        '</div>' +
+
+        '<div class="pp-form">' +
+          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:8px">How PO numbers are built</div>' +
+          '<p style="font-size:13px;color:var(--muted)">' +
+            'Year, Printavo invoice number, then an imprint sequence when a job has more than one. A manual web order has no invoice, so it uses an M sequence instead, ' +
+            'which makes it obvious at a glance that no Printavo job sits behind it.' +
+          '</p>' +
         '</div>';
+    }
+
+    async function saveSettingsForm() {
+      const err = $('#ppSettingsErr');
+      err.hidden = true;
+
+      const accountManagers = [];
+      root.querySelectorAll('#ppAmRows tr[data-am]').forEach((tr) => {
+        const name = tr.querySelector('[data-amf="name"]');
+        const email = tr.querySelector('[data-amf="email"]');
+        if (!name || !email) return;
+        if (!name.value.trim() && !email.value.trim()) return;
+        accountManagers.push({ name: name.value, email: email.value });
+      });
+
+      const payload = {
+        alwaysCc: parseEmailList($('#ppAlwaysCc').value),
+        chaseAfterDays: Number($('#ppChase').value) || 3,
+        accountManagers,
+      };
+
+      try {
+        const res = await ctx.api.request(ENDPOINTS.ppSettings, { method: 'PATCH', body: JSON.stringify(payload) });
+        if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
+        await loadAll();
+        renderAll();
+      } catch (e) {
+        err.textContent = e.message || 'Could not save settings.';
+        err.hidden = false;
+      }
     }
 
     function renderAll() {
@@ -638,6 +715,7 @@ export default {
         st.picked = null;
         st.draftLines = [{ description: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
+        renderCcPreview();
         $('#ppFormWrap').hidden = false;
         $('#ppDetailWrap').hidden = true;
         if (t.id === 'ppNewFromPipe') this.showView('orders');
@@ -680,6 +758,20 @@ export default {
         return;
       }
 
+      if (t.id === 'ppSaveSettings') { await saveSettingsForm(); return; }
+
+      if (t.id === 'ppAddAm') {
+        st.settings.accountManagers = st.settings.accountManagers.concat([{ id: '', name: '', email: '' }]);
+        renderSettings();
+        return;
+      }
+
+      if (t.dataset && t.dataset.rmam !== undefined) {
+        st.settings.accountManagers = st.settings.accountManagers.filter((a, i) => i !== Number(t.dataset.rmam));
+        renderSettings();
+        return;
+      }
+
       if (t.id === 'ppNewVendor') { renderVendorForm(null); return; }
 
       if (t.dataset && t.dataset.editvendor) {
@@ -689,6 +781,26 @@ export default {
 
       if (t.id === 'ppVenSave') { await saveVendor(); return; }
       if (t.id === 'ppVenCancel') { $('#ppVendorFormWrap').hidden = true; return; }
+    });
+
+    function renderCcPreview() {
+      const box = $('#ppCcPreview');
+      if (!box) return;
+      const amEl = $('#ppAm');
+      const venEl = $('#ppVendor');
+      if (!amEl || !venEl) return;
+      const cc = ccListFor(
+        { accountManager: amEl.value },
+        vendorById(venEl.value),
+        st.settings
+      );
+      box.textContent = cc.length
+        ? 'Will be CC\u2019d on this PO: ' + cc.join(', ')
+        : 'Nobody is set to be CC\u2019d yet.';
+    }
+
+    root.addEventListener('change', (e) => {
+      if (e.target.id === 'ppAm' || e.target.id === 'ppVendor') renderCcPreview();
     });
 
     // Line edits write straight back to the draft rather than being read off
@@ -715,6 +827,7 @@ export default {
       err.hidden = true;
       const payload = {
         vendorId: $('#ppVendor').value,
+        accountManager: $('#ppAm').value,
         neededBy: $('#ppNeededBy').value || null,
         decorateBufferDays: Number($('#ppBuffer').value) || 0,
         shipTo: $('#ppShipTo').value,
