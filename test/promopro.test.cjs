@@ -23,6 +23,7 @@ const app = read('apps/promopro.js');
 const posRoute = read('api/promopro/pos.js');
 const vendorsRoute = read('api/promopro/vendors.js');
 const printavoRoute = read('api/promopro/printavo.js');
+const settingsRoute = read('api/promopro/settings.js');
 const lookup = read('lib/promopro/printavo-lookup.js');
 const store = read('lib/promopro/store.js');
 const registry = read('js/registry.js');
@@ -84,11 +85,22 @@ t.test('adding a vendor is one card, not a chain of prompts', () => {
     .forEach((f) => t.assert(app.includes(f), 'the vendor card is missing the ' + f + ' field'));
 });
 
-t.test('the vendor card exposes the per-stage waits, not just one lead time', () => {
-  // These are what drive every amber and red in the app, so they belong on
-  // the card rather than behind a second screen nobody opens.
-  t.assert(app.includes('data-wait='), 'no per-stage wait inputs on the vendor card');
-  t.assert(app.includes('DEFAULT_STAGE_WAITS'), 'the card should seed new vendors with the defaults');
+t.test('the vendor card asks two numbers, not six', () => {
+  // Simplified Aug 14 2026. Six per-stage waits meant six guesses per vendor,
+  // and a guessed threshold produces a false amber. False ambers train people
+  // to ignore the colour, at which point the alerting is worse than none.
+  t.assert(!app.includes('data-wait='), 'the per-stage wait grid is back on the vendor card');
+  t.assert(app.includes('ppVenLead'), 'the vendor card should still ask for lead days');
+  t.assert(app.includes('ppVenResponse'), 'the vendor card should offer one optional response-time override');
+});
+
+t.test('every screen judges lateness against the same shop-wide setting', () => {
+  // Calling poHealth directly anywhere would silently fall back to the
+  // built-in default and disagree with what Settings says.
+  const direct = app.split('poHealth(').length - 1;
+  t.assert(direct <= 2, 'poHealth should be called through the shared health() wrapper, found ' + direct + ' direct uses');
+  t.assert(app.includes('chaseAfterDays: st.settings.chaseAfterDays'),
+    'the wrapper should pass the configured threshold');
 });
 
 t.test('an existing vendor can be edited, not just created', () => {
@@ -99,8 +111,8 @@ t.test('an existing vendor can be edited, not just created', () => {
 
 /* ---- seam --------------------------------------------------------------- */
 
-t.test('the seam knows all three promopro endpoints and marks them live', () => {
-  ['ppPos', 'ppVendors', 'ppPrintavo'].forEach((k) => {
+t.test('the seam knows every promopro endpoint and marks them live', () => {
+  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings'].forEach((k) => {
     t.assert(apiJs.includes(k + ':'), 'js/api.js is missing ENDPOINTS.' + k);
   });
   t.assert(apiJs.includes("'/api/promopro/'"), 'the /api/promopro/ prefix is not marked live');
@@ -121,7 +133,7 @@ t.test('the promopro mocks are empty, never invented purchase orders', () => {
 /* ---- routes ------------------------------------------------------------- */
 
 t.test('every promopro route requires a session', () => {
-  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute]].forEach(([name, src]) => {
+  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute]].forEach(([name, src]) => {
     t.assert(src.includes('requireAuth(req, res)'), 'api/promopro/' + name + '.js does not require auth');
     t.assert(src.includes('if (!sess) return'), 'api/promopro/' + name + '.js does not bail on a missing session');
   });
@@ -165,6 +177,16 @@ t.test('the Printavo route answers cleanly when Printavo is not configured', () 
 t.test('the Printavo route is read-only', () => {
   t.assert(/req\.method !== "GET"/.test(printavoRoute),
     'nothing in PromoPro should be able to write back to a Printavo quote');
+});
+
+t.test('reading settings is open, writing them is admin only', () => {
+  // The new-PO form cannot render its required account-manager picker
+  // without this read, so gating it would break the app for the people who
+  // use it most. Writing decides who is copied on outgoing mail.
+  const getIdx = settingsRoute.indexOf('if (req.method === "GET")');
+  const gateIdx = settingsRoute.indexOf('if (!isAdmin)');
+  t.assert(getIdx !== -1 && gateIdx !== -1 && getIdx < gateIdx,
+    'settings GET must be reachable without admin');
 });
 
 /* ---- architecture ------------------------------------------------------- */
@@ -259,30 +281,44 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
 
   /* -- the clocks -- */
 
-  const vendor = { id: 'v1', leadDays: 10, stageWaitDays: { submitted: 2, confirmed: 3 } };
+  const vendor = { id: 'v1', leadDays: 10 };
 
-  t.test('a PO inside its vendor window is not flagged', () => {
+  t.test('a vendor still inside the chase window is not flagged', () => {
     const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-11').level, 'ok');
+    t.equal(s.poHealth(po, vendor, '2026-08-12').level, 'ok');
   });
 
-  t.test('a vendor going quiet past its own window goes amber', () => {
+  t.test('a vendor going quiet past the chase window goes amber', () => {
     const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-13').level, 'amber');
+    t.equal(s.poHealth(po, vendor, '2026-08-14').level, 'amber');
   });
 
-  t.test('well past the window goes red', () => {
+  t.test('twice the chase window goes red', () => {
     const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-16').level, 'red');
+    t.equal(s.poHealth(po, vendor, '2026-08-17').level, 'red');
   });
 
-  t.test('the same wait is judged against THIS vendor, not a global setting', () => {
-    // A supplier who confirms same day and one who takes four days are not
-    // both late on day two. This is why the clock is per vendor.
-    const slow = { id: 'v2', leadDays: 10, stageWaitDays: { submitted: 10 } };
+  t.test('the chase window is one shop-wide number, overridable per vendor', () => {
+    // One number somebody can actually answer, not six guesses per supplier.
     const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-13').level, 'amber');
-    t.equal(s.poHealth(po, slow, '2026-08-13').level, 'ok');
+    const slow = { id: 'v2', leadDays: 10, responseDays: 10 };
+    t.equal(s.poHealth(po, vendor, '2026-08-14', { chaseAfterDays: 3 }).level, 'amber');
+    t.equal(s.poHealth(po, vendor, '2026-08-14', { chaseAfterDays: 10 }).level, 'ok');
+    t.equal(s.poHealth(po, slow, '2026-08-14', { chaseAfterDays: 3 }).level, 'ok');
+  });
+
+  t.test('steps that are OURS never raise a vendor alarm', () => {
+    // Approving art and sending payment are our holdups. Colouring them as
+    // vendor lateness pointed the finger at the wrong party, and no vendor
+    // setting could ever have described them.
+    const ours = { artApprovedAt: '2026-07-01', neededBy: '2026-12-31', createdAt: '2026-07-01T00:00:00Z' };
+    const h = s.poHealth(ours, vendor, '2026-08-14', { chaseAfterDays: 3 });
+    t.assert(!h.reasons.some((r) => /no word/.test(r)),
+      'a step we own should not be reported as vendor silence');
+
+    const theirs = { confirmedAt: '2026-07-01', neededBy: '2026-12-31', createdAt: '2026-07-01T00:00:00Z' };
+    t.assert(s.poHealth(theirs, vendor, '2026-08-14', { chaseAfterDays: 3 }).reasons.some((r) => /no word/.test(r)),
+      'a step the vendor owns should still be chased');
   });
 
   t.test('a PO moving along fine can still be flagged as doomed', () => {
@@ -330,27 +366,97 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
 
   /* -- validation -- */
 
-  t.test('a PO must have a vendor and at least one line', () => {
-    const bad = s.validateNew({}, ['v1']);
+  t.test('a PO must have a vendor, an account manager, and at least one line', () => {
+    const bad = s.validateNew({}, ['v1'], ['alexis']);
     t.assert(!bad.ok, 'an empty PO should not validate');
     t.assert(bad.errors.some((e) => /vendor/.test(e)), 'should complain about the vendor');
+    t.assert(bad.errors.some((e) => /account manager/.test(e)), 'should complain about the account manager');
     t.assert(bad.errors.some((e) => /line/.test(e)), 'should complain about the lines');
   });
 
+  t.test('the account manager is required, not optional', () => {
+    // A PO with no account manager is a PO nobody owns, which is the exact
+    // failure this app exists to end.
+    const r = s.validateNew({
+      vendorId: 'v1', lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
+    }, ['v1'], ['alexis']);
+    t.assert(!r.ok, 'a PO with no account manager should not validate');
+  });
+
+  t.test('an account manager who is not set up in Settings is rejected', () => {
+    const r = s.validateNew({
+      vendorId: 'v1', accountManager: 'ghost',
+      lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
+    }, ['v1'], ['alexis']);
+    t.assert(!r.ok, 'an unknown account manager should not validate');
+  });
+
+  t.test('the account manager cannot be cleared once set', () => {
+    // Required on create has to mean required forever, or a PO quietly loses
+    // its owner on an unrelated edit.
+    const r = s.validatePatch({ accountManager: '' }, ['v1'], ['alexis']);
+    t.assert(!r.ok, 'blanking the account manager should be refused');
+  });
+
   t.test('a vendor that is not on the list is rejected', () => {
-    const r = s.validateNew({ vendorId: 'ghost', lines: [{ description: 'Mug', qty: 10, unitCost: 2 }] }, ['v1']);
+    const r = s.validateNew({ vendorId: 'ghost', accountManager: 'alexis', lines: [{ description: 'Mug', qty: 10, unitCost: 2 }] }, ['v1'], ['alexis']);
     t.assert(!r.ok, 'an unknown vendor should not validate');
   });
 
   t.test('a good PO validates and keeps its Printavo link', () => {
     const r = s.validateNew({
       vendorId: 'v1',
+      accountManager: 'alexis',
       lines: [{ description: 'Mug', qty: 10, unitCost: 2.5 }],
       printavo: { invoiceNumber: '66601', customerName: 'Acme', dueDate: '2026-09-30' },
-    }, ['v1']);
+    }, ['v1'], ['alexis']);
     t.assert(r.ok, 'should validate: ' + r.errors.join('; '));
     t.equal(r.record.printavo.invoiceNumber, '66601');
+    t.equal(r.record.accountManager, 'alexis');
     t.equal(r.record.lines.length, 1);
+  });
+
+  /* -- who gets copied -- */
+
+  t.test('the CC list is built in one place, so preview and send agree', () => {
+    // A CC list that differs between the preview and the real send is the
+    // kind of bug nobody notices until a customer is copied on something.
+    const settings = {
+      alwaysCc: ['ops@pmapparel.com'],
+      accountManagers: [{ id: 'alexis', name: 'Alexis', email: 'alexis@pmapparel.com' }],
+    };
+    const cc = s.ccListFor({ accountManager: 'alexis' }, { ccEmail: 'rep@vendor.com' }, settings);
+    t.equal(cc.join(','), 'ops@pmapparel.com,alexis@pmapparel.com,rep@vendor.com');
+  });
+
+  t.test('nobody is copied twice, whatever the casing', () => {
+    const settings = {
+      alwaysCc: ['Alexis@PMApparel.com'],
+      accountManagers: [{ id: 'alexis', name: 'Alexis', email: 'alexis@pmapparel.com' }],
+    };
+    t.equal(s.ccListFor({ accountManager: 'alexis' }, {}, settings).length, 1);
+  });
+
+  t.test('a malformed address is dropped rather than sent to', () => {
+    const settings = { alwaysCc: ['not-an-address'], accountManagers: [] };
+    t.equal(s.ccListFor({}, {}, settings).length, 0);
+  });
+
+  t.test('CC addresses can be typed with commas, semicolons or newlines', () => {
+    // People paste all three, and none of them should be "the wrong way".
+    t.equal(s.parseEmailList('a@x.com, b@x.com; c@x.com\nd@x.com').length, 4);
+  });
+
+  t.test('settings fall back to sane defaults rather than undefined', () => {
+    const d = s.withSettingDefaults({});
+    t.equal(d.chaseAfterDays, 3);
+    t.equal(d.alwaysCc.length, 0);
+    t.equal(d.accountManagers.length, 0);
+  });
+
+  t.test('an account manager with a bad address is refused at settings time', () => {
+    const r = s.validateSettings({ accountManagers: [{ name: 'Alexis', email: 'nope' }] });
+    t.assert(!r.ok, 'should refuse an address that cannot receive mail');
   });
 
   t.test('a nonsense date is rejected rather than stored as garbage', () => {
