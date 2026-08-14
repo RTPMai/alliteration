@@ -18,8 +18,8 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
-import { validateNew, validatePatch, yearPrefix, poTotal, currentStage } from "../../lib/promopro/schema.js";
-import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq } from "../../lib/promopro/store.js";
+import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
+import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings } from "../../lib/promopro/store.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -58,8 +58,9 @@ export default async function handler(req, res) {
 
     if (req.method === "POST") {
       const body = parseBody(req);
-      const vendors = await getVendors();
-      const check = validateNew(body, vendors.map((v) => v.id));
+      const [vendors, settings] = await Promise.all([getVendors(), getSettings()]);
+      const amIds = withSettingDefaults(settings).accountManagers.map((a) => a.id);
+      const check = validateNew(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
       const createdAt = new Date().toISOString();
@@ -106,8 +107,9 @@ export default async function handler(req, res) {
       const existing = await getPo(String(id));
       if (!existing) return res.status(404).json({ error: "Not found" });
 
-      const vendors = await getVendors();
-      const check = validatePatch(body, vendors.map((v) => v.id));
+      const [vendors, settings] = await Promise.all([getVendors(), getSettings()]);
+      const amIds = withSettingDefaults(settings).accountManagers.map((a) => a.id);
+      const check = validatePatch(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
       // History records the STAGE change, not every keystroke. A note edit is
