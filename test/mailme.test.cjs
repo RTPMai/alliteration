@@ -470,6 +470,35 @@ t.test('import and lists routes require auth AND app-level access', () => {
   });
 });
 
+t.test('every way a call can arrive leaves a trace', () => {
+  // "No call has ever been received" is only useful if it is TRUE. A crash
+  // during processing, or a wrong-method call, would otherwise look
+  // identical to silence while the provider retried against a 500.
+  const src = stripComments(read('api/mailme/webhook.js'));
+  const calls = (src.match(/recordWebhookHeartbeat\(/g) || []).length;
+  t.assert(calls >= 5,
+    'expected a heartbeat on GET-ok, GET-denied, POST-denied, POST-ok and the catch; found ' + calls);
+  const catchBlock = src.slice(src.indexOf('} catch (e) {'));
+  t.assert(/recordWebhookHeartbeat\(/.test(catchBlock),
+    'a crash after authorization must still be recorded');
+});
+
+t.test('a GET is a reachability test, and cannot pass for a real event', () => {
+  // Lets you prove the URL and secret from a browser, separating "provider
+  // is not calling" from "nothing reaches this code".
+  const src = stripComments(read('api/mailme/webhook.js'));
+  t.assert(/req\.method === "GET"/.test(src), 'the endpoint must answer a browser GET');
+  const get = src.slice(src.indexOf('req.method === "GET"'));
+  const body = get.slice(0, get.indexOf('req.method !== "POST"'));
+  t.assert(/authorized\(req\)/.test(body), 'the test must still require the secret');
+  t.assert(/test: true/.test(body), 'it must be flagged as a test, not real provider traffic');
+  t.assert(/stored: 0/.test(body), 'a reachability test stores no events');
+
+  const app = stripComments(read('apps/mailme.js'));
+  t.assert(/hb\.test && hb\.ok/.test(app),
+    'the UI must not report a browser test as the provider working');
+});
+
 t.test('the webhook fails closed when its secret is unset', () => {
   // The one unauthenticated-by-cookie route. An unset secret must DENY, not
   // allow: `undefined === undefined` would otherwise let anyone forge
