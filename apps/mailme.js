@@ -1599,9 +1599,9 @@ export default {
               <textarea id="mmBody" placeholder="Write the email here.">${esc(d.body)}</textarea>
               <div class="hint">
                 {{first_name}} and {{company_name}} fill in per recipient when this sends.
-                Formatting: pasted links become clickable on their own. Use
-                **bold**, [link text](https://example.com) to show words instead of a URL,
-                and lines starting with "- " for a bullet list.
+                Formatting: links starting with www. or https:// become clickable on
+                their own. Use **bold**, [link text](https://example.com) to show words
+                instead of a URL, and lines starting with "- " for a bullet list.
               </div>
             </div>
             <div class="mm-field">
@@ -2211,10 +2211,22 @@ export default {
       }
       if (!hb) {
         return `<div class="mm-notice danger">
-          <b>No webhook call has ever been received.</b> The secret is set, but Resend has
-          not called this app. Add a webhook in Resend pointing at
-          <code>/api/mailme/webhook?secret=YOUR_SECRET</code> and subscribe it to delivered,
-          opened, clicked, bounced and complained.</div>`;
+          <b>No webhook call has ever been received.</b> Nothing has reached this app at
+          all, not even a rejected call.
+          <br><span class="hint">Test it yourself: open your webhook URL
+          (<code>/api/mailme/webhook?secret=YOUR_SECRET</code>) in a browser tab. If it
+          answers "reachable", the URL and secret are right and the provider is the
+          problem. If it does not, the URL or the secret is wrong.</span></div>`;
+      }
+      // A passing browser test proves the endpoint works but says nothing
+      // about whether the provider is actually calling it, so it must not
+      // read as success.
+      if (hb.test && hb.ok) {
+        return `<div class="mm-notice">
+          <b>Endpoint reachable, but no provider events yet.</b> Your browser test at
+          ${esc(fmtDateTime(hb.at))} passed, so the URL and secret are correct. Resend
+          still has not sent a real event. Check the webhook is Enabled in Resend and
+          subscribed to email.delivered, then send a test email.</div>`;
       }
       if (hb.ok === false) {
         return `<div class="mm-notice danger">
