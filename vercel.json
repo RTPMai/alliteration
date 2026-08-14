@@ -60,6 +60,10 @@
     {
       "source": "/scan/:id",
       "destination": "/scan.html"
+    },
+    {
+      "source": "/clock",
+      "destination": "/clock.html"
     }
   ]
 }
