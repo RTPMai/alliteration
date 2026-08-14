@@ -32,6 +32,7 @@ import {
   validateCampaignPatch, selectRecipients, resolveList,
   computeRates, deliverabilityWarnings, identityForCampaign, campaignSourceConflict,
   identityAudienceWarning, sendingIdentities, COLD_SOURCES,
+  SUPPRESSED_STATUSES, SOURCE_LABELS,
 } from "../../lib/mailme/schema.js";
 import {
   applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
@@ -71,27 +72,63 @@ function testFailureMessage(result) {
  * tags; suppression is applied by selectRecipients either way, so no path
  * through this function can return an opted-out address.
  */
+/**
+ * Why a contact who IS on the list did not make it into the send.
+ *
+ * selectRecipients drops people silently, which is fine for computing a
+ * send but terrible for explaining one: a list of three showing one
+ * recipient looks broken. This re-derives each drop so the panel can say
+ * which filter removed whom.
+ */
+function exclusionReason(contact, campaign) {
+  if (SUPPRESSED_STATUSES.includes(contact.status)) {
+    return contact.status === "unsubscribed"
+      ? "Unsubscribed" : `Not mailable (${contact.status})`;
+  }
+  if (campaign.source && contact.source !== campaign.source) {
+    const label = (SOURCE_LABELS[campaign.source] || campaign.source);
+    const own = (SOURCE_LABELS[contact.source] || contact.source);
+    return `This campaign is going to ${label}, and this contact is a ${own}`;
+  }
+  const tags = (campaign.segmentTags || []).map((t) => String(t).trim().toLowerCase()).filter(Boolean);
+  if (tags.length) return "Does not match the campaign's segment tags";
+  return "Excluded by this campaign's audience";
+}
+
 async function recipientsFor(campaign) {
   const { contacts, settings } = await resolveContacts();
 
   let pool;
   let list = null;
+  let candidates;
   if (campaign.listId) {
     list = await getList(campaign.listId);
     if (!list) return { recipients: [], held: [], missingList: true, settings };
-    pool = selectRecipients(resolveList(list, contacts), { source: campaign.source });
+    candidates = resolveList(list, contacts);
+    pool = selectRecipients(candidates, { source: campaign.source });
   } else {
+    candidates = contacts;
     pool = selectRecipients(contacts, {
       source: campaign.source,
       segmentTags: campaign.segmentTags,
     });
   }
 
+  // Only meaningful for a LIST: "everyone mailable" minus a filter is not a
+  // surprising number, but "my list of three" minus a filter is.
+  const inPool = new Set(pool.map((c) => String(c.id)));
+  const filteredOut = list
+    ? candidates.filter((c) => !inPool.has(String(c.id)))
+        .map((c) => ({ ...c, heldReason: exclusionReason(c, campaign) }))
+    : [];
+
   // Suppression has already been applied by selectRecipients and is absolute.
   // Eligibility is the SOFTER layer on top: frequency cap, open quotes,
-  // failed verification. Held contacts are returned rather than silently
-  // dropped so "why is this person not in my send?" is answerable.
-  const { send, held } = applyEligibility(pool, { policy: settings.policy });
+  // failed verification, and one-email-per-mailbox. Held contacts are
+  // returned rather than silently dropped so "why is this person not in my
+  // send?" is answerable.
+  const { send, held: eligibilityHeld } = applyEligibility(pool, { policy: settings.policy });
+  const held = filteredOut.concat(eligibilityHeld);
   return { recipients: send, held, list, settings };
 }
 
@@ -116,7 +153,10 @@ export default async function handler(req, res) {
 
         // The cold ramp: a brand-new sending domain must not go from zero to
         // hundreds of cold emails in a day, which is itself a spam signal.
-        const isCold = COLD_SOURCES.includes(campaign.source);
+        // Matches lib/mailme/send.js: any cold recipient at all puts the
+        // send on the cold ramp, so the plan shown here is the plan used.
+        const isCold = COLD_SOURCES.includes(campaign.source) ||
+          recipients.some((r) => COLD_SOURCES.includes(r.source));
         const rampDay = settings.coldStartedAt
           ? Math.floor((Date.now() - new Date(settings.coldStartedAt)) / 86400000) : 0;
         const dailyCap = isCold
@@ -137,14 +177,14 @@ export default async function handler(req, res) {
           identity,
           identities: sendingIdentities(settings),
           identityWarning: identityAudienceWarning(recipients, identity),
-          conflict: campaignSourceConflict(recipients),
+          conflict: campaignSourceConflict(recipients, identity),
           // Two blocker lists on purpose: `blockers` is the CAN-SPAM-only set
           // (unchanged shape, still used by Settings' own checklist), while
           // `sendBlockers` is everything that actually stands between this
           // campaign and a real send, including provider/domain readiness.
           blockers: complianceBlockers(settings),
           sendBlockers,
-          canSend: sendBlockers.length === 0 && !campaignSourceConflict(recipients) && recipients.length > 0,
+          canSend: sendBlockers.length === 0 && !campaignSourceConflict(recipients, identity) && recipients.length > 0,
           sendPlan: {
             dailyCap,
             isCold,
