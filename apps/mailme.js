@@ -1599,8 +1599,9 @@ export default {
               <textarea id="mmBody" placeholder="Write the email here.">${esc(d.body)}</textarea>
               <div class="hint">
                 {{first_name}} and {{company_name}} fill in per recipient when this sends.
-                Formatting: **bold**, [link text](https://example.com), and lines starting
-                with "- " become a bullet list. Everything else is a plain paragraph.
+                Formatting: pasted links become clickable on their own. Use
+                **bold**, [link text](https://example.com) to show words instead of a URL,
+                and lines starting with "- " for a bullet list.
               </div>
             </div>
             <div class="mm-field">
@@ -2194,6 +2195,40 @@ export default {
 
     // One row per sending identity (brand). Status comes from a live Resend
     // lookup, so it reflects real DNS rather than something the app cached.
+    // Results stay empty forever if the provider is not calling the webhook,
+    // and nothing anywhere used to say so. This reports the last call
+    // received, including rejected ones, which is what separates "never
+    // configured" from "configured with the wrong secret".
+    function renderWebhookStatus() {
+      const d = state.domains || {};
+      const hb = d.webhook;
+
+      if (!d.webhookConfigured) {
+        return `<div class="mm-notice danger">
+          <b>Delivery and open tracking is off.</b> MAILME_WEBHOOK_SECRET is not set in
+          Vercel, so every callback from Resend is rejected. Campaign Results will stay
+          at zero even on a send that worked.</div>`;
+      }
+      if (!hb) {
+        return `<div class="mm-notice danger">
+          <b>No webhook call has ever been received.</b> The secret is set, but Resend has
+          not called this app. Add a webhook in Resend pointing at
+          <code>/api/mailme/webhook?secret=YOUR_SECRET</code> and subscribe it to delivered,
+          opened, clicked, bounced and complained.</div>`;
+      }
+      if (hb.ok === false) {
+        return `<div class="mm-notice danger">
+          <b>Webhook calls are being rejected.</b> ${esc(hb.reason || 'The secret did not match.')}
+          <br><span class="hint">Last attempt ${esc(fmtDateTime(hb.at))}.</span></div>`;
+      }
+      const detail = hb.reason
+        ? `<br><span class="hint">${esc(hb.reason)}</span>`
+        : `<br><span class="hint">${hb.stored} event${hb.stored === 1 ? '' : 's'} recorded${
+            (hb.types && hb.types.length) ? ': ' + esc(hb.types.join(', ')) : ''}.</span>`;
+      return `<div class="mm-notice">
+        <b>Webhook working.</b> Last call ${esc(fmtDateTime(hb.at))}.${detail}</div>`;
+    }
+
     function renderIdentityRow(identity, idx) {
       const byKey = (state.domains && Array.isArray(state.domains.domains))
         ? state.domains.domains.find((d) => d.key === identity.key) : null;
@@ -2340,6 +2375,7 @@ export default {
               <b>No provider connected yet.</b> RESEND_API_KEY needs to be set in Vercel
               before anything can send, regardless of what's filled in above.
               </div>` : ''}
+            ${renderWebhookStatus()}
             ${(st.identities || []).some((i) => i.cold) ? '' : `<div class="mm-notice">
               <b>No identity is marked for cold outreach.</b> Campaigns to imported
               prospects will warn until one is. Cold email draws complaints at rates a
