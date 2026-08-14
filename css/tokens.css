@@ -1,6 +1,3 @@
-/* PUT IN: css/tokens.css (REPLACES the current one) */
-/* (this banner line is for verification only, delete it after checking the path) */
-
 /* ==========================================================================
    alliteration. — design tokens
    THE ONLY PLACE COLORS AND DIMENSIONS ARE DEFINED.
@@ -238,9 +235,18 @@ body[data-app="traveltrack"] {
    the vector logo file (assets/logos/crewcore-mark.svg / -wordmark.svg),
    corrected Aug 2026: #E1251B. */
 body[data-app="crewcore"] {
-  --accent:      #E1251B;
-  --accent-deep: #B41E16;
-  --accent-tint: #FCEBEA;
+  --accent:      #C83E73;
+  --accent-deep: #A32E5B;
+  --accent-tint: #FBEDF3;
+}
+
+/* PromoPro. Red, from the Aug 14 2026 logo lineup. This is the value CrewCore
+   used to hold: the lineup moved CrewCore to raspberry and gave the red to
+   PromoPro, so the two are no longer near-identical in the rail. */
+body[data-app="promopro"] {
+  --accent:      #E31E2D;
+  --accent-deep: #B81824;
+  --accent-tint: #FDEBEC;
 }
 
 /* MailMe's accent is the EXACT fill from the vector logo file
