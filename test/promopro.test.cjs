@@ -249,6 +249,29 @@ t.test('the full roster goes to admins only', () => {
     'the candidate roster should be admin-only');
 });
 
+t.test('a failed settings load is never reported as an empty CrewCore roster', () => {
+  // The Aug 14 misdiagnosis: the settings route 404'd because the file was
+  // uploaded as "settings,js" with a comma, and the screen said "No active
+  // employees found in CrewCore". That sent the search at the roster when
+  // the roster had never been read at all.
+  t.assert(app.includes('settingsFailed'), 'a settings-load failure should be tracked distinctly');
+  const idx = app.indexOf('No active employees found in CrewCore');
+  const guard = app.indexOf('if (st.settingsFailed)');
+  t.assert(guard !== -1 && guard < idx,
+    'the settings-failed branch must come before the empty-roster message');
+});
+
+t.test('saving is refused when settings never loaded', () => {
+  // Otherwise Save posts defaults over whatever was really stored.
+  t.assert(/st\.settingsFailed[\s\S]{0,200}overwrite/.test(app),
+    'save should refuse rather than overwrite unread settings');
+});
+
+t.test('a roster with no emails says so, rather than showing silent grey rows', () => {
+  t.assert(app.includes('Nobody on the roster has an email address yet'),
+    'the all-unselectable case needs its own explanation');
+});
+
 /* ---- architecture ------------------------------------------------------- */
 
 t.test('lib/promopro never imports from api/', () => {
