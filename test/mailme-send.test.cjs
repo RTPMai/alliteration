@@ -572,6 +572,68 @@ Promise.all([
     t.assert(!out.includes('<script>'), 'script tags must never survive: ' + out);
   });
 
+  /* ---- attribution: tags in either shape, or the message index ---------- */
+  //
+  // Regression: real events arrived and were counted "orphaned" because
+  // Resend's SEND api takes tags as an array of {name,value} but its
+  // WEBHOOK delivers the same tags as a plain object. Reading only the
+  // array form meant every open and click was dropped.
+
+  t.test('tags delivered as an OBJECT are read (Resend webhook shape)', () => {
+    const e = webhook.normalizeEvent({
+      type: 'email.opened',
+      data: {
+        email_id: 'abc-123', to: ['ryan@pmapparel.com'],
+        tags: { campaignId: schema.encodeTagValue('MM-00007'), cid: schema.encodeTagValue('client:1') },
+      },
+    });
+    t.equal(e.campaignId, 'MM-00007', 'object-form tags must resolve');
+    t.equal(e.contactId, 'client:1');
+  });
+
+  t.test('tags delivered as an ARRAY still work (send-api shape, other providers)', () => {
+    const e = webhook.normalizeEvent({
+      type: 'email.opened',
+      data: {
+        email_id: 'abc-123', to: ['ryan@pmapparel.com'],
+        tags: [
+          { name: 'campaignId', value: schema.encodeTagValue('MM-00007') },
+          { name: 'cid', value: schema.encodeTagValue('client:1') },
+        ],
+      },
+    });
+    t.equal(e.campaignId, 'MM-00007', 'array-form tags must keep working');
+  });
+
+  t.test('an event with NO tags still carries the message id for lookup', () => {
+    // The fallback path: the message id always comes back even when tags
+    // do not, so attribution never depends on the provider echoing tags.
+    const e = webhook.normalizeEvent({
+      type: 'email.opened',
+      data: { email_id: '69730fab-891f-4e03', to: ['ryan@pmapparel.com'] },
+    });
+    t.equal(e.campaignId, null, 'no tags means no campaign from tags');
+    t.equal(e.messageId, '69730fab-891f-4e03',
+      'the message id must survive so the index can attribute it');
+  });
+
+  t.test('the webhook consults the message index for unattributed events', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'api/mailme/webhook.js'), 'utf8');
+    t.assert(/lookupSentMessage\(e\.messageId\)/.test(src),
+      'an event with no campaign from tags must be looked up by message id');
+    t.assert(/if \(e\.campaignId \|\| !e\.messageId\) continue/.test(src),
+      'the lookup should only run when tags did not already resolve it');
+  });
+
+  t.test('send records the provider message id against each contact', () => {
+    const src = require('fs').readFileSync(
+      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
+    t.assert(/rememberSentMessages\(/.test(src), 'send must write the message index');
+    t.assert(/chunk\[i\]/.test(src),
+      'ids come back in send order, so each must be paired with its own contact');
+  });
+
   process.exit(t.report());
 }).catch((e) => {
   console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
