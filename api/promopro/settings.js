@@ -24,7 +24,7 @@
 // outgoing mail to an outside party, which is not a personal preference.
 
 import { requireAuth } from "../../lib/session.js";
-import { permsFor } from "../../lib/users.js";
+import { isAdminSession } from "../../lib/promopro/access.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
@@ -44,8 +44,7 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    const perms = await permsFor(sess.username);
-    const isAdmin = perms.role === "admin" || perms.superuser === true;
+    const isAdmin = await isAdminSession(sess);
 
     // A CrewCore outage must not take the whole app down: PromoPro can run
     // with an empty account-manager list and say so, which is far better
@@ -81,7 +80,22 @@ export default async function handler(req, res) {
       settings.accountManagerIds = ids;
       settings.accountManagers = resolveAccountManagers(ids, employees);
       settings.usingDefaults = !withSettingDefaults(stored).accountManagerIds.length;
-      if (isAdmin) settings.candidates = candidatesFrom(employees);
+
+      const candidates = candidatesFrom(employees);
+      if (isAdmin) settings.candidates = candidates;
+
+      // Counts, always, admin or not. An empty picker has several very
+      // different causes (nobody on the roster, everybody inactive, nobody
+      // with an email, or the caller not being treated as an admin) and they
+      // want completely different fixes. Reporting the shape of what was read
+      // means the screen can say which one it is instead of guessing. No
+      // personal data here, just numbers.
+      settings.rosterCounts = {
+        total: employees.length,
+        active: candidates.length,
+        withEmail: candidates.filter((c) => c.selectable).length,
+        adminView: isAdmin,
+      };
       return settings;
     }
 
