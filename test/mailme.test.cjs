@@ -279,6 +279,58 @@ t.test('campaign results open in a modal, not inline in the list', () => {
     'unmount must be able to tear down the modal Escape listener');
 });
 
+t.test('every editor and viewer uses the shared modal, none render inline', () => {
+  const src = read('apps/mailme.js');
+  ['mmResults', 'mmComposer', 'mmListEditor', 'mmListMembers'].forEach((id) => {
+    t.assert(!new RegExp('id="' + id + '"').test(src),
+      'the inline ' + id + ' container should be gone; it is a modal now');
+  });
+  ['results', 'composer', 'list', 'members'].forEach((kind) => {
+    t.assert(new RegExp("'" + kind + "'\\)").test(src),
+      'no modal registered under the ' + kind + ' kind');
+  });
+});
+
+t.test('the $ helper looks inside the modal, since modals live outside ctx.root', () => {
+  // The modal is attached to body. If $ only searched ctx.root, every field
+  // in an editor would come back null and Save would read empty values.
+  const src = stripComments(read('apps/mailme.js'));
+  t.assert(/modalCarrier && modalCarrier\.querySelector\(sel\)/.test(src),
+    '$ must consult the open modal before falling back to the app root');
+});
+
+t.test('closing one modal cannot tear down an unrelated one', () => {
+  const src = stripComments(read('apps/mailme.js'));
+  t.assert(/function closeModalIf\(kind\)[\s\S]{0,120}modalKind === kind/.test(src),
+    'a targeted close must check the kind before closing');
+  // A background repaint clears editor state; without the kind check it
+  // would close whatever the person happened to have open.
+  t.assert(/closeModalIf\('composer'\)/.test(src) && /closeModalIf\('list'\)/.test(src),
+    'the editors must close by kind, not unconditionally');
+});
+
+t.test('dismissing an editor drops its editing session', () => {
+  // Otherwise state still holds a draft nobody is looking at, and the next
+  // repaint sees "an editor is open" and skips rendering the view.
+  const src = stripComments(read('apps/mailme.js'));
+  const fn = src.slice(src.indexOf('function dismissModal'));
+  const body = fn.slice(0, fn.indexOf('\n    }'));
+  t.assert(/state\.editingCampaign = null/.test(body), 'composer session must clear');
+  t.assert(/state\.editingList = null/.test(body), 'list session must clear');
+  t.assert(/state\.viewingListId = null/.test(body), 'members session must clear');
+  // openModal calls closeModal on the way in; if THAT cleared state it would
+  // wipe the very draft being opened.
+  const open = src.slice(src.indexOf('function openModal'));
+  t.assert(!/state\.editingCampaign = null/.test(open.slice(0, 700)),
+    'openModal must not clear editing state on the way in');
+});
+
+t.test('validation errors surface inside the open modal, not behind it', () => {
+  const src = stripComments(read('apps/mailme.js'));
+  t.assert(/modalCarrier \? '#mmModalMsg'/.test(src),
+    'editor messages must target the modal message slot while a modal is open');
+});
+
 t.test('the modal clears the shell header and carries its style scope', () => {
   // The shell header is z-index 200. A modal below that renders UNDERNEATH
   // it, which is what clipped the first version's title bar.
