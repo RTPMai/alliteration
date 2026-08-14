@@ -341,8 +341,6 @@ export default {
           </div>
         </div>
         <div id="mmListMsg"></div>
-        <div id="mmListEditor" hidden></div>
-        <div id="mmListMembers" hidden></div>
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>Saved lists</h3><span class="meta" id="mmListCount"></span>
@@ -427,7 +425,6 @@ export default {
           </div>
         </div>
         <div id="mmCampaignMsg"></div>
-        <div id="mmComposer" hidden></div>
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>Saved drafts</h3><span class="meta" id="mmCampaignCount"></span>
@@ -440,7 +437,18 @@ export default {
 
   async mount(ctx) {
     const root = ctx.root;
-    const $ = (sel) => root.querySelector(sel);
+
+    // The open modal, if any. Declared up here because $ consults it: the
+    // modal is attached to <body>, outside ctx.root, so a root-only lookup
+    // would miss every field inside an editor once editors became modals.
+    let modalCarrier = null;
+    let modalKind = null;
+
+    // Modal first, then the page behind it. Everything an editor queries
+    // lives in the modal while it is open, and nothing in the page shares
+    // those ids, so there is no ambiguity.
+    const $ = (sel) =>
+      (modalCarrier && modalCarrier.querySelector(sel)) || root.querySelector(sel);
     const api = ctx.api;
     this._root = root;
 
@@ -462,6 +470,12 @@ export default {
       const el = $(sel);
       if (el) el.innerHTML = html ? `<div class="${cls}">${html}</div>` : '';
     };
+
+    // Errors raised while an editor modal is open must land inside it. The
+    // page's own message strip sits behind the overlay, so a validation
+    // failure there is invisible and the Save button just looks dead.
+    const editorMsg = (html, cls) => msg(modalCarrier ? '#mmModalMsg' : '#mmCampaignMsg', html, cls);
+    const listEditorMsg = (html, cls) => msg(modalCarrier ? '#mmModalMsg' : '#mmListMsg', html, cls);
 
     /* ---------------- data ---------------- */
 
@@ -903,13 +917,11 @@ export default {
     /* ---------------- lists ---------------- */
 
     function renderListEditor() {
-      const box = $('#mmListEditor');
       const l = state.editingList;
-      if (!l) { box.hidden = true; box.innerHTML = ''; return; }
+      if (!l) { closeModalIf('list'); return; }
 
       const rule = l.rule || { source: '', statuses: [], tags: [], tagMatch: 'any', search: '' };
-      box.hidden = false;
-      box.innerHTML = `
+      openModal(`
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>${l.id ? 'Edit ' + esc(l.id) : 'New list'}</h3>
@@ -960,7 +972,7 @@ export default {
               ${l.id ? '<button class="mm-btn ghost" id="mmDeleteList">Delete</button>' : ''}
             </div>
           </div>
-        </div>`;
+        </div>`, 'list');
 
       $('#mmSaveList').addEventListener('click', saveList);
       $('#mmCancelList').addEventListener('click', () => { state.editingList = null; renderListEditor(); });
@@ -985,7 +997,7 @@ export default {
       }
 
       if (!payload.name.trim()) {
-        msg('#mmListMsg', 'A list needs a name.', 'mm-err');
+        listEditorMsg('A list needs a name.', 'mm-err');
         return;
       }
       try {
@@ -996,7 +1008,7 @@ export default {
         renderListEditor(); renderListTable();
         msg('#mmListMsg', 'List saved.', 'mm-ok');
       } catch (e) {
-        msg('#mmListMsg', 'Could not save: ' + esc(e.message), 'mm-err');
+        listEditorMsg('Could not save: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -1022,16 +1034,14 @@ export default {
      */
     async function viewListMembers(listId) {
       state.viewingListId = listId;
-      const box = $('#mmListMembers');
-      box.hidden = false;
-      box.innerHTML = '<div class="mm-card"><div class="mm-card-bd">Loading members...</div></div>';
+      setModalContent('<div class="mm-card"><div class="mm-card-bd">Loading members...</div></div>', 'members');
       try {
         const d = await api.get(ENDPOINTS.mmLists, { id: listId });
         renderListMembersPanel(d.list, d.members || [], d.memberCount, d.mailableCount);
       } catch (e) {
-        box.innerHTML = `<div class="mm-card"><div class="mm-card-bd">
+        setModalContent(`<div class="mm-card"><div class="mm-card-bd">
           <div class="mm-err">Could not load members: ${esc(e.message)}</div>
-        </div></div>`;
+        </div></div>`, 'members');
       }
     }
 
@@ -1111,8 +1121,6 @@ export default {
     }
 
     function renderListMembersPanel(list, members, memberCount, mailableCount) {
-      const box = $('#mmListMembers');
-      box.hidden = false;
       const editable = listIsMemberEditable(list);
 
       const addRow = editable ? `
@@ -1130,7 +1138,7 @@ export default {
       const headerActions = `<div style="display:flex;gap:8px">${editBtn}${closeBtn}</div>`;
 
       if (!members.length) {
-        box.innerHTML = `
+        setModalContent(`
           <div class="mm-card">
             <div class="mm-card-hd">
               <h3>${esc(list.name)}</h3>
@@ -1143,12 +1151,12 @@ export default {
                 ? 'This list has no fixed contacts saved to it.'
                 : 'No contact currently matches this list\u2019s rule.'}</div>
             </div></div>
-          </div>`;
+          </div>`, 'members');
         wireListMembersPanel(list);
         return;
       }
 
-      box.innerHTML = `
+      setModalContent(`
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>${esc(list.name)}</h3>
@@ -1183,16 +1191,16 @@ export default {
               </tbody>
             </table>
           </div>
-        </div>`;
+        </div>`, 'members');
 
       wireListMembersPanel(list);
-      $('#mmListMembers').querySelectorAll('[data-removemember]').forEach((b) => {
+      modalCarrier.querySelectorAll('[data-removemember]').forEach((b) => {
         b.addEventListener('click', () => {
           const m = members.find((x) => x.id === b.dataset.removemember);
           if (m) removeListMember(list, m);
         });
       });
-      $('#mmListMembers').querySelectorAll('[data-editmember]').forEach((b) => {
+      modalCarrier.querySelectorAll('[data-editmember]').forEach((b) => {
         b.addEventListener('click', () => {
           const m = members.find((x) => x.id === b.dataset.editmember);
           if (m) openContactEditor(m);
@@ -1283,9 +1291,7 @@ export default {
 
     function closeListMembers() {
       state.viewingListId = null;
-      const box = $('#mmListMembers');
-      box.hidden = true;
-      box.innerHTML = '';
+      closeModalIf('members');
     }
 
     $('#mmNewList').addEventListener('click', () => {
@@ -1477,15 +1483,13 @@ export default {
     /* ---------------- campaigns ---------------- */
 
     function renderComposer() {
-      const box = $('#mmComposer');
       const d = state.editingCampaign;
-      if (!d) { box.hidden = true; box.innerHTML = ''; return; }
+      if (!d) { closeModalIf('composer'); return; }
 
       const listOpts = state.lists
         .filter((l) => !d.source || !l.rule || !l.rule.source || l.rule.source === d.source);
 
-      box.hidden = false;
-      box.innerHTML = `
+      openModal(`
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3>${d.id ? 'Edit draft ' + esc(d.id) : 'New draft'}</h3>
@@ -1561,7 +1565,7 @@ export default {
               ${d.id ? '<button class="mm-btn ghost" id="mmDeleteDraft">Delete</button>' : ''}
             </div>
           </div>
-        </div>`;
+        </div>`, 'composer');
 
       const refresh = () => {
         const source = $('#mmSource').value;
@@ -1654,7 +1658,7 @@ export default {
 
     async function saveDraft() {
       const result = await saveDraftInternal();
-      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+      if (!result.ok) { editorMsg(esc(result.error), 'mm-err'); return; }
       state.editingCampaign = null;
       await loadCampaigns();
       renderComposer(); renderCampaignList();
@@ -1665,7 +1669,7 @@ export default {
       // Saves first so the test reflects exactly what's on screen, including
       // any edits not yet saved — matches what pressing Save would have done.
       const result = await saveDraftInternal();
-      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+      if (!result.ok) { editorMsg(esc(result.error), 'mm-err'); return; }
 
       const to = window.prompt('Send a test to which email address?', '');
       if (!to || !to.trim()) return;
@@ -1674,26 +1678,26 @@ export default {
         await api.post(ENDPOINTS.mmCampaigns, {}, { query: { id: result.campaign.id, action: 'test', to: to.trim() } });
         state.editingCampaign = { ...result.campaign, segmentTags: result.campaign.segmentTags || [] };
         await loadCampaigns(); renderCampaignList();
-        msg('#mmCampaignMsg', `Test sent to ${esc(to.trim())}. Check that inbox (and spam folder) in a minute.`, 'mm-ok');
+        editorMsg(`Test sent to ${esc(to.trim())}. Check that inbox (and spam folder) in a minute.`, 'mm-ok');
       } catch (e) {
-        msg('#mmCampaignMsg', 'Could not send test: ' + esc(e.message), 'mm-err');
+        editorMsg('Could not send test: ' + esc(e.message), 'mm-err');
       }
     }
 
     async function scheduleDraft() {
       const dtInput = $('#mmScheduleAt');
       if (!dtInput || !dtInput.value) {
-        msg('#mmCampaignMsg', 'Pick a date and time to schedule for first.', 'mm-err');
+        editorMsg('Pick a date and time to schedule for first.', 'mm-err');
         return;
       }
       const when = new Date(dtInput.value);
       if (isNaN(when.getTime()) || when.getTime() <= Date.now()) {
-        msg('#mmCampaignMsg', 'That has to be a real time in the future.', 'mm-err');
+        editorMsg('That has to be a real time in the future.', 'mm-err');
         return;
       }
 
       const result = await saveDraftInternal();
-      if (!result.ok) { msg('#mmCampaignMsg', esc(result.error), 'mm-err'); return; }
+      if (!result.ok) { editorMsg(esc(result.error), 'mm-err'); return; }
 
       try {
         await api.post(ENDPOINTS.mmCampaigns, { scheduledAt: when.toISOString() },
@@ -1702,7 +1706,7 @@ export default {
         await loadCampaigns(); renderComposer(); renderCampaignList();
         msg('#mmCampaignMsg', `Scheduled for ${esc(fmtDateTime(when.toISOString()))}.`, 'mm-ok');
       } catch (e) {
-        msg('#mmCampaignMsg', 'Could not schedule: ' + esc(e.message), 'mm-err');
+        editorMsg('Could not schedule: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -1721,22 +1725,18 @@ export default {
     // The modal is created on demand and appended to the app root, not left
     // sitting in the campaigns markup, so it overlays the page instead of
     // pushing the list around.
-    // Held in the closure rather than looked up by id. Other apps are
-    // mounted at the same time, so document-wide lookups are banned in this
-    // file; keeping the node itself sidesteps that entirely.
-    let modalCarrier = null;
-
-    function openModal(innerHtml) {
+    function openModal(innerHtml, kind) {
       closeModal();
       const back = document.createElement('div');
       back.className = 'mm-modal-back';
       back.id = 'mmModalBack';
       back.innerHTML = `<div class="mm-modal" role="dialog" aria-modal="true">
         <button class="mm-modal-x" id="mmModalX" aria-label="Close">&times;</button>
-        ${innerHtml}</div>`;
+        <div id="mmModalMsg"></div>
+        <div id="mmModalBody">${innerHtml}</div></div>`;
       // Clicking the backdrop closes; clicking inside must not.
-      back.addEventListener('click', (ev) => { if (ev.target === back) closeModal(); });
-      back.querySelector('#mmModalX').addEventListener('click', closeModal);
+      back.addEventListener('click', (ev) => { if (ev.target === back) dismissModal(); });
+      back.querySelector('#mmModalX').addEventListener('click', dismissModal);
       document.addEventListener('keydown', escClose);
       // App styles are scoped to [data-app-root="mailme"] (see
       // js/app-host.js), so a bare body child would render unstyled. The
@@ -1748,12 +1748,37 @@ export default {
       carrier.appendChild(back);
       document.body.appendChild(carrier);
       modalCarrier = carrier;
+      modalKind = kind || null;
       // Stop the page behind the overlay scrolling with the wheel.
       document.body.style.overflow = 'hidden';
       return back;
     }
 
-    function escClose(ev) { if (ev.key === 'Escape') closeModal(); }
+    // Swap the contents of an already-open modal of the same kind instead of
+    // tearing it down and rebuilding it. Used by the members panel, which
+    // opens on a loading state and then fills in: reopening would flicker and
+    // reset the scroll position mid-read.
+    function setModalContent(innerHtml, kind) {
+      if (modalKind === kind && modalCarrier) {
+        const slot = modalCarrier.querySelector('#mmModalBody');
+        if (slot) { slot.innerHTML = innerHtml; return modalCarrier; }
+      }
+      return openModal(innerHtml, kind);
+    }
+
+    function escClose(ev) { if (ev.key === 'Escape') dismissModal(); }
+
+    // Closing an editor by X, backdrop or Escape must also drop the editing
+    // session. Otherwise state still holds a draft nobody is looking at, and
+    // the next repaint sees "an editor is open" and skips rendering.
+    // Deliberately separate from closeModal(), which openModal() calls on the
+    // way in: clearing state there would wipe the very draft being opened.
+    function dismissModal() {
+      if (modalKind === 'composer') state.editingCampaign = null;
+      if (modalKind === 'list') state.editingList = null;
+      if (modalKind === 'members') state.viewingListId = null;
+      closeModal();
+    }
     // Held on the instance so unmount() can tear down the modal's
     // document-level Escape listener, which would otherwise keep firing
     // against a detached root.
@@ -1764,8 +1789,16 @@ export default {
         modalCarrier.remove();
         modalCarrier = null;
       }
+      modalKind = null;
       document.removeEventListener('keydown', escClose);
       document.body.style.overflow = '';
+    }
+
+    // Close only if the thing on screen is what the caller thinks it is.
+    // Without this, a background repaint that clears one editor would also
+    // tear down an unrelated modal the person is actively reading.
+    function closeModalIf(kind) {
+      if (modalKind === kind) closeModal();
     }
 
     async function showResults(id) {
@@ -1846,7 +1879,7 @@ export default {
                 <button class="mm-btn ghost" id="mmCloseResults">Close</button>
               </div>
             </div>
-          </div>`);
+          </div>`, 'results');
         box.querySelector('#mmCloseResults').addEventListener('click', closeModal);
 
         const sendBtn = box.querySelector('#mmSendCampaign');
