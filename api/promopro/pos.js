@@ -17,7 +17,7 @@
 // not be a normal-day action.
 
 import { requireAuth } from "../../lib/session.js";
-import { permsFor } from "../../lib/users.js";
+import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
 import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings } from "../../lib/promopro/store.js";
 
@@ -39,9 +39,7 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    const perms = await permsFor(sess.username);
-    const isAdmin = perms.role === "admin" || perms.superuser === true;
-    const canEdit = perms.can_edit !== false || perms.superuser === true;
+    const [isAdmin, canEdit] = await Promise.all([isAdminSession(sess), canEditSession(sess)]);
 
     if (req.method === "GET") {
       const id = req.query && req.query.id;
