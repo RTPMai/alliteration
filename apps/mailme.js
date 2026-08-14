@@ -1556,6 +1556,7 @@ export default {
                   <option value="lead"${d.source === 'lead' ? ' selected' : ''}>Leads</option>
                   <option value="giving"${d.source === 'giving' ? ' selected' : ''}>Giving contacts</option>
                   <option value="prospect"${d.source === 'prospect' ? ' selected' : ''}>Prospects (cold)</option>
+                  <option value="all"${d.source === 'all' ? ' selected' : ''}>Everyone on the list</option>
                 </select>
                 <div class="hint" id="mmIdentityHint"></div>
               </div>
@@ -1642,7 +1643,12 @@ export default {
         // ordinary customer mail at risk.
         const identList = (state.settings && state.settings.identities) || [];
         const chosen = identList.find((i) => i.key === ($('#mmIdentity') ? $('#mmIdentity').value : null));
-        if (COLD_SOURCES.includes(source)) {
+        if (source === 'all') {
+          $('#mmIdentityHint').textContent = chosen && chosen.cold
+            ? `Sends from ${chosen.domain} to everyone on the list, clients and prospects together.`
+            : 'Mixing prospects with clients needs a domain marked for cold outreach. '
+              + 'If the list has both, this will not send until you pick one, or mark this one in Settings.';
+        } else if (COLD_SOURCES.includes(source)) {
           $('#mmIdentityHint').textContent = chosen && !chosen.cold
             ? `${chosen.label} is not marked for cold outreach. Cold complaints on this domain can push client mail into spam.`
             : 'Cold outreach. Kept on a domain marked for it so complaints cannot hurt client mail.';
@@ -1887,9 +1893,11 @@ export default {
                 </div>` : ''}
               ${canTriggerSend ? renderSendBlock(d, canSendUI) : ''}
               ${d.heldCount ? `<div class="mm-notice">
-                <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} held back</b> by the
-                frequency cap, an open quote, or failed verification. They are excluded from
-                the recipient count above, not silently dropped: see the list below.
+                <b>${d.heldCount} contact${d.heldCount === 1 ? '' : 's'} not receiving this.</b>
+                Reasons vary: the campaign's audience does not match, the same mailbox is
+                already on the send, an unsubscribe, the frequency cap, or an open quote.
+                Every one is listed below with its reason, so a recipient count lower than
+                your list size is always explainable.
                 </div>
                 <table class="mm-table" style="margin-bottom:14px">
                   <thead><tr><th>Company</th><th>Why held</th></tr></thead>
@@ -2061,7 +2069,13 @@ export default {
           <tbody>
             ${state.campaigns.map((c) => {
               const list = c.listId ? state.lists.find((l) => l.id === c.listId) : null;
-              const src = SOURCE_META[c.source] || SOURCE_META.client;
+              // "all" is a campaign audience, not a contact source, so it is
+              // deliberately absent from SOURCE_META (which drives the
+              // Contacts summary and would otherwise show "0 all"). Falling
+              // through to the client label would mislabel a mixed campaign.
+              const src = c.source === 'all'
+                ? { label: 'Everyone' }
+                : (SOURCE_META[c.source] || SOURCE_META.client);
               // A scheduled campaign's whole point is WHEN, so the row says
               // when rather than just repeating the word "scheduled".
               const statusText = c.status === 'scheduled' && c.scheduledAt
