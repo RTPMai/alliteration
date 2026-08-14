@@ -17,13 +17,17 @@ const t = require('./harness.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+// A missing file should produce a NAMED failure, not crash the whole test
+// file before it can say which one. That is what happened on Aug 14: the
+// suite blew up at load instead of reporting the absent settings route.
+const readSoft = (p) => { try { return read(p); } catch (e) { return ''; } };
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
 const app = read('apps/promopro.js');
 const posRoute = read('api/promopro/pos.js');
 const vendorsRoute = read('api/promopro/vendors.js');
 const printavoRoute = read('api/promopro/printavo.js');
-const settingsRoute = read('api/promopro/settings.js');
+const settingsRoute = readSoft('api/promopro/settings.js');
 const lookup = read('lib/promopro/printavo-lookup.js');
 const store = read('lib/promopro/store.js');
 const registry = read('js/registry.js');
@@ -187,6 +191,43 @@ t.test('reading settings is open, writing them is admin only', () => {
   const gateIdx = settingsRoute.indexOf('if (!isAdmin)');
   t.assert(getIdx !== -1 && gateIdx !== -1 && getIdx < gateIdx,
     'settings GET must be reachable without admin');
+});
+
+t.test('every promopro endpoint has a route file that actually exists', () => {
+  // This is the check that would have caught the Aug 14 outage. All the code
+  // agreed the settings endpoint existed: the seam declared it, the app
+  // called it, the tests passed. The FILE just never got uploaded, so the
+  // app died on mount with a 404 and a message that named none of the three
+  // routes it had tried. Declaring an endpoint and shipping its handler are
+  // two separate acts, and only one of them was being verified.
+  const declared = [...apiJs.matchAll(/(pp\w+):\s*'(\/api\/promopro\/[\w-]+)'/g)]
+    .map((m) => ({ key: m[1], path: m[2] }));
+  t.assert(declared.length >= 4, 'expected several promopro endpoints, found ' + declared.length);
+  declared.forEach(({ key, path: p }) => {
+    const file = 'api' + p.replace('/api', '') + '.js';
+    t.assert(exists(file),
+      'ENDPOINTS.' + key + ' points at ' + p + ' but ' + file + ' does not exist');
+  });
+});
+
+t.test('one missing route degrades a section instead of blanking the app', () => {
+  // Promise.all meant a single 404 rejected everything and the whole app
+  // rendered "could not load". allSettled keeps the rest of the screen alive
+  // and names which part failed.
+  t.assert(app.includes('Promise.allSettled'),
+    'app data loading should use allSettled so one dead route is survivable');
+  t.assert(app.includes('loadErrors'), 'a failed load should be reported, not swallowed');
+});
+
+t.test('the vendor picker is searchable and posts an id, not typed text', () => {
+  t.assert(app.includes('ppVendorSearch'), 'no searchable vendor input');
+  t.assert(app.includes('data-vendorpick'), 'no pickable vendor results');
+  t.assert(/vendorId: \$\('#ppVendor'\)\.value/.test(app),
+    'the PO must post the hidden vendor id, never the typed text');
+  // Typing after a pick has to clear the pick, or the id can be left pointing
+  // at a vendor whose name is no longer in the box.
+  t.assert(/ppVendorSearch'\)?\s*\{[\s\S]{0,240}draftVendorId = ''/.test(app),
+    'typing should clear a previous vendor selection');
 });
 
 /* ---- architecture ------------------------------------------------------- */
