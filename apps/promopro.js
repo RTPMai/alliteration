@@ -26,6 +26,7 @@ import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate
 } from '../lib/promopro/schema.js';
+import { DEFAULT_STAGE_WAITS } from '../lib/promopro/vendors.js';
 
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -163,6 +164,7 @@ export default {
         </div>
         <button class="pp-btn" id="ppNewVendor">Add vendor</button>
       </div>
+      <div id="ppVendorFormWrap" hidden></div>
       <div id="ppVendorsBody">Loading…</div>
     </div>
 
@@ -467,6 +469,115 @@ export default {
       $('#ppFormWrap').hidden = true;
     }
 
+    /* ---------------- vendor form ---------------- */
+
+    // One card with every field, not a chain of prompts. Adding a vendor is a
+    // judgement call about lead times, and you cannot make it well when you
+    // can only see one question at a time and cannot go back to change an
+    // earlier answer.
+    function renderVendorForm(vendor) {
+      const v = vendor || {};
+      const isEdit = !!v.id;
+      const wrap = $('#ppVendorFormWrap');
+
+      // The stage waits are what drive every amber and red in the app, so
+      // they are on the card rather than buried behind a second screen.
+      const waitRows = STAGES.filter((s) => s.dateField && s.key !== 'closed' && s.key !== 'received')
+        .map((s) => {
+          const val = (v.stageWaitDays && v.stageWaitDays[s.key] !== undefined)
+            ? v.stageWaitDays[s.key]
+            : (DEFAULT_STAGE_WAITS[s.key] !== undefined ? DEFAULT_STAGE_WAITS[s.key] : 0);
+          return '<div class="pp-field">' +
+            '<label>' + esc(s.label) + '</label>' +
+            '<input type="number" min="0" data-wait="' + esc(s.key) + '" value="' + esc(val) + '">' +
+          '</div>';
+        }).join('');
+
+      wrap.innerHTML = '<div class="pp-form">' +
+        '<div class="pp-hd"><div>' +
+          '<h1 style="font-size:20px">' + (isEdit ? 'Edit ' + esc(v.name) : 'Add a vendor') + '.</h1>' +
+          '<div class="sub">Lead times here decide what counts as late for every order with this vendor.</div>' +
+        '</div></div>' +
+
+        '<input type="hidden" id="ppVenId" value="' + esc(v.id || '') + '">' +
+
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Vendor name</label><input id="ppVenName" value="' + esc(v.name || '') + '" placeholder="SanMar"></div>' +
+          '<div class="pp-field"><label>Order email</label><input id="ppVenEmail" type="email" value="' + esc(v.email || '') + '" placeholder="orders@vendor.com"></div>' +
+          '<div class="pp-field"><label>CC email</label><input id="ppVenCc" type="email" value="' + esc(v.ccEmail || '') + '" placeholder="Optional second contact"></div>' +
+        '</div>' +
+
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Payment terms</label><input id="ppVenTerms" value="' + esc(v.terms || '') + '" placeholder="Net 30"></div>' +
+          '<div class="pp-field"><label>Lead days, order to our dock</label><input id="ppVenLead" type="number" min="0" value="' + esc(v.leadDays === undefined ? 10 : v.leadDays) + '"></div>' +
+          '<div class="pp-field"><label>Payment before production</label>' +
+            '<select id="ppVenPrepay">' +
+              '<option value="no"' + (v.prepay ? '' : ' selected') + '>No</option>' +
+              '<option value="yes"' + (v.prepay ? ' selected' : '') + '>Yes, prepay</option>' +
+            '</select></div>' +
+        '</div>' +
+
+        '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:16px 0 8px">' +
+          'How long each step normally takes with this vendor (days)' +
+        '</div>' +
+        '<div class="pp-row">' + waitRows + '</div>' +
+
+        '<div class="pp-field"><label>Notes</label><textarea id="ppVenNotes" placeholder="Minimums, rep name, quirks worth remembering">' + esc(v.notes || '') + '</textarea></div>' +
+
+        (isEdit
+          ? '<div class="pp-field" style="margin-top:12px"><label>Status</label><select id="ppVenActive">' +
+              '<option value="yes"' + (v.active === false ? '' : ' selected') + '>Active</option>' +
+              '<option value="no"' + (v.active === false ? ' selected' : '') + '>Inactive, hide from new orders</option>' +
+            '</select></div>'
+          : '') +
+
+        '<div style="margin-top:16px;display:flex;gap:8px">' +
+          '<button class="pp-btn" id="ppVenSave">' + (isEdit ? 'Save vendor' : 'Add vendor') + '</button>' +
+          '<button class="pp-btn ghost" id="ppVenCancel">Cancel</button>' +
+        '</div>' +
+        '<div class="pp-err" id="ppVenErr" hidden></div>' +
+      '</div>';
+
+      wrap.hidden = false;
+    }
+
+    async function saveVendor() {
+      const err = $('#ppVenErr');
+      err.hidden = true;
+
+      const stageWaitDays = {};
+      root.querySelectorAll('[data-wait]').forEach((el) => {
+        stageWaitDays[el.dataset.wait] = Number(el.value) || 0;
+      });
+
+      const id = $('#ppVenId').value;
+      const payload = {
+        name: $('#ppVenName').value,
+        email: $('#ppVenEmail').value,
+        ccEmail: $('#ppVenCc').value,
+        terms: $('#ppVenTerms').value,
+        leadDays: Number($('#ppVenLead').value) || 0,
+        prepay: $('#ppVenPrepay').value === 'yes',
+        notes: $('#ppVenNotes').value,
+        stageWaitDays,
+      };
+      const activeEl = $('#ppVenActive');
+      if (activeEl) payload.active = activeEl.value === 'yes';
+
+      try {
+        const res = id
+          ? await ctx.api.request(ENDPOINTS.ppVendors, { method: 'PATCH', body: JSON.stringify({ ...payload, id }) })
+          : await ctx.api.post(ENDPOINTS.ppVendors, payload);
+        if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
+        $('#ppVendorFormWrap').hidden = true;
+        await loadAll();
+        renderAll();
+      } catch (e) {
+        err.textContent = e.message || 'Could not save the vendor.';
+        err.hidden = false;
+      }
+    }
+
     /* ---------------- vendors ---------------- */
 
     function renderVendors() {
@@ -487,7 +598,10 @@ export default {
             '<td class="num">' + esc(v.leadDays) + '</td>' +
             '<td>' + (v.prepay ? 'Yes' : 'No') + '</td>' +
             '<td>' + openCount + '</td>' +
-            (isAdmin ? '<td><button class="pp-btn ghost" data-rmvendor="' + esc(v.id) + '">Remove</button></td>' : '') +
+            (isAdmin
+              ? '<td><button class="pp-btn ghost" data-editvendor="' + esc(v.id) + '">Edit</button> ' +
+                '<button class="pp-btn ghost" data-rmvendor="' + esc(v.id) + '">Remove</button></td>'
+              : '') +
           '</tr>';
         }).join('') + '</tbody></table>';
     }
@@ -566,7 +680,15 @@ export default {
         return;
       }
 
-      if (t.id === 'ppNewVendor') { await addVendorPrompt(); return; }
+      if (t.id === 'ppNewVendor') { renderVendorForm(null); return; }
+
+      if (t.dataset && t.dataset.editvendor) {
+        renderVendorForm(vendorById(t.dataset.editvendor));
+        return;
+      }
+
+      if (t.id === 'ppVenSave') { await saveVendor(); return; }
+      if (t.id === 'ppVenCancel') { $('#ppVendorFormWrap').hidden = true; return; }
     });
 
     // Line edits write straight back to the draft rather than being read off
@@ -636,19 +758,6 @@ export default {
       } catch (e) {
         err.textContent = e.message || 'Could not save.';
         err.hidden = false;
-      }
-    }
-
-    async function addVendorPrompt() {
-      const name = window.prompt('Vendor name');
-      if (!name) return;
-      const lead = window.prompt('How many days from confirmed order to goods on our dock?', '10');
-      try {
-        await ctx.api.post(ENDPOINTS.ppVendors, { name, leadDays: Number(lead) || 10 });
-        await loadAll();
-        renderAll();
-      } catch (e) {
-        window.alert(e.message || 'Could not add the vendor.');
       }
     }
 
