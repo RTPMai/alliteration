@@ -19,8 +19,18 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 const src = read('apps/mailme.js');
 
-t.test('the Lists view has a members panel mount point', () => {
-  t.assert(/id="mmListMembers"/.test(src), 'apps/mailme.js is missing the #mmListMembers container');
+t.test('the members panel renders into the shared modal', () => {
+  // Was a #mmListMembers container inline in the Lists view. It is now the
+  // same modal Results and the editors use, so the assertion is that it
+  // routes through setModalContent under the 'members' kind rather than
+  // writing into a container that no longer exists.
+  t.assert(!/id="mmListMembers"/.test(src),
+    'the old inline members container should be gone');
+  const fn = src.slice(src.indexOf('async function viewListMembers'));
+  t.assert(/setModalContent\([^)]*'members'\)/.test(fn.slice(0, 900)),
+    'viewListMembers must open the members modal');
+  t.assert(/closeModalIf\('members'\)/.test(src),
+    'closing the panel must close that modal specifically, not whatever is open');
 });
 
 t.test('viewing a list fetches its resolved members from the server, not a client-side rule match', () => {
