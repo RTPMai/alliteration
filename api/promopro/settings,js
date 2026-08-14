@@ -1,9 +1,20 @@
 // api/promopro/settings.js — shop-wide PromoPro settings.
 //
 // Holds three things:
-//   chaseAfterDays   how many days of vendor silence before a PO goes amber
-//   alwaysCc         addresses copied on every purchase order email
-//   accountManagers  the pickable list, name and address
+//   chaseAfterDays      how many days of vendor silence before a PO goes amber
+//   alwaysCc            addresses copied on every purchase order email
+//   accountManagerIds   WHICH CrewCore employees can own a purchase order
+//
+// Only ids are stored. Names and addresses come from the CrewCore roster on
+// every read, so they cannot drift: change an address in CrewCore and PromoPro
+// follows. A second hand-typed list of the same people would go stale silently,
+// and a stale address means a PO owner who is never actually copied.
+//
+// The candidate roster (everyone who COULD be picked) is returned to admins
+// only, since that is the Settings screen. Everyone else gets just the chosen
+// account managers, which the new-PO form needs to render its picker. Only id,
+// name and email ever leave here: CrewCore's admin gating is about pay and
+// review notes, none of which this route touches.
 //
 // GET is open to anyone who can open the app: the new-PO form needs the
 // account manager list to render its (required) picker, so gating the read
@@ -16,6 +27,8 @@ import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
+import { listEmployees } from "../../lib/crewcore/store.js";
+import { resolveAccountManagers, candidatesFrom, defaultSelection } from "../../lib/promopro/account-managers.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -31,20 +44,58 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    if (req.method === "GET") {
-      const settings = withSettingDefaults(await getSettings());
-      return res.status(200).json({ settings });
-    }
-
     const perms = await permsFor(sess.username);
     const isAdmin = perms.role === "admin" || perms.superuser === true;
+
+    // A CrewCore outage must not take the whole app down: PromoPro can run
+    // with an empty account-manager list and say so, which is far better
+    // than a screen that will not load at all.
+    async function roster() {
+      try {
+        return await listEmployees();
+      } catch (e) {
+        console.error("promopro/settings could not read the CrewCore roster:", e);
+        return null;
+      }
+    }
+
+    async function shape(stored) {
+      const settings = withSettingDefaults(stored);
+      const employees = await roster();
+
+      if (employees === null) {
+        settings.accountManagers = [];
+        settings.rosterUnavailable = true;
+        if (isAdmin) settings.candidates = [];
+        return settings;
+      }
+
+      // First run: nobody has chosen yet, so offer Sales rather than an
+      // empty picker that blocks every purchase order until somebody visits
+      // Settings. Not written to storage, so an admin who deliberately
+      // clears the list gets an empty list, not Sales back again.
+      const ids = settings.accountManagerIds.length
+        ? settings.accountManagerIds
+        : defaultSelection(employees);
+
+      settings.accountManagerIds = ids;
+      settings.accountManagers = resolveAccountManagers(ids, employees);
+      settings.usingDefaults = !withSettingDefaults(stored).accountManagerIds.length;
+      if (isAdmin) settings.candidates = candidatesFrom(employees);
+      return settings;
+    }
+
+    if (req.method === "GET") {
+      return res.status(200).json({ settings: await shape(await getSettings()) });
+    }
+
     if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
 
     if (req.method === "PATCH" || req.method === "POST") {
       const body = parseBody(req);
       const check = validateSettings(body);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
-      const saved = withSettingDefaults(await saveSettings(check.patch));
+      const saved = await shape(await saveSettings(check.patch));
       return res.status(200).json({ ok: true, settings: saved });
     }
 
