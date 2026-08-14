@@ -133,6 +133,16 @@ export default async function handler(req, res) {
         const only = String(q.employee_id || "").trim();
         if (dept) employees = employees.filter((e) => e.department === dept);
         if (only) employees = employees.filter((e) => e.id === only);
+
+        // Salaried staff (clock_enabled false) are left out of the grid.
+        // They never punch, so they would sit there showing 0.00 across
+        // every day of every week forever, which is noise on the one screen
+        // that exists to make a wrong number obvious.
+        //
+        // Picking someone explicitly in the employee filter still shows
+        // them. That matters for anyone who moved from hourly to salary:
+        // their old weeks are real and still have to be reachable.
+        if (!only) employees = employees.filter((e) => e.clock_enabled !== false);
         // Terminated staff are hidden by default but stay reachable, because
         // a final paycheck is exactly when someone needs their last week.
         if (String(q.include_inactive || "") !== "1") {
