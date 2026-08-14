@@ -1,3 +1,4 @@
+// PUT IN: js/registry.js (REPLACES the current one)
 /**
  * alliteration. — app registry
  *
@@ -148,9 +149,17 @@ export const APPS = [
     // PTO REMOVED, Aug 2026 (Ryan's call): time off tracking stays in
     // QuickBooks, not duplicated here. The old 'pto' view, and everything
     // behind it, is gone — not hidden, gone. See DEPLOY-NOTES.md.
+    //
+    // TIME CLOCK added Aug 2026 as a rush replacement for the shop's broken
+    // clock in/out system. Same adaptive pattern as Roster: an admin sees
+    // the whole team's timecards and can correct them, a self-serve
+    // employee sees only their own hours, read only. The PUNCHING itself
+    // does not happen here at all — it happens on /clock, a public page
+    // outside the shell, because most of production has no login.
     views: [
       ['dashboard', 'Dashboard'],
       ['roster', 'Roster'],
+      ['timeclock', 'Time Clock'],
       ['stipend', 'Stipend'],
       ['reviews', 'Reviews'],
       ['handbook', 'Handbook'],
