@@ -309,6 +309,27 @@ export default {
     display:inline-block;background:var(--line-soft);border-radius:var(--radius-sm);
     padding:3px 8px;font-size:12.5px;color:var(--ink);font-weight:600;
   }
+  /* Shift editor opens in a modal, matching MailMe. Prepending a form to the
+     top of the body pushed the whole week grid down, so the row you were
+     correcting jumped off screen the moment you clicked Fix.
+     Carries MailMe's two hard-won constraints verbatim:
+     z-index must clear the shell header (200), and the backdrop is attached
+     to <body> rather than the app root, because .view runs a transform
+     animation and a transformed ancestor makes position:fixed resolve
+     against IT, pinning the modal under the header. */
+  .cc-modal-back{position:fixed;inset:0;background:rgba(15,20,28,.55);
+    z-index:400;overflow-y:auto;padding:40px 16px}
+  /* Centred with auto margins, not flex: a flex item taller than its
+     container gets its overflowing top clipped and unreachable by scroll. */
+  .cc-modal{background:var(--card);border-radius:12px;width:100%;
+    max-width:560px;margin:0 auto;box-shadow:0 18px 50px rgba(0,0,0,.3);
+    position:relative}
+  .cc-modal .cc-form{border:0;margin:0}
+  .cc-modal-x{position:absolute;top:12px;right:14px;border:0;background:transparent;
+    font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:4px 8px;
+    font-family:inherit}
+  .cc-modal-x:hover{color:var(--ink)}
+
   .tc-pinstate{font-size:11.5px;font-weight:700;margin-top:5px}
   .tc-pinstate.set{color:var(--success-dk)}
   .tc-pinstate.unset{color:var(--warn-dk)}
@@ -1288,6 +1309,59 @@ export default {
     };
   },
 
+  /* ---------------- Modal ----------------
+   *
+   * Same pattern as MailMe, including the two constraints its comments
+   * document, because both were real bugs there and would be real here:
+   *
+   *   - The backdrop attaches to <body>, not the app root. The shell's
+   *     .view runs a transform animation, and a transformed ancestor makes
+   *     position:fixed resolve against IT rather than the viewport, which
+   *     pins the overlay under the header and clips its top.
+   *   - It is wrapped in a carrier div carrying data-app-root="crewcore",
+   *     because js/app-host.js scopes every .cc-* rule to that selector. A
+   *     bare body child would render completely unstyled.
+   */
+
+  _openModal(innerHtml) {
+    this._closeModal();
+
+    const back = document.createElement('div');
+    back.className = 'cc-modal-back';
+    back.innerHTML = `<div class="cc-modal" role="dialog" aria-modal="true">
+      <button class="cc-modal-x" id="ccModalX" aria-label="Close">&times;</button>
+      <div id="ccModalBody">${innerHtml}</div></div>`;
+
+    // Clicking the backdrop closes, clicking inside must not.
+    back.addEventListener('click', (ev) => { if (ev.target === back) this._closeModal(); });
+    back.querySelector('#ccModalX').addEventListener('click', () => this._closeModal());
+
+    this._escClose = (ev) => { if (ev.key === 'Escape') this._closeModal(); };
+    document.addEventListener('keydown', this._escClose);
+
+    const carrier = document.createElement('div');
+    carrier.dataset.appRoot = 'crewcore';
+    carrier.appendChild(back);
+    document.body.appendChild(carrier);
+    this._modalCarrier = carrier;
+
+    // Stop the week grid behind the overlay scrolling with the wheel.
+    document.body.style.overflow = 'hidden';
+    return back;
+  },
+
+  _closeModal() {
+    if (this._modalCarrier) {
+      this._modalCarrier.remove();
+      this._modalCarrier = null;
+    }
+    if (this._escClose) {
+      document.removeEventListener('keydown', this._escClose);
+      this._escClose = null;
+    }
+    document.body.style.overflow = '';
+  },
+
   /* ---------------- Time Clock ----------------
    *
    * Rush build, Aug 2026, replacing the shop's broken clock in/out system.
@@ -1535,13 +1609,11 @@ export default {
    * typed on a daylight saving changeover day still lands on the right hour.
    */
   _openShiftForm(shift, presetEmployeeId) {
-    const body = this._root.querySelector('#ccBody');
     const isEdit = !!shift;
     const emps = this._employees || [];
     const empId = shift ? shift.employee_id : (presetEmployeeId || '');
 
-    const wrap = document.createElement('div');
-    wrap.innerHTML = `
+    const formHtml = `
       <div class="cc-form">
         <h3>${isEdit ? 'Fix a shift' : 'Add a shift'}</h3>
         <div class="cc-form-grid">
@@ -1570,12 +1642,13 @@ export default {
         </p>
       </div>
     `;
-    body.prepend(wrap);
+
+    const wrap = this._openModal(formHtml);
     const $ = (sel) => wrap.querySelector(sel);
     const err = $('#tsErr');
     const fail = (m) => { err.hidden = false; err.textContent = m; };
 
-    $('#tsCancel').onclick = () => wrap.remove();
+    $('#tsCancel').onclick = () => this._closeModal();
 
     if (isEdit) {
       $('#tsDelete').onclick = async () => {
@@ -1586,7 +1659,7 @@ export default {
             '&week=' + encodeURIComponent(shift.week_key) + '&id=' + encodeURIComponent(shift.id),
             { method: 'DELETE' }
           );
-          wrap.remove();
+          this._closeModal();
           this.showView('timeclock');
         } catch (e) {
           fail((e.body && e.body.error) || e.message || 'Could not delete.');
@@ -1615,7 +1688,7 @@ export default {
         } else {
           await this._ctx.api.request(ENDPOINTS.ccTimecards, { method: 'POST', body: payload });
         }
-        wrap.remove();
+        this._closeModal();
         this.showView('timeclock');
       } catch (e) {
         fail((e.body && e.body.details && e.body.details.join(', ')) || (e.body && e.body.error) || e.message || 'Could not save.');
@@ -1726,6 +1799,11 @@ export default {
   },
 
   unmount() {
+    // Tear the modal down explicitly. Its Escape handler is registered on
+    // document, so leaving it attached would keep firing against a detached
+    // root after the person navigates away, and body overflow would stay
+    // locked with no overlay on screen to explain why nothing scrolls.
+    this._closeModal();
     this._root = null;
     this._ctx = null;
   }
