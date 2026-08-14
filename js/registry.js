@@ -1,4 +1,3 @@
-// PUT IN: js/registry.js (REPLACES the current one)
 /**
  * alliteration. — app registry
  *
@@ -131,12 +130,38 @@ export const APPS = [
     stub: false
   },
   {
+    id: 'promopro',
+    name: 'PromoPro',
+    w1: 'Promo', w2: 'Pro', letter: 'P',
+    role: 'Where every vendor order stands',
+    blurb: 'Purchase orders, vendor timelines, art approvals, tracking.',
+    accent: '#E31E2D',           // display only (rail dot / app mark); tokens.css owns theming — from the Aug 14 2026 logo lineup. CrewCore moved off red to raspberry the same day so the two rail dots stay distinguishable.
+    // Owns the PO end to end: builds it from a Printavo quote (or from
+    // nothing, for a manual web order), emails it to the vendor, then tracks
+    // submitted / confirmed / art / payment / ship / receive with a per-vendor
+    // clock on each step. Replaces raising POs in QuickBooks — the vendor
+    // BILL still gets entered there when it arrives, so the accounting side
+    // is unchanged, but the open-order picture now lives here where the whole
+    // team can see it instead of in one person's inbox.
+    //
+    // Read access is deliberately wide (AMs need to answer "where is my
+    // order" without asking); writing is can_edit, deleting is admin only.
+    views: [
+      ['pipeline', 'Pipeline'],
+      ['orders', 'Purchase Orders'],
+      ['vendors', 'Vendors'],
+      ['settings', 'Settings']
+    ],
+    defaultView: 'pipeline',
+    stub: false
+  },
+  {
     id: 'crewcore',
     name: 'CrewCore',
     w1: 'Crew', w2: 'Core', letter: 'C',
     role: 'Who does the work',
     blurb: 'Employees, stipends, reviews, handbook.',
-    accent: '#E1251B',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #D61623, a different red)
+    accent: '#C83E73',           // display only (rail dot / app mark); tokens.css owns theming — raspberry, from the Aug 14 2026 logo lineup (was #E1251B red; PromoPro took the red so the two rail dots stay distinguishable)
     // Real build, Aug 2026. Roster and Reviews render an admin view (roles
     // with data_scope "all", or any superuser account) and a self-serve "my
     // profile" view otherwise, from the SAME route — see apps/crewcore.js.
