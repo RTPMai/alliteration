@@ -562,6 +562,45 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.equal(s.parseEmailList('a@x.com, b@x.com; c@x.com\nd@x.com').length, 4);
   });
 
+  t.test('normalizing a settings payload does not throw away what the route attached', () => {
+    // The Aug 14 bug, in one line. withSettingDefaults rebuilt the object
+    // from four known keys, so candidates/rosterCounts/usingDefaults were
+    // deleted the moment the response reached the browser. The server was
+    // returning thirteen employees and six valid addresses; the picker was
+    // empty before anything rendered. A normalizer supplies what is absent,
+    // it does not decide what is allowed through.
+    const fromRoute = {
+      chaseAfterDays: 3,
+      alwaysCc: [],
+      accountManagerIds: ['EMP-00005', 'EMP-00003'],
+      accountManagers: [{ id: 'EMP-00005', name: 'Abby Penton', email: 'abby@pmapparel.com' }],
+      candidates: [{ id: 'EMP-00005', name: 'Abby Penton', selectable: true }],
+      rosterCounts: { total: 13, active: 13, withEmail: 6, adminView: true },
+      usingDefaults: true,
+    };
+    const after = s.withSettingDefaults(fromRoute);
+    t.assert(Array.isArray(after.candidates) && after.candidates.length === 1,
+      'the candidate roster must survive normalizing');
+    t.assert(after.rosterCounts && after.rosterCounts.total === 13,
+      'the roster counts must survive, or an empty picker cannot explain itself');
+    t.equal(after.usingDefaults, true);
+    t.equal(after.accountManagers.length, 1);
+  });
+
+  t.test('normalizing still fills in a completely empty payload', () => {
+    const d = s.withSettingDefaults(null);
+    t.equal(d.chaseAfterDays, 3);
+    t.equal(d.alwaysCc.length, 0);
+    t.equal(d.accountManagerIds.length, 0);
+  });
+
+  t.test('normalizing still repairs bad values rather than passing them through', () => {
+    const d = s.withSettingDefaults({ chaseAfterDays: -4, alwaysCc: 'nope', accountManagerIds: 'nope' });
+    t.equal(d.chaseAfterDays, 3);
+    t.equal(d.alwaysCc.length, 0);
+    t.equal(d.accountManagerIds.length, 0);
+  });
+
   t.test('settings fall back to sane defaults rather than undefined', () => {
     const d = s.withSettingDefaults({});
     t.equal(d.chaseAfterDays, 3);
