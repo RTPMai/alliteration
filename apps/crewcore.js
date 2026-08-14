@@ -1,3 +1,4 @@
+// PUT IN: apps/crewcore.js (REPLACES the current one)
 /**
  * CrewCore — employee management for the whole team.
  *
@@ -604,7 +605,7 @@ export default {
                 <td><span class="chip ${esc(e.status)}">${esc(e.status)}</span></td>
                 <td>${e.hourly_rate != null ? fmtMoney(e.hourly_rate) + '/hr' : '—'}</td>
                 <td>${fmtMoney(e.apparel_stipend)}/yr</td>
-                <td>${e.clock_enabled === false ? '<span class="chip on_leave">off</span>'
+                <td>${e.clock_enabled === false ? '<span class="chip on_leave">salary</span>'
                   : (e.has_clock_pin ? '<span class="chip">set</span>' : '<span class="chip terminated">no code</span>')}</td>
               </tr>
             `).join('')}
@@ -655,10 +656,10 @@ export default {
             <input id="fStipend" type="number" step="0.01" value="${emp && emp.apparel_stipend != null ? emp.apparel_stipend : ''}" placeholder="defaults by department">
           </div>
           <div>
-            <label>Time clock</label>
+            <label>Pay type</label>
             <select id="fClockOn">
-              <option value="true" ${!emp || emp.clock_enabled !== false ? 'selected' : ''}>Punches in and out</option>
-              <option value="false" ${emp && emp.clock_enabled === false ? 'selected' : ''}>Does not punch</option>
+              <option value="true" ${!emp || emp.clock_enabled !== false ? 'selected' : ''}>Hourly, punches the clock</option>
+              <option value="false" ${emp && emp.clock_enabled === false ? 'selected' : ''}>Salary, does not punch</option>
             </select>
           </div>
           <div>
