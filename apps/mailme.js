@@ -458,6 +458,7 @@ export default {
       source: 'all', status: 'all', search: '',
       sort: 'company_name', dir: 'asc',
       editingList: null, editingCampaign: null, editingContact: null, viewingListId: null,
+      listMemberIds: [],
       importPreview: null, importCsv: '',
       settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
       domains: null
@@ -1058,21 +1059,38 @@ export default {
       return tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean);
     }
 
+    // Every list can be edited by hand now. A tag-based dynamic rule still
+    // adds/removes the rule's tags, because that keeps the contact and the
+    // rule telling the same story. Any other dynamic rule records the change
+    // as an override on the list itself (extraMembers / excludedMembers),
+    // which is what makes source-only and search-only lists editable at all.
     function listIsMemberEditable(list) {
-      return list && (list.kind === 'static' || listRuleTags(list).length > 0);
+      return !!list;
+    }
+
+    function usesTagMechanism(list) {
+      return list && list.kind === 'dynamic' && listRuleTags(list).length > 0;
     }
 
     async function removeListMember(list, member) {
       try {
+        const mid = String(member.id);
         if (list.kind === 'static') {
-          const members = (list.members || []).filter((id) => String(id) !== String(member.id));
+          const members = (list.members || []).filter((id) => String(id) !== mid);
           await api.patch(ENDPOINTS.mmLists, { id: list.id, members });
-        } else {
+        } else if (usesTagMechanism(list)) {
           const ruleTags = listRuleTags(list);
           const tags = (member.tags || []).filter(
             (t) => !ruleTags.includes(String(t).trim().toLowerCase())
           );
           await api.patch(ENDPOINTS.mmContacts, { id: member.id, tags });
+        } else {
+          // Record the removal against the list. Dropping them from
+          // extraMembers alone is not enough: if the rule still matches them
+          // they would reappear on the next render.
+          const excludedMembers = [...new Set([...(list.excludedMembers || []).map(String), mid])];
+          const extraMembers = (list.extraMembers || []).map(String).filter((x) => x !== mid);
+          await api.patch(ENDPOINTS.mmLists, { id: list.id, excludedMembers, extraMembers });
         }
         await Promise.all([loadContacts(), loadLists()]);
         renderListTable();
@@ -1093,24 +1111,29 @@ export default {
           'or check the address against Contacts.', 'mm-err');
       }
 
-      const alreadyIn = list.kind === 'static'
-        ? (list.members || []).map(String).includes(String(candidate.id))
-        : listRuleTags(list).every((t) => (candidate.tags || []).map((x) => String(x).trim().toLowerCase()).includes(t));
+      const cid = String(candidate.id);
+      const alreadyIn = (state.listMemberIds || []).includes(cid);
       if (alreadyIn) {
         return msg('#mmListMembersMsg', esc(candidate.email) + ' is already on this list.', 'mm-err');
       }
 
       try {
         if (list.kind === 'static') {
-          const members = [...new Set([...(list.members || []).map(String), String(candidate.id)])];
+          const members = [...new Set([...(list.members || []).map(String), cid])];
           await api.patch(ENDPOINTS.mmLists, { id: list.id, members });
-        } else {
+        } else if (usesTagMechanism(list)) {
           const ruleTags = listRuleTags(list);
           const tags = [...new Set([
             ...(candidate.tags || []).map((t) => String(t).trim().toLowerCase()),
             ...ruleTags,
           ])];
           await api.patch(ENDPOINTS.mmContacts, { id: candidate.id, tags });
+        } else {
+          // No tag to set, so the addition is recorded on the list. Also
+          // drop any prior exclusion, or the override would cancel itself.
+          const extraMembers = [...new Set([...(list.extraMembers || []).map(String), cid])];
+          const excludedMembers = (list.excludedMembers || []).map(String).filter((x) => x !== cid);
+          await api.patch(ENDPOINTS.mmLists, { id: list.id, extraMembers, excludedMembers });
         }
         await Promise.all([loadContacts(), loadLists()]);
         renderListTable();
@@ -1122,16 +1145,26 @@ export default {
 
     function renderListMembersPanel(list, members, memberCount, mailableCount) {
       const editable = listIsMemberEditable(list);
+      // The server resolved this list, overrides and all. Checking "already
+      // on the list" against it is right for every list kind, where the old
+      // per-kind guess was not.
+      state.listMemberIds = members.map((m) => String(m.id));
 
-      const addRow = editable ? `
+      // How a hand edit is stored differs by list kind, and that difference
+      // is worth stating: on a rule-based list the person is creating an
+      // exception to the rule, not changing the rule, and the rule keeps
+      // pulling in new matches around them.
+      const overrideNote = (list.kind === 'dynamic' && !usesTagMechanism(list)) ? `
+        <div class="hint" style="padding:0 16px 10px">
+          Adding or removing someone here is kept as an exception to this list's rule.
+          The rule still runs and still picks up new matches.
+        </div>` : '';
+
+      const addRow = `
         <div class="mm-add-row">
           <input id="mmAddMemberEmail" type="text" placeholder="Add by email, e.g. name@example.com">
           <button class="mm-btn sm" id="mmAddMemberBtn">Add to list</button>
-        </div>` : `
-        <div class="mm-hint" style="padding:12px 16px;border-bottom:1px solid var(--line)">
-          This list's rule isn't tag-based (it filters by source or text match), so members
-          can't be added or removed one by one here. Edit the list's rule instead.
-        </div>`;
+        </div>${overrideNote}`;
 
       const editBtn = `<button class="mm-btn ghost sm" id="mmEditListFromPanel">Edit list</button>`;
       const closeBtn = `<button class="mm-btn ghost sm" id="mmCloseListMembers">Close</button>`;
