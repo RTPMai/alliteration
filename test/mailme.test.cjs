@@ -361,6 +361,34 @@ t.test('a body-attached modal is cleaned up on view change and unmount', () => {
     'closing must restore body scrolling');
 });
 
+t.test('every list member missing from a send is accounted for with a reason', () => {
+  // A list of three showing one recipient looks broken. selectRecipients
+  // drops people silently (wrong source, unsubscribed, segment mismatch)
+  // and only applyEligibility used to report anything, so those drops
+  // vanished with no explanation.
+  const src = stripComments(read('api/mailme/campaigns.js'));
+  t.assert(/function exclusionReason/.test(src),
+    'there must be a function that explains why a list member was filtered out');
+  t.assert(/filteredOut/.test(src) && /filteredOut\.concat\(eligibilityHeld\)/.test(src),
+    'filtered-out contacts must be merged into held, not discarded');
+  const fn = src.slice(src.indexOf('function exclusionReason'));
+  const body = fn.slice(0, fn.indexOf('\nasync function recipientsFor'));
+  t.assert(/SUPPRESSED_STATUSES/.test(body), 'an unsubscribe must be named as such');
+  t.assert(/contact\.source !== campaign\.source/.test(body),
+    'an audience mismatch is the most common cause and must be named');
+  t.assert(/segmentTags/.test(body), 'a segment mismatch must be named');
+});
+
+t.test('source labels are defined once, server-side, not duplicated per app', () => {
+  // The server writes user-facing text now (exclusion reasons), so the
+  // labels cannot live only in apps/mailme.js or the two will drift.
+  const schema = read('lib/mailme/schema.js');
+  t.assert(/export const SOURCE_LABELS/.test(schema),
+    'SOURCE_LABELS must be exported from schema.js');
+  const api = read('api/mailme/campaigns.js');
+  t.assert(/SOURCE_LABELS/.test(api), 'the campaigns route should use the shared labels');
+});
+
 t.test('send orchestration re-verifies compliance, domain readiness and suppression before dispatch', () => {
   const src = stripComments(read('lib/mailme/send.js'));
   t.assert(/complianceBlockers\(/.test(src), 'sendReadiness must reuse the CAN-SPAM blockers');
