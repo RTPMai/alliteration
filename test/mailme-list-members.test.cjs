@@ -65,17 +65,39 @@ t.test('the members panel can be closed and does not linger when a different lis
 
 /* ---- editing membership: add/remove ---- */
 
-t.test('a tag-based dynamic list, or a static list, allows adding/removing members', () => {
+t.test('EVERY list allows adding and removing members by hand', () => {
+  // Previously a dynamic list built on source or free-text search offered no
+  // add box at all, because there was no per-contact field to toggle. The
+  // exception is now stored on the list instead, so no list is read-only.
   t.assert(/function listIsMemberEditable/.test(src), 'listIsMemberEditable() is missing');
   const fn = src.slice(src.indexOf('function listIsMemberEditable'));
-  const body = fn.slice(0, fn.indexOf('\n    async function removeListMember'));
-  t.assert(/kind === ['"]static['"]/.test(body) && /listRuleTags\(list\)\.length > 0/.test(body),
-    'membership editing must be allowed for static lists and tag-based dynamic lists');
+  const body = fn.slice(0, fn.indexOf('}'));
+  t.assert(/return !!list/.test(body),
+    'no list kind should be excluded from hand-editing');
 });
 
-t.test('a source- or search-only dynamic list explains why it cannot be hand-edited here', () => {
-  t.assert(/isn't tag-based/.test(src),
-    'the panel should tell the user why add/remove is unavailable for a non-tag rule');
+t.test('a non-tag dynamic list records the change on the list, not on the contact', () => {
+  // Setting a tag the rule does not use would not add anyone to the list,
+  // and would quietly edit the contact for no reason.
+  const add = src.slice(src.indexOf('async function addListMember'));
+  const addBody = add.slice(0, add.indexOf('\n    function renderListMembersPanel'));
+  t.assert(/extraMembers/.test(addBody), 'adding must write extraMembers for a non-tag rule');
+  t.assert(/excludedMembers.*filter/.test(addBody),
+    'adding someone must also clear any prior exclusion, or the two cancel out');
+
+  const rem = src.slice(src.indexOf('async function removeListMember'));
+  const remBody = rem.slice(0, rem.indexOf('\n    async function addListMember'));
+  t.assert(/excludedMembers/.test(remBody),
+    'removing must write excludedMembers, or the rule re-adds them immediately');
+});
+
+t.test('a tag-based dynamic list still uses tags, not the override', () => {
+  // Tags keep the contact and the rule telling the same story, so the
+  // override is only for rules that have no tag to set.
+  t.assert(/function usesTagMechanism/.test(src), 'usesTagMechanism() is missing');
+  const add = src.slice(src.indexOf('async function addListMember'));
+  t.assert(/usesTagMechanism\(list\)/.test(add.slice(0, 1400)),
+    'the add path must branch on whether the rule is tag-based');
 });
 
 t.test('removing a member from a STATIC list edits list.members, not the contact', () => {
@@ -118,4 +140,43 @@ t.test('the Dashboard view has a message target, so a failed refresh is visible 
 });
 
 
-process.exit(t.report());
+/* ---- resolveList overrides: real calls, not source matching ---- */
+
+(async () => {
+  const schema = await import('../lib/mailme/schema.js');
+  const contacts = [
+    { id: 'client:1', email: 'a@x.com', source: 'client', tags: [] },
+    { id: 'client:2', email: 'b@x.com', source: 'client', tags: [] },
+    { id: 'prospect:9', email: 'c@x.com', source: 'prospect', tags: [] },
+  ];
+  const base = { kind: 'dynamic', rule: { source: 'client' } };
+  const ids = (l) => schema.resolveList(l, contacts).map((c) => c.id);
+
+  t.test('a manual addition appears even though the rule does not match them', () => {
+    t.equal(ids({ ...base, extraMembers: ['prospect:9'] }).join(','),
+      'client:1,client:2,prospect:9');
+  });
+
+  t.test('a manual removal sticks even though the rule still matches them', () => {
+    // Without this the rule would re-add them on the very next render.
+    t.equal(ids({ ...base, excludedMembers: ['client:1'] }).join(','), 'client:2');
+  });
+
+  t.test('exclusion beats inclusion, so a contact can never be both', () => {
+    t.equal(ids({ ...base, extraMembers: ['client:1'], excludedMembers: ['client:1'] }).join(','),
+      'client:2');
+  });
+
+  t.test('a list with no overrides behaves exactly as before', () => {
+    t.equal(ids(base).join(','), 'client:1,client:2');
+    t.equal(ids({ ...base, extraMembers: [], excludedMembers: [] }).join(','), 'client:1,client:2');
+  });
+
+  t.test('overrides never leak into static lists', () => {
+    const stat = { kind: 'static', members: ['client:1'], extraMembers: ['prospect:9'] };
+    t.equal(ids(stat).join(','), 'client:1',
+      'a static list is its members, full stop');
+  });
+
+  process.exit(t.report());
+})();
