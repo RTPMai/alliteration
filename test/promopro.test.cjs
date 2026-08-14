@@ -74,6 +74,29 @@ t.test('CrewCore moved off red so the two rail dots are distinguishable', () => 
   t.assert(registry.includes("accent: '#C83E73'"), 'registry still has CrewCore on the old red');
 });
 
+t.test('adding a vendor is one card, not a chain of prompts', () => {
+  // A lead time is a judgement call. You cannot make it well when you can
+  // only see one question at a time and cannot go back and change an
+  // earlier answer.
+  t.assert(!/window\.prompt|window\.alert/.test(app),
+    'vendor entry should be a form card, not browser prompts');
+  ['ppVenName', 'ppVenEmail', 'ppVenLead', 'ppVenTerms', 'ppVenPrepay', 'ppVenNotes']
+    .forEach((f) => t.assert(app.includes(f), 'the vendor card is missing the ' + f + ' field'));
+});
+
+t.test('the vendor card exposes the per-stage waits, not just one lead time', () => {
+  // These are what drive every amber and red in the app, so they belong on
+  // the card rather than behind a second screen nobody opens.
+  t.assert(app.includes('data-wait='), 'no per-stage wait inputs on the vendor card');
+  t.assert(app.includes('DEFAULT_STAGE_WAITS'), 'the card should seed new vendors with the defaults');
+});
+
+t.test('an existing vendor can be edited, not just created', () => {
+  t.assert(app.includes('data-editvendor='), 'no edit affordance on the vendor list');
+  t.assert(/method:\s*'PATCH'[\s\S]{0,120}ppVendors|ppVendors[\s\S]{0,120}method:\s*'PATCH'/.test(app),
+    'editing a vendor should PATCH rather than create a duplicate');
+});
+
 /* ---- seam --------------------------------------------------------------- */
 
 t.test('the seam knows all three promopro endpoints and marks them live', () => {
