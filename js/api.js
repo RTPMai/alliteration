@@ -214,6 +214,11 @@ export const ENDPOINTS = {
   ccReviews:       '/api/crewcore/reviews',
   ccHandbook:      '/api/crewcore/handbook',
   ccSettings:      '/api/crewcore/settings',
+  // Time clock back side. The PUBLIC punch endpoint (/api/crewcore/clock)
+  // is deliberately NOT listed here: clock.html lives outside the shell and
+  // calls it directly, the same way scan.html calls api/scan-status.js. The
+  // seam rule covers app modules, and there is no app module in that path.
+  ccTimecards:     '/api/crewcore/timecards',
 
   // ---- Notifications (shell-level) ----
   notifications:   '/api/notifications',
@@ -560,7 +565,13 @@ const MOCK_DATA = {
       { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
     ]
   }),
-  [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true } }),
+  [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true, clock_enabled: true, week_start_day: 0, overtime_after_hours: 40, clock_round_minutes: 0, clock_kiosk_token: '' } }),
+  [ENDPOINTS.ccTimecards]: () => ({
+    scope: 'all', timezone: 'America/Chicago', week_start_day: 0,
+    week_key: '2026-08-09', dates: ['2026-08-09','2026-08-10','2026-08-11','2026-08-12','2026-08-13','2026-08-14','2026-08-15'],
+    round_minutes: 0, overtime_after: 40,
+    rows: [], totals: { hours: 0, overtime: 0, flags: 0, cost: 0 }, now_in: []
+  }),
 
   // Shape mirrors api/notifications.js. Two sample rows assigned to the mock
   // user so the header bell has something to show while developing offline.
