@@ -1,511 +1,884 @@
-/**
- * MailMe sending pipeline tests.
- *
- * Real function calls against the code that decides who a real email goes
- * to and what it says, not source-text matching. Two files exercised here:
- *
- *   lib/mailme/send.js       personalization, and sendReadiness's blockers
- *   api/mailme/webhook.js    normalizeEvent() against ACTUAL Resend payload
- *                            shapes, not a guessed generic one
- *
- * RESEND_API_KEY and SESSION_SECRET are deliberately unset in this test run
- * (test/run.sh sets no env vars), which is itself exercised below: every
- * function here must degrade safely with no provider configured rather than
- * throwing or silently treating "unconfigured" as "ready".
- */
+// lib/mailme/store.js — MailMe's Upstash access layer.
+//
+// Mirrors lib/errorengine/store.js's KV conventions exactly (same shared
+// Upstash instance, GET /get + POST /pipeline, same defensive unwrap for
+// double-encoded / chunked historic values).
+//
+// SHARED INSTANCE. MailMe writes ONLY under the mailme_data: prefix. It reads
+// backbone_data READ-ONLY and NEVER writes it — the rule ErrorEngine follows.
+//
+// TWO CONTACT SOURCES:
+//   client   — the BackBone roster, resolved live, never stored here.
+//   prospect — imported cold-outreach records, stored here in full because
+//              nothing else in the shell knows about them.
+// Both are normalized to ONE contact shape by resolveContacts(), so lists,
+// sorting and campaigns never branch on where a contact came from.
+//
+// ESM. Do NOT convert to module.exports.
 
-const t = require('./harness.cjs');
+import {
+  keys, SUPPRESSED_STATUSES, newCampaignDraft, normalizeEmail,
+  resolveList, aggregateEvents, mergeSettings,
+} from "./schema.js";
+import { reorderStatus, ytdRevenue } from "./audience.js";
+import { listRequests } from "../giving.js";
 
-Promise.all([
-  import('../lib/mailme/send.js'),
-  import('../api/mailme/webhook.js'),
-  import('../lib/mailme/schema.js'),
-]).then(async ([send, webhook, schema]) => {
+const KV_URL = process.env.KV_REST_API_URL;
+const KV_TOKEN = process.env.KV_REST_API_TOKEN;
 
-  /* ---- personalize() ---------------------------------------------------- */
+function assertConfig() {
+  if (!KV_URL || !KV_TOKEN) throw new Error("Upstash not configured (KV_REST_API_URL / KV_REST_API_TOKEN)");
+}
 
-  t.test('personalize fills in first name and company name', () => {
-    const out = send.personalize('Hi {{first_name}}, from {{company_name}}!',
-      { contact_name: 'Dana Whitmer', company_name: 'Ankeny Miracle League' });
-    t.equal(out, 'Hi Dana, from Ankeny Miracle League!', 'both placeholders should resolve');
+async function kvGet(key) {
+  assertConfig();
+  const r = await fetch(`${KV_URL}/get/${encodeURIComponent(key)}`, {
+    headers: { Authorization: `Bearer ${KV_TOKEN}` },
   });
+  if (!r.ok) return null;
+  const j = await r.json();
+  return j.result || null;
+}
 
-  t.test('personalize falls back to "there" when no name is on file', () => {
-    const out = send.personalize('Hi {{first_name}}', { contact_name: '', company_name: '' });
-    t.equal(out, 'Hi there', 'a blank name should not leave a literal placeholder or empty string');
+async function kvPipeline(commands) {
+  assertConfig();
+  const r = await fetch(`${KV_URL}/pipeline`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${KV_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(commands),
   });
+  if (!r.ok) throw new Error(`Redis pipeline failed: ${r.status}`);
+  return r.json();
+}
 
-  t.test('personalize is case-insensitive and tolerates whitespace in the placeholder', () => {
-    const out = send.personalize('{{ First_Name }} at {{COMPANY_NAME}}',
-      { contact_name: 'Marcus Bell', company_name: 'Saylorville Trail Run' });
-    t.equal(out, 'Marcus at Saylorville Trail Run', 'placeholder matching should not be picky about case or spaces');
-  });
+function unwrap(raw) {
+  let data = raw;
+  let attempts = 0;
+  while (typeof data === "string" && attempts < 3) {
+    try { data = JSON.parse(data); } catch (e) { break; }
+    attempts++;
+  }
+  if (typeof data === "object" && data && data["0"] !== undefined && data.synced === undefined) {
+    const rebuilt = Object.keys(data)
+      .sort((a, b) => Number(a) - Number(b))
+      .map((k) => data[k])
+      .join("");
+    try { data = JSON.parse(rebuilt); } catch (e) { /* leave as-is */ }
+  }
+  return data;
+}
 
-  /* ---- sendReadiness() --------------------------------------------------- */
-  //
-  // t.test()'s try/catch is synchronous (see harness.cjs), so an async
-  // function handed to it would always report "ok" regardless of whether its
-  // assertions actually pass — the rejection never reaches the catch. Each
-  // async call is awaited and resolved HERE, outside t.test, and only the
-  // synchronous assertion against the already-resolved value goes inside.
+async function readObject(key) {
+  const raw = await kvGet(key);
+  const data = raw ? unwrap(raw) : null;
+  return (data && typeof data === "object" && !Array.isArray(data)) ? data : {};
+}
 
-  const READY_BASE = {
-    fromName: 'P&M Apparel', unsubscribeUrl: 'https://x/unsub',
-    postalAddress: { line1: '1 Main St', city: 'Polk City', state: 'IA', postalCode: '50226' },
+async function readArray(key) {
+  const raw = await kvGet(key);
+  const data = raw ? unwrap(raw) : null;
+  return Array.isArray(data) ? data : [];
+}
+
+async function writeKey(key, value) {
+  await kvPipeline([["SET", key, JSON.stringify(value)]]);
+  return value;
+}
+
+// ---- BackBone reader (READ-ONLY) -------------------------------------------
+
+async function getBackboneData() {
+  const raw = await kvGet("backbone_data");
+  if (!raw) return { synced: [], enrichment: {} };
+  const data = unwrap(raw);
+  return {
+    synced: (data && data.synced) || [],
+    enrichment: (data && data.enrichment) || {},
   };
-  const ident = (over) => ({
-    key: 'pmapparel', label: 'PM Apparel', domain: 'pmapparel.com',
-    fromAddress: 'PM Apparel <hello@pmapparel.com>', cold: false, default: true, ...over
-  });
+}
 
-  const readinessNoProvider = await send.sendReadiness(
-    schema.mergeSettings(READY_BASE), ident());
+// Leads are BackBone's own qualified pipeline, stored separately from the
+// customer roster. Read-only, same as backbone_data.
+async function getLeads() {
+  const raw = await kvGet("backbone_leads");
+  if (!raw) return [];
+  const data = unwrap(raw);
+  if (Array.isArray(data)) return data;
+  return (data && Array.isArray(data.leads)) ? data.leads : [];
+}
 
-  t.test('sendReadiness blocks when the provider is not configured', () => {
-    t.assert(readinessNoProvider.some((b) => b.field === 'provider'),
-      'with no RESEND_API_KEY set, sendReadiness must report the provider as a blocker');
-  });
+// GivingGauge requests. Every org that asked for a donation handed over a
+// contact email and told P&M they run an event with apparel needs, which
+// makes them a warmer audience than anything that could be bought.
+//
+// FIXED Aug 3: this originally read a guessed key ("givinggauge_requests"),
+// which does not exist, so Giving silently showed zero. Requests actually
+// live under alliteration:giving:index plus one key per request. Rather than
+// re-derive that layout here (and risk drifting from it again), this calls
+// GivingGauge's own listRequests(). One reader, one place to be wrong.
+async function getGivingRequests() {
+  try {
+    const rows = await listRequests();
+    return Array.isArray(rows) ? rows : [];
+  } catch (e) {
+    // A GivingGauge outage must not take down the whole contact list.
+    console.error("[mailme] giving requests unavailable:", e && e.message);
+    return [];
+  }
+}
 
-  const readinessNoFromAddress = await send.sendReadiness(
-    schema.mergeSettings(READY_BASE), ident({ fromAddress: '' }));
+// Pull the best contact off a lead. Leads store qualification data with a
+// key_contacts array; prefer a contact that actually has an email, since a
+// name with no address cannot be emailed however senior the person is.
+// The qualification agent is REQUIRED to emit a value for every field, so a
+// missing email comes back as "not found" / "N/A" / "unknown" rather than
+// being omitted. Those are not addresses. Without this filter MailMe would
+// have created contacts whose email is literally the string "not found" and
+// cheerfully counted them as mailable.
+//
+// Mirrors the same cleaning BackBone does on its own lead table.
+const CONTACT_PLACEHOLDER_RE =
+  /^(not\s*found|none|n\/?a|null|unknown|unavailable|not\s*(listed|available|provided|public|disclosed)|tbd|-{1,}|\u2014)$/i;
 
-  t.test('sendReadiness blocks an identity with no from-address', () => {
-    t.assert(readinessNoFromAddress.some((b) => b.field === 'identity.pmapparel.fromAddress'),
-      'a blank from-address on the chosen identity must block the send');
-  });
+function cleanLeadEmail(v) {
+  const t = String(v == null ? "" : v).trim();
+  if (!t || CONTACT_PLACEHOLDER_RE.test(t)) return "";
+  // Extract a real address even when it arrives inside a sentence, which the
+  // older contact_info free-text field routinely did.
+  const m = t.match(/[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i);
+  return m ? m[0] : "";
+}
 
-  t.test('sendReadiness blocks when a campaign resolves to no identity at all', () => {
-    // Guards against a campaign pointing at an identity that was deleted in
-    // Settings: better a clear blocker than a crash or a silent wrong sender.
-    return send.sendReadiness(schema.mergeSettings(READY_BASE), null).then((b) => {
-      t.assert(b.some((x) => x.field === 'identity'), 'a missing identity must be a blocker');
+function leadContact(lead) {
+  const direct = cleanLeadEmail(lead.contact_email || lead.email);
+  if (direct) {
+    return { email: direct, name: lead.contact_name || "", title: lead.contact_title || "" };
+  }
+
+  const qual = lead.qualification || {};
+  const contacts = Array.isArray(qual.key_contacts) ? qual.key_contacts
+    : Array.isArray(lead.key_contacts) ? lead.key_contacts : [];
+
+  // Keep the person INTACT: take the name and title from whoever actually
+  // owns the address, never the first name found beside a different person's
+  // email. BackBone learned this one the hard way.
+  for (const c of contacts) {
+    if (!c) continue;
+    const email = cleanLeadEmail(c.email || c.contact_info);
+    if (email) {
+      return { email, name: c.name || "", title: c.title || "" };
+    }
+  }
+  return null;
+}
+
+// Best email for a customer: a manually-entered enrichment.contact_email
+// overrides the Printavo-synced primary_contact, matching how BackBone's own
+// customer detail panel displays and placeholders this field.
+function resolveEmail(customerRow, enrichmentRow) {
+  const manual = enrichmentRow && enrichmentRow.contact_email;
+  if (manual && String(manual).trim()) return String(manual).trim();
+  const pc = customerRow && customerRow.primary_contact;
+  return (pc && pc.email) ? String(pc.email).trim() : null;
+}
+
+function resolveName(customerRow, enrichmentRow) {
+  const first = enrichmentRow && enrichmentRow.contact_first_name;
+  const last = enrichmentRow && enrichmentRow.contact_last_name;
+  if (first || last) return [first, last].filter(Boolean).join(" ").trim();
+  const pc = customerRow && customerRow.primary_contact;
+  return (pc && pc.name) ? String(pc.name).trim() : "";
+}
+
+// ---- Suppression (by email address, source-independent) --------------------
+//
+// THE COMPLIANCE BACKSTOP. Keyed by raw email, not by contact id, so an
+// opt-out survives the contact record being deleted and re-imported under a
+// new id. Every send path and every import consults this.
+
+export async function getSuppression() {
+  return readObject(keys.suppressionList());
+}
+
+export async function suppressEmail(email, entry) {
+  const e = normalizeEmail(email);
+  if (!e) return null;
+  const all = await getSuppression();
+  all[e] = {
+    status: (entry && entry.status) || "unsubscribed",
+    reason: (entry && entry.reason) || null,
+    at: new Date().toISOString(),
+    by: (entry && entry.by) || null,
+  };
+  await writeKey(keys.suppressionList(), all);
+  return all[e];
+}
+
+/**
+ * Record that a webhook call arrived, and what came of it. Written even for
+ * a REJECTED call, which is the whole point: an unauthorized attempt proves
+ * the provider is configured and pointing here, and narrows the problem to
+ * the secret rather than leaving it a mystery.
+ *
+ * Best-effort. A failure to record the heartbeat must never fail the
+ * webhook itself, or a diagnostic aid would start losing real events.
+ */
+export async function recordWebhookHeartbeat(entry) {
+  try {
+    await writeKey(keys.webhookHeartbeat(), {
+      at: new Date().toISOString(),
+      ...entry,
     });
-  });
+  } catch (e) {
+    console.error("[mailme] could not record webhook heartbeat:", e && e.message);
+  }
+}
 
-  const readinessBlank = await send.sendReadiness(schema.mergeSettings({}), ident());
+export async function getWebhookHeartbeat() {
+  try {
+    const v = await readObject(keys.webhookHeartbeat());
+    return v && v.at ? v : null;
+  } catch (e) {
+    return null;
+  }
+}
 
-  t.test('sendReadiness still carries the CAN-SPAM blockers (postal address, unsubscribe link, from-name)', () => {
-    ['postalAddress', 'unsubscribeUrl', 'fromName'].forEach((field) => {
-      t.assert(readinessBlank.some((b) => b.field === field), `sendReadiness dropped the existing ${field} blocker`);
-    });
-  });
+export async function unsuppressEmail(email) {
+  const e = normalizeEmail(email);
+  const all = await getSuppression();
+  if (!all[e]) return false;
+  // Bounces and complaints are NOT hand-clearable: a hard bounce means the
+  // mailbox does not exist, and a complaint means they marked it spam.
+  // Resuming either is how a sending domain gets blocked.
+  if (all[e].status === "bounced" || all[e].status === "complained") return false;
+  delete all[e];
+  await writeKey(keys.suppressionList(), all);
+  return true;
+}
 
-  /* ---- normalizeEvent() against real Resend shapes ----------------------- */
+// ---- Settings --------------------------------------------------------------
 
-  t.test('normalizeEvent reads a real Resend "email.delivered" payload', () => {
-    const raw = {
-      type: 'email.delivered',
-      created_at: '2026-08-10T12:00:00.000Z',
-      data: {
-        email_id: 're_abc123',
-        to: ['dana@ankenymiracleleague.org'],
-        tags: [{ name: 'campaignId', value: 'MM-00007' }, { name: 'contactId', value: 'client:3310' }],
-      },
+export async function getSettings() {
+  return mergeSettings(await readObject(keys.settings()));
+}
+
+export async function saveSettings(patch) {
+  const current = await getSettings();
+  const next = {
+    ...current, ...patch,
+    postalAddress: { ...current.postalAddress, ...(patch.postalAddress || {}) },
+    identities: Array.isArray(patch.identities) && patch.identities.length ? patch.identities : current.identities,
+    policy: { ...current.policy, ...(patch.policy || {}) },
+    reorder: { ...current.reorder, ...(patch.reorder || {}) },
+  };
+  await writeKey(keys.settings(), next);
+  return next;
+}
+
+// ---- Verification results --------------------------------------------------
+// Keyed by EMAIL, not contact id, so a re-imported address keeps its result
+// and is not re-billed to a verification provider.
+
+export async function getVerification() {
+  return readObject(keys.verification());
+}
+
+export async function setVerification(results) {
+  const all = await getVerification();
+  const now = new Date().toISOString();
+  let n = 0;
+  for (const [email, status] of Object.entries(results || {})) {
+    const e = normalizeEmail(email);
+    if (!e) continue;
+    all[e] = { status, at: now };
+    n++;
+  }
+  await writeKey(keys.verification(), all);
+  return n;
+}
+
+// ---- Send history (frequency cap) ------------------------------------------
+
+export async function getLastEmailed() {
+  return readObject(keys.lastEmailed());
+}
+
+export async function recordSends(contactIds, when) {
+  const all = await getLastEmailed();
+  const at = when || new Date().toISOString();
+  (contactIds || []).forEach((id) => { all[String(id)] = at; });
+  await writeKey(keys.lastEmailed(), all);
+  return all;
+}
+
+// ---- Roster contact overrides ---------------------------------------------
+
+export async function getContactOverrides() {
+  return readObject(keys.contactOverrides());
+}
+
+// ---- Prospects -------------------------------------------------------------
+
+export async function getProspects() {
+  return readObject(keys.prospects());
+}
+
+export async function nextProspectIds(count) {
+  // One INCR for the whole batch: importing 800 rows must not be 800 round
+  // trips. INCRBY returns the LAST id in the reserved block.
+  const [res] = await kvPipeline([["INCRBY", keys.prospectCounter(), String(count)]]);
+  const end = Number(res && res.result);
+  const start = end - count + 1;
+  const ids = [];
+  for (let n = start; n <= end; n++) ids.push(`PR-${String(n).padStart(5, "0")}`);
+  return ids;
+}
+
+/** Insert importable rows as prospects. Caller has already classified them. */
+export async function addProspects(rows, session, batchId) {
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) return { added: [], batchId };
+
+  const all = await getProspects();
+  const ids = await nextProspectIds(list.length);
+  const now = new Date().toISOString();
+  const added = [];
+
+  list.forEach((r, i) => {
+    const rec = {
+      prospect_id: ids[i],
+      email: normalizeEmail(r.email),
+      company_name: r.company_name || "",
+      contact_name: r.contact_name || "",
+      title: r.title || "",
+      phone: r.phone || "",
+      city: r.city || "",
+      state: r.state || "",
+      tags: Array.isArray(r.tags) ? r.tags : [],
+      importedAt: now,
+      importedBy: (session && session.username) || null,
+      importBatch: batchId || null,
     };
-    const e = webhook.normalizeEvent(raw);
-    t.assert(e, 'a real Resend delivered event should normalize, not be dropped');
-    t.equal(e.type, 'delivered', 'the "email." prefix should be stripped before matching');
-    t.equal(e.email, 'dana@ankenymiracleleague.org', 'recipient should come from data.to[0]');
-    t.equal(e.campaignId, 'MM-00007', 'campaignId should come from the tags array');
-    t.equal(e.contactId, 'client:3310', 'contactId should come from the tags array');
+    all[rec.prospect_id] = rec;
+    added.push(rec);
   });
 
-  t.test('normalizeEvent reads a real Resend "email.clicked" payload including the link', () => {
-    const raw = {
-      type: 'email.clicked',
-      data: {
-        to: ['sara@waukeeboosters.org'],
-        tags: [{ name: 'campaignId', value: 'MM-00003' }, { name: 'contactId', value: 'prospect:PR-00001' }],
-        link: 'https://pmapparel.com/quote',
-      },
+  await writeKey(keys.prospects(), all);
+  return { added, batchId };
+}
+
+/** Undo one import batch. An import is the easiest thing to get wrong in
+ *  bulk, so it must be reversible as a unit rather than row by row. */
+export async function deleteProspectBatch(batchId) {
+  const all = await getProspects();
+  const ids = Object.keys(all).filter((id) => all[id] && all[id].importBatch === batchId);
+  ids.forEach((id) => { delete all[id]; });
+  await writeKey(keys.prospects(), all);
+  return ids.length;
+}
+
+export async function updateProspect(id, patch) {
+  const all = await getProspects();
+  const rec = all[id];
+  if (!rec) return null;
+  const next = { ...rec, ...patch, prospect_id: rec.prospect_id, email: rec.email };
+  all[id] = next;
+  await writeKey(keys.prospects(), all);
+  return next;
+}
+
+export async function deleteProspect(id) {
+  const all = await getProspects();
+  if (!all[id]) return false;
+  delete all[id];
+  await writeKey(keys.prospects(), all);
+  return true;
+}
+
+// ---- Unified contact resolution --------------------------------------------
+
+/**
+ * Every mailable contact, both sources, in ONE normalized shape.
+ *
+ * Suppression is applied here as the authoritative status: whatever a contact
+ * record says, an address on the suppression list reads as suppressed. That
+ * means there is no code path anywhere above this function that can see an
+ * opted-out address as mailable.
+ *
+ * `id` is the stable cross-source identifier used by lists and events:
+ * "client:<customer_id>" or "prospect:<prospect_id>". Prefixed so a roster
+ * customer_id can never collide with a prospect id.
+ */
+export async function resolveContacts(opts) {
+  const [
+    { synced, enrichment }, overrides, prospects, suppression,
+    leads, giving, verification, lastEmailed, settings,
+  ] = await Promise.all([
+    getBackboneData(), getContactOverrides(), getProspects(), getSuppression(),
+    getLeads(), getGivingRequests(), getVerification(), getLastEmailed(), getSettings(),
+  ]);
+
+  const now = (opts && opts.now) || new Date().toISOString();
+  const contacts = [];
+  let withoutEmail = 0;
+  const seen = new Set();
+
+  // Decorate every contact with the shared fields: suppression status,
+  // verification result and send history. Done in one place so no source can
+  // accidentally skip the suppression join.
+  const decorate = (base, rawStatus, rawReason) => {
+    const key = normalizeEmail(base.email);
+    const sup = suppression[key];
+    const ver = verification[key];
+    return {
+      ...base,
+      status: (sup && sup.status) || rawStatus || "subscribed",
+      reason: (sup && sup.reason) || rawReason || null,
+      verification: (ver && ver.status) || "unverified",
+      lastEmailedAt: lastEmailed[base.id] || null,
     };
-    const e = webhook.normalizeEvent(raw);
-    t.equal(e.type, 'click', 'email.clicked should normalize to click');
-    t.equal(e.linkUrl, 'https://pmapparel.com/quote', 'the clicked link should be captured');
-  });
+  };
 
-  t.test('normalizeEvent reads a real Resend "email.bounced" payload and captures the reason', () => {
-    const raw = {
-      type: 'email.bounced',
-      data: {
-        to: ['ethan@polkcountypickleball.org'],
-        tags: [{ name: 'campaignId', value: 'MM-00003' }, { name: 'contactId', value: 'client:4471' }],
-        bounce: { type: 'Permanent', message: 'Mailbox does not exist' },
-      },
-    };
-    const e = webhook.normalizeEvent(raw);
-    t.equal(e.type, 'bounce', 'email.bounced should normalize to bounce');
-    t.equal(e.reason, 'Mailbox does not exist', 'the bounce reason should come from data.bounce.message');
-  });
+  // --- client contacts, from the roster ---
+  for (const c of synced) {
+    const cid = String(c.customer_id);
+    const enr = enrichment[cid] || {};
+    const email = resolveEmail(c, enr);
+    if (!email) { withoutEmail++; continue; }
+    seen.add(normalizeEmail(email));
 
-  t.test('normalizeEvent still handles a flat, non-Resend shape (defensive, not vendor-locked)', () => {
-    const e = webhook.normalizeEvent({ event: 'unsubscribed', email: 'x@y.com', metadata: { campaignId: 'MM-1' } });
-    t.equal(e.type, 'unsubscribe');
-    t.equal(e.email, 'x@y.com');
-  });
+    const ov = overrides[cid] || {};
+    contacts.push(decorate({
+      id: `client:${cid}`,
+      source: "client",
+      customer_id: cid,
+      // A MailMe-local correction (ov.<field>) wins over what BackBone
+      // resolved, same precedence tags/status already use. This is a
+      // MailMe-only overlay — it never writes back to backbone_data, so
+      // BackBone's own record is untouched; see setContactStatus.
+      company_name: ov.company_name || c.company_name || c.companyName || c.customer || `#${cid}`,
+      contact_name: ov.contact_name || resolveName(c, enr),
+      title: ov.title || (c.primary_contact && c.primary_contact.title) || "",
+      email,
+      phone: ov.phone || (c.primary_contact && c.primary_contact.phone) || "",
+      city: ov.city || enr.city || "",
+      state: ov.state || enr.state || "",
+      tags: Array.isArray(ov.tags) ? ov.tags : [],
+      accountManager: enr.account_manager || "",
+      // Order history, which is what makes reorder timing possible at all.
+      lastOrderDate: c.last_invoice_date || null,
+      orderCount: Number(c.invoice_count) || 0,
+      lifetimeRevenue: Number(c.total_revenue) || 0,
+      ytdRevenue: ytdRevenue(c, now),
+      reorder: reorderStatus(c, { ...settings.reorder, now }),
+      hasOpenQuote: !!enr.has_open_quote,
+      updatedAt: ov.updatedAt || null,
+    }, ov.status, ov.reason));
+  }
 
-  t.test('normalizeEvent drops an unrecognized event type rather than storing junk', () => {
-    const e = webhook.normalizeEvent({ type: 'email.sent', data: { to: ['x@y.com'] } });
-    t.equal(e, null, '"sent" is not a tracked outcome and must not be stored as one');
-  });
+  // --- lead contacts, from BackBone's pipeline ---
+  for (const l of leads) {
+    const lc = leadContact(l || {});
+    if (!lc || !lc.email) continue;
+    const key = normalizeEmail(lc.email);
+    // A lead that has since become a customer is already in the list above;
+    // showing them twice would double-count and risk two emails.
+    if (seen.has(key)) continue;
+    seen.add(key);
 
-  t.test('normalizeEvent returns null for garbage input instead of throwing', () => {
-    t.equal(webhook.normalizeEvent(null), null);
-    t.equal(webhook.normalizeEvent('not an object'), null);
-    t.equal(webhook.normalizeEvent({}), null);
-  });
+    const lid = String(l.id || l.lead_id || key);
+    const lov = overrides[`lead:${lid}`] || {};
+    contacts.push(decorate({
+      id: `lead:${lid}`,
+      source: "lead",
+      lead_id: lid,
+      company_name: lov.company_name || l.company_name || l.company || "",
+      contact_name: lov.contact_name || lc.name,
+      title: lov.title || lc.title,
+      email: lc.email,
+      phone: lov.phone || l.contact_phone || "",
+      city: lov.city || l.city || "",
+      state: lov.state || l.state || "",
+      tags: Array.isArray(lov.tags) ? lov.tags : [],
+      accountManager: l.owner || l.account_manager || "",
+      leadStatus: l.status || "",
+      updatedAt: lov.updatedAt || l.updated_at || l.created_at || null,
+    }, lov.status, lov.reason));
+  }
 
-  /* ---- markdown-lite rendering (buildHtml) ------------------------------- */
-  //
-  // This is the one new bit of logic that turns user input into HTML, so the
-  // escaping behaviour matters as much as the formatting behaviour.
+  // --- giving contacts, from donation requests ---
+  for (const g of giving) {
+    const req = (g && g.request) || {};
+    const email = req.email;
+    if (!email || !String(email).trim()) continue;
+    const key = normalizeEmail(email);
+    if (seen.has(key)) continue;
+    seen.add(key);
 
-  const mdSettings = schema.mergeSettings({
-    companyName: 'P&M Apparel', fromName: 'P&M Apparel',
-    unsubscribeUrl: 'https://example.com/unsubscribe.html',
-    postalAddress: { line1: '1 Main St', city: 'Polk City', state: 'IA', postalCode: '50226' },
-  });
-  const mdContact = { id: 'client:1', email: 'x@y.com', contact_name: 'Dana Whitmer', company_name: 'Ankeny Miracle League' };
-  const html = (body) => send.buildHtml({ subject: 's', body }, mdContact, mdSettings, 'tok');
+    const gov = overrides[`giving:${g.id}`] || {};
+    contacts.push(decorate({
+      id: `giving:${g.id}`,
+      source: "giving",
+      giving_id: g.id,
+      company_name: gov.company_name || req.orgName || "",
+      contact_name: gov.contact_name || req.contactName || "",
+      title: gov.title || "",
+      email: String(email).trim(),
+      phone: gov.phone || req.phone || "",
+      city: gov.city || req.city || "",
+      state: gov.state || req.state || "",
+      tags: Array.isArray(gov.tags) ? gov.tags : [],
+      accountManager: (g.account && g.account.owner) || "",
+      givingStatus: g.status || "",
+      updatedAt: gov.updatedAt || g.received || null,
+    }, gov.status, gov.reason));
+  }
 
-  t.test('**bold** renders as a strong tag', () => {
-    const out = html('Order by **Friday** please.');
-    t.assert(out.includes('<strong>Friday</strong>'), 'bold markers should become <strong>');
-    t.assert(!out.includes('**'), 'the asterisks themselves should not survive into the output');
-  });
+  // --- prospect contacts, imported ---
+  for (const id of Object.keys(prospects)) {
+    const p = prospects[id];
+    if (!p || !p.email) continue;
+    seen.add(normalizeEmail(p.email));
 
-  t.test('[text](url) renders as a real link', () => {
-    const out = html('See [our catalog](https://pmapparel.com/catalog) for options.');
-    t.assert(out.includes('href="https://pmapparel.com/catalog"'), 'the URL should become an href');
-    t.assert(out.includes('>our catalog</a>'), 'the label should be the link text');
-  });
+    contacts.push(decorate({
+      id: `prospect:${p.prospect_id}`,
+      source: "prospect",
+      prospect_id: p.prospect_id,
+      company_name: p.company_name || "",
+      contact_name: p.contact_name || "",
+      title: p.title || "",
+      email: p.email,
+      phone: p.phone || "",
+      city: p.city || "",
+      state: p.state || "",
+      tags: Array.isArray(p.tags) ? p.tags : [],
+      accountManager: "",
+      importedAt: p.importedAt || null,
+      importBatch: p.importBatch || null,
+      updatedAt: p.importedAt || null,
+    }, p.status, p.reason));
+  }
 
-  t.test('a javascript: URL is NOT turned into a link', () => {
-    // Only http(s) is honored. Anything else stays inert bracketed text
-    // rather than becoming a clickable script payload in someone's inbox.
-    const out = html('Click [here](javascript:alert(1)) now.');
-    t.assert(!/href="javascript:/i.test(out), 'a javascript: URL must never become an href');
-  });
+  const bySource = (src) => contacts.filter((c) => c.source === src).length;
 
-  t.test('a block of "- " lines becomes a bullet list', () => {
-    const out = html('We offer:\n\n- Screen printing\n- Embroidery\n- DTF transfers');
-    t.assert(out.includes('<ul'), 'a dash block should produce a <ul>');
-    t.assert((out.match(/<li>/g) || []).length === 3, 'expected three list items');
-    t.assert(out.includes('<li>Screen printing</li>'), 'list item text should carry through');
-  });
+  return {
+    contacts,
+    customersWithoutEmail: withoutEmail,
+    totalRosterSize: synced.length,
+    settings,
+    clientCount: bySource("client"),
+    prospectCount: bySource("prospect"),
+    leadCount: bySource("lead"),
+    givingCount: bySource("giving"),
+  };
+}
 
-  t.test('a mixed block that is not all dashes stays a paragraph', () => {
-    const out = html('Here is a note\n- with a dash line inside it');
-    t.assert(!out.includes('<ul'), 'a partial dash block should not become a list');
-  });
+/** Emails already known, for import dedupe. */
+export async function knownEmails() {
+  const { contacts } = await resolveContacts();
+  const suppression = await getSuppression();
+  return {
+    clientEmails: contacts.filter((c) => c.source === "client").map((c) => normalizeEmail(c.email)),
+    prospectEmails: contacts.filter((c) => c.source === "prospect").map((c) => normalizeEmail(c.email)),
+    suppressedEmails: Object.keys(suppression),
+  };
+}
 
-  t.test('HTML in the body is escaped, not passed through', () => {
-    const out = html('Watch out for <script>alert("x")</script> here.');
-    t.assert(!out.includes('<script>'), 'raw HTML must be escaped, never rendered');
-    t.assert(out.includes('&lt;script&gt;'), 'the escaped form should appear instead');
-  });
+/**
+ * Change a contact's subscribe state, whichever source it belongs to.
+ *
+ * Unsubscribes ALWAYS write the email-level suppression list as well as the
+ * per-contact record, so the opt-out survives the record being deleted.
+ */
+export async function setContactStatus(contactId, patch, session) {
+  const id = String(contactId);
+  const [source, localId] = id.includes(":") ? id.split(":") : ["client", id];
 
-  t.test('formatting still composes with personalization', () => {
-    const out = html('Hi {{first_name}}, **{{company_name}}** is due for a reorder.');
-    t.assert(out.includes('Hi Dana'), 'merge fields should still resolve');
-    t.assert(out.includes('<strong>Ankeny Miracle League</strong>'), 'a merge field inside bold should render bolded');
-  });
+  const { contacts } = await resolveContacts();
+  const contact = contacts.find((c) => c.id === id);
+  if (!contact) return { ok: false, reason: "not_found" };
 
-  t.test('every rendered email carries the unsubscribe link and postal address', () => {
-    const out = html('Plain body.');
-    t.assert(out.includes('unsubscribe.html?t=tok'), 'the tokenized unsubscribe URL must be in the footer');
-    t.assert(out.includes('Polk City'), 'the CAN-SPAM postal address must be in the footer');
-  });
+  if (patch.status !== undefined) {
+    if (patch.status === "subscribed") {
+      const cleared = await unsuppressEmail(contact.email);
+      if (!cleared) {
+        return { ok: false, reason: "provider_set" };
+      }
+    } else {
+      await suppressEmail(contact.email, {
+        status: patch.status,
+        reason: patch.reason,
+        by: (session && session.username) || null,
+      });
+    }
+  }
 
-  /* ---- sending identities (multi-brand) ---------------------------------- */
+  // Detail fields (company/contact name/title/phone/city/state) that CAN be
+  // hand-corrected here, same list the API route validates against.
+  const DETAIL_FIELDS = ["company_name", "contact_name", "title", "phone", "city", "state"];
 
-  const threeBrands = schema.mergeSettings({
-    identities: [
-      { key: 'pmapparel', label: 'PM Apparel', domain: 'pmapparel.com', fromAddress: 'a@pmapparel.com', cold: false, default: true },
-      { key: 'flyovercon', label: 'Flyover Con', domain: 'flyovercon.ink', fromAddress: 'a@flyovercon.ink', cold: false, default: false },
-      { key: 'iowaondemand', label: 'Iowa On Demand', domain: 'iowaondemand.com', fromAddress: 'a@iowaondemand.com', cold: true, default: false },
-    ]
-  });
+  // Tags and detail-field corrections both live on the contact record for a
+  // prospect (MailMe's own record), or in MailMe's own overrides map for
+  // everyone else (client/lead/giving) — NEVER written back to backbone_data,
+  // backbone_leads, or the giving store. This is a MailMe-local correction
+  // layered on top of what the owning app resolved, exactly like tags/status
+  // already work; it disappears if the override is cleared, and the owning
+  // app's own record is never touched.
+  const detailPatch = {};
+  DETAIL_FIELDS.forEach((f) => { if (patch[f] !== undefined) detailPatch[f] = patch[f]; });
+  const hasDetailPatch = Object.keys(detailPatch).length > 0;
 
-  t.test('a campaign sends as the identity it explicitly names', () => {
-    const got = schema.identityForCampaign({ source: 'client', identityKey: 'flyovercon' }, threeBrands);
-    t.equal(got.domain, 'flyovercon.ink', 'an explicit identityKey must win');
-  });
+  if (patch.tags !== undefined || hasDetailPatch) {
+    if (source === "prospect") {
+      const prospectPatch = { ...detailPatch };
+      if (patch.tags !== undefined) prospectPatch.tags = patch.tags;
+      await updateProspect(localId, prospectPatch);
+    } else if (source === "lead" || source === "giving") {
+      // Leads and giving requests belong to other apps, so MailMe stores
+      // corrections in its own overrides map under the FULL prefixed id
+      // rather than writing back into backbone_leads or the giving store.
+      const all = await getContactOverrides();
+      const existing = all[id] || {};
+      const next = {
+        ...existing,
+        ...detailPatch,
+        updatedAt: new Date().toISOString(),
+        updatedBy: (session && session.username) || existing.updatedBy,
+      };
+      if (patch.tags !== undefined) next.tags = patch.tags;
+      const isEmpty = !(next.tags && next.tags.length) && !next.status && !next.reason &&
+        !DETAIL_FIELDS.some((f) => next[f]);
+      if (isEmpty) delete all[id]; else all[id] = next;
+      await writeKey(keys.contactOverrides(), all);
+    } else {
+      const all = await getContactOverrides();
+      const existing = all[localId] || {};
+      const next = {
+        ...existing,
+        ...detailPatch,
+        updatedAt: new Date().toISOString(),
+        updatedBy: (session && session.username) || existing.updatedBy,
+      };
+      if (patch.tags !== undefined) next.tags = patch.tags;
+      const isEmpty = !(next.tags && next.tags.length) && !next.status && !next.reason &&
+        !DETAIL_FIELDS.some((f) => next[f]);
+      if (isEmpty) delete all[localId]; else all[localId] = next;
+      await writeKey(keys.contactOverrides(), all);
+    }
+  }
 
-  t.test('a campaign with no identity chosen falls back to the default one', () => {
-    const got = schema.identityForCampaign({ source: 'client', identityKey: null }, threeBrands);
-    t.equal(got.key, 'pmapparel', 'the identity flagged default should be used');
-  });
+  return { ok: true };
+}
 
-  t.test('a cold campaign with no identity chosen prefers a cold-marked identity', () => {
-    const got = schema.identityForCampaign({ source: 'prospect', identityKey: null }, threeBrands);
-    t.equal(got.key, 'iowaondemand', 'cold sends should default to an identity marked for cold');
-  });
+// ---- Public self-service signup (event/list opt-in) ------------------------
+//
+// Used by public signup pages OUTSIDE the shell (e.g. flyover-con-signup.html)
+// that have no session and no admin sitting there to run an import. Unlike
+// the CSV import path this handles exactly one person at a time:
+//   - if the email already belongs to a known contact (client, lead, giving,
+//     or a previously-imported prospect), that contact is TAGGED, never
+//     duplicated.
+//   - otherwise a new prospect record is created, same as a one-row import.
+// The target list is created lazily on the very first signup: dynamic and
+// tag-matched, so every later signup lands in it automatically with no
+// separate "add to list" write. Suppression is unaffected either way — a
+// previously-unsubscribed email stays unsubscribed regardless of this call,
+// because resolveContacts() always overlays suppression status on top of
+// whatever the underlying record says.
+export async function publicListSignup({ email, name, tag, listName, company, attendedBefore }) {
+  const cleanEmail = normalizeEmail(email);
+  const cleanName = String(name || "").trim();
+  const cleanCompany = String(company || "").trim();
+  // Lowercased to match the convention every other tag-writing path already
+  // follows (api/mailme/import.js and api/mailme/contacts.js PATCH both
+  // lowercase on the way in). Matching is case-insensitive everywhere tags
+  // are compared, but storage should still be consistent so the Contacts
+  // and list-rule tag chips don't show one mixed-case outlier.
+  const cleanTag = String(tag || "").trim().toLowerCase();
 
-  t.test('a campaign pointing at a deleted identity still resolves rather than crashing', () => {
-    const got = schema.identityForCampaign({ source: 'client', identityKey: 'gone' }, threeBrands);
-    t.assert(got && got.key === 'pmapparel', 'a stale identityKey should fall back to the default');
-  });
+  // attendedBefore is optional and, when present, becomes its own tag —
+  // "returning attendee" or "first-time attendee" — alongside the event
+  // tag. It rides the same tags array rather than a new field so it needs
+  // no schema change and shows up wherever tags already show up (Contacts,
+  // list rules).
+  const attendanceTag = attendedBefore === true ? "returning attendee"
+    : attendedBefore === false ? "first-time attendee"
+    : null;
 
-  t.test('settings with no identities saved fall back to the seeded three', () => {
-    const list = schema.sendingIdentities(schema.mergeSettings({}));
-    t.assert(list.length >= 1, 'there must always be at least one identity');
-    t.assert(list.some((i) => i.domain === 'pmapparel.com'), 'pmapparel.com should be seeded');
-  });
+  const { contacts } = await resolveContacts();
+  const existing = contacts.find((c) => normalizeEmail(c.email) === cleanEmail);
 
-  t.test('sending cold prospects over a non-cold identity warns, but does not block', () => {
-    const recips = [{ source: 'prospect', email: 'a@b.com' }];
-    const warm = threeBrands.identities.find((i) => i.key === 'pmapparel');
-    const warning = schema.identityAudienceWarning(recips, warm);
-    t.assert(warning && /cold outreach/i.test(warning),
-      'a cold audience on a warm domain must produce a warning');
-    const cold = threeBrands.identities.find((i) => i.key === 'iowaondemand');
-    t.equal(schema.identityAudienceWarning(recips, cold), null,
-      'a cold audience on a cold-marked identity is fine');
-  });
-
-  t.test('warm contacts never trigger the cold-domain warning', () => {
-    const recips = [{ source: 'client', email: 'a@b.com' }];
-    const warm = threeBrands.identities.find((i) => i.key === 'pmapparel');
-    t.equal(schema.identityAudienceWarning(recips, warm), null);
-  });
-
-  /* ---- reply-to derivation ----------------------------------------------- */
-
-  const amSettings = schema.mergeSettings({
-    replyToMode: 'account-manager', replyToDomain: 'pmapparel.com',
-    replyToFixed: 'orders@pmapparel.com'
-  });
-
-  t.test('account-manager mode derives firstname@ from a full name', () => {
-    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, amSettings),
-      'alexis@pmapparel.com');
-  });
-
-  t.test('a first name on its own works the same way', () => {
-    t.equal(schema.resolveReplyTo({ accountManager: 'Hannah' }, amSettings),
-      'hannah@pmapparel.com');
-  });
-
-  t.test('punctuation and case in the name are stripped', () => {
-    t.equal(schema.resolveReplyTo({ accountManager: "O'Brien, Margo" }, amSettings),
-      'obrien@pmapparel.com');
-  });
-
-  t.test('a contact with no account manager falls back to the fixed address', () => {
-    // Rather than inventing an inbox. A reply that bounces is worse than a
-    // reply that lands in the shop's main mailbox.
-    t.equal(schema.resolveReplyTo({ accountManager: '' }, amSettings),
-      'orders@pmapparel.com');
-  });
-
-  t.test('an implausible account manager value falls back rather than guessing', () => {
-    t.equal(schema.resolveReplyTo({ accountManager: '-' }, amSettings),
-      'orders@pmapparel.com');
-  });
-
-  t.test('fixed mode ignores the account manager entirely', () => {
-    const fixed = schema.mergeSettings({
-      replyToMode: 'fixed', replyToFixed: 'orders@pmapparel.com', replyToDomain: 'pmapparel.com'
+  let contactId;
+  if (existing) {
+    const tags = Array.isArray(existing.tags) ? existing.tags.slice() : [];
+    [cleanTag, attendanceTag].filter(Boolean).forEach((t) => {
+      if (!tags.some((x) => String(x).trim().toLowerCase() === t.toLowerCase())) tags.push(t);
     });
-    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, fixed),
-      'orders@pmapparel.com');
-  });
+    const patch = { tags };
+    // Never overwrite an existing contact's real company name with what a
+    // stranger typed into a public form — only fill it in if MailMe doesn't
+    // already have one on file for them.
+    if (cleanCompany && !existing.company_name) patch.company_name = cleanCompany;
+    await setContactStatus(existing.id, patch, null);
+    contactId = existing.id;
+  } else {
+    const tags = [cleanTag, attendanceTag].filter(Boolean);
+    const { added } = await addProspects(
+      [{ email: cleanEmail, contact_name: cleanName, company_name: cleanCompany, tags }],
+      null,
+      null,
+    );
+    contactId = `prospect:${added[0].prospect_id}`;
+  }
 
-  t.test('reply-to is null when nothing usable is configured, not a broken address', () => {
-    const none = schema.mergeSettings({
-      replyToMode: 'account-manager', replyToDomain: '', replyToFixed: ''
-    });
-    t.equal(schema.resolveReplyTo({ accountManager: 'Alexis Davis' }, none), null,
-      'with no domain and no fallback, Reply-To must be omitted rather than malformed');
-  });
+  const lists = await listLists();
+  let list = lists.find((l) => String(l.name).trim().toLowerCase() === listName.trim().toLowerCase());
+  if (!list) {
+    list = await createList({ name: listName, kind: "dynamic", rule: { tags: [cleanTag] } }, null);
+  }
 
-  t.test('the send path attaches reply_to per recipient, not per campaign', () => {
-    const src = require('fs').readFileSync(
-      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
-    const batch = src.slice(src.indexOf('const messages = chunk.map'));
-    t.assert(/resolveReplyTo\(contact, settings\)/.test(batch),
-      'reply_to must be resolved from each contact inside the per-message map');
-  });
+  return { contactId, listId: list.id, alreadyKnown: !!existing };
+}
 
-  /* ---- from-name composition --------------------------------------------- */
+// ---- Lists -----------------------------------------------------------------
 
-  const brand = { key: 'pm', label: 'P&M Apparel', domain: 'pmapparel.com',
-                  fromAddress: 'P&M Apparel <hello@pmapparel.com>' };
-  const amOn = schema.mergeSettings({ fromNameIncludesAM: true });
-  const amOff = schema.mergeSettings({ fromNameIncludesAM: false });
+export async function listLists() {
+  const all = await readArray(keys.lists());
+  return all.slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+}
 
-  t.test('the account manager first name is appended to the sender name', () => {
-    t.equal(schema.composeFrom(brand, { accountManager: 'Alexis Davis' }, amOn),
-      '"P&M Apparel - Alexis" <hello@pmapparel.com>');
-  });
+export async function getList(id) {
+  const all = await listLists();
+  return all.find((l) => l.id === id) || null;
+}
 
-  t.test('a contact with no account manager gets the brand name alone', () => {
-    t.equal(schema.composeFrom(brand, { accountManager: '' }, amOn),
-      '"P&M Apparel" <hello@pmapparel.com>',
-      'no dangling separator when there is no AM');
-  });
+export async function createList(patch, session) {
+  const all = await readArray(keys.lists());
+  const [res] = await kvPipeline([["INCR", keys.listCounter()]]);
+  const now = new Date().toISOString();
+  const rec = {
+    id: `LS-${String(res && res.result).padStart(5, "0")}`,
+    name: patch.name,
+    kind: patch.kind || "dynamic",
+    members: patch.members || [],
+    // Manual overrides for dynamic lists; see resolveList() in schema.js.
+    extraMembers: patch.extraMembers || [],
+    excludedMembers: patch.excludedMembers || [],
+    rule: patch.rule || null,
+    createdAt: now,
+    createdBy: (session && session.username) || null,
+    updatedAt: now,
+  };
+  all.push(rec);
+  await writeKey(keys.lists(), all);
+  return rec;
+}
 
-  t.test('the name is normalized to title case', () => {
-    t.equal(schema.composeFrom(brand, { accountManager: 'hannah posey' }, amOn),
-      '"P&M Apparel - Hannah" <hello@pmapparel.com>');
-  });
+export async function updateList(id, patch) {
+  const all = await readArray(keys.lists());
+  const idx = all.findIndex((l) => l.id === id);
+  if (idx === -1) return null;
+  all[idx] = { ...all[idx], ...patch, id, updatedAt: new Date().toISOString() };
+  await writeKey(keys.lists(), all);
+  return all[idx];
+}
 
-  t.test('turning the setting off keeps the sender name fixed', () => {
-    t.equal(schema.composeFrom(brand, { accountManager: 'Alexis Davis' }, amOff),
-      '"P&M Apparel" <hello@pmapparel.com>');
-  });
+export async function deleteList(id) {
+  const all = await readArray(keys.lists());
+  const next = all.filter((l) => l.id !== id);
+  if (next.length === all.length) return false;
+  await writeKey(keys.lists(), next);
+  return true;
+}
 
-  t.test('the sending ADDRESS never changes, only the display name', () => {
-    // Domain alignment for SPF/DKIM depends on the address, so a varying
-    // display name must never move it off the verified domain.
-    ['Alexis Davis', '', 'Margo'].forEach((am) => {
-      const out = schema.composeFrom(brand, { accountManager: am }, amOn);
-      t.assert(out.includes('<hello@pmapparel.com>'),
-        'address must stay put for AM "' + am + '"');
-    });
-  });
+/** A list's membership, resolved against live contacts. */
+export async function membersOf(list) {
+  const { contacts } = await resolveContacts();
+  return resolveList(list, contacts);
+}
 
-  t.test('a bare address with no display name still works', () => {
-    const bare = { key: 'x', label: 'Flyover Con', domain: 'flyovercon.ink',
-                   fromAddress: 'hello@flyovercon.ink' };
-    t.equal(schema.composeFrom(bare, { accountManager: 'Abby Penton' }, amOn),
-      '"Flyover Con - Abby" <hello@flyovercon.ink>',
-      'the identity label fills in when the from-address carries no name');
-  });
+// ---- Campaigns -------------------------------------------------------------
 
-  t.test('a display name cannot break out of the From header', () => {
-    const nasty = { key: 'x', label: 'Bad "Name" <evil@attacker.com>', domain: 'pmapparel.com',
-                    fromAddress: 'hello@pmapparel.com' };
-    const out = schema.composeFrom(nasty, { accountManager: '' }, amOn);
-    t.assert(out.endsWith('<hello@pmapparel.com>'),
-      'the real address must remain the last thing in the header');
-    t.assert(!/^"[^"]*"\s*<evil/.test(out), 'an injected address must not become the sender');
-  });
+export async function listCampaigns() {
+  const all = await readArray(keys.campaigns());
+  return all.slice().sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+}
 
-  t.test('an identity with no from-address yet yields an empty string, not junk', () => {
-    t.equal(schema.composeFrom({ key: 'x', label: 'X', fromAddress: '' }, {}, amOn), '');
-  });
+export async function getCampaign(id) {
+  const all = await listCampaigns();
+  return all.find((c) => c.id === id) || null;
+}
 
-  /* ---- Resend tag encoding ------------------------------------------------ */
-  //
-  // Regression: a real send failed with "Tags should only contain ASCII
-  // letters, numbers, underscores, or dashes" because contact ids are
-  // "source:localId" and the colon is not allowed.
+export async function createCampaign(patch, session) {
+  const all = await readArray(keys.campaigns());
+  const [res] = await kvPipeline([["INCR", keys.campaignCounter()]]);
+  const draft = newCampaignDraft(patch, session);
+  draft.id = `MM-${String(res && res.result).padStart(5, "0")}`;
+  all.push(draft);
+  await writeKey(keys.campaigns(), all);
+  return draft;
+}
 
-  const RESEND_TAG_OK = /^[A-Za-z0-9_-]*$/;
+export async function updateCampaign(id, patch) {
+  const all = await readArray(keys.campaigns());
+  const idx = all.findIndex((c) => c.id === id);
+  if (idx === -1) return { ok: false, reason: "not_found" };
+  if (all[idx].status !== "draft") return { ok: false, reason: "locked" };
+  all[idx] = { ...all[idx], ...patch, id, updatedAt: new Date().toISOString() };
+  await writeKey(keys.campaigns(), all);
+  return { ok: true, campaign: all[idx] };
+}
 
-  t.test('every real contact id shape encodes to a legal Resend tag', () => {
-    ['client:3310', 'lead:LD-0042', 'giving:abc-123', 'prospect:PR-00001',
-     'client:ACME/2024', 'prospect:PR 7', 'client:café'].forEach((id) => {
-      const enc = schema.encodeTagValue(id);
-      t.assert(RESEND_TAG_OK.test(enc), 'illegal tag characters produced for ' + id + ': ' + enc);
-    });
-  });
+/**
+ * Patch a campaign regardless of status. updateCampaign() above is the
+ * user-facing edit path and deliberately refuses anything but a draft; this
+ * is the SEND path's equivalent, used only by lib/mailme/send.js to move a
+ * campaign through draft -> sending -> sent and persist its resumable queue.
+ * Never exposed directly to an API route body.
+ */
+export async function applyCampaignPatch(id, patch) {
+  const all = await readArray(keys.campaigns());
+  const idx = all.findIndex((c) => c.id === id);
+  if (idx === -1) return { ok: false, reason: "not_found" };
+  all[idx] = { ...all[idx], ...patch, id, updatedAt: new Date().toISOString() };
+  await writeKey(keys.campaigns(), all);
+  return { ok: true, campaign: all[idx] };
+}
 
-  t.test('encoding round-trips exactly, so open and click attribution survives', () => {
-    // Unique-open counts key on contactId, so a lossy encode would split one
-    // person into two or merge two into one.
-    ['client:3310', 'prospect:PR-00001', 'giving:abc-123', 'client:café'].forEach((id) => {
-      t.equal(schema.decodeTagValue(schema.encodeTagValue(id)), id, 'round trip failed for ' + id);
-    });
-  });
+export async function deleteCampaign(id) {
+  const all = await readArray(keys.campaigns());
+  const idx = all.findIndex((c) => c.id === id);
+  if (idx === -1) return { ok: false, reason: "not_found" };
+  if (all[idx].status !== "draft") return { ok: false, reason: "locked" };
+  all.splice(idx, 1);
+  await writeKey(keys.campaigns(), all);
+  return { ok: true };
+}
 
-  t.test('two different contacts never encode to the same tag', () => {
-    const a = schema.encodeTagValue('client:331');
-    const b = schema.encodeTagValue('client:3310');
-    t.assert(a !== b, 'distinct contact ids must stay distinct after encoding');
-  });
+// ---- Events / results ------------------------------------------------------
 
-  t.test('campaign ids encode legally too', () => {
-    t.assert(RESEND_TAG_OK.test(schema.encodeTagValue('MM-00001')));
-    t.equal(schema.decodeTagValue(schema.encodeTagValue('MM-00001')), 'MM-00001');
-  });
+export async function getCampaignEvents(campaignId) {
+  return readArray(keys.campaignEvents(campaignId));
+}
 
-  t.test('decodeTagValue returns null on junk rather than throwing', () => {
-    t.equal(schema.decodeTagValue(''), null);
-    t.equal(schema.decodeTagValue(null), null);
-  });
+/** Append normalized tracking events. Written only by the webhook receiver. */
+export async function appendCampaignEvents(campaignId, events) {
+  const list = Array.isArray(events) ? events : [];
+  if (!list.length) return 0;
+  const all = await getCampaignEvents(campaignId);
+  all.push(...list);
+  await writeKey(keys.campaignEvents(campaignId), all);
+  return list.length;
+}
 
-  t.test('the send path encodes both tags, never raw ids', () => {
-    const src = require('fs').readFileSync(
-      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
-    t.assert(!/value: String\(contact\.id\)/.test(src),
-      'a raw contact id must never be handed to Resend as a tag value');
-    t.assert(/encodeTagValue\(contact\.id\)/.test(src), 'contact id must be encoded');
-    t.assert(/encodeTagValue\(campaign\.id\)/.test(src), 'campaign id must be encoded');
-  });
+/**
+ * A campaign's results. Stats are ALWAYS recomputed from raw events rather
+ * than read from the campaign record: a stored counter that drifts from its
+ * events is a number nobody can audit, and the events are the source of truth.
+ */
+export async function campaignResults(campaignId, recipientCount) {
+  const events = await getCampaignEvents(campaignId);
+  return aggregateEvents(events, recipientCount);
+}
 
-  t.test('the webhook decodes the cid tag back to the real contact id', () => {
-    const e = webhook.normalizeEvent({
-      type: 'email.clicked',
-      data: {
-        to: ['dana@example.org'],
-        link: 'https://pmapparel.com',
-        tags: [
-          { name: 'campaignId', value: schema.encodeTagValue('MM-00007') },
-          { name: 'cid', value: schema.encodeTagValue('client:3310') },
-        ],
-      },
-    });
-    t.equal(e.campaignId, 'MM-00007', 'campaign id must decode');
-    t.equal(e.contactId, 'client:3310', 'contact id must decode back to its real form');
-  });
-
-  t.test('a plain tag value that happens to look like base64 is left alone', () => {
-    // "MM-00007" decodes without error into mojibake, so a naive decode
-    // would corrupt every plain-text tag from another provider.
-    t.equal(schema.decodeTagValueStrict('MM-00007'), null,
-      'a value that was never encoded must not be decoded');
-    const e = webhook.normalizeEvent({
-      type: 'email.delivered',
-      data: { to: ['x@y.com'], tags: [{ name: 'campaignId', value: 'MM-00007' }] },
-    });
-    t.equal(e.campaignId, 'MM-00007', 'a plain campaign id must pass through unchanged');
-  });
-
-  t.test('strict decode still accepts genuinely encoded values', () => {
-    t.equal(schema.decodeTagValueStrict(schema.encodeTagValue('client:3310')), 'client:3310');
-  });
-
-  /* ---- List-Unsubscribe --------------------------------------------------- */
-
-  t.test('List-Unsubscribe points at an endpoint that accepts POST', () => {
-    const h = schema.listUnsubscribeHeaders(
-      schema.mergeSettings({ unsubscribeUrl: 'https://alliteration-eight.vercel.app/unsubscribe.html' }),
-      'TOK123');
-    t.assert(h, 'headers should be produced when an unsubscribe URL is set');
-    t.assert(/\/api\/mailme\/unsubscribe\?t=TOK123/.test(h['List-Unsubscribe']),
-      'one-click must target the API route, not the HTML page: ' + h['List-Unsubscribe']);
-    t.assert(/^<https:\/\/.*>$/.test(h['List-Unsubscribe']),
-      'the header value must be angle-bracketed per RFC 8058');
-    t.equal(h['List-Unsubscribe-Post'], 'List-Unsubscribe=One-Click');
-  });
-
-  t.test('no unsubscribe URL means no header, rather than one pointing nowhere', () => {
-    t.equal(schema.listUnsubscribeHeaders(schema.mergeSettings({ unsubscribeUrl: '' }), 'TOK'), null);
-    t.equal(schema.listUnsubscribeHeaders(
-      schema.mergeSettings({ unsubscribeUrl: 'https://x/unsubscribe.html' }), ''), null,
-      'no token means no usable header');
-  });
-
-  t.test('a trailing slash on the configured URL does not double up', () => {
-    const h = schema.listUnsubscribeHeaders(
-      schema.mergeSettings({ unsubscribeUrl: 'https://mail.example.com/' }), 'TOK');
-    t.assert(!/\/\/api/.test(h['List-Unsubscribe']), 'got: ' + h['List-Unsubscribe']);
-  });
-
-  t.test('the header token matches the one in the email body', () => {
-    // Both come from the same makeToken call in send.js. If they diverged,
-    // one-click would opt out a different contact than the visible link.
-    const src = require('fs').readFileSync(
-      require('path').join(__dirname, '..', 'lib/mailme/send.js'), 'utf8');
-    t.assert(/listUnsubscribeHeaders\(settings, token\)/.test(src),
-      'the header must reuse the same token variable the body link uses');
-  });
-
-  process.exit(t.report());
-}).catch((e) => {
-  console.log('  FAIL could not import lib/mailme/send.js, api/mailme/webhook.js, or lib/mailme/schema.js: ' + e.message);
-  process.exit(1);
-});
+export { SUPPRESSED_STATUSES };
