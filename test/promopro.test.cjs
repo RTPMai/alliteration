@@ -255,10 +255,42 @@ t.test('a failed settings load is never reported as an empty CrewCore roster', (
   // employees found in CrewCore". That sent the search at the roster when
   // the roster had never been read at all.
   t.assert(app.includes('settingsFailed'), 'a settings-load failure should be tracked distinctly');
-  const idx = app.indexOf('No active employees found in CrewCore');
+  const idx = app.indexOf('No account managers to choose from');
   const guard = app.indexOf('if (st.settingsFailed)');
-  t.assert(guard !== -1 && guard < idx,
+  t.assert(guard !== -1 && idx !== -1 && guard < idx,
     'the settings-failed branch must come before the empty-roster message');
+});
+
+t.test('an empty picker names its cause instead of guessing', () => {
+  // Four causes land in the same place and want completely different fixes:
+  // no records, none active, none with an email, or the caller not being
+  // treated as an admin. Guessing sent one round of debugging at CrewCore
+  // when the real problem was the route's admin check.
+  t.assert(settingsRoute.includes('rosterCounts'), 'the route should report what it actually read');
+  t.assert(app.includes('not being treated as an administrator'),
+    'the not-an-admin case needs to be distinguishable from an empty roster');
+});
+
+t.test('every promopro route uses the shell-wide admin test', () => {
+  // Checking the role NAME ("admin") excluded manager and every custom role,
+  // and permsFor(undefined) on a session with no username silently returns a
+  // non-admin. Both are why Settings decided Ryan was not an admin. The rest
+  // of the shell tests data_scope and guards the missing username, so
+  // PromoPro does too, in one place.
+  [['pos', posRoute], ['vendors', vendorsRoute], ['settings', settingsRoute]].forEach(([name, src]) => {
+    t.assert(src.includes('isAdminSession'),
+      'api/promopro/' + name + '.js should use the shared admin check');
+    t.assert(!/perms\.role === "admin"/.test(src),
+      'api/promopro/' + name + '.js still matches the role name literally');
+  });
+});
+
+t.test('the shared admin check accepts a session with no username', () => {
+  const access = fs.readFileSync(path.join(ROOT, 'lib/promopro/access.js'), 'utf8');
+  t.assert(/s\.username \? await getUser/.test(access),
+    'a session carrying only a role must still resolve, same as the working routes');
+  t.assert(access.includes('data_scope === "all"'),
+    'admin should mean data_scope all, not a literal role name');
 });
 
 t.test('saving is refused when settings never loaded', () => {
