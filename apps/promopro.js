@@ -208,6 +208,7 @@ export default {
       vendors: [],
       settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] },
       loadErrors: [],
+      settingsFailed: false,
       filter: 'open',
       draftLines: [],
       draftVendorId: '',
@@ -241,6 +242,7 @@ export default {
 
       st.pos = took(posRes, 'pos', [], 'Purchase orders');
       st.vendors = took(venRes, 'vendors', [], 'Vendors');
+      st.settingsFailed = setRes.status !== 'fulfilled';
       st.settings = withSettingDefaults(took(setRes, 'settings', null, 'Settings'));
     }
 
@@ -667,7 +669,15 @@ export default {
       const candidates = Array.isArray(S.candidates) ? S.candidates : [];
 
       let amBlock;
-      if (S.rosterUnavailable) {
+      if (st.settingsFailed) {
+        // Never blame CrewCore for a failure that was ours. Before this, a
+        // 404 on the settings route rendered "No active employees found in
+        // CrewCore", which sent the search in exactly the wrong direction.
+        amBlock = '<div class="pp-notice"><strong>Settings could not be loaded.</strong> ' +
+          esc(st.loadErrors.join('. ')) +
+          '. This is not a CrewCore problem: the roster was never read. If it says 404, ' +
+          'check that <code>api/promopro/settings.js</code> is deployed and spelled correctly.</div>';
+      } else if (S.rosterUnavailable) {
         amBlock = '<div class="pp-notice">The CrewCore roster could not be read, so account managers are unavailable right now. Purchase orders cannot be created until it comes back.</div>';
       } else if (!isAdmin) {
         // Non-admins see who is set, not the whole roster.
@@ -676,6 +686,19 @@ export default {
           : '<div style="font-size:13px;color:var(--muted)">None set. An admin can choose them here.</div>';
       } else if (!candidates.length) {
         amBlock = '<div class="pp-notice">No active employees found in CrewCore. Add people there and they will appear here.</div>';
+      } else if (!candidates.some((c) => c.selectable)) {
+        // The likely real-world case: the roster exists but nobody has an
+        // email on their record yet. Say that plainly instead of showing a
+        // list of greyed-out names with no explanation of what to do.
+        amBlock = '<div class="pp-notice"><strong>Nobody on the roster has an email address yet.</strong> ' +
+          'Add emails to the employee records in CrewCore and they become selectable here. ' +
+          'An account manager with no address would never be copied on the vendor thread, so they cannot be picked.</div>' +
+          '<div class="pp-amgrid">' + candidates.map((c) =>
+            '<label class="pp-amrow off"><input type="checkbox" disabled>' +
+            '<span><span class="nm">' + esc(c.name) + '</span>' +
+            (c.department ? '<span class="dept">' + esc(c.department) + '</span>' : '') +
+            '<span class="em">' + esc(c.reason) + '</span></span></label>'
+          ).join('') + '</div>';
       } else {
         amBlock =
           (S.usingDefaults
@@ -739,6 +762,12 @@ export default {
       const ok = $('#ppSettingsOk');
       err.hidden = true;
       if (ok) ok.hidden = true;
+
+      if (st.settingsFailed) {
+        err.textContent = 'Settings did not load, so saving would overwrite them with defaults. Fix the route first.';
+        err.hidden = false;
+        return;
+      }
 
       const accountManagerIds = [];
       root.querySelectorAll('[data-amid]').forEach((el) => {
