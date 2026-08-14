@@ -1,4 +1,3 @@
-// test/crewcore-timeclock.test.cjs
 /**
  * CrewCore time clock contract tests.
  *
@@ -423,6 +422,61 @@ Promise.all([
     t.assert(code.indexOf('if (!only)') < code.indexOf('clock_enabled !== false'),
       'the exclusion must be skipped when a specific employee is requested');
     t.assert(filterLine.length > 0, 'filter present');
+  });
+
+  /* ---- the shift editor is a modal --------------------------------- */
+
+  t.test('the shift editor opens as a modal, not prepended to the page', () => {
+    // Prepending pushed the week grid down, so the row being corrected
+    // jumped off screen the instant Fix was clicked.
+    const app = read('apps/crewcore.js');
+    const start = app.indexOf('\n  _openShiftForm(');
+    const end = app.indexOf('\n  _exportTimecards(');
+    t.assert(start > 0 && end > start, 'could not locate the _openShiftForm method body');
+    const fn = app.slice(start, end);
+    t.assert(fn.includes('this._openModal('), 'the shift form must open through the modal helper');
+    t.assert(!fn.includes('prepend'), 'the shift form must not prepend itself to the body');
+  });
+
+  t.test('the modal escapes the transformed ancestor that would clip it', () => {
+    // MailMe learned this the hard way: .view runs a transform animation,
+    // and a transformed ancestor makes position:fixed resolve against IT
+    // rather than the viewport, pinning the overlay under the header.
+    const app = read('apps/crewcore.js');
+    t.assert(/document\.body\.appendChild\(carrier\)/.test(app),
+      'the backdrop must attach to <body>, not the app root');
+    t.assert(/carrier\.dataset\.appRoot = 'crewcore'/.test(app),
+      'and must carry data-app-root or every .cc-* rule stops matching');
+  });
+
+  t.test('the modal sits above the shell header', () => {
+    const app = read('apps/crewcore.js');
+    const m = /\.cc-modal-back\{[^}]*z-index:(\d+)/.exec(app);
+    t.assert(m, 'the backdrop needs an explicit z-index');
+    t.assert(Number(m[1]) > 200, 'it must clear the shell header, which sits at 200');
+  });
+
+  t.test('the modal closes every way a person would expect', () => {
+    const app = read('apps/crewcore.js');
+    const mStart = app.indexOf('\n  _openModal(');
+    const mEnd = app.indexOf('\n  _closeModal() {');
+    t.assert(mStart > 0 && mEnd > mStart, 'could not locate the _openModal method body');
+    const fn = app.slice(mStart, mEnd);
+    t.assert(fn.includes("ev.key === 'Escape'"), 'Escape must close it');
+    t.assert(/ev\.target === back/.test(fn), 'a backdrop click must close it, an inside click must not');
+    t.assert(fn.includes('ccModalX'), 'there must be an X');
+  });
+
+  t.test('leaving the app tears the modal down completely', () => {
+    // The Escape handler lives on document, so an un-removed listener keeps
+    // firing against a detached root, and body overflow stays locked with
+    // no overlay on screen to explain why nothing scrolls.
+    const app = read('apps/crewcore.js');
+    const un = app.slice(app.indexOf('unmount() {'));
+    t.assert(un.includes('this._closeModal()'), 'unmount must close the modal');
+    const close = app.slice(app.indexOf('_closeModal() {'), app.indexOf('_closeModal() {') + 600);
+    t.assert(close.includes("removeEventListener('keydown'"), 'and drop the document listener');
+    t.assert(close.includes("document.body.style.overflow = ''"), 'and release the scroll lock');
   });
 
   t.test('the pay type control reads in hourly and salary terms', () => {
