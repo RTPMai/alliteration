@@ -9,7 +9,7 @@
 // counts as late for the whole team, not one person's preference.
 
 import { requireAuth } from "../../lib/session.js";
-import { permsFor } from "../../lib/users.js";
+import { isAdminSession } from "../../lib/promopro/access.js";
 import { validateVendor } from "../../lib/promopro/vendors.js";
 import { getVendors, saveVendors, listPos } from "../../lib/promopro/store.js";
 
@@ -31,8 +31,7 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    const perms = await permsFor(sess.username);
-    const isAdmin = perms.role === "admin" || perms.superuser === true;
+    const isAdmin = await isAdminSession(sess);
 
     if (req.method === "GET") {
       const vendors = await getVendors();
