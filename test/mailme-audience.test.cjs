@@ -179,7 +179,53 @@ import('../lib/mailme/audience.js').then((a) => {
       'the caveat must warn against that specific segment');
   });
 
+  /* ---- one mailbox, one email ---- */
+
+  t.test('the same mailbox on two contact records only gets one email', () => {
+    // Real case: the same person on the roster under two companies. Both
+    // records are legitimate and stay separate, but the inbox is one inbox.
+    const { send, held } = a.applyEligibility([
+      { id: 'client:1', email: 'RYAN@PMAPPAREL.COM', company_name: 'P&M Apparel', status: 'subscribed', source: 'client' },
+      { id: 'client:2', email: 'ryan@pmapparel.com', company_name: 'Hawkbat Garrison', status: 'subscribed', source: 'client' },
+    ], { policy: {} });
+    t.equal(send.length, 1, 'one mailbox should receive one email');
+    t.equal(held.length, 1, 'the duplicate must be held, not dropped without trace');
+    t.assert(/already on this send/.test(held[0].heldReason),
+      'the held reason must explain why: ' + held[0].heldReason);
+  });
+
+  t.test('deduping is case and whitespace insensitive', () => {
+    const { send } = a.applyEligibility([
+      { id: 'a', email: '  Sara@Example.COM ', status: 'subscribed', source: 'client' },
+      { id: 'b', email: 'sara@example.com', status: 'subscribed', source: 'client' },
+    ], { policy: {} });
+    t.equal(send.length, 1);
+  });
+
+  t.test('different mailboxes are never merged', () => {
+    const { send } = a.applyEligibility([
+      { id: 'a', email: 'one@x.com', status: 'subscribed', source: 'client' },
+      { id: 'b', email: 'two@x.com', status: 'subscribed', source: 'client' },
+    ], { policy: {} });
+    t.equal(send.length, 2);
+  });
+
+  t.test('an ineligible duplicate keeps its OWN reason, not the duplicate one', () => {
+    // Eligibility is checked before deduping, so the more specific reason
+    // wins. "Has an open quote" tells an AM something; "duplicate" does not.
+    // (Unsubscribed contacts never reach this function: selectRecipients
+    // filters to mailable upstream.)
+    const { send, held } = a.applyEligibility([
+      { id: 'a', email: 'x@y.com', source: 'client' },
+      { id: 'b', email: 'x@y.com', source: 'client', hasOpenQuote: true },
+    ], { policy: { skipOpenQuotes: true } });
+    t.equal(send.length, 1);
+    t.assert(/open quote/.test(held[0].heldReason),
+      'the specific reason should win over the duplicate one: ' + held[0].heldReason);
+  });
+
   process.exit(t.report());
+;
 }).catch((e) => {
   console.log('  FAIL could not import audience module: ' + e.message);
   process.exit(1);
