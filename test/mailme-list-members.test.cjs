@@ -96,7 +96,7 @@ t.test('a tag-based dynamic list still uses tags, not the override', () => {
   // override is only for rules that have no tag to set.
   t.assert(/function usesTagMechanism/.test(src), 'usesTagMechanism() is missing');
   const add = src.slice(src.indexOf('async function addListMember'));
-  t.assert(/usesTagMechanism\(list\)/.test(add.slice(0, 1400)),
+  t.assert(/usesTagMechanism\(list\)/.test(add.slice(0, 2600)),
     'the add path must branch on whether the rule is tag-based');
 });
 
@@ -115,14 +115,28 @@ t.test('removing a member from a TAG-BASED dynamic list edits the contact\'s tag
     'a dynamic list must be edited by removing the rule tag(s) from the contact via PATCH ENDPOINTS.mmContacts');
 });
 
-t.test('adding a member looks up an existing contact by email rather than creating a bare record', () => {
+t.test('adding a member reuses an existing contact before creating anything', () => {
+  // An address already in MailMe must keep whatever it already is (client,
+  // lead, giving, prospect). Only a genuinely unknown address creates a
+  // prospect, and the server decides that, not this screen.
   t.assert(/async function addListMemberByEmail/.test(src), 'addListMemberByEmail() is missing');
   const fn = src.slice(src.indexOf('async function addListMemberByEmail'));
   const body = fn.slice(0, fn.indexOf('\n    function renderListMembersPanel'));
   t.assert(/state\.contacts\.find/.test(body),
-    'adding a member must look the email up against already-loaded contacts');
-  t.assert(/No contact with that email/.test(body),
-    'an unknown email should get a clear error rather than silently doing nothing');
+    'the already-loaded contacts should be checked first, to avoid a needless round trip');
+  t.assert(/api\.post\(ENDPOINTS\.mmContacts/.test(body),
+    'an unknown address must go to the find-or-create endpoint');
+  t.assert(/createdNew/.test(body),
+    'the result must distinguish a new prospect from an existing contact');
+});
+
+t.test('the result tells you whether it created someone or reused them', () => {
+  // "Added as a new prospect" versus "Added (existing client)". Silently
+  // creating a person is the kind of thing you want to see happen.
+  const fn = src.slice(src.indexOf('async function addListMemberByEmail'));
+  const body = fn.slice(0, fn.indexOf('\n    function renderListMembersPanel'));
+  t.assert(/as a new prospect/.test(body) && /existing/.test(body),
+    'both outcomes need distinct wording');
 });
 
 t.test('the member row actions refresh contacts, lists, and the open panel after a change', () => {
