@@ -191,8 +191,10 @@ export default {
       pos: [],
       vendors: [],
       settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] },
+      loadErrors: [],
       filter: 'open',
       draftLines: [],
+      draftVendorId: '',
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -204,14 +206,33 @@ export default {
     /* ---------------- loading ---------------- */
 
     async function loadAll() {
-      const [posRes, venRes, setRes] = await Promise.all([
+      // allSettled, not all. One endpoint that has not deployed yet should
+      // degrade that section, not blank the whole app. A 404 on settings
+      // used to take the entire screen down with "could not load PromoPro",
+      // which says nothing about which of three routes was missing.
+      const [posRes, venRes, setRes] = await Promise.allSettled([
         ctx.api.get(ENDPOINTS.ppPos),
         ctx.api.get(ENDPOINTS.ppVendors),
         ctx.api.get(ENDPOINTS.ppSettings),
       ]);
-      st.pos = (posRes && posRes.pos) || [];
-      st.vendors = (venRes && venRes.vendors) || [];
-      st.settings = withSettingDefaults(setRes && setRes.settings);
+
+      st.loadErrors = [];
+      const took = (res, key, fallback, label) => {
+        if (res.status === 'fulfilled') return (res.value && res.value[key]) || fallback;
+        st.loadErrors.push(label + ': ' + (res.reason && res.reason.message ? res.reason.message : 'failed'));
+        return fallback;
+      };
+
+      st.pos = took(posRes, 'pos', [], 'Purchase orders');
+      st.vendors = took(venRes, 'vendors', [], 'Vendors');
+      st.settings = withSettingDefaults(took(setRes, 'settings', null, 'Settings'));
+    }
+
+    function loadErrorHtml() {
+      if (!st.loadErrors || !st.loadErrors.length) return '';
+      return '<div class="pp-notice"><strong>Some data did not load.</strong> ' +
+        esc(st.loadErrors.join('. ')) +
+        '. If this says 404, that route has not been deployed yet.</div>';
     }
 
     // One wrapper so every screen judges lateness against the same shop-wide
@@ -232,7 +253,7 @@ export default {
       });
 
       if (!st.pos.length) {
-        body.innerHTML = '<div class="pp-empty">No purchase orders yet. Create one to get started.</div>';
+        body.innerHTML = loadErrorHtml() + '<div class="pp-empty">No purchase orders yet. Create one to get started.</div>';
         $('#ppPipeSub').textContent = 'Every open purchase order, by stage.';
         return;
       }
@@ -247,7 +268,7 @@ export default {
       // closed is finished. Everything between them is what needs watching.
       const lanes = STAGES.filter((s) => s.key !== 'closed');
 
-      body.innerHTML = '<div class="pp-lanes">' + lanes.map((lane) => {
+      body.innerHTML = loadErrorHtml() + '<div class="pp-lanes">' + lanes.map((lane) => {
         const inLane = scored
           .filter((x) => x.health.stage === lane.key)
           .sort((a, b) => {
@@ -341,8 +362,8 @@ export default {
 
     function renderForm() {
       const wrap = $('#ppFormWrap');
-      const vendorOpts = st.vendors.filter((v) => v.active !== false)
-        .map((v) => '<option value="' + esc(v.id) + '">' + esc(v.name) + '</option>').join('');
+      const pickedVendor = vendorById(st.draftVendorId);
+      const pickedVendorName = pickedVendor ? pickedVendor.name : '';
       const amOpts = st.settings.accountManagers
         .map((a) => '<option value="' + esc(a.id) + '">' + esc(a.name) + '</option>').join('');
 
@@ -366,8 +387,15 @@ export default {
           : '') +
 
         '<div class="pp-row">' +
-          '<div class="pp-field"><label>Vendor</label><select id="ppVendor">' +
-            '<option value="">Choose a vendor</option>' + vendorOpts + '</select></div>' +
+          // Searchable rather than a plain select: the vendor list grows past
+          // the point where scrolling a dropdown is faster than typing three
+          // letters. The id lives in a hidden field so the value posted is
+          // always a real vendor, never whatever text was typed.
+          '<div class="pp-field"><label>Vendor</label>' +
+            '<input id="ppVendorSearch" autocomplete="off" placeholder="Start typing a vendor name" value="' + esc(pickedVendorName) + '">' +
+            '<input type="hidden" id="ppVendor" value="' + esc(st.draftVendorId || '') + '">' +
+            '<div id="ppVendorResults"></div>' +
+          '</div>' +
           '<div class="pp-field"><label>Account manager (required)</label><select id="ppAm">' +
             '<option value="">Choose an account manager</option>' + amOpts + '</select></div>' +
           '<div class="pp-field"><label>Needed by</label><input id="ppNeededBy" type="date" value="' + esc((st.picked && st.picked.dueDate) || '') + '"></div>' +
@@ -713,6 +741,7 @@ export default {
 
       if (t.id === 'ppNewFromPipe' || t.id === 'ppNewToggle') {
         st.picked = null;
+        st.draftVendorId = '';
         st.draftLines = [{ description: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
         renderCcPreview();
@@ -739,6 +768,8 @@ export default {
       }
 
       if (t.dataset && t.dataset.inv) { await pickInvoice(t.dataset.inv); return; }
+
+      if (t.dataset && t.dataset.vendorpick) { pickVendor(t.dataset.vendorpick); return; }
 
       if (t.dataset && t.dataset.filter) { st.filter = t.dataset.filter; renderOrders(); return; }
 
@@ -783,6 +814,45 @@ export default {
       if (t.id === 'ppVenCancel') { $('#ppVendorFormWrap').hidden = true; return; }
     });
 
+    // Shows matches as you type, and everything when the box is focused but
+    // empty, so it still behaves like a dropdown for someone who does not
+    // remember the name and just wants to browse.
+    function renderVendorMatches(term) {
+      const box = $('#ppVendorResults');
+      if (!box) return;
+      const q = String(term || '').trim().toLowerCase();
+      const active = st.vendors.filter((v) => v.active !== false);
+      const matches = q
+        ? active.filter((v) => v.name.toLowerCase().includes(q))
+        : active;
+
+      if (!active.length) {
+        box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendors yet. Add one on the Vendors tab.</div>';
+        return;
+      }
+      if (!matches.length) {
+        box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendor matches that.</div>';
+        return;
+      }
+      box.innerHTML = '<div class="pp-search-results">' + matches.slice(0, 12).map((v) =>
+        '<button data-vendorpick="' + esc(v.id) + '"><strong>' + esc(v.name) + '</strong>' +
+        (v.leadDays != null ? ' <span style="color:var(--muted)">' + esc(v.leadDays) + ' day lead</span>' : '') +
+        '</button>'
+      ).join('') + '</div>';
+    }
+
+    function pickVendor(id) {
+      const v = vendorById(id);
+      st.draftVendorId = id;
+      const searchEl = $('#ppVendorSearch');
+      const hiddenEl = $('#ppVendor');
+      if (searchEl) searchEl.value = v ? v.name : '';
+      if (hiddenEl) hiddenEl.value = id;
+      const box = $('#ppVendorResults');
+      if (box) box.innerHTML = '';
+      renderCcPreview();
+    }
+
     function renderCcPreview() {
       const box = $('#ppCcPreview');
       if (!box) return;
@@ -800,7 +870,11 @@ export default {
     }
 
     root.addEventListener('change', (e) => {
-      if (e.target.id === 'ppAm' || e.target.id === 'ppVendor') renderCcPreview();
+      if (e.target.id === 'ppAm') renderCcPreview();
+    });
+
+    root.addEventListener('focusin', (e) => {
+      if (e.target.id === 'ppVendorSearch') renderVendorMatches(e.target.value);
     });
 
     // Line edits write straight back to the draft rather than being read off
@@ -815,6 +889,17 @@ export default {
         }
         return;
       }
+      if (e.target.id === 'ppVendorSearch') {
+        // Typing after a pick clears the pick, so the hidden id can never be
+        // left pointing at a vendor whose name is no longer in the box.
+        st.draftVendorId = '';
+        const hid = $('#ppVendor');
+        if (hid) hid.value = '';
+        renderVendorMatches(e.target.value);
+        renderCcPreview();
+        return;
+      }
+
       if (e.target.id === 'ppSearch') {
         clearTimeout(st.searchTimer);
         const val = e.target.value;
@@ -844,6 +929,7 @@ export default {
         const res = await ctx.api.post(ENDPOINTS.ppPos, payload);
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
         st.picked = null;
+        st.draftVendorId = '';
         st.draftLines = [];
         $('#ppFormWrap').hidden = true;
         await loadAll();
