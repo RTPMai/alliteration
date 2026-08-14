@@ -122,6 +122,22 @@ export default {
     .pp-notice { background: var(--accent-tint); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; margin-bottom: 16px; }
     .pp-err { color: var(--danger); font-size: 13px; font-weight: 600; margin-top: 8px; }
 
+    .pp-sect { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 8px; }
+    .pp-sect:first-child { margin-top: 0; }
+    .pp-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    .pp-amgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }
+    .pp-amrow {
+      display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+      border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--bg);
+    }
+    .pp-amrow:hover { border-color: var(--faint); }
+    .pp-amrow.off { opacity: .55; cursor: default; }
+    .pp-amrow input { margin-top: 2px; }
+    .pp-amrow .nm { display: block; font-size: 13px; font-weight: 700; }
+    .pp-amrow .dept { display: inline-block; font-size: 11px; color: var(--muted); }
+    .pp-amrow .em { display: block; font-size: 11px; color: var(--muted); }
+
     .pp-detail { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 20px; }
     .pp-trail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
     .pp-step { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px; }
@@ -647,46 +663,70 @@ export default {
 
     function renderSettings() {
       const S = st.settings;
-      const amRows = S.accountManagers.length
-        ? S.accountManagers.map((a, i) =>
-            '<tr data-am="' + i + '">' +
-              '<td><input data-amf="name" value="' + esc(a.name) + '"' + (isAdmin ? '' : ' disabled') + '></td>' +
-              '<td><input data-amf="email" type="email" value="' + esc(a.email) + '"' + (isAdmin ? '' : ' disabled') + '></td>' +
-              (isAdmin ? '<td><button class="pp-btn ghost" data-rmam="' + i + '">Remove</button></td>' : '') +
-            '</tr>'
-          ).join('')
-        : '<tr><td colspan="3" style="color:var(--muted);font-size:13px">Nobody yet. A purchase order cannot be created until at least one is here.</td></tr>';
+      const chosen = new Set(S.accountManagerIds || []);
+      const candidates = Array.isArray(S.candidates) ? S.candidates : [];
+
+      let amBlock;
+      if (S.rosterUnavailable) {
+        amBlock = '<div class="pp-notice">The CrewCore roster could not be read, so account managers are unavailable right now. Purchase orders cannot be created until it comes back.</div>';
+      } else if (!isAdmin) {
+        // Non-admins see who is set, not the whole roster.
+        amBlock = S.accountManagers.length
+          ? '<div style="font-size:13px">' + S.accountManagers.map((a) => esc(a.name)).join(', ') + '</div>'
+          : '<div style="font-size:13px;color:var(--muted)">None set. An admin can choose them here.</div>';
+      } else if (!candidates.length) {
+        amBlock = '<div class="pp-notice">No active employees found in CrewCore. Add people there and they will appear here.</div>';
+      } else {
+        amBlock =
+          (S.usingDefaults
+            ? '<div class="pp-notice">Nobody has been chosen yet, so everyone in Sales is ticked by default. Adjust and save to make it stick.</div>'
+            : '') +
+          '<div class="pp-amgrid">' + candidates.map((c) =>
+            '<label class="pp-amrow' + (c.selectable ? '' : ' off') + '">' +
+              '<input type="checkbox" data-amid="' + esc(c.id) + '"' +
+                (chosen.has(c.id) ? ' checked' : '') +
+                (c.selectable ? '' : ' disabled') + '>' +
+              '<span>' +
+                '<span class="nm">' + esc(c.name || '(no name)') + '</span>' +
+                (c.department ? '<span class="dept">' + esc(c.department) + '</span>' : '') +
+                '<span class="em">' + esc(c.selectable ? c.email : c.reason) + '</span>' +
+              '</span>' +
+            '</label>'
+          ).join('') + '</div>';
+      }
 
       $('#ppSettingsBody').innerHTML =
         '<div class="pp-form">' +
-          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px">Email</div>' +
+          '<div class="pp-sect">Email</div>' +
           '<div class="pp-field" style="margin-bottom:12px">' +
             '<label>Always CC on every purchase order</label>' +
-            '<textarea id="ppAlwaysCc" placeholder="one per line, or comma separated"' + (isAdmin ? '' : ' disabled') + '>' + esc(S.alwaysCc.join('\n')) + '</textarea>' +
-            '<div style="font-size:11px;color:var(--muted);margin-top:4px">Everyone here is copied on every PO, on top of the account manager and the vendor\u2019s own second contact.</div>' +
+            '<textarea id="ppAlwaysCc" placeholder="one per line, or comma separated"' + (isAdmin ? '' : ' disabled') + '>' + esc((S.alwaysCc || []).join('\n')) + '</textarea>' +
+            '<div class="pp-hint">Everyone here is copied on every PO, on top of the account manager and the vendor\u2019s own second contact.</div>' +
           '</div>' +
 
-          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:18px 0 8px">Account managers</div>' +
-          '<table class="pp-table"><thead><tr><th>Name</th><th>Email</th>' + (isAdmin ? '<th></th>' : '') + '</tr></thead>' +
-          '<tbody id="ppAmRows">' + amRows + '</tbody></table>' +
-          (isAdmin ? '<button class="pp-btn ghost" id="ppAddAm" style="margin-top:8px">Add an account manager</button>' : '') +
+          '<div class="pp-sect">Who can own a purchase order</div>' +
+          '<div class="pp-hint" style="margin-bottom:10px">' +
+            'Pulled live from the CrewCore roster. Names and addresses are never stored here, so changing someone\u2019s email in CrewCore changes it everywhere.' +
+          '</div>' +
+          amBlock +
 
-          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin:18px 0 8px">Chasing</div>' +
+          '<div class="pp-sect">Chasing</div>' +
           '<div class="pp-row">' +
             '<div class="pp-field"><label>Days of vendor silence before a PO goes amber</label>' +
               '<input id="ppChase" type="number" min="1" value="' + esc(S.chaseAfterDays) + '"' + (isAdmin ? '' : ' disabled') + '></div>' +
           '</div>' +
-          '<div style="font-size:11px;color:var(--muted)">' +
+          '<div class="pp-hint">' +
             'This applies only where we are waiting on the vendor. Steps that are ours, like approving art and sending payment, do not raise a vendor alarm. ' +
             'A single supplier who is reliably slower can override this on their own card.' +
           '</div>' +
 
           (isAdmin ? '<div style="margin-top:16px"><button class="pp-btn" id="ppSaveSettings">Save settings</button></div>' : '') +
           '<div class="pp-err" id="ppSettingsErr" hidden></div>' +
+          '<div id="ppSettingsOk" class="pp-hint" hidden style="margin-top:8px;font-weight:700">Saved.</div>' +
         '</div>' +
 
         '<div class="pp-form">' +
-          '<div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:8px">How PO numbers are built</div>' +
+          '<div class="pp-sect">How PO numbers are built</div>' +
           '<p style="font-size:13px;color:var(--muted)">' +
             'Year, Printavo invoice number, then an imprint sequence when a job has more than one. A manual web order has no invoice, so it uses an M sequence instead, ' +
             'which makes it obvious at a glance that no Printavo job sits behind it.' +
@@ -696,30 +736,34 @@ export default {
 
     async function saveSettingsForm() {
       const err = $('#ppSettingsErr');
+      const ok = $('#ppSettingsOk');
       err.hidden = true;
+      if (ok) ok.hidden = true;
 
-      const accountManagers = [];
-      root.querySelectorAll('#ppAmRows tr[data-am]').forEach((tr) => {
-        const name = tr.querySelector('[data-amf="name"]');
-        const email = tr.querySelector('[data-amf="email"]');
-        if (!name || !email) return;
-        if (!name.value.trim() && !email.value.trim()) return;
-        accountManagers.push({ name: name.value, email: email.value });
+      const accountManagerIds = [];
+      root.querySelectorAll('[data-amid]').forEach((el) => {
+        if (el.checked) accountManagerIds.push(el.dataset.amid);
       });
 
       const payload = {
         alwaysCc: parseEmailList($('#ppAlwaysCc').value),
         chaseAfterDays: Number($('#ppChase').value) || 3,
-        accountManagers,
       };
+      // Only send the list when the picker was actually on screen. A
+      // non-admin view has no checkboxes, and posting an empty array would
+      // wipe everyone.
+      if (root.querySelector('[data-amid]')) payload.accountManagerIds = accountManagerIds;
 
       try {
         const res = await ctx.api.request(ENDPOINTS.ppSettings, { method: 'PATCH', body: JSON.stringify(payload) });
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
         await loadAll();
         renderAll();
+        const ok2 = $('#ppSettingsOk');
+        if (ok2) ok2.hidden = false;
       } catch (e) {
-        err.textContent = e.message || 'Could not save settings.';
+        err.textContent = (e.message || 'Could not save settings.') +
+          (/404/.test(e.message || '') ? ' That route has not been deployed yet.' : '');
         err.hidden = false;
       }
     }
@@ -790,18 +834,6 @@ export default {
       }
 
       if (t.id === 'ppSaveSettings') { await saveSettingsForm(); return; }
-
-      if (t.id === 'ppAddAm') {
-        st.settings.accountManagers = st.settings.accountManagers.concat([{ id: '', name: '', email: '' }]);
-        renderSettings();
-        return;
-      }
-
-      if (t.dataset && t.dataset.rmam !== undefined) {
-        st.settings.accountManagers = st.settings.accountManagers.filter((a, i) => i !== Number(t.dataset.rmam));
-        renderSettings();
-        return;
-      }
 
       if (t.id === 'ppNewVendor') { renderVendorForm(null); return; }
 
