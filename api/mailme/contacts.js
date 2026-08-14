@@ -8,18 +8,28 @@
 //          body = { id, status?, tags?, reason? }   id is "client:123" or "prospect:PR-00042"
 // DELETE -> remove a PROSPECT only. Client contacts belong to BackBone.
 //
-// No POST. Client contacts come from the roster; prospect contacts come from
-// api/mailme/import.js, which does the dedupe and suppression checks that a
-// bare create would skip.
+// POST  -> find-or-create a single contact by email, for the "add to list"
+//          box. body = { email, contact_name?, company_name?, tags? }
+//          If the address already belongs to a contact (client, lead, giving
+//          or prospect) that contact is returned untouched. If not, a
+//          prospect is created.
+//
+//          This is the ONLY create path besides api/mailme/import.js, and it
+//          deliberately repeats import's two guards rather than skipping
+//          them: the address is matched against every existing contact so a
+//          duplicate is never made, and a suppressed address is refused
+//          outright. Bulk creation still belongs to import.js.
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
-import { resolveContacts, setContactStatus, deleteProspect } from "../../lib/mailme/store.js";
+import {
+  resolveContacts, setContactStatus, deleteProspect, addProspects, getSuppression,
+} from "../../lib/mailme/store.js";
 import {
   SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts, CONTACT_SOURCES,
-  CONTACT_DETAIL_FIELDS, validateContactDetailPatch,
+  CONTACT_DETAIL_FIELDS, validateContactDetailPatch, normalizeEmail,
 } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
@@ -97,6 +107,53 @@ export default async function handler(req, res) {
 
     if (!(await canEditMailMe(sess))) {
       return res.status(403).json({ error: "Your role is read-only in MailMe" });
+    }
+
+    if (req.method === "POST") {
+      const body = parseBody(req);
+      const email = normalizeEmail(body.email);
+      if (!email) {
+        return res.status(400).json({ error: "Enter a valid email address." });
+      }
+
+      // Already known? Hand back the existing record rather than making a
+      // second one. This is what makes the same box work for "add my
+      // existing client" and "add somebody new".
+      const { contacts } = await resolveContacts();
+      const existing = contacts.find((c) => normalizeEmail(c.email) === email);
+      if (existing) {
+        return res.status(200).json({ ok: true, created: false, contact: existing });
+      }
+
+      // An opt-out survives the contact record being deleted, so a brand new
+      // record for a suppressed address would otherwise quietly resurrect
+      // someone who asked not to be emailed.
+      const suppression = await getSuppression();
+      if (suppression[email]) {
+        const entry = suppression[email];
+        return res.status(409).json({
+          error: `${email} opted out${entry.at ? " on " + String(entry.at).slice(0, 10) : ""} and cannot be added.`,
+          reason: "suppressed",
+        });
+      }
+
+      const tags = Array.isArray(body.tags)
+        ? body.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean) : [];
+
+      const { added } = await addProspects([{
+        email,
+        contact_name: String(body.contact_name || "").trim(),
+        company_name: String(body.company_name || "").trim(),
+        tags,
+      }], sess, null);
+
+      if (!added || !added.length) {
+        return res.status(500).json({ error: "Could not create the contact." });
+      }
+
+      const { contacts: refreshed } = await resolveContacts();
+      const created = refreshed.find((c) => String(c.id) === `prospect:${added[0].prospect_id}`);
+      return res.status(201).json({ ok: true, created: true, contact: created });
     }
 
     if (req.method === "PATCH") {
@@ -178,7 +235,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, deleted: id });
     }
 
-    res.setHeader("Allow", "GET, PATCH, DELETE");
+    res.setHeader("Allow", "GET, POST, PATCH, DELETE");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (e) {
     console.error("mailme contacts route error:", e);
