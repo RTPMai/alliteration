@@ -1104,11 +1104,25 @@ export default {
       const email = String(rawEmail || '').trim().toLowerCase();
       if (!email) return msg('#mmListMembersMsg', 'Enter an email address.', 'mm-err');
 
-      const candidate = state.contacts.find((c) => String(c.email || '').trim().toLowerCase() === email);
+      // Find-or-create. An address already in MailMe keeps whatever it
+      // already is (client, lead, giving, prospect); an unknown one becomes
+      // a prospect. The server does the matching, not this list, so an
+      // address that exists under a source not currently loaded here is
+      // still recognised instead of being duplicated.
+      let candidate = state.contacts.find((c) => String(c.email || '').trim().toLowerCase() === email);
+      let createdNew = false;
       if (!candidate) {
-        return msg('#mmListMembersMsg',
-          'No contact with that email in MailMe yet. Import them as a prospect first, ' +
-          'or check the address against Contacts.', 'mm-err');
+        try {
+          const res = await api.post(ENDPOINTS.mmContacts, { email });
+          candidate = res.contact;
+          createdNew = !!res.created;
+          if (createdNew) await loadContacts();
+        } catch (e) {
+          return msg('#mmListMembersMsg', esc(e.message), 'mm-err');
+        }
+      }
+      if (!candidate) {
+        return msg('#mmListMembersMsg', 'Could not add that address.', 'mm-err');
       }
 
       const cid = String(candidate.id);
@@ -1138,6 +1152,10 @@ export default {
         await Promise.all([loadContacts(), loadLists()]);
         renderListTable();
         await viewListMembers(list.id);
+        msg('#mmListMembersMsg', createdNew
+          ? `Added ${esc(candidate.email)} as a new prospect.`
+          : `Added ${esc(candidate.email)} (existing ${esc(candidate.source || 'contact')}).`,
+          'mm-ok');
       } catch (e) {
         msg('#mmListMembersMsg', 'Could not add: ' + esc(e.message), 'mm-err');
       }
