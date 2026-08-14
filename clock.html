@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
+<title>Time Clock — P&amp;M Apparel</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#1C2430">
+<!--
+  PUBLIC CrewCore time clock kiosk. No login, no shell.
+
+  Replaces the shop's broken clock in/out system (Aug 2026, rush build).
+  Pick your name, type your passcode, tap Clock In or Clock Out. Most of
+  production has no Alliteration account and the old system never asked for
+  one, so requiring a shell login here would just move the outage.
+
+  Standalone on purpose, same reasoning as scan.html and unsubscribe.html:
+  loading the shell would hit the login gate in shell.js and defeat the
+  point. It carries its own small palette for the same reason tokens.css is
+  skipped there. Everything below is TOKEN-EXEMPT by that precedent.
+
+  Built for a wall-mounted tablet with someone's inky hands on it: nothing
+  smaller than a fingertip, no scrolling to reach a button, no keyboard, and
+  the screen resets itself so the next person never sees the last person's
+  name.
+
+  Optional kiosk token: if one is set in CrewCore Settings, this page needs
+  ?k=<token> on the URL. Bookmark the full link on the tablet.
+-->
+<style>
+  :root {
+    --ink: #1C2430; --muted: #6B7684; --line: #E4E8EC; --line-soft: #F0F3F5;
+    --bg: #F4F6F8; --card: #FFFFFF;
+    --accent: #E1251B; --accent-tint: #FDECEB;
+    --green: #2F7A48; --green-tint: #EAF5EE;
+    --amber: #A8690B; --amber-tint: #FBF3DF;
+    --danger: #C0392B; --danger-tint: #FBEAE8;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; min-height: 100%;
+    -webkit-user-select: none; user-select: none;
+  }
+
+  header {
+    display: flex; align-items: baseline; justify-content: space-between;
+    padding: 14px 22px; border-bottom: 1px solid var(--line); background: var(--card);
+    flex-wrap: wrap; gap: 6px;
+  }
+  .mark { font-size: 19px; font-weight: 800; letter-spacing: -.02em; }
+  .mark .w1 { color: var(--accent); }
+  .mark .dot { color: var(--accent); }
+  .now { font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .now .day { font-size: 12.5px; font-weight: 600; color: var(--muted); margin-right: 10px; }
+
+  main { flex: 1 1 auto; padding: 20px 22px 34px; max-width: 900px; width: 100%; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 800; letter-spacing: -.02em; margin: 0 0 4px; }
+  .sub { font-size: 13.5px; color: var(--muted); margin-bottom: 18px; }
+
+  .names { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+  .name-btn {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 18px 16px; font-size: 16.5px; font-weight: 700; color: var(--ink);
+    font-family: inherit; cursor: pointer; text-align: left; min-height: 72px;
+    display: flex; flex-direction: column; justify-content: center; gap: 3px;
+  }
+  .name-btn:active { background: var(--accent-tint); border-color: var(--accent); }
+  .name-btn .dept { font-size: 12px; font-weight: 600; color: var(--muted); }
+  .name-btn.on-clock { border-color: var(--green); background: var(--green-tint); }
+  .name-btn .badge { font-size: 11px; font-weight: 800; color: var(--green); letter-spacing: .04em; }
+
+  .pad-wrap { max-width: 380px; margin: 0 auto; text-align: center; }
+  .who { font-size: 24px; font-weight: 800; letter-spacing: -.02em; margin-bottom: 2px; }
+  .who-sub { font-size: 13px; color: var(--muted); margin-bottom: 18px; }
+
+  .dots { display: flex; justify-content: center; gap: 12px; margin-bottom: 20px; height: 20px; }
+  .dot-slot { width: 15px; height: 15px; border-radius: 50%; border: 2px solid var(--line); }
+  .dot-slot.filled { background: var(--ink); border-color: var(--ink); }
+
+  .keys { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 18px; }
+  .key {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    font-size: 26px; font-weight: 700; color: var(--ink); font-family: inherit;
+    padding: 16px 0; cursor: pointer; min-height: 62px;
+  }
+  .key:active { background: var(--line-soft); }
+  .key.util { font-size: 15px; font-weight: 700; color: var(--muted); }
+
+  .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .act {
+    border: none; border-radius: 12px; padding: 20px 10px; font-size: 17px; font-weight: 800;
+    font-family: inherit; cursor: pointer; color: #FFFFFF; min-height: 68px;
+  }
+  .act:disabled { opacity: .4; cursor: not-allowed; }
+  .act.in { background: var(--green); }
+  .act.out { background: var(--amber); }
+  .back {
+    display: block; width: 100%; margin-top: 14px; background: none; border: none;
+    color: var(--muted); font-size: 14px; font-weight: 600; font-family: inherit;
+    padding: 12px; cursor: pointer;
+  }
+
+  .msg { border-radius: 10px; padding: 12px 14px; font-size: 14px; font-weight: 600; margin-bottom: 16px; text-align: left; }
+  .msg.err { background: var(--danger-tint); color: var(--danger); }
+  .msg.warn { background: var(--amber-tint); color: var(--amber); }
+
+  .done { text-align: center; padding: 30px 10px; }
+  .done .ring {
+    width: 96px; height: 96px; border-radius: 50%; margin: 0 auto 22px;
+    display: grid; place-items: center; font-size: 46px; font-weight: 800; color: #FFFFFF;
+  }
+  .done.in .ring { background: var(--green); }
+  .done.out .ring { background: var(--amber); }
+  .done h2 { font-size: 27px; font-weight: 800; letter-spacing: -.02em; margin: 0 0 6px; }
+  .done .big-time { font-size: 40px; font-weight: 800; letter-spacing: -.03em; margin: 10px 0 6px; font-variant-numeric: tabular-nums; }
+  .done .detail { font-size: 15px; color: var(--muted); }
+  .done .heads-up {
+    margin: 20px auto 0; max-width: 420px; background: var(--amber-tint); color: var(--amber);
+    border-radius: 10px; padding: 12px 14px; font-size: 13.5px; font-weight: 600;
+  }
+  .done .countdown { margin-top: 24px; font-size: 12.5px; color: var(--muted); }
+
+  .center-note { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 14.5px; line-height: 1.6; }
+  .spin { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 14px; }
+  .search {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px;
+    font-size: 15px; font-family: inherit; margin-bottom: 14px; background: var(--card); color: var(--ink);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="mark"><span class="w1">Crew</span>Core<span class="dot">.</span> Time Clock</div>
+  <div class="now"><span class="day" id="today"></span><span id="clock"></span></div>
+</header>
+
+<main id="screen"></main>
+
+<script>
+(function () {
+  'use strict';
+
+  var API = '/api/crewcore/clock';
+  var TOKEN = new URLSearchParams(location.search).get('k') || '';
+  var MAX_PIN = 6;
+  var RESET_SECONDS = 8;
+
+  var roster = [];
+  var picked = null;
+  var pin = '';
+  var busy = false;
+  var resetTimer = null;
+  var countdownTimer = null;
+
+  var screen = document.getElementById('screen');
+
+  /* ---- header clock ---- */
+  function tickClock() {
+    var d = new Date();
+    var h = d.getHours(), ampm = h >= 12 ? 'PM' : 'AM';
+    h = h % 12; if (h === 0) h = 12;
+    var m = String(d.getMinutes()).padStart(2, '0');
+    document.getElementById('clock').textContent = h + ':' + m + ' ' + ampm;
+    document.getElementById('today').textContent =
+      d.toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' });
+  }
+  tickClock();
+  setInterval(tickClock, 15000);
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  function url(extra) {
+    var u = API;
+    if (TOKEN) u += '?k=' + encodeURIComponent(TOKEN);
+    return u + (extra || '');
+  }
+
+  function post(body) {
+    return fetch(url(), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { status: r.status, body: j };
+      });
+    });
+  }
+
+  function clearTimers() {
+    if (resetTimer) { clearTimeout(resetTimer); resetTimer = null; }
+    if (countdownTimer) { clearInterval(countdownTimer); countdownTimer = null; }
+  }
+
+  /* ---- screen 1: pick a name ---- */
+
+  function loadRoster() {
+    screen.innerHTML = '<div class="spin">Loading the crew list...</div>';
+    fetch(url('')).then(function (r) {
+      return r.json().catch(function () { return {}; }).then(function (j) {
+        return { status: r.status, body: j };
+      });
+    }).then(function (res) {
+      if (res.status !== 200) {
+        screen.innerHTML = '<div class="center-note">' + esc(res.body.error || 'The time clock is not available right now.') + '</div>';
+        return;
+      }
+      roster = res.body.roster || [];
+      showNames();
+    }).catch(function () {
+      screen.innerHTML = '<div class="center-note">Can\'t reach the time clock.<br>Check the tablet\'s wifi, then reload this page.</div>';
+    });
+  }
+
+  function showNames(filter) {
+    clearTimers();
+    picked = null; pin = '';
+
+    if (!roster.length) {
+      screen.innerHTML = '<div class="center-note">Nobody is set up on the time clock yet.<br>' +
+        'A manager needs to add a passcode in CrewCore.</div>';
+      return;
+    }
+
+    var q = (filter || '').trim().toLowerCase();
+    var shown = roster.filter(function (e) {
+      return !q || String(e.name).toLowerCase().indexOf(q) >= 0;
+    });
+
+    // The search box only appears once the wall of names stops fitting on a
+    // tablet screen. Below that it is one more thing to tap past.
+    var searchBox = roster.length > 12
+      ? '<input class="search" id="q" type="text" placeholder="Start typing your name..." value="' + esc(filter || '') + '">'
+      : '';
+
+    screen.innerHTML =
+      '<h1>Who\'s clocking?</h1>' +
+      '<div class="sub">Tap your name, then enter your passcode.</div>' +
+      searchBox +
+      '<div class="names">' +
+        shown.map(function (e) {
+          return '<button class="name-btn" data-id="' + esc(e.id) + '">' +
+            '<span>' + esc(e.name) + '</span>' +
+            (e.department ? '<span class="dept">' + esc(e.department) + '</span>' : '') +
+            '</button>';
+        }).join('') +
+      '</div>' +
+      (shown.length ? '' : '<div class="center-note">No names match.</div>');
+
+    var qBox = document.getElementById('q');
+    if (qBox) {
+      qBox.oninput = function () { showNames(qBox.value); };
+      if (filter) { qBox.focus(); qBox.setSelectionRange(qBox.value.length, qBox.value.length); }
+    }
+
+    Array.prototype.forEach.call(screen.querySelectorAll('.name-btn'), function (btn) {
+      btn.onclick = function () {
+        picked = roster.find(function (e) { return e.id === btn.dataset.id; });
+        pin = '';
+        showPad();
+      };
+    });
+  }
+
+  /* ---- screen 2: passcode + action ---- */
+
+  function showPad(message, kind) {
+    var keys = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+    screen.innerHTML =
+      '<div class="pad-wrap">' +
+        '<div class="who">' + esc(picked.name) + '</div>' +
+        '<div class="who-sub">Enter your passcode</div>' +
+        (message ? '<div class="msg ' + (kind || 'err') + '">' + esc(message) + '</div>' : '') +
+        '<div class="dots" id="dots"></div>' +
+        '<div class="keys">' +
+          keys.map(function (k) { return '<button class="key" data-k="' + k + '">' + k + '</button>'; }).join('') +
+          '<button class="key util" data-k="clear">Clear</button>' +
+          '<button class="key" data-k="0">0</button>' +
+          '<button class="key util" data-k="back">Delete</button>' +
+        '</div>' +
+        '<div class="actions">' +
+          '<button class="act in" id="btnIn">Clock In</button>' +
+          '<button class="act out" id="btnOut">Clock Out</button>' +
+        '</div>' +
+        '<button class="back" id="btnBack">Not you? Go back</button>' +
+      '</div>';
+
+    Array.prototype.forEach.call(screen.querySelectorAll('.key'), function (btn) {
+      btn.onclick = function () {
+        var k = btn.dataset.k;
+        if (k === 'clear') pin = '';
+        else if (k === 'back') pin = pin.slice(0, -1);
+        else if (pin.length < MAX_PIN) pin += k;
+        drawDots();
+      };
+    });
+
+    document.getElementById('btnIn').onclick = function () { punch('in'); };
+    document.getElementById('btnOut').onclick = function () { punch('out'); };
+    document.getElementById('btnBack').onclick = function () { showNames(); };
+
+    drawDots();
+
+    // Anyone who walks away mid-entry should not leave their name on screen
+    // for the next person.
+    resetTimer = setTimeout(function () { showNames(); }, 45000);
+  }
+
+  function drawDots() {
+    var el = document.getElementById('dots');
+    if (!el) return;
+    var slots = Math.max(4, pin.length);
+    var html = '';
+    for (var i = 0; i < slots; i++) {
+      html += '<span class="dot-slot' + (i < pin.length ? ' filled' : '') + '"></span>';
+    }
+    el.innerHTML = html;
+    var ok = pin.length >= 4 && !busy;
+    document.getElementById('btnIn').disabled = !ok;
+    document.getElementById('btnOut').disabled = !ok;
+  }
+
+  /* ---- the punch ---- */
+
+  function punch(action) {
+    if (busy || pin.length < 4) return;
+    busy = true;
+    clearTimers();
+    drawDots();
+
+    var btn = document.getElementById(action === 'in' ? 'btnIn' : 'btnOut');
+    var was = btn.textContent;
+    btn.textContent = 'Working...';
+
+    post({ employee_id: picked.id, pin: pin, action: action }).then(function (res) {
+      busy = false;
+      if (res.status === 200 && res.body.ok) {
+        showDone(res.body);
+        return;
+      }
+      // A wrong-state answer (already in, not in) is not the person's
+      // mistake to puzzle over, so it comes back as a plain instruction on
+      // the same screen with the passcode cleared.
+      pin = '';
+      btn.textContent = was;
+      showPad(res.body.error || 'That did not work. Try again.', res.status === 409 ? 'warn' : 'err');
+    }).catch(function () {
+      busy = false;
+      pin = '';
+      showPad('Can\'t reach the time clock. Check wifi and try again.', 'err');
+    });
+  }
+
+  /* ---- screen 3: confirmation ---- */
+
+  function showDone(data) {
+    var isIn = data.action === 'in';
+    screen.innerHTML =
+      '<div class="done ' + (isIn ? 'in' : 'out') + '">' +
+        '<div class="ring">&#10003;</div>' +
+        '<h2>' + esc(data.name) + '</h2>' +
+        '<div class="detail">' + (isIn ? 'Clocked in' : 'Clocked out') + '</div>' +
+        '<div class="big-time">' + esc(data.at) + '</div>' +
+        (data.worked ? '<div class="detail">' + esc(data.worked) + ' on the clock</div>' : '') +
+        (data.note ? '<div class="heads-up">' + esc(data.note) + '</div>' : '') +
+        '<div class="countdown" id="cd"></div>' +
+      '</div>';
+
+    var left = RESET_SECONDS;
+    var cd = document.getElementById('cd');
+    cd.textContent = 'Back to the crew list in ' + left + '...';
+    countdownTimer = setInterval(function () {
+      left -= 1;
+      if (cd) cd.textContent = 'Back to the crew list in ' + left + '...';
+      if (left <= 0) { clearTimers(); loadRoster(); }
+    }, 1000);
+
+    // Tapping anywhere skips the wait, so a shift change does not queue up
+    // behind a countdown.
+    screen.onclick = function () { screen.onclick = null; clearTimers(); loadRoster(); };
+  }
+
+  loadRoster();
+
+  // The name list carries who is currently on the clock only as of load, and
+  // a wall tablet can sit on one screen all day. A quiet refresh keeps a
+  // newly added employee from needing someone to reload the page.
+  setInterval(function () {
+    if (!picked && !busy) {
+      fetch(url('')).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && Array.isArray(j.roster) && j.roster.length !== roster.length) {
+          roster = j.roster;
+          showNames();
+        }
+      }).catch(function () {});
+    }
+  }, 300000);
+})();
+</script>
+</body>
+</html>
