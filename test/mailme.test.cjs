@@ -378,14 +378,31 @@ t.test('the Resend API key is an env var, never a Settings field a client could 
   t.assert(!/RESEND_API_KEY/.test(settingsSrc), 'the settings route must never accept or echo the API key');
 });
 
-t.test('contacts cannot be created in MailMe', () => {
-  // The contact list IS the BackBone roster. A POST here would invent a
-  // person BackBone has never heard of and silently break the join.
+t.test('creating a contact can only ever create a PROSPECT, never a client', () => {
+  // The client half of the contact list IS the BackBone roster. Inventing a
+  // client here would create a person BackBone has never heard of and break
+  // the join. Prospects are MailMe's own data, which is why import.js and
+  // the public signup form already create them, so the find-or-create box
+  // uses that same path and no other.
   const src = stripComments(read('api/mailme/contacts.js'));
-  t.assert(!/req\.method === "POST"/.test(src),
-    'api/mailme/contacts.js must not accept POST: contacts come from the roster');
-  t.assert(/"GET, PATCH, DELETE"/.test(src),
-    'contacts route should allow GET, PATCH and DELETE (prospect removal) but never POST');
+  const post = src.slice(src.indexOf('req.method === "POST"'));
+  const body = post.slice(0, post.indexOf('req.method === "PATCH"'));
+  t.assert(/addProspects\(/.test(body),
+    'creation must go through addProspects, the prospect-only path');
+  t.assert(!/backbone/i.test(body),
+    'the create path must never touch BackBone data');
+});
+
+t.test('the create path repeats import.js dedupe and suppression guards', () => {
+  // A bare create would skip both, which is exactly why this route had no
+  // POST before. Adding one is only safe because it re-does the checks.
+  const src = stripComments(read('api/mailme/contacts.js'));
+  const post = src.slice(src.indexOf('req.method === "POST"'));
+  const body = post.slice(0, post.indexOf('req.method === "PATCH"'));
+  t.assert(/contacts\.find\(/.test(body) && /normalizeEmail/.test(body),
+    'an existing address must be matched and returned, never duplicated');
+  t.assert(/getSuppression\(\)/.test(body) && /suppressed/.test(body),
+    'an opted-out address must be refused, not silently re-created');
 });
 
 t.test('mailme never writes the backbone_data key', () => {
