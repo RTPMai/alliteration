@@ -1,0 +1,57 @@
+// api/promopro/settings.js — shop-wide PromoPro settings.
+//
+// Holds three things:
+//   chaseAfterDays   how many days of vendor silence before a PO goes amber
+//   alwaysCc         addresses copied on every purchase order email
+//   accountManagers  the pickable list, name and address
+//
+// GET is open to anyone who can open the app: the new-PO form needs the
+// account manager list to render its (required) picker, so gating the read
+// would make the app unusable for the people who use it most.
+//
+// Writes are admin/superuser only. These settings decide who gets copied on
+// outgoing mail to an outside party, which is not a personal preference.
+
+import { requireAuth } from "../../lib/session.js";
+import { permsFor } from "../../lib/users.js";
+import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
+import { getSettings, saveSettings } from "../../lib/promopro/store.js";
+
+function parseBody(req) {
+  let b = req.body;
+  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
+  return b && typeof b === "object" ? b : {};
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const sess = requireAuth(req, res);
+  if (!sess) return;
+
+  try {
+    if (req.method === "GET") {
+      const settings = withSettingDefaults(await getSettings());
+      return res.status(200).json({ settings });
+    }
+
+    const perms = await permsFor(sess.username);
+    const isAdmin = perms.role === "admin" || perms.superuser === true;
+    if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
+
+    if (req.method === "PATCH" || req.method === "POST") {
+      const body = parseBody(req);
+      const check = validateSettings(body);
+      if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
+      const saved = withSettingDefaults(await saveSettings(check.patch));
+      return res.status(200).json({ ok: true, settings: saved });
+    }
+
+    res.setHeader("Allow", "GET, POST, PATCH");
+    return res.status(405).json({ error: "Method not allowed" });
+  } catch (e) {
+    console.error("promopro/settings route error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+}
