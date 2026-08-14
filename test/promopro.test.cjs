@@ -230,6 +230,25 @@ t.test('the vendor picker is searchable and posts an id, not typed text', () => 
     'typing should clear a previous vendor selection');
 });
 
+t.test('the settings route reads the roster from CrewCore, not a stored copy', () => {
+  t.assert(settingsRoute.includes('lib/crewcore/store.js'), 'settings should read the CrewCore roster');
+  t.assert(settingsRoute.includes('resolveAccountManagers'), 'names should be resolved, not stored');
+});
+
+t.test('a CrewCore outage does not take PromoPro down with it', () => {
+  t.assert(/catch[\s\S]{0,200}rosterUnavailable|rosterUnavailable/.test(settingsRoute),
+    'a failed roster read should degrade to an explained empty list');
+});
+
+t.test('the full roster goes to admins only', () => {
+  // The Settings screen needs everyone; the new-PO form only needs whoever
+  // was chosen. CrewCore is gated for pay and review notes, and this route
+  // touches neither, but there is no reason to hand the whole staff list to
+  // every signed-in user either.
+  t.assert(/if \(isAdmin\) settings\.candidates/.test(settingsRoute),
+    'the candidate roster should be admin-only');
+});
+
 /* ---- architecture ------------------------------------------------------- */
 
 t.test('lib/promopro never imports from api/', () => {
@@ -495,9 +514,70 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.equal(d.accountManagers.length, 0);
   });
 
-  t.test('an account manager with a bad address is refused at settings time', () => {
-    const r = s.validateSettings({ accountManagers: [{ name: 'Alexis', email: 'nope' }] });
-    t.assert(!r.ok, 'should refuse an address that cannot receive mail');
+  /* -- account managers come from CrewCore, not a typed list -- */
+
+  const am = await import('../lib/promopro/account-managers.js');
+
+  const roster = [
+    { id: 'e1', name: 'Alexis Davis', email: 'alexis@pmapparel.com', department: 'Sales', status: 'active' },
+    { id: 'e2', name: 'Jacob Whitman', email: 'jacob@pmapparel.com', department: 'Sales', status: 'active' },
+    { id: 'e3', name: 'Margo Niemeyer', email: 'margo@pmapparel.com', department: 'Screen Printing', status: 'active' },
+    { id: 'e4', name: 'No Email', email: '', department: 'Sales', status: 'active' },
+    { id: 'e5', name: 'Former Person', email: 'gone@pmapparel.com', department: 'Sales', status: 'terminated' },
+  ];
+
+  t.test('settings store employee ids only, never names or addresses', () => {
+    // A second copy of the roster is a copy that goes stale. Somebody changes
+    // their address in CrewCore, PromoPro keeps CC-ing the old one, and
+    // nothing tells you.
+    const r = s.validateSettings({ accountManagerIds: ['e1', 'e2'] });
+    t.assert(r.ok, 'should validate: ' + r.errors.join('; '));
+    t.equal(r.patch.accountManagerIds.join(','), 'e1,e2');
+    t.assert(!('accountManagers' in r.patch), 'resolved names must never be written to storage');
+  });
+
+  t.test('names and addresses resolve live from the roster', () => {
+    const resolved = am.resolveAccountManagers(['e1', 'e3'], roster);
+    t.equal(resolved.length, 2);
+    t.equal(resolved[0].email, 'alexis@pmapparel.com');
+    t.equal(resolved[1].name, 'Margo Niemeyer');
+  });
+
+  t.test('an address changed in CrewCore changes here, with no action taken', () => {
+    const moved = roster.map((e) => (e.id === 'e1' ? { ...e, email: 'a.davis@pmapparel.com' } : e));
+    t.equal(am.resolveAccountManagers(['e1'], moved)[0].email, 'a.davis@pmapparel.com');
+  });
+
+  t.test('somebody with no email is shown but cannot be picked', () => {
+    // Picking them would mean a PO whose owner is silently never copied.
+    // Showing them greyed with a reason beats hiding them and having
+    // somebody hunt for a name that should be there.
+    const c = am.candidatesFrom(roster).find((x) => x.id === 'e4');
+    t.assert(c, 'the person with no email should still be listed');
+    t.assert(!c.selectable, 'they should not be selectable');
+    t.assert(/email/i.test(c.reason), 'the reason should say why');
+  });
+
+  t.test('an unselectable person is dropped even if their id was saved', () => {
+    t.equal(am.resolveAccountManagers(['e4'], roster).length, 0);
+  });
+
+  t.test('people who have left the company are not offered', () => {
+    t.assert(!am.candidatesFrom(roster).some((c) => c.id === 'e5'),
+      'a terminated employee should not appear');
+  });
+
+  t.test('first run offers Sales rather than an empty blocking picker', () => {
+    // An empty list blocks every purchase order until somebody visits
+    // Settings, which is a bad first five minutes.
+    const d = am.defaultSelection(roster);
+    t.assert(d.includes('e1') && d.includes('e2'), 'Sales should be offered by default');
+    t.assert(!d.includes('e3'), 'other departments should not be, though they can be added');
+    t.assert(!d.includes('e4'), 'somebody with no email cannot be a default');
+  });
+
+  t.test('an id that no longer resolves is dropped, not returned half-formed', () => {
+    t.equal(am.resolveAccountManagers(['ghost'], roster).length, 0);
   });
 
   t.test('a nonsense date is rejected rather than stored as garbage', () => {
