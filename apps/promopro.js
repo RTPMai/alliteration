@@ -685,7 +685,18 @@ export default {
           ? '<div style="font-size:13px">' + S.accountManagers.map((a) => esc(a.name)).join(', ') + '</div>'
           : '<div style="font-size:13px;color:var(--muted)">None set. An admin can choose them here.</div>';
       } else if (!candidates.length) {
-        amBlock = '<div class="pp-notice">No active employees found in CrewCore. Add people there and they will appear here.</div>';
+        // Several very different causes land here, so say which one it is.
+        const rc = S.rosterCounts || {};
+        let why;
+        if (rc.adminView === false) {
+          why = 'Your account is not being treated as an administrator, so the roster was not sent. ' +
+            'Check your role and superuser flag in the shell Settings.';
+        } else if (!rc.total) {
+          why = 'CrewCore has no employee records at all.';
+        } else {
+          why = 'CrewCore has ' + esc(rc.total) + ' employee records but none are active.';
+        }
+        amBlock = '<div class="pp-notice"><strong>No account managers to choose from.</strong> ' + why + '</div>';
       } else if (!candidates.some((c) => c.selectable)) {
         // The likely real-world case: the roster exists but nobody has an
         // email on their record yet. Say that plainly instead of showing a
