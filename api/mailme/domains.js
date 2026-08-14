@@ -18,7 +18,7 @@ import { requireAuth } from "../../lib/session.js";
 import { requireMailMe } from "../../lib/mailme/access.js";
 import { domainStatus, resendConfigured } from "../../lib/mailme/resend-client.js";
 import { sendingIdentities } from "../../lib/mailme/schema.js";
-import { getSettings } from "../../lib/mailme/store.js";
+import { getSettings, getWebhookHeartbeat } from "../../lib/mailme/store.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -36,10 +36,15 @@ export default async function handler(req, res) {
   try {
     const settings = await getSettings();
     const identities = sendingIdentities(settings);
+    // Piggybacks on this route because Settings already calls it, and the
+    // two answer the same question: is sending actually wired up end to end.
+    const webhook = await getWebhookHeartbeat();
+    const webhookConfigured = !!process.env.MAILME_WEBHOOK_SECRET;
 
     if (!resendConfigured()) {
       return res.status(200).json({
         configured: false,
+        webhook, webhookConfigured,
         domains: identities.map((i) => ({ key: i.key, domain: i.domain, status: null })),
       });
     }
@@ -52,7 +57,7 @@ export default async function handler(req, res) {
       return { key: i.key, domain: i.domain, status: s ? s.status : null };
     }));
 
-    return res.status(200).json({ configured: true, domains });
+    return res.status(200).json({ configured: true, webhook, webhookConfigured, domains });
   } catch (e) {
     console.error("mailme domains route error:", e);
     return res.status(500).json({ error: e.message });
