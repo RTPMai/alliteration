@@ -228,6 +228,89 @@ export default {
   .cc-hb-ack-pending .cc-hb-ack-text strong{color:var(--accent-deep)}
   .cc-hb-ack-done .cc-hb-ack-text strong{color:var(--success-dk)}
   .cc-hb-ack-bottom{margin-top:8px;margin-bottom:0}
+
+  /* ---- Time Clock ---- */
+  .tc-weeknav{display:flex;align-items:center;gap:8px}
+  .tc-weeklabel{font-size:13px;font-weight:700;min-width:190px;text-align:center}
+  .tc-spacer{flex:1 1 auto}
+
+  .tc-now{
+    display:flex;flex-wrap:wrap;gap:8px;align-items:center;
+    background:var(--success-tint);border:1px solid var(--success);
+    border-radius:var(--radius-md);padding:11px 14px;margin-bottom:16px;
+  }
+  .tc-now .lbl{font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;color:var(--success-dk);margin-right:4px}
+  .tc-now .pill{
+    display:inline-flex;align-items:center;gap:6px;background:var(--card);
+    border-radius:var(--radius-pill);padding:4px 11px;font-size:12.5px;font-weight:600;
+  }
+  .tc-now .pill .t{color:var(--muted);font-weight:600}
+
+  .tc-alert{
+    background:var(--warn-tint);border:1px solid var(--warn);
+    border-radius:var(--radius-md);padding:11px 14px;margin-bottom:16px;font-size:12.5px;
+  }
+  .tc-alert strong{display:block;font-size:13px;margin-bottom:3px;color:var(--warn-dk)}
+  .tc-alert ul{margin:4px 0 0 18px;padding:0}
+  .tc-alert li{margin-bottom:2px}
+
+  .tc-grid{width:100%;border-collapse:collapse;font-size:13px;background:var(--card)}
+  .tc-grid th{
+    text-align:right;color:var(--muted);font-weight:600;padding:9px 10px;
+    border-bottom:1px solid var(--line);font-size:11px;text-transform:uppercase;letter-spacing:.03em;
+  }
+  .tc-grid th.who,.tc-grid td.who{text-align:left}
+  .tc-grid th .dnum{display:block;font-size:10px;font-weight:600;color:var(--muted);text-transform:none;letter-spacing:0}
+  .tc-grid td{padding:10px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums}
+  .tc-grid tbody tr{cursor:pointer}
+  .tc-grid tbody tr.emprow:hover{background:var(--line-soft)}
+  .tc-grid td.who{font-weight:600}
+  .tc-grid td.who .dept{display:block;font-size:11.5px;color:var(--muted);font-weight:500}
+  .tc-grid td.zero{color:var(--line)}
+  .tc-grid td.total{font-weight:800}
+  .tc-grid td.ot{color:var(--warn-dk);font-weight:700}
+  .tc-grid tr.today-col td{background:var(--accent-tint)}
+  .tc-grid tfoot td{font-weight:800;border-top:2px solid var(--line);border-bottom:none;padding-top:12px}
+  .tc-flagdot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--warn);margin-left:6px;vertical-align:middle}
+
+  .tc-detail{background:var(--bg)}
+  .tc-detail td{padding:0;text-align:left}
+  .tc-shifts{padding:10px 14px 14px}
+  .tc-shift{
+    display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:8px 0;border-bottom:1px solid var(--line-soft);font-size:12.5px;
+  }
+  .tc-shift:last-child{border-bottom:none}
+  .tc-shift .d{font-weight:700;min-width:104px}
+  .tc-shift .times{font-variant-numeric:tabular-nums}
+  .tc-shift .h{font-weight:700;min-width:56px;text-align:right;font-variant-numeric:tabular-nums}
+  .tc-shift .grow{flex:1 1 auto}
+  .tc-shift .note{color:var(--muted);font-style:italic}
+  .tc-miss{color:var(--danger);font-weight:700}
+
+  .tc-mine{display:grid;grid-template-columns:repeat(7,1fr);gap:8px;margin-bottom:20px}
+  .tc-day{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:10px 8px;text-align:center;
+  }
+  .tc-day.today{border-color:var(--accent);background:var(--accent-tint)}
+  .tc-day .dl{font-size:10.5px;font-weight:800;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .tc-day .dn{font-size:11px;color:var(--muted);margin-bottom:5px}
+  .tc-day .dh{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
+  .tc-day .dh.none{color:var(--line)}
+  @media (max-width:720px){.tc-mine{grid-template-columns:repeat(4,1fr)}}
+
+  .tc-kiosk{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:14px 16px;margin-bottom:18px;font-size:12.5px;color:var(--muted);
+  }
+  .tc-kiosk code{
+    display:inline-block;background:var(--line-soft);border-radius:var(--radius-sm);
+    padding:3px 8px;font-size:12.5px;color:var(--ink);font-weight:600;
+  }
+  .tc-pinstate{font-size:11.5px;font-weight:700;margin-top:5px}
+  .tc-pinstate.set{color:var(--success-dk)}
+  .tc-pinstate.unset{color:var(--warn-dk)}
   `,
 
   template: `
@@ -344,6 +427,28 @@ export default {
       } else {
         sub.textContent = 'Your profile.';
         body.innerHTML = this._renderProfileSelf();
+      }
+      return;
+    }
+
+    if (view === 'timeclock') {
+      title.textContent = 'Time Clock.';
+      sub.textContent = isAdmin ? 'Hours by employee and pay week.' : 'Your hours.';
+      if (!this._tcWeek) this._tcWeek = '';   // '' means "whatever week today is in"
+      await this._loadTimecards();
+      if (isAdmin) {
+        actions.innerHTML = `
+          <button class="cc-btn ghost" id="tcExport">Export CSV</button>
+          <button class="cc-btn" id="tcAdd">Add a shift</button>`;
+        const ex = $('#tcExport');
+        if (ex) ex.onclick = () => this._exportTimecards();
+        const add = $('#tcAdd');
+        if (add) add.onclick = () => this._openShiftForm(null);
+        body.innerHTML = this._renderTimeclockAdmin();
+        this._wireTimeclockAdmin();
+      } else {
+        body.innerHTML = this._renderTimeclockSelf();
+        this._wireTimeclockSelf();
       }
       return;
     }
@@ -488,7 +593,7 @@ export default {
       }
       list.innerHTML = `
         <table class="cc-table">
-          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th><th>Stipend</th></tr></thead>
+          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th><th>Stipend</th><th>Kiosk</th></tr></thead>
           <tbody>
             ${rows.map((e) => `
               <tr class="clickable" data-id="${esc(e.id)}">
@@ -499,6 +604,8 @@ export default {
                 <td><span class="chip ${esc(e.status)}">${esc(e.status)}</span></td>
                 <td>${e.hourly_rate != null ? fmtMoney(e.hourly_rate) + '/hr' : '—'}</td>
                 <td>${fmtMoney(e.apparel_stipend)}/yr</td>
+                <td>${e.clock_enabled === false ? '<span class="chip on_leave">off</span>'
+                  : (e.has_clock_pin ? '<span class="chip">set</span>' : '<span class="chip terminated">no code</span>')}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -547,6 +654,23 @@ export default {
             <label>Apparel stipend / year</label>
             <input id="fStipend" type="number" step="0.01" value="${emp && emp.apparel_stipend != null ? emp.apparel_stipend : ''}" placeholder="defaults by department">
           </div>
+          <div>
+            <label>Time clock</label>
+            <select id="fClockOn">
+              <option value="true" ${!emp || emp.clock_enabled !== false ? 'selected' : ''}>Punches in and out</option>
+              <option value="false" ${emp && emp.clock_enabled === false ? 'selected' : ''}>Does not punch</option>
+            </select>
+          </div>
+          <div>
+            <label>Kiosk passcode</label>
+            <input id="fPin" type="text" inputmode="numeric" autocomplete="off" maxlength="6"
+                   placeholder="${isEdit && emp.has_clock_pin ? 'leave blank to keep current' : '4 to 6 digits'}">
+            <div class="tc-pinstate ${isEdit && emp.has_clock_pin ? 'set' : 'unset'}">
+              ${isEdit && emp.has_clock_pin
+                ? 'Passcode is set. Type a new one to replace it, or type CLEAR to remove it.'
+                : 'No passcode yet. Without one this person cannot use the clock kiosk.'}
+            </div>
+          </div>
           <div class="full"><label>Notes</label><textarea id="fNotes" rows="2">${esc(emp ? emp.notes : '')}</textarea></div>
         </div>
         <div class="cc-err" id="fErr" hidden></div>
@@ -591,6 +715,16 @@ export default {
         hourly_rate: $('#fRate').value === '' ? null : Number($('#fRate').value),
         notes: $('#fNotes').value
       };
+      payload.clock_enabled = $('#fClockOn').value === 'true';
+
+      // The passcode field is write-only and blank by default. Blank means
+      // "leave whatever is stored alone", which is why it is only added to
+      // the payload when something was actually typed. The literal word
+      // CLEAR is the explicit way to remove a code, so that clearing is
+      // never something an empty field does by accident.
+      const pinRaw = ($('#fPin').value || '').trim();
+      if (pinRaw) payload.clock_pin = /^clear$/i.test(pinRaw) ? '' : pinRaw;
+
       // Only send apparel_stipend if the admin actually typed something —
       // leaving it blank on a NEW employee lets the server apply the
       // department default (see lib/crewcore/store.js saveEmployee); on an
@@ -1051,6 +1185,54 @@ export default {
           <button class="cc-btn" id="sSave">Save</button>
         </div>
       </div>
+
+      <div class="cc-form" style="max-width:480px">
+        <h3>Time clock</h3>
+        <div class="cc-form-grid">
+          <div class="full">
+            <label>Kiosk</label>
+            <select id="sClockOn">
+              <option value="true" ${s.clock_enabled !== false ? 'selected' : ''}>On</option>
+              <option value="false" ${s.clock_enabled === false ? 'selected' : ''}>Off (nobody can punch)</option>
+            </select>
+          </div>
+          <div>
+            <label>Pay week starts</label>
+            <select id="sWeekStart">
+              ${['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday']
+                .map((d, i) => `<option value="${i}" ${Number(s.week_start_day || 0) === i ? 'selected' : ''}>${d}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label>Overtime after (hours)</label>
+            <input id="sOt" type="number" step="0.5" value="${s.overtime_after_hours != null ? s.overtime_after_hours : 40}">
+          </div>
+          <div>
+            <label>Round totals to</label>
+            <select id="sRound">
+              ${[[0, 'Exact, no rounding'], [5, '5 minutes'], [6, '6 minutes (tenth of an hour)'], [10, '10 minutes'], [15, '15 minutes']]
+                .map(([v, l]) => `<option value="${v}" ${Number(s.clock_round_minutes || 0) === v ? 'selected' : ''}>${l}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label>Kiosk link word (optional)</label>
+            <input id="sKioskToken" value="${esc(s.clock_kiosk_token || '')}" placeholder="blank = open link">
+          </div>
+        </div>
+        <div class="cc-err" id="sErr2" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn" id="sSaveClock">Save</button>
+        </div>
+      </div>
+      <p style="font-size:12.5px;color:var(--muted);max-width:480px">
+        The kiosk lives at <code>${esc(location.origin)}/clock</code>. Bookmark
+        it on the shop tablet. Rounding only shapes the totals that get
+        reported and exported, never the punch times themselves, so the
+        record of what someone actually clocked stays exact. Setting a link
+        word means the kiosk needs
+        <code>${esc(location.origin)}/clock?k=YOURWORD</code> and the name
+        list won't load without it.
+      </p>
       <p style="font-size:12.5px;color:var(--muted);max-width:480px">
         These figures set the default when a NEW employee is added — they
         don't retroactively change anyone already on the roster. Per the
@@ -1084,6 +1266,462 @@ export default {
         err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
       }
     };
+
+    const err2 = $('#sErr2');
+    $('#sSaveClock').onclick = async () => {
+      const payload = {
+        clock_enabled: $('#sClockOn').value === 'true',
+        week_start_day: Number($('#sWeekStart').value),
+        overtime_after_hours: Number($('#sOt').value),
+        clock_round_minutes: Number($('#sRound').value),
+        clock_kiosk_token: $('#sKioskToken').value
+      };
+      try {
+        const out = await this._ctx.api.request(ENDPOINTS.ccSettings, { method: 'PATCH', body: payload });
+        this._settings = out.settings;
+        err2.hidden = true;
+      } catch (e) {
+        err2.hidden = false;
+        err2.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
+      }
+    };
+  },
+
+  /* ---------------- Time Clock ----------------
+   *
+   * Rush build, Aug 2026, replacing the shop's broken clock in/out system.
+   *
+   * Nobody PUNCHES here. Punching happens on /clock, a public page outside
+   * the shell, because most of production has no Alliteration login. This
+   * view is the back side: read the week, spot a missed punch, fix it,
+   * export it for payroll.
+   *
+   * Same adaptive split as Roster. An admin gets the whole team and every
+   * write. A self-serve employee gets their own hours, read only — worth
+   * having, since "what did I actually work" was the question the broken
+   * system left nobody able to answer.
+   */
+
+  async _loadTimecards() {
+    const q = [];
+    if (this._tcWeek) q.push('week=' + encodeURIComponent(this._tcWeek));
+    if (this._tcDept) q.push('dept=' + encodeURIComponent(this._tcDept));
+    if (this._tcEmployee) q.push('employee_id=' + encodeURIComponent(this._tcEmployee));
+    if (this._tcInactive) q.push('include_inactive=1');
+    const url = ENDPOINTS.ccTimecards + (q.length ? '?' + q.join('&') : '');
+    this._tc = await this._ctx.api.get(url);
+    // Pin the resolved week so the Prev/Next buttons have something concrete
+    // to step from, instead of re-resolving "today" on every click.
+    if (this._tc && this._tc.week_key) this._tcWeek = this._tc.week_key;
+  },
+
+  _tcShiftWeek(n) {
+    const base = this._tcWeek || (this._tc && this._tc.week_key);
+    if (!base) return;
+    const [y, m, d] = base.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    dt.setUTCDate(dt.getUTCDate() + (7 * n));
+    const p = (x) => String(x).padStart(2, '0');
+    this._tcWeek = `${dt.getUTCFullYear()}-${p(dt.getUTCMonth() + 1)}-${p(dt.getUTCDate())}`;
+    this.showView('timeclock');
+  },
+
+  _tcWeekLabel() {
+    const dates = (this._tc && this._tc.dates) || [];
+    if (!dates.length) return '';
+    return fmtDate(dates[0]) + ' to ' + fmtDate(dates[6]);
+  },
+
+  _tcDayHead(dateStr) {
+    const DL = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const [y, m, d] = dateStr.split('-').map(Number);
+    const dow = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    return { label: DL[dow], num: m + '/' + d };
+  },
+
+  _tcHrs(n) {
+    const v = Number(n) || 0;
+    return v ? v.toFixed(2) : '';
+  },
+
+  _renderTcToolbar() {
+    const emps = this._employees || [];
+    return `
+      <div class="cc-toolbar">
+        <div class="tc-weeknav">
+          <button class="cc-btn ghost sm" id="tcPrev">&lsaquo; Prev</button>
+          <span class="tc-weeklabel" id="tcLabel">${esc(this._tcWeekLabel())}</span>
+          <button class="cc-btn ghost sm" id="tcNext">Next &rsaquo;</button>
+          <button class="cc-btn ghost sm" id="tcToday">This week</button>
+        </div>
+        <span class="tc-spacer"></span>
+        <select class="cc-filt" id="tcDept">
+          <option value="">All departments</option>
+          ${DEPARTMENTS.map((d) => `<option value="${esc(d)}" ${this._tcDept === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}
+        </select>
+        <select class="cc-filt" id="tcEmp">
+          <option value="">Everyone</option>
+          ${emps.map((e) => `<option value="${esc(e.id)}" ${this._tcEmployee === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  },
+
+  _renderTimeclockAdmin() {
+    const tc = this._tc || {};
+    const rows = tc.rows || [];
+    const dates = tc.dates || [];
+    const totals = tc.totals || { hours: 0, overtime: 0, flags: 0 };
+
+    const nowIn = (tc.now_in || []).length
+      ? `<div class="tc-now">
+           <span class="lbl">On the clock now</span>
+           ${tc.now_in.map((n) => `<span class="pill">${esc(n.name)} <span class="t">since ${esc(n.since_local)}</span></span>`).join('')}
+         </div>`
+      : '';
+
+    // Every flag on one banner rather than buried in a row someone has to
+    // think to expand. A missed clock-out is the whole reason this screen
+    // gets looked at before payroll runs.
+    const allFlags = [];
+    rows.forEach((r) => {
+      (r.summary.flags || []).forEach((f) => allFlags.push({ name: r.employee.name, ...f }));
+    });
+    const flagBanner = allFlags.length
+      ? `<div class="tc-alert">
+           <strong>${allFlags.length} shift${allFlags.length === 1 ? '' : 's'} need${allFlags.length === 1 ? 's' : ''} a look before payroll</strong>
+           <ul>${allFlags.map((f) => `<li>${esc(f.name)}, ${fmtDate(f.date)}: ${esc(f.message)}</li>`).join('')}</ul>
+         </div>`
+      : '';
+
+    const kiosk = `
+      <div class="tc-kiosk">
+        Kiosk page for the shop floor: <code>${esc(location.origin)}/clock</code>
+        &nbsp;Employees pick a name and enter their passcode. No login.
+        Set passcodes per person in Roster.
+      </div>`;
+
+    if (!rows.length) {
+      return this._renderTcToolbar() + kiosk +
+        `<div class="cc-empty">Nobody matches those filters.</div>`;
+    }
+
+    const cards = `
+      <div class="cc-grid">
+        <div class="cc-card"><h3>Hours this week</h3><div class="big">${(totals.hours || 0).toFixed(2)}</div>
+          <div class="note">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div>
+        <div class="cc-card"><h3>Overtime</h3><div class="big">${(totals.overtime || 0).toFixed(2)}</div>
+          <div class="note">past ${tc.overtime_after || 40} hours</div></div>
+        <div class="cc-card"><h3>On the clock</h3><div class="big">${(tc.now_in || []).length}</div>
+          <div class="note">right now</div></div>
+        ${totals.cost != null ? `<div class="cc-card"><h3>Estimated labor</h3><div class="big">${fmtMoney(totals.cost)}</div>
+          <div class="note">base rate only, no OT multiplier</div></div>` : ''}
+      </div>`;
+
+    return this._renderTcToolbar() + nowIn + flagBanner + cards + kiosk + `
+      <div class="cc-list">
+        <table class="tc-grid">
+          <thead>
+            <tr>
+              <th class="who">Employee</th>
+              ${dates.map((d) => {
+                const h = this._tcDayHead(d);
+                return `<th>${h.label}<span class="dnum">${h.num}</span></th>`;
+              }).join('')}
+              <th>Total</th>
+              <th>OT</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((r) => `
+              <tr class="emprow" data-id="${esc(r.employee.id)}">
+                <td class="who">${esc(r.employee.name)}
+                  <span class="dept">${esc(r.employee.department || '')}</span></td>
+                ${dates.map((d) => {
+                  const v = r.summary.days[d] || 0;
+                  return `<td class="${v ? '' : 'zero'}">${v ? v.toFixed(2) : '·'}</td>`;
+                }).join('')}
+                <td class="total">${(r.summary.total_hours || 0).toFixed(2)}${(r.summary.flags || []).length ? '<span class="tc-flagdot"></span>' : ''}</td>
+                <td class="${r.summary.overtime_hours ? 'ot' : 'zero'}">${r.summary.overtime_hours ? r.summary.overtime_hours.toFixed(2) : '·'}</td>
+              </tr>
+              <tr class="tc-detail" data-detail="${esc(r.employee.id)}" hidden>
+                <td colspan="${dates.length + 3}">${this._renderShiftList(r)}</td>
+              </tr>
+            `).join('')}
+          </tbody>
+          <tfoot>
+            <tr>
+              <td class="who">Total</td>
+              ${dates.map((d) => {
+                const v = rows.reduce((s, r) => s + (r.summary.days[d] || 0), 0);
+                return `<td>${v ? v.toFixed(2) : '·'}</td>`;
+              }).join('')}
+              <td>${(totals.hours || 0).toFixed(2)}</td>
+              <td>${(totals.overtime || 0).toFixed(2)}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    `;
+  },
+
+  _renderShiftList(row) {
+    const shifts = row.shifts || [];
+    if (!shifts.length) {
+      return `<div class="tc-shifts"><div class="tc-shift"><span class="note">No shifts recorded this week.</span>
+        <span class="grow"></span>
+        <button class="cc-btn ghost sm" data-addfor="${esc(row.employee.id)}">Add a shift</button></div></div>`;
+    }
+    return `
+      <div class="tc-shifts">
+        ${shifts.map((s) => `
+          <div class="tc-shift">
+            <span class="d">${fmtDate(s.date)}</span>
+            <span class="times">${esc(s.in_time)} to ${s.out_time ? esc(s.out_time) : '<span class="tc-miss">no clock-out</span>'}</span>
+            ${s.source === 'manual' ? '<span class="chip">edited</span>' : ''}
+            ${s.note ? `<span class="note">${esc(s.note)}</span>` : ''}
+            <span class="grow"></span>
+            <span class="h">${s.hours != null ? s.hours.toFixed(2) : '—'}</span>
+            ${this._isAdmin ? `<button class="cc-btn ghost sm" data-edit="${esc(s.id)}" data-emp="${esc(row.employee.id)}" data-week="${esc(s.week_key)}">Fix</button>` : ''}
+          </div>
+        `).join('')}
+        ${this._isAdmin ? `<div class="tc-shift"><span class="grow"></span>
+          <button class="cc-btn ghost sm" data-addfor="${esc(row.employee.id)}">Add a shift</button></div>` : ''}
+      </div>
+    `;
+  },
+
+  _wireTimeclockAdmin() {
+    const body = this._root.querySelector('#ccBody');
+    const $ = (sel) => body.querySelector(sel);
+
+    const prev = $('#tcPrev'); if (prev) prev.onclick = () => this._tcShiftWeek(-1);
+    const next = $('#tcNext'); if (next) next.onclick = () => this._tcShiftWeek(1);
+    const today = $('#tcToday'); if (today) today.onclick = () => { this._tcWeek = ''; this.showView('timeclock'); };
+
+    const dept = $('#tcDept');
+    if (dept) dept.onchange = () => { this._tcDept = dept.value; this.showView('timeclock'); };
+    const emp = $('#tcEmp');
+    if (emp) emp.onchange = () => { this._tcEmployee = emp.value; this.showView('timeclock'); };
+
+    body.querySelectorAll('tr.emprow').forEach((tr) => {
+      tr.onclick = () => {
+        const det = body.querySelector(`tr[data-detail="${tr.dataset.id}"]`);
+        if (det) det.hidden = !det.hidden;
+      };
+    });
+
+    body.querySelectorAll('[data-addfor]').forEach((btn) => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        this._openShiftForm(null, btn.dataset.addfor);
+      };
+    });
+
+    body.querySelectorAll('[data-edit]').forEach((btn) => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
+        const row = (this._tc.rows || []).find((r) => r.employee.id === btn.dataset.emp);
+        const shift = row && row.shifts.find((s) => s.id === btn.dataset.edit);
+        if (shift) this._openShiftForm({ ...shift, employee_id: btn.dataset.emp });
+      };
+    });
+  },
+
+  /**
+   * Add or fix one shift. Times are entered as the wall clock the person
+   * actually worked, not a timestamp — the server converts, so a correction
+   * typed on a daylight saving changeover day still lands on the right hour.
+   */
+  _openShiftForm(shift, presetEmployeeId) {
+    const body = this._root.querySelector('#ccBody');
+    const isEdit = !!shift;
+    const emps = this._employees || [];
+    const empId = shift ? shift.employee_id : (presetEmployeeId || '');
+
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="cc-form">
+        <h3>${isEdit ? 'Fix a shift' : 'Add a shift'}</h3>
+        <div class="cc-form-grid">
+          <div><label>Employee</label>
+            <select id="tsEmp" ${isEdit ? 'disabled' : ''}>
+              <option value="">Pick someone</option>
+              ${emps.map((e) => `<option value="${esc(e.id)}" ${empId === e.id ? 'selected' : ''}>${esc(e.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div><label>Date</label><input id="tsDate" type="date" value="${esc(shift ? shift.date : '')}"></div>
+          <div><label>Clocked in</label><input id="tsIn" type="time" value="${esc(shift ? shift.in_time : '')}"></div>
+          <div><label>Clocked out</label><input id="tsOut" type="time" value="${esc(shift && shift.out_time ? shift.out_time : '')}"></div>
+          <div class="full"><label>Note (why this was entered by hand)</label>
+            <input id="tsNote" value="${esc(shift ? shift.note : '')}" placeholder="forgot to punch out, tablet was down, etc"></div>
+        </div>
+        <div class="cc-err" id="tsErr" hidden></div>
+        <div class="cc-form-actions">
+          ${isEdit ? '<button class="cc-btn ghost" id="tsDelete">Delete</button>' : ''}
+          <button class="cc-btn ghost" id="tsCancel">Cancel</button>
+          <button class="cc-btn" id="tsSave">Save</button>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:10px">
+          Leaving the clock-out time blank records an open shift, the same as
+          somebody standing at the tablet right now. An out time earlier than
+          the in time is read as crossing midnight.
+        </p>
+      </div>
+    `;
+    body.prepend(wrap);
+    const $ = (sel) => wrap.querySelector(sel);
+    const err = $('#tsErr');
+    const fail = (m) => { err.hidden = false; err.textContent = m; };
+
+    $('#tsCancel').onclick = () => wrap.remove();
+
+    if (isEdit) {
+      $('#tsDelete').onclick = async () => {
+        if (!confirm('Delete this shift? This cannot be undone.')) return;
+        try {
+          await this._ctx.api.request(
+            ENDPOINTS.ccTimecards + '?employee_id=' + encodeURIComponent(shift.employee_id) +
+            '&week=' + encodeURIComponent(shift.week_key) + '&id=' + encodeURIComponent(shift.id),
+            { method: 'DELETE' }
+          );
+          wrap.remove();
+          this.showView('timeclock');
+        } catch (e) {
+          fail((e.body && e.body.error) || e.message || 'Could not delete.');
+        }
+      };
+    }
+
+    $('#tsSave').onclick = async () => {
+      const payload = {
+        employee_id: isEdit ? shift.employee_id : $('#tsEmp').value,
+        date: $('#tsDate').value,
+        in_time: $('#tsIn').value,
+        out_time: $('#tsOut').value,
+        note: $('#tsNote').value
+      };
+      if (!payload.employee_id) return fail('Pick an employee.');
+      if (!payload.date || !payload.in_time) return fail('Date and clock-in time are both required.');
+
+      try {
+        if (isEdit) {
+          await this._ctx.api.request(
+            ENDPOINTS.ccTimecards + '?employee_id=' + encodeURIComponent(shift.employee_id) +
+            '&week=' + encodeURIComponent(shift.week_key) + '&id=' + encodeURIComponent(shift.id),
+            { method: 'PATCH', body: payload }
+          );
+        } else {
+          await this._ctx.api.request(ENDPOINTS.ccTimecards, { method: 'POST', body: payload });
+        }
+        wrap.remove();
+        this.showView('timeclock');
+      } catch (e) {
+        fail((e.body && e.body.details && e.body.details.join(', ')) || (e.body && e.body.error) || e.message || 'Could not save.');
+      }
+    };
+  },
+
+  /**
+   * Payroll handoff. Built client side from the week already on screen, the
+   * same way TravelTrack and ShopStock export, so what lands in the
+   * spreadsheet is exactly the numbers being looked at and there is no
+   * second round trip that could disagree with them.
+   */
+  _exportTimecards() {
+    const tc = this._tc || {};
+    const rows = tc.rows || [];
+    const cell = (v) => {
+      const str = String(v == null ? '' : v);
+      return /[",\n]/.test(str) ? '"' + str.replace(/"/g, '""') + '"' : str;
+    };
+    const lines = [['Employee', 'Department', 'Date', 'Clock in', 'Clock out', 'Hours', 'Source', 'Note'].map(cell).join(',')];
+    rows.forEach((r) => {
+      r.shifts.forEach((sh) => {
+        lines.push([
+          r.employee.name, r.employee.department, sh.date, sh.in_time,
+          sh.out_time || 'MISSING CLOCK-OUT',
+          sh.hours == null ? '' : sh.hours, sh.source, sh.note
+        ].map(cell).join(','));
+      });
+      lines.push([r.employee.name, '', '', '', 'WEEK TOTAL', r.summary.total_hours, '', ''].map(cell).join(','));
+    });
+
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
+    a.download = 'timecards-' + (tc.week_key || 'week') + '.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  },
+
+  /* ---- Time Clock: self-serve ---- */
+
+  _renderTimeclockSelf() {
+    const tc = this._tc || {};
+    const row = (tc.rows || [])[0];
+
+    if (!row) {
+      return `
+        <div class="cc-locked">
+          <h2>No timecard yet</h2>
+          <p>${esc(tc.error_hint || "Nothing recorded for you this week.")}</p>
+        </div>
+      `;
+    }
+
+    const dates = tc.dates || [];
+    const todayStr = new Date().toISOString().slice(0, 10);
+
+    return `
+      ${this._renderTcSelfNav()}
+      <div class="cc-grid">
+        <div class="cc-card"><h3>Hours this week</h3><div class="big">${(row.summary.total_hours || 0).toFixed(2)}</div>
+          <div class="note">${esc(this._tcWeekLabel())}</div></div>
+        ${row.summary.overtime_hours ? `<div class="cc-card"><h3>Overtime</h3><div class="big">${row.summary.overtime_hours.toFixed(2)}</div>
+          <div class="note">past ${tc.overtime_after || 40} hours</div></div>` : ''}
+      </div>
+      <div class="tc-mine">
+        ${dates.map((d) => {
+          const h = this._tcDayHead(d);
+          const v = row.summary.days[d] || 0;
+          return `<div class="tc-day ${d === todayStr ? 'today' : ''}">
+            <div class="dl">${h.label}</div><div class="dn">${h.num}</div>
+            <div class="dh ${v ? '' : 'none'}">${v ? v.toFixed(2) : '·'}</div>
+          </div>`;
+        }).join('')}
+      </div>
+      <div class="cc-section">
+        <h2>Your shifts</h2>
+        <div class="cc-list">${this._renderShiftList(row)}</div>
+      </div>
+      <p style="font-size:12.5px;color:var(--muted)">
+        Something wrong here? Tell a manager. Timecards can only be corrected
+        by an admin, on purpose.
+      </p>
+    `;
+  },
+
+  _renderTcSelfNav() {
+    return `
+      <div class="cc-toolbar">
+        <div class="tc-weeknav">
+          <button class="cc-btn ghost sm" id="tcPrev">&lsaquo; Prev</button>
+          <span class="tc-weeklabel">${esc(this._tcWeekLabel())}</span>
+          <button class="cc-btn ghost sm" id="tcNext">Next &rsaquo;</button>
+          <button class="cc-btn ghost sm" id="tcToday">This week</button>
+        </div>
+      </div>
+    `;
+  },
+
+  _wireTimeclockSelf() {
+    const body = this._root.querySelector('#ccBody');
+    const prev = body.querySelector('#tcPrev'); if (prev) prev.onclick = () => this._tcShiftWeek(-1);
+    const next = body.querySelector('#tcNext'); if (next) next.onclick = () => this._tcShiftWeek(1);
+    const today = body.querySelector('#tcToday');
+    if (today) today.onclick = () => { this._tcWeek = ''; this.showView('timeclock'); };
   },
 
   unmount() {
