@@ -14,7 +14,9 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { getUser, getRole } from "../../lib/users.js";
-import { validateEmployee, stripAdminFields } from "../../lib/crewcore/schema.js";
+import { validateEmployee, stripAdminFields, stripSecrets } from "../../lib/crewcore/schema.js";
+import { validatePin } from "../../lib/crewcore/timeclock.js";
+import { hashPassword } from "../../lib/users.js";
 import {
   listEmployees, getEmployee, getEmployeeByUsername,
   saveEmployee, updateEmployee, deleteEmployee, seedFromContactList,
@@ -41,6 +43,35 @@ async function checkUsernameLink(username, ownEmployeeId) {
   if (claimedBy) {
     return "Shell username \"" + username + "\" is already linked to " + (claimedBy.name || claimedBy.id) + ".";
   }
+  return null;
+}
+
+/**
+ * Turns a plaintext kiosk passcode on the request into a stored hash, and
+ * only ever in that direction. Handled here rather than in validateEmployee
+ * so that hashing is on the one admin-authenticated path, and no route that
+ * happens to pass a body through the validator can write a passcode by
+ * accident.
+ *
+ * Three cases:
+ *   clock_pin absent      -> leave whatever is stored alone
+ *   clock_pin "" or null  -> clear it (that person can no longer punch)
+ *   clock_pin "4821"      -> validate the digits, hash, store
+ *
+ * Same scrypt hashing as a shell login password. A four digit code has a
+ * small keyspace no matter how it is hashed, which is why the real defence
+ * is the per-employee lockout in api/crewcore/clock.js, not the hash. The
+ * hash is here so a leaked database dump is not a list of everyone's codes.
+ */
+async function applyPinToRecord(body, record) {
+  if (body.clock_pin === undefined) return null;
+  if (body.clock_pin === "" || body.clock_pin === null) {
+    record.clock_pin_hash = null;
+    return null;
+  }
+  const check = validatePin(body.clock_pin);
+  if (!check.ok) return check.error;
+  record.clock_pin_hash = await hashPassword(check.pin);
   return null;
 }
 
@@ -85,9 +116,13 @@ export default async function handler(req, res) {
         if (id) {
           const emp = await getEmployee(id);
           if (!emp) return res.status(404).json({ error: "Employee not found" });
-          return res.status(200).json({ employee: emp });
+          return res.status(200).json({ employee: stripSecrets(emp) });
         }
-        const employees = await listEmployees();
+        // stripSecrets on the admin path too: the passcode hash is a
+        // credential, and an admin has no use for reading one. They set a
+        // new code instead. has_clock_pin comes back so the Roster can show
+        // who is still not set up on the kiosk.
+        const employees = (await listEmployees()).map(stripSecrets);
         return res.status(200).json({ employees });
       }
 
@@ -112,12 +147,15 @@ export default async function handler(req, res) {
       const usernameError = await checkUsernameLink(record.username, null);
       if (usernameError) return res.status(400).json({ error: usernameError });
 
+      const pinError = await applyPinToRecord(body, record);
+      if (pinError) return res.status(400).json({ error: pinError });
+
       record.created_by = sess.username;
       record.created_at = new Date().toISOString();
       record.updated_at = record.created_at;
 
       const employee = await saveEmployee(record);
-      return res.status(201).json({ ok: true, employee });
+      return res.status(201).json({ ok: true, employee: stripSecrets(employee) });
     }
 
     if (req.method === "PATCH") {
@@ -136,8 +174,11 @@ export default async function handler(req, res) {
         if (usernameError) return res.status(400).json({ error: usernameError });
       }
 
+      const pinError = await applyPinToRecord(body, record);
+      if (pinError) return res.status(400).json({ error: pinError });
+
       const employee = await updateEmployee(id, record);
-      return res.status(200).json({ ok: true, employee });
+      return res.status(200).json({ ok: true, employee: stripSecrets(employee) });
     }
 
     if (req.method === "DELETE") {
