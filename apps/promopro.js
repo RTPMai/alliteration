@@ -113,6 +113,8 @@ export default {
     .pp-lines td { padding: 4px; }
     .pp-lines input { width: 100%; padding: 6px 8px; font-size: 13px; font-family: inherit; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); }
     .pp-lines .w-item { width: 130px; }
+    .pp-lines .pp-imprintline { margin-top: 4px; font-size: 12px; color: var(--muted); }
+    .pp-lines td { vertical-align: top; }
     .pp-lines .w-qty { width: 80px; }
     .pp-lines .w-cost { width: 100px; }
 
@@ -406,11 +408,18 @@ export default {
     function lineRowHtml(l, i) {
       return '<tr data-line="' + i + '">' +
         '<td><input class="w-item" data-f="itemNumber" value="' + esc(l.itemNumber || '') + '" placeholder="e.g. 1234-BLK"></td>' +
-        '<td><input data-f="description" value="' + esc(l.description) + '" placeholder="Item"></td>' +
+        '<td>' +
+          '<input data-f="description" value="' + esc(l.description) + '" placeholder="Item">' +
+          // Imprint sits under the description because it describes the same
+          // line, and because a vendor reads "what is it" then "what goes on
+          // it" in that order. Pulled from Printavo, editable: the wording a
+          // supplier needs is not always the wording the quote used.
+          '<input class="pp-imprintline" data-f="imprint" value="' + esc(l.imprint || '') + '" placeholder="Imprint, pulled from Printavo">' +
+        '</td>' +
         '<td><input data-f="detail" value="' + esc(l.detail || '') + '" placeholder="Color / sizes"></td>' +
         '<td><input class="w-qty" data-f="qty" type="number" min="0" value="' + esc(l.qty) + '"></td>' +
         '<td><input class="w-cost" data-f="unitCost" type="number" step="0.01" min="0" value="' + esc(l.unitCost) + '"></td>' +
-        '<td class="num">' + money(lineTotal(l)) + '</td>' +
+        '<td class="num" data-linetotal>' + money(lineTotal(l)) + '</td>' +
         '<td><button class="pp-btn ghost" data-rmline="' + i + '">Remove</button></td>' +
       '</tr>';
     }
@@ -474,7 +483,7 @@ export default {
           (st.draftLines.length ? st.draftLines.map(lineRowHtml).join('') : '') +
         '</tbody></table>' +
         '<button class="pp-btn ghost" id="ppAddLine">Add a line</button>' +
-        '<div style="float:right;font-weight:700;padding-top:8px">Total ' + money(total) + '</div>' +
+        '<div id="ppDraftTotal" style="float:right;font-weight:700;padding-top:8px">Total ' + money(total) + '</div>' +
         '<div style="clear:both"></div>' +
 
         '<div class="pp-row" style="margin-top:14px">' +
@@ -825,7 +834,10 @@ export default {
 
         '<table class="pp-table"><thead><tr><th>Item #</th><th>Description</th><th>Detail</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
           (po.lines || []).map((l) =>
-            '<tr><td>' + esc(l.itemNumber || '') + '</td><td>' + esc(l.description) + '</td><td>' + esc(l.detail || '') + '</td>' +
+            '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
+            '<td>' + esc(l.description) +
+              (l.imprint ? '<div class="pp-hint">' + esc(l.imprint) + '</div>' : '') +
+            '</td><td>' + esc(l.detail || '') + '</td>' +
             '<td class="num">' + esc(l.qty) + '</td><td class="num">' + money(l.unitCost) + '</td>' +
             '<td class="num">' + money(lineTotal(l)) + '</td></tr>'
           ).join('') +
@@ -1164,7 +1176,7 @@ export default {
         st.imprintLocked = false;
         st.poSuffix = '';
         st.draftVendorId = '';
-        st.draftLines = [{ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 }];
+        st.draftLines = [{ itemNumber: '', description: '', imprint: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
         renderCcPreview();
         $('#ppFormWrap').hidden = false;
@@ -1193,7 +1205,7 @@ export default {
       if (t.id === 'ppUnlockImprints') { st.imprintLocked = false; renderForm(); return; }
 
       if (t.id === 'ppAddLine') {
-        st.draftLines.push({ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 });
+        st.draftLines.push({ itemNumber: '', description: '', imprint: '', detail: '', qty: 1, unitCost: 0 });
         renderForm();
         return;
       }
@@ -1367,10 +1379,18 @@ export default {
     root.addEventListener('input', (e) => {
       const cell = e.target.closest('#ppLinesBody tr[data-line] input');
       if (cell) {
-        const i = Number(e.target.closest('tr').dataset.line);
+        const row = e.target.closest('tr');
+        const i = Number(row.dataset.line);
         const f = e.target.dataset.f;
         if (st.draftLines[i]) {
           st.draftLines[i][f] = (f === 'qty' || f === 'unitCost') ? Number(e.target.value) : e.target.value;
+          // Update the two figures in place rather than re-rendering the
+          // table: a re-render would rebuild the input being typed into and
+          // lose the caret mid-number.
+          const cellTotal = row.querySelector('[data-linetotal]');
+          if (cellTotal) cellTotal.textContent = money(lineTotal(st.draftLines[i]));
+          const grand = $('#ppDraftTotal');
+          if (grand) grand.textContent = 'Total ' + money(st.draftLines.reduce((a, l) => a + lineTotal(l), 0));
         }
         return;
       }
