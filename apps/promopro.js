@@ -27,6 +27,7 @@ import {
   STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
   withSettingDefaults, ccListFor, parseEmailList
 } from '../lib/promopro/schema.js';
+import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -139,6 +140,21 @@ export default {
     .pp-amrow .dept { display: inline-block; font-size: 11px; color: var(--muted); }
     .pp-amrow .em { display: block; font-size: 11px; color: var(--muted); }
 
+    .pp-imprints { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 8px; }
+    .pp-imprint {
+      display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+      border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; background: var(--bg);
+    }
+    .pp-imprint.on { border-color: var(--accent); background: var(--accent-tint); }
+    .pp-imprint .nm { display: block; font-size: 13px; font-weight: 700; }
+    .pp-imprint .em { display: block; font-size: 11px; color: var(--muted); }
+
+    .pp-cattag {
+      display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+      border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; margin-right: 4px; font-size: 11px;
+    }
+    .pp-cattag.on { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-deep); font-weight: 700; }
+
     .pp-artgrid { display: flex; flex-direction: column; gap: 6px; }
     .pp-artrow {
       display: flex; align-items: center; gap: 10px;
@@ -221,6 +237,7 @@ export default {
       filter: 'open',
       draftLines: [],
       draftVendorId: '',
+      pickedGroup: null,     // the imprint this PO covers
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -520,6 +537,13 @@ export default {
       }
 
       st.picked = inv;
+      // Pick the promo imprint automatically when the shop has told us which
+      // categories count. When it has not, leave nothing selected and let the
+      // imprint list ask, rather than guessing and quietly pulling garments
+      // onto a promo PO.
+      const promo = promoGroups(inv, st.settings.promoCategories);
+      st.pickedGroup = (promo.matched && promo.groups.length === 1) ? promo.groups[0].id : null;
+      applyGroupSelection();
       // Which field set Printavo accepted. Worth surfacing once: it tells us
       // this account's real schema, so the fallback ladder can be trimmed to
       // the one that works instead of guessing on every lookup.
@@ -527,8 +551,51 @@ export default {
       // Costs come back zero on purpose. Printavo holds what we CHARGE, and
       // a PO holds what the vendor charges US, so copying the sell price in
       // would look filled-in and be wrong.
-      st.draftLines = inv.lines.map((l) => ({ ...l }));
       renderForm();
+    }
+
+    /** Copy the chosen imprint's lines into the draft. */
+    function applyGroupSelection() {
+      const inv = st.picked;
+      if (!inv) { st.draftLines = []; return; }
+      const g = (inv.groups || []).find((x) => x.id === st.pickedGroup);
+      st.draftLines = g ? g.lines.map((l) => ({ ...l })) : [];
+    }
+
+    function imprintPickerHtml() {
+      const inv = st.picked;
+      if (!inv || !inv.groups || !inv.groups.length) return '';
+      const promo = promoGroups(inv, st.settings.promoCategories);
+      const promoIds = new Set(promo.matched ? promo.groups.map((g) => g.id) : []);
+
+      return '<div class="pp-sect">Which imprint is this PO for?</div>' +
+        (!promo.matched
+          ? '<div class="pp-notice">Tick the categories that mean promo below and they will be remembered, so next time the right imprint is chosen for you.</div>'
+          : '') +
+        '<div class="pp-imprints">' + inv.groups.map((g) => {
+          const qty = g.lines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
+          return '<label class="pp-imprint' + (st.pickedGroup === g.id ? ' on' : '') + '">' +
+            '<input type="radio" name="ppImprint" data-imprint="' + esc(g.id) + '"' +
+              (st.pickedGroup === g.id ? ' checked' : '') + '>' +
+            '<span>' +
+              '<span class="nm">Imprint ' + esc(g.imprintNumber) + (promoIds.has(g.id) ? ' <span class="pp-pill">Promo</span>' : '') + '</span>' +
+              '<span class="em">' + esc(g.categories.join(', ') || 'No category') + '</span>' +
+              '<span class="em">' + g.lines.length + ' line' + (g.lines.length === 1 ? '' : 's') + ', ' + qty + ' pieces</span>' +
+            '</span>' +
+          '</label>';
+        }).join('') + '</div>' +
+
+        (inv.categories && inv.categories.length
+          ? '<div class="pp-hint" style="margin-top:8px">Categories on this job: ' +
+            inv.categories.map((c) => {
+              const on = (st.settings.promoCategories || []).some((p) => p.toLowerCase() === c.toLowerCase());
+              return '<label class="pp-cattag' + (on ? ' on' : '') + '">' +
+                '<input type="checkbox" data-promocat="' + esc(c) + '"' + (on ? ' checked' : '') + '> ' + esc(c) +
+              '</label>';
+            }).join(' ') +
+            (isAdmin ? '<button class="pp-btn ghost" id="ppSavePromoCats" style="margin-left:8px">Remember as promo</button>' : '') +
+            '</div>'
+          : '');
     }
 
     /* ---------------- artwork ---------------- */
@@ -977,7 +1044,7 @@ export default {
 
       if (t.id === 'ppCancel') { $('#ppFormWrap').hidden = true; return; }
       if (t.id === 'ppCloseDetail') { $('#ppDetailWrap').hidden = true; st.openPoId = null; return; }
-      if (t.id === 'ppClearPick') { st.picked = null; renderForm(); return; }
+      if (t.id === 'ppClearPick') { st.picked = null; st.pickedGroup = null; st.draftLines = []; renderForm(); return; }
 
       if (t.id === 'ppAddLine') {
         st.draftLines.push({ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 });
@@ -1000,6 +1067,25 @@ export default {
       if (t.dataset && t.dataset.po) {
         const po = st.pos.find((p) => p.id === t.dataset.po);
         if (po) { st.openPoId = po.id; renderDetail(po); this.showView('orders'); }
+        return;
+      }
+
+      if (t.id === 'ppSavePromoCats') {
+        const cats = [];
+        root.querySelectorAll('[data-promocat]').forEach((el) => {
+          if (el.checked) cats.push(el.dataset.promocat);
+        });
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppSettings, { method: 'PATCH', body: JSON.stringify({ promoCategories: cats }) });
+          if (res && res.error) throw new Error(res.error);
+          await loadAll();
+          renderForm();
+        } catch (e) {
+          // Inline, never a browser alert: an alert loses the half-filled
+          // form behind it and cannot be read alongside what caused it.
+          const err = $('#ppFormErr');
+          if (err) { err.textContent = e.message || 'Could not save the promo categories.'; err.hidden = false; }
+        }
         return;
       }
 
@@ -1097,6 +1183,11 @@ export default {
 
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
+      if (e.target.dataset && e.target.dataset.imprint) {
+        st.pickedGroup = e.target.dataset.imprint;
+        applyGroupSelection();
+        renderForm();
+      }
       if (e.target.id === 'ppArtFile') uploadArt(e.target.files);
     });
 
@@ -1151,6 +1242,12 @@ export default {
           invoiceNumber: st.picked.invoiceNumber,
           customerName: st.picked.customerName,
           dueDate: st.picked.dueDate,
+          // Drives the PO number's suffix: 26-66608-9.
+          imprintNumber: (() => {
+            const g = (st.picked.groups || []).find((x) => x.id === st.pickedGroup);
+            return g ? g.imprintNumber : null;
+          })(),
+          groupId: st.pickedGroup,
         } : null,
       };
       try {
