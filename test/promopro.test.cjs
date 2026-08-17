@@ -29,6 +29,9 @@ const vendorsRoute = read('api/promopro/vendors.js');
 const printavoRoute = read('api/promopro/printavo.js');
 const settingsRoute = readSoft('api/promopro/settings.js');
 const artRoute = readSoft('api/promopro/art.js');
+const sendRoute = readSoft('api/promopro/send.js');
+const printRoute = readSoft('api/promopro/print.js');
+const doc = readSoft('lib/promopro/document.js');
 const lookup = read('lib/promopro/printavo-lookup.js');
 const store = read('lib/promopro/store.js');
 const registry = read('js/registry.js');
@@ -117,7 +120,7 @@ t.test('an existing vendor can be edited, not just created', () => {
 /* ---- seam --------------------------------------------------------------- */
 
 t.test('the seam knows every promopro endpoint and marks them live', () => {
-  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings', 'ppArt'].forEach((k) => {
+  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings', 'ppArt', 'ppSend', 'ppPrint'].forEach((k) => {
     t.assert(apiJs.includes(k + ':'), 'js/api.js is missing ENDPOINTS.' + k);
   });
   t.assert(apiJs.includes("'/api/promopro/'"), 'the /api/promopro/ prefix is not marked live');
@@ -138,7 +141,7 @@ t.test('the promopro mocks are empty, never invented purchase orders', () => {
 /* ---- routes ------------------------------------------------------------- */
 
 t.test('every promopro route requires a session', () => {
-  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute], ['art', artRoute]].forEach(([name, src]) => {
+  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute], ['art', artRoute], ['send', sendRoute], ['print', printRoute]].forEach(([name, src]) => {
     t.assert(src.includes('requireAuth(req, res)'), 'api/promopro/' + name + '.js does not require auth');
     t.assert(src.includes('if (!sess) return'), 'api/promopro/' + name + '.js does not bail on a missing session');
   });
@@ -447,6 +450,51 @@ t.test('no function in the app is defined but never called', () => {
   });
   t.assert(orphans.length === 0,
     'defined but never called: ' + orphans.join(', '));
+});
+
+t.test('the printed and emailed copies come from one renderer', () => {
+  // A vendor who prints the page and a vendor who reads the email have to be
+  // looking at identical numbers. Two templates would disagree eventually
+  // and nobody would notice until a supplier invoiced against the wrong one.
+  t.assert(printRoute.includes('renderPrintPage'), 'print should use the shared document');
+  t.assert(sendRoute.includes('renderEmailHtml'), 'email should use the shared document');
+  t.assert(doc.includes('renderPoHtml'), 'both wrap one body renderer');
+});
+
+t.test('a send re-checks the order immediately before dispatch', () => {
+  // A PO can sit as a draft for a week. Nothing about it is trusted as still
+  // true at send time, and a send that half works is worse than one that
+  // refuses: the vendor may already be producing.
+  ['no longer exists', 'no order email', 'no lines', 'totals zero', 'no from-address']
+    .forEach((phrase) => {
+      t.assert(sendRoute.includes(phrase), 'the pre-send check is missing: ' + phrase);
+    });
+});
+
+t.test('a vendor hitting Reply reaches a person', () => {
+  // The QuickBooks version sent from quickbooks@notification.intuit.com.
+  t.assert(sendRoute.includes('reply_to'), 'no reply-to is set on the message');
+  t.assert(/replyTo/.test(read('lib/promopro/schema.js')), 'reply-to should be configurable');
+});
+
+t.test('a test send never reaches the vendor', () => {
+  const testBlock = sendRoute.slice(sendRoute.indexOf('const isTest'));
+  t.assert(/isTest[\s\S]{0,300}sender && sender\.email/.test(testBlock),
+    'a test should go to the account manager, not the vendor');
+  t.assert(/Touches no dates and no history/.test(sendRoute),
+    'a test must not advance the pipeline');
+});
+
+t.test('sending sets the submitted date', () => {
+  // Sending IS submitting. Asking someone to also tick a box means the
+  // pipeline can disagree with what actually left the building.
+  t.assert(/if \(!po\.submittedAt\) patch\.submittedAt/.test(sendRoute),
+    'the first send should record the submitted date');
+});
+
+t.test('the printable page needs a session', () => {
+  // A PO carries our costs. Not something to serve on a guessable URL.
+  t.assert(printRoute.includes('requireAuth'), 'print must not be public');
 });
 
 /* ---- architecture ------------------------------------------------------- */
