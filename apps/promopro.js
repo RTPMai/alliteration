@@ -435,6 +435,8 @@ export default {
             '</div>'
           : '') +
 
+        imprintPickerHtml() +
+
         '<div class="pp-row">' +
           // Searchable rather than a plain select: the vendor list grows past
           // the point where scrolling a dropdown is faster than typing three
@@ -542,7 +544,13 @@ export default {
       // imprint list ask, rather than guessing and quietly pulling garments
       // onto a promo PO.
       const promo = promoGroups(inv, st.settings.promoCategories);
-      st.pickedGroup = (promo.matched && promo.groups.length === 1) ? promo.groups[0].id : null;
+      // Preselect when there is only one sensible answer: either the promo
+      // categories point at exactly one imprint, or the job only has one
+      // imprint at all. Anything else is a real choice and stays unpicked,
+      // because guessing would quietly put garments on a promo PO.
+      st.pickedGroup =
+        (promo.matched && promo.groups.length === 1) ? promo.groups[0].id
+        : ((inv.groups || []).length === 1 ? inv.groups[0].id : null);
       applyGroupSelection();
       // Which field set Printavo accepted. Worth surfacing once: it tells us
       // this account's real schema, so the fallback ladder can be trimmed to
