@@ -28,6 +28,7 @@ const posRoute = read('api/promopro/pos.js');
 const vendorsRoute = read('api/promopro/vendors.js');
 const printavoRoute = read('api/promopro/printavo.js');
 const settingsRoute = readSoft('api/promopro/settings.js');
+const artRoute = readSoft('api/promopro/art.js');
 const lookup = read('lib/promopro/printavo-lookup.js');
 const store = read('lib/promopro/store.js');
 const registry = read('js/registry.js');
@@ -116,7 +117,7 @@ t.test('an existing vendor can be edited, not just created', () => {
 /* ---- seam --------------------------------------------------------------- */
 
 t.test('the seam knows every promopro endpoint and marks them live', () => {
-  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings'].forEach((k) => {
+  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings', 'ppArt'].forEach((k) => {
     t.assert(apiJs.includes(k + ':'), 'js/api.js is missing ENDPOINTS.' + k);
   });
   t.assert(apiJs.includes("'/api/promopro/'"), 'the /api/promopro/ prefix is not marked live');
@@ -137,7 +138,7 @@ t.test('the promopro mocks are empty, never invented purchase orders', () => {
 /* ---- routes ------------------------------------------------------------- */
 
 t.test('every promopro route requires a session', () => {
-  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute]].forEach(([name, src]) => {
+  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute], ['art', artRoute]].forEach(([name, src]) => {
     t.assert(src.includes('requireAuth(req, res)'), 'api/promopro/' + name + '.js does not require auth');
     t.assert(src.includes('if (!sess) return'), 'api/promopro/' + name + '.js does not bail on a missing session');
   });
@@ -304,6 +305,37 @@ t.test('a roster with no emails says so, rather than showing silent grey rows', 
     'the all-unselectable case needs its own explanation');
 });
 
+t.test('art upload is size-capped before the file is decoded', () => {
+  // Checking after Buffer.from() would mean allocating the oversized file
+  // first, which is the thing the cap exists to avoid.
+  const capIdx = artRoute.indexOf('MAX_BYTES');
+  const bufIdx = artRoute.indexOf('Buffer.from');
+  t.assert(capIdx !== -1 && bufIdx !== -1 && capIdx < bufIdx,
+    'the size check must come before decoding');
+});
+
+t.test('art uploads get an unguessable URL', () => {
+  t.assert(artRoute.includes('addRandomSuffix: true'),
+    'a predictable blob path would make every PO art file enumerable');
+});
+
+t.test('removing art does not yank the file from a vendor mid-job', () => {
+  t.assert(/does not delete the blob/i.test(artRoute),
+    'the reasoning for keeping the blob should stay documented');
+});
+
+t.test('the UPS account number is not committed to source', () => {
+  // This repository is public. Anything that could be used to bill freight
+  // to P&M belongs in Settings, which lives in the database.
+  const sources = [read('lib/promopro/schema.js'), app, settingsRoute];
+  sources.forEach((src) => {
+    t.assert(!/\b\d{3}-\d{3}\b(?![^<]*placeholder)/.test(src.replace(/1100 South 5th St[^"']*/g, '')),
+      'a freight account number looks like it has been hardcoded');
+  });
+  t.assert(read('lib/promopro/schema.js').includes('DEFAULT_SHIP_TO'),
+    'the shop address is public information and can stay in source');
+});
+
 /* ---- architecture ------------------------------------------------------- */
 
 t.test('lib/promopro never imports from api/', () => {
@@ -464,6 +496,57 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     // the customer do not, which is why the buffer is per PO.
     t.equal(s.orderByDate({ neededBy: '2026-09-30' }, vendor), '2026-09-20');
     t.equal(s.orderByDate({ neededBy: '2026-09-30', decorateBufferDays: 5 }, vendor), '2026-09-15');
+  });
+
+  /* -- item number, shipping -- */
+
+  t.test('a line can carry the vendor item number', () => {
+    const r = s.validateNew({
+      vendorId: 'v1', accountManager: 'alexis',
+      lines: [{ itemNumber: '1234-BLK', description: 'Mug', qty: 10, unitCost: 2 }],
+    }, ['v1'], ['alexis']);
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.record.lines[0].itemNumber, '1234-BLK');
+  });
+
+  t.test('an item number is optional, because manual orders often have none', () => {
+    const r = s.validateNew({
+      vendorId: 'v1', accountManager: 'alexis',
+      lines: [{ description: 'Custom banner', qty: 1, unitCost: 40 }],
+    }, ['v1'], ['alexis']);
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.record.lines[0].itemNumber, '');
+  });
+
+  t.test('the shop address is the default ship-to', () => {
+    t.assert(/Polk City/.test(s.withSettingDefaults({}).defaultShipTo),
+      'a new install should already know where to ship');
+  });
+
+  t.test('shipping instructions default to blank, never to a real account number', () => {
+    // The repo is public. A freight account seeded in source would be
+    // committed the first time anyone deployed.
+    t.equal(s.withSettingDefaults({}).shippingInstructions, '');
+  });
+
+  t.test('a PO keeps its own copy of the shipping instructions', () => {
+    // A PO is a document that went to an outside party. Changing the shop
+    // default later must not rewrite what a vendor was told last month.
+    const r = s.validateNew({
+      vendorId: 'v1', accountManager: 'alexis',
+      shipTo: '1100 South 5th St, Polk City, IA 50226',
+      shippingInstructions: 'Ship via our UPS account',
+      lines: [{ description: 'Mug', qty: 1, unitCost: 2 }],
+    }, ['v1'], ['alexis']);
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.record.shippingInstructions, 'Ship via our UPS account');
+  });
+
+  t.test('a settings change can update both shipping fields', () => {
+    const r = s.validateSettings({ defaultShipTo: 'Somewhere else', shippingInstructions: 'Ground only' });
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.patch.defaultShipTo, 'Somewhere else');
+    t.equal(r.patch.shippingInstructions, 'Ground only');
   });
 
   /* -- money -- */
@@ -703,6 +786,28 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.equal(inv.lines[0].unitCost, 0);
     t.equal(inv.lines[0].qty, 50);
     t.equal(inv.lines[0].description, 'Tee');
+  });
+
+  t.test('autofill brings the style number across as the item number', () => {
+    const inv = pl.normalizeInvoice({
+      id: '1', visualId: 66601, contact: {},
+      lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
+        { id: 'l1', description: 'Gildan Tee', quantity: 50, styleNumber: 'G500' },
+      ] } }] },
+    });
+    t.equal(inv.lines[0].itemNumber, 'G500');
+  });
+
+  t.test('the item number never just repeats the description', () => {
+    // When Printavo has no style field, "style" falls through to the same
+    // text as the description. Two identical columns on a PO is noise.
+    const inv = pl.normalizeInvoice({
+      id: '1', visualId: 1, contact: {},
+      lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
+        { id: 'l1', description: 'G500', quantity: 5, style: 'G500' },
+      ] } }] },
+    });
+    t.equal(inv.lines[0].itemNumber, '');
   });
 
   t.test('autofill survives an invoice with no line items', () => {
