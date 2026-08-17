@@ -1,3 +1,6 @@
+// PUT IN: api/promopro/printavo.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 // api/promopro/printavo.js — search Printavo and pull one job's line items,
 // so a PO can be filled in from the quote instead of retyped.
 //
@@ -39,9 +42,19 @@ export default async function handler(req, res) {
   try {
     const id = req.query && req.query.id;
     if (id) {
-      const invoice = await getInvoice(String(id));
-      if (!invoice) return res.status(404).json({ configured: true, error: "Invoice not found" });
-      return res.status(200).json({ configured: true, invoice });
+      const { invoice, via, tried } = await getInvoice(String(id));
+      if (!invoice) {
+        // 200, not 404. The front end has to be able to TELL the user what
+        // went wrong, and `tried` carries the actual Printavo messages. A
+        // bare 404 here is what made clicking a search result do nothing.
+        return res.status(200).json({
+          configured: true,
+          invoice: null,
+          error: (tried[tried.length - 1] && tried[tried.length - 1].error) || "Printavo returned nothing for that order",
+          tried,
+        });
+      }
+      return res.status(200).json({ configured: true, invoice, via });
     }
 
     const q = (req.query && req.query.q) || "";
