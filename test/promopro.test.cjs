@@ -866,14 +866,33 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
       'the silent return is back');
   });
 
-  t.test('autofill brings the style number across as the item number', () => {
+  t.test('autofill reads the field names this account actually has', () => {
+    // Probed Aug 2026 against pmapparel's Printavo. Two surprises worth
+    // locking in: there is no `quantity` field, the quantity is `items`; and
+    // the item number is `itemNumber`, not `styleNumber`. Guessing
+    // `styleNumber` made GraphQL reject the whole query, which is why
+    // clicking a search result did nothing.
     const inv = pl.normalizeInvoice({
-      id: '1', visualId: 66601, contact: {},
-      lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
-        { id: 'l1', description: 'Gildan Tee', quantity: 50, styleNumber: 'G500' },
+      id: '1', visualId: 66608, contact: {},
+      lineItemGroups: { nodes: [{ id: 'g1', position: 9, lineItems: { nodes: [
+        { id: 'l1', description: 'Koozie', itemNumber: 'KZ-100', items: 250, color: 'Red',
+          category: { id: 'c1', name: 'Promotional Products' } },
       ] } }] },
     });
-    t.equal(inv.lines[0].itemNumber, 'G500');
+    t.equal(inv.lines[0].itemNumber, 'KZ-100');
+    t.equal(inv.lines[0].qty, 250);
+    t.equal(inv.lines[0].category, 'Promotional Products');
+  });
+
+  t.test('the query never asks for a field this account does not have', () => {
+    const src = read('lib/promopro/printavo-lookup.js');
+    const sets = src.slice(src.indexOf('const LINE_FIELD_SETS'), src.indexOf('function invoiceQuery'));
+    ['styleNumber', 'sku', 'productNumber', 'quantity'].forEach((f) => {
+      t.assert(!new RegExp('\\b' + f + '\\b').test(sets),
+        'the line-item query still asks for "' + f + '", which this account does not have');
+    });
+    t.assert(/\bitemNumber\b/.test(sets) && /\bitems\b/.test(sets),
+      'the query should use the confirmed itemNumber and items fields');
   });
 
   t.test('the item number never just repeats the description', () => {
