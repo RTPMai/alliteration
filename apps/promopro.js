@@ -866,6 +866,19 @@ export default {
             '</div>'
           : '') +
 
+        '<div class="pp-sect">Send this order</div>' +
+        (po.lastSentAt
+          ? '<div class="pp-hint" style="margin-bottom:8px">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
+            ' to ' + esc(po.sentTo || '') +
+            (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') + '</div>'
+          : '<div class="pp-hint" style="margin-bottom:8px">Not sent yet.</div>') +
+        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="pp-btn ghost" id="ppPrint">Print or save as PDF</button>' +
+          (canEdit ? '<button class="pp-btn ghost" id="ppSendTest">Send a test to me</button>' : '') +
+          (canEdit ? '<button class="pp-btn" id="ppSend">' + (po.lastSentAt ? 'Send again' : 'Send to vendor') + '</button>' : '') +
+        '</div>' +
+        '<div id="ppSendMsg" class="pp-hint" style="margin-top:6px"></div>' +
+
         (canEdit ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
         '<div class="pp-err" id="ppDetailErr" hidden></div>' +
       '</div>';
@@ -1071,6 +1084,20 @@ export default {
             '<div class="pp-hint">Everyone here is copied on every PO, on top of the account manager and the vendor\u2019s own second contact.</div>' +
           '</div>' +
 
+          '<div class="pp-sect">Sending</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Purchase orders come from</label>' +
+              '<input id="ppFromAddress" value="' + esc(S.fromAddress || '') + '" placeholder="po@pmapparel.com"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">Must be on a domain verified in Resend.</div>' +
+            '</div>' +
+            '<div class="pp-field"><label>Vendors reply to</label>' +
+              '<input id="ppReplyTo" value="' + esc(S.replyTo || '') + '" placeholder="Blank uses the account manager"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">A vendor hitting Reply must reach a person.</div>' +
+            '</div>' +
+            '<div class="pp-field"><label>Phone on the PO</label>' +
+              '<input id="ppBrandPhone" value="' + esc(S.brandPhone || '') + '"' + (isAdmin ? '' : ' disabled') + '></div>' +
+          '</div>' +
+
           '<div class="pp-sect">Shipping</div>' +
           '<div class="pp-row">' +
             '<div class="pp-field"><label>Default ship to</label>' +
@@ -1135,6 +1162,9 @@ export default {
         chaseAfterDays: Number($('#ppChase').value) || 3,
         defaultShipTo: $('#ppDefaultShipTo').value,
         shippingInstructions: $('#ppShipInstructions').value,
+        fromAddress: $('#ppFromAddress').value,
+        replyTo: $('#ppReplyTo').value,
+        brandPhone: $('#ppBrandPhone').value,
       };
       // Only send the list when the picker was actually on screen. A
       // non-admin view has no checkboxes, and posting an empty array would
@@ -1249,6 +1279,46 @@ export default {
 
       if (t.id === 'ppSave') { await saveNew(); return; }
       if (t.id === 'ppSaveDetail') { await saveDetail(); return; }
+
+      if (t.id === 'ppPrint') {
+        // A new tab, not a fetch: the browser's own print dialog is what
+        // turns this into a PDF.
+        window.open(ENDPOINTS.ppPrint + '?id=' + encodeURIComponent(st.openPoId), '_blank', 'noopener');
+        return;
+      }
+
+      if (t.id === 'ppSend' || t.id === 'ppSendTest') {
+        const isTest = t.id === 'ppSendTest';
+        const msg = $('#ppSendMsg');
+        // Sending to an outside party is not undoable, so it asks once.
+        if (!isTest && !window.confirm('Email this purchase order to the vendor?')) return;
+        if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
+        t.disabled = true;
+        try {
+          const res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
+          if (res && res.error) {
+            if (msg) msg.textContent = res.error;
+            t.disabled = false;
+            return;
+          }
+          if (isTest) {
+            if (msg) msg.textContent = 'Test sent to ' + (res.to || []).join(', ');
+            t.disabled = false;
+            return;
+          }
+          await loadAll();
+          renderAll();
+          const po = st.pos.find((p) => p.id === st.openPoId);
+          if (po) renderDetail(po);
+          const msg2 = $('#ppSendMsg');
+          if (msg2) msg2.textContent = 'Sent to ' + (res.to || []).join(', ') +
+            ((res.cc && res.cc.length) ? ', copied to ' + res.cc.join(', ') : '');
+        } catch (e) {
+          if (msg) msg.textContent = e.message || 'Could not send.';
+          t.disabled = false;
+        }
+        return;
+      }
 
       if (t.id === 'ppArtPick') { const el = $('#ppArtFile'); if (el) el.click(); return; }
 
