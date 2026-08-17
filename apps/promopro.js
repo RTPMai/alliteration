@@ -411,7 +411,11 @@ export default {
           ? '<div class="pp-notice">Filling from Printavo invoice <strong>' + esc(st.picked.invoiceNumber) + '</strong>' +
             (st.picked.customerName ? ' for ' + esc(st.picked.customerName) : '') +
             (st.picked.dueDate ? ', due ' + esc(st.picked.dueDate) : '') +
-            ' <button class="pp-btn ghost" id="ppClearPick">Clear</button></div>'
+            ' <button class="pp-btn ghost" id="ppClearPick">Clear</button>' +
+            (st.pickedVia && st.pickedVia !== 'full'
+              ? '<div class="pp-hint">Printavo gave us the "' + esc(st.pickedVia) + '" field set, so some detail columns are blank. Mention this and the fallback can be tuned to your account.</div>'
+              : '') +
+            '</div>'
           : '') +
 
         '<div class="pp-row">' +
@@ -491,10 +495,35 @@ export default {
     }
 
     async function pickInvoice(id) {
-      const res = await ctx.api.get(ENDPOINTS.ppPrintavo, { id });
+      const box = $('#ppSearchResults');
+      if (box) box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">Loading that order…</div>';
+
+      let res;
+      try {
+        res = await ctx.api.get(ENDPOINTS.ppPrintavo, { id });
+      } catch (e) {
+        if (box) box.innerHTML = '<div class="pp-notice">Could not load that order: ' + esc(e.message || 'request failed') + '. Fill the lines in by hand.</div>';
+        return;
+      }
+
       const inv = res && res.invoice;
-      if (!inv) return;
+      if (!inv) {
+        // Never fail silently here. A search result that does nothing when
+        // clicked is the worst possible outcome: nothing to read, nothing to
+        // report, and no way to tell a broken lookup from a slow one.
+        const why = (res && res.error) || 'Printavo returned nothing for that order';
+        if (box) {
+          box.innerHTML = '<div class="pp-notice"><strong>Could not load that order.</strong> ' + esc(why) +
+            '<br>You can still build the PO by hand: fill in the lines below.</div>';
+        }
+        return;
+      }
+
       st.picked = inv;
+      // Which field set Printavo accepted. Worth surfacing once: it tells us
+      // this account's real schema, so the fallback ladder can be trimmed to
+      // the one that works instead of guessing on every lookup.
+      st.pickedVia = (res && res.via) || null;
       // Costs come back zero on purpose. Printavo holds what we CHARGE, and
       // a PO holds what the vendor charges US, so copying the sell price in
       // would look filled-in and be wrong.
