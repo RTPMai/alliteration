@@ -406,6 +406,23 @@ t.test('one bad file does not abandon the rest of the batch', () => {
     'a failure should carry on to the next file rather than stopping the run');
 });
 
+t.test('line and order totals recompute as you type', () => {
+  // They were written into state and never redrawn, so a cost could be typed
+  // and both figures would sit at $0.00. Updated in place rather than by
+  // re-rendering the table, because re-rendering rebuilds the input being
+  // typed into and drops the caret mid-number.
+  t.assert(app.includes('data-linetotal'), 'the line total cell needs a hook to update');
+  t.assert(app.includes('ppDraftTotal'), 'the order total needs a hook to update');
+  const handler = app.slice(app.indexOf("closest('#ppLinesBody"));
+  t.assert(/cellTotal\.textContent/.test(handler.slice(0, 1200)), 'the line total is never redrawn');
+  t.assert(/grand\.textContent/.test(handler.slice(0, 1200)), 'the order total is never redrawn');
+});
+
+t.test('each line carries an imprint field under the description', () => {
+  t.assert(app.includes('data-f="imprint"'), 'no imprint input on the line');
+  t.assert(app.includes('pp-imprintline'), 'the imprint field should sit under the description');
+});
+
 t.test('no function in the app is defined but never called', () => {
   // Aug 2026: imprintPickerHtml() was written, wired to state, styled and
   // tested, and never actually called. A string replacement that was meant
@@ -1071,6 +1088,47 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     const r = s.validateSettings({ promoCategories: ['Promotional Products', 'promotional products', 'Drinkware'] });
     t.assert(r.ok, r.errors.join('; '));
     t.equal(r.patch.promoCategories.length, 2);
+  });
+
+  t.test('imprint text is fetched separately so a miss costs only the imprint', () => {
+    // One unknown field name fails an entire GraphQL query, and the Imprint
+    // type has not been probed on this account. Keeping it in its own
+    // request means a miss loses the imprint wording and nothing else: the
+    // lines, quantities and item numbers still come through.
+    const src = read('lib/promopro/printavo-lookup.js');
+    t.assert(src.includes('PromoProImprints'), 'imprints should have their own query');
+    t.assert(src.includes('IMPRINT_FIELD_SETS'), 'and their own fallback ladder');
+    t.assert(/No imprint text is a smaller loss/.test(src), 'the reasoning should stay documented');
+  });
+
+  t.test('imprint text reads the way Printavo shows it', async () => {
+    process.env.PRINTAVO_API_TOKEN = 'x';
+    process.env.PRINTAVO_EMAIL = 'x@y.com';
+    global.fetch = async (u, o) => {
+      const q = JSON.parse(o.body).query;
+      if (/PromoProImprints/.test(q)) {
+        // This account has no typeOfWork, so the ladder must step down.
+        if (/typeOfWork/.test(q)) {
+          return { ok: true, status: 200, headers: { get: () => null },
+            json: async () => ({ errors: [{ message: "Field 'typeOfWork' doesn't exist on type 'Imprint'" }] }) };
+        }
+        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ data: { invoice: {
+          id: '1', lineItemGroups: { nodes: [{ id: 'g9', imprints: { nodes: [
+            { id: 'i1', name: 'Laser Engraved', details: '023-185' },
+          ] } }] },
+        } } }) };
+      }
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ data: { invoice: {
+        id: '1', visualId: 66608, contact: { fullName: 'Madison Rollefson' },
+        lineItemGroups: { nodes: [{ id: 'g9', position: 9, lineItems: { nodes: [
+          { id: 'b', description: 'Tumbler', itemNumber: 'LTM7066', items: 1 },
+        ] } }] },
+      } } }) };
+    };
+    const r = await pl.getInvoice('f76a');
+    t.equal(r.invoice.groups[0].imprintText, 'Laser Engraved // 023-185');
+    t.equal(r.invoice.groups[0].lines[0].imprint, 'Laser Engraved // 023-185');
+    t.equal(r.imprintVia, 'named');
   });
 
   t.test('autofill reads the field names this account actually has', () => {
