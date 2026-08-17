@@ -28,7 +28,7 @@ import { isAdminSession } from "../../lib/promopro/access.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
-import { resolveAccountManagers, candidatesFrom, defaultSelection } from "../../lib/promopro/account-managers.js";
+import { resolveAccountManagers, candidatesFrom, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -73,9 +73,9 @@ export default async function handler(req, res) {
       // empty picker that blocks every purchase order until somebody visits
       // Settings. Not written to storage, so an admin who deliberately
       // clears the list gets an empty list, not Sales back again.
-      const ids = settings.accountManagerIds.length
-        ? settings.accountManagerIds
-        : defaultSelection(employees);
+      // Same helper the purchase-order route uses, so what this screen
+      // offers and what a submission accepts can never drift apart.
+      const ids = effectiveAccountManagerIds(settings, employees);
 
       settings.accountManagerIds = ids;
       settings.accountManagers = resolveAccountManagers(ids, employees);
