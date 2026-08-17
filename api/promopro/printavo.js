@@ -45,13 +45,21 @@ export default async function handler(req, res) {
       if (!(await isAdminSession(sess))) return res.status(403).json({ error: "Admin access required" });
       const types = await probeTypes();
       let invoice = null;
+      let query = null;
       let probeError = null;
       try {
-        invoice = await probeInvoice(String(req.query.id), types);
+        const r = await probeInvoice(String(req.query.id), types);
+        invoice = r.invoice;
+        query = r.query;
       } catch (e) {
         probeError = e.message;
       }
-      return res.status(200).json({ configured: true, probe: { types, invoice, probeError } });
+      // `types` is large and mostly noise once the invoice comes back, so it
+      // is only included when the data fetch failed and the field list is
+      // what would explain why.
+      const body = { configured: true, probe: { invoice, query, probeError } };
+      if (probeError || !invoice) body.probe.types = types;
+      return res.status(200).json(body);
     }
 
     const id = req.query && req.query.id;
