@@ -1,6 +1,3 @@
-// PUT IN: apps/promopro.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * PromoPro — purchase orders to vendors, and where each one stands.
  *
