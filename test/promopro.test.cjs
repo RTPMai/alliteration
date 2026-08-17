@@ -344,6 +344,24 @@ t.test('the UPS account number is not committed to source', () => {
     'the shop address is public information and can stay in source');
 });
 
+t.test('no function in the app is defined but never called', () => {
+  // Aug 2026: imprintPickerHtml() was written, wired to state, styled and
+  // tested, and never actually called. A string replacement that was meant
+  // to drop it into the form silently matched nothing, so the picker existed
+  // in the file and never rendered. Every other test passed, because they
+  // all checked that the function EXISTED.
+  //
+  // A helper that appears exactly once is a helper nobody uses.
+  const names = [...app.matchAll(/^\s*(?:async\s+)?function\s+(\w+)\s*\(/gm)].map((m) => m[1]);
+  t.assert(names.length > 5, 'expected to find several functions, found ' + names.length);
+  const orphans = names.filter((n) => {
+    const uses = app.split(new RegExp('\\b' + n + '\\b')).length - 1;
+    return uses < 2;
+  });
+  t.assert(orphans.length === 0,
+    'defined but never called: ' + orphans.join(', '));
+});
+
 /* ---- architecture ------------------------------------------------------- */
 
 t.test('lib/promopro never imports from api/', () => {
