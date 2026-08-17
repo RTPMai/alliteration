@@ -1,6 +1,3 @@
-// PUT IN: api/promopro/printavo.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 // api/promopro/printavo.js — search Printavo and pull one job's line items,
 // so a PO can be filled in from the quote instead of retyped.
 //
