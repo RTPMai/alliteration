@@ -20,6 +20,8 @@ import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
 import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings } from "../../lib/promopro/store.js";
+import { listEmployees } from "../../lib/crewcore/store.js";
+import { effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -37,6 +39,17 @@ export default async function handler(req, res) {
 
   const sess = requireAuth(req, res);
   if (!sess) return;
+
+  // A CrewCore outage must not block purchase orders. It only matters when
+  // nothing has been saved in Settings yet, which is the first-run case.
+  async function roster() {
+    try {
+      return await listEmployees();
+    } catch (e) {
+      console.error("promopro/pos could not read the CrewCore roster:", e);
+      return [];
+    }
+  }
 
   try {
     const [isAdmin, canEdit] = await Promise.all([isAdminSession(sess), canEditSession(sess)]);
@@ -56,8 +69,8 @@ export default async function handler(req, res) {
 
     if (req.method === "POST") {
       const body = parseBody(req);
-      const [vendors, settings] = await Promise.all([getVendors(), getSettings()]);
-      const amIds = withSettingDefaults(settings).accountManagers.map((a) => a.id);
+      const [vendors, settings, employees] = await Promise.all([getVendors(), getSettings(), roster()]);
+      const amIds = effectiveAccountManagerIds(settings, employees);
       const check = validateNew(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
@@ -105,8 +118,8 @@ export default async function handler(req, res) {
       const existing = await getPo(String(id));
       if (!existing) return res.status(404).json({ error: "Not found" });
 
-      const [vendors, settings] = await Promise.all([getVendors(), getSettings()]);
-      const amIds = withSettingDefaults(settings).accountManagers.map((a) => a.id);
+      const [vendors, settings, employees] = await Promise.all([getVendors(), getSettings(), roster()]);
+      const amIds = effectiveAccountManagerIds(settings, employees);
       const check = validatePatch(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
