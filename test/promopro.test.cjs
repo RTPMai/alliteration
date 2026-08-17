@@ -280,6 +280,16 @@ t.test('an empty picker names its cause instead of guessing', () => {
     'the not-an-admin case needs to be distinguishable from an empty roster');
 });
 
+t.test('no route decides for itself who may own a purchase order', () => {
+  // Two places answering the same question is what caused this, twice.
+  t.assert(posRoute.includes('effectiveAccountManagerIds'),
+    'the purchase-order route should use the shared definition');
+  t.assert(settingsRoute.includes('effectiveAccountManagerIds'),
+    'the settings route should use the same one');
+  t.assert(!/settings\)\.accountManagers\.map/.test(posRoute),
+    'the route must not read accountManagers, which is resolved and never stored');
+});
+
 t.test('every promopro route uses the shell-wide admin test', () => {
   // Checking the role NAME ("admin") excluded manager and every custom role,
   // and permsFor(undefined) on a session with no username silently returns a
@@ -856,6 +866,37 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.assert(d.includes('e1') && d.includes('e2'), 'Sales should be offered by default');
     t.assert(!d.includes('e3'), 'other departments should not be, though they can be added');
     t.assert(!d.includes('e4'), 'somebody with no email cannot be a default');
+  });
+
+  t.test('the screen and the route agree on who may own a PO', () => {
+    // The Aug 2026 bug: the purchase-order route read
+    // `settings.accountManagers`, which is never stored. It is resolved from
+    // the CrewCore roster on the way OUT of the settings route, so the
+    // stored blob only ever holds `accountManagerIds`. The allowed list was
+    // therefore always empty and every account manager was rejected,
+    // including the one the screen had just offered and Ryan had just
+    // ticked.
+    const stored = { accountManagerIds: ['e1', 'e3'] };
+    const offered = am.resolveAccountManagers(am.effectiveAccountManagerIds(stored, roster), roster).map((a) => a.id);
+    const accepted = am.effectiveAccountManagerIds(stored, roster);
+    t.equal(offered.join(','), 'e1,e3');
+    t.assert(offered.every((id) => accepted.includes(id)),
+      'an account manager the screen offers must be one the route accepts');
+  });
+
+  t.test('before anything is saved, the offered defaults are also accepted', () => {
+    // Otherwise the picker shows Sales on a fresh install and every
+    // submission is refused, which reads as a broken app.
+    const accepted = am.effectiveAccountManagerIds({}, roster);
+    t.assert(accepted.includes('e1') && accepted.includes('e2'),
+      'the first-run Sales default must be accepted, not just displayed');
+    t.equal(accepted.join(','), am.defaultSelection(roster).join(','));
+  });
+
+  t.test('a saved selection wins over the first-run default', () => {
+    // Ticking only Ryan, who is not in Sales, must not silently re-add Sales.
+    const accepted = am.effectiveAccountManagerIds({ accountManagerIds: ['e3'] }, roster);
+    t.equal(accepted.join(','), 'e3');
   });
 
   t.test('an id that no longer resolves is dropped, not returned half-formed', () => {
