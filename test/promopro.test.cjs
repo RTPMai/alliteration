@@ -370,6 +370,32 @@ t.test('a multi-imprint PO number is editable rather than invented', () => {
   t.assert(app.includes("join('+')"), 'a sensible default is fine, deciding silently is not');
 });
 
+t.test('artwork can be attached while creating, not only afterwards', () => {
+  // It used to live only on the detail screen, which you reach by clicking a
+  // PO that does not exist yet. "Create it, then go find it again to attach
+  // the art" is how art ends up never attached.
+  t.assert(app.includes('stagedArt'), 'the create form should hold files before the PO exists');
+  t.assert(app.includes('ppStagePick'), 'the create form needs its own attach control');
+  t.assert(app.includes('uploadArtTo'), 'both paths should share one upload routine');
+});
+
+t.test('a failed art upload never loses the purchase order', () => {
+  // The order is real and correct by then. Rolling it back because an upload
+  // stalled would be far worse than an order with art still to add.
+  const save = app.slice(app.indexOf('async function saveNew'));
+  t.assert(/The order was created, but/.test(save),
+    'a partial art failure should be reported, with the PO kept');
+  t.assert(!/rollback|deletePo/.test(save.slice(0, 2000)), 'the PO must not be undone');
+});
+
+t.test('one bad file does not abandon the rest of the batch', () => {
+  const fn = app.slice(app.indexOf('async function uploadArtTo'));
+  const body = fn.slice(0, fn.indexOf('\n    }'));
+  t.assert(/failed\.push/.test(body), 'a failure should be collected');
+  t.assert(!/\breturn;\s*\n\s*}\s*catch/.test(body),
+    'a failure should carry on to the next file rather than stopping the run');
+});
+
 t.test('no function in the app is defined but never called', () => {
   // Aug 2026: imprintPickerHtml() was written, wired to state, styled and
   // tested, and never actually called. A string replacement that was meant
