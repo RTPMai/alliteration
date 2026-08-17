@@ -13,7 +13,8 @@
 // the front end can show a setup notice instead of a broken screen.
 
 import { requireAuth } from "../../lib/session.js";
-import { isConfigured, searchInvoices, getInvoice } from "../../lib/promopro/printavo-lookup.js";
+import { isConfigured, searchInvoices, getInvoice, probeTypes, probeInvoice } from "../../lib/promopro/printavo-lookup.js";
+import { isAdminSession } from "../../lib/promopro/access.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -37,6 +38,22 @@ export default async function handler(req, res) {
   }
 
   try {
+    // ?id=<id>&probe=1 — read-only schema dump, admin only. Exists so the
+    // item-number field and the imprint numbering can be read off this
+    // account rather than guessed at. Guessing has cost real time already.
+    if (req.query && req.query.probe && req.query.id) {
+      if (!(await isAdminSession(sess))) return res.status(403).json({ error: "Admin access required" });
+      const types = await probeTypes();
+      let invoice = null;
+      let probeError = null;
+      try {
+        invoice = await probeInvoice(String(req.query.id), types);
+      } catch (e) {
+        probeError = e.message;
+      }
+      return res.status(200).json({ configured: true, probe: { types, invoice, probeError } });
+    }
+
     const id = req.query && req.query.id;
     if (id) {
       const { invoice, via, tried } = await getInvoice(String(id));
