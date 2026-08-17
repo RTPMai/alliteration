@@ -239,7 +239,9 @@ export const ENDPOINTS = {
   ppVendors:       '/api/promopro/vendors',
   ppPrintavo:      '/api/promopro/printavo',
   ppSettings:      '/api/promopro/settings',
-  ppArt:           '/api/promopro/art'
+  ppArt:           '/api/promopro/art',
+  ppSend:          '/api/promopro/send',
+  ppPrint:         '/api/promopro/print'
 };
 
 /* ------------------------------------------------------------------ *
@@ -488,6 +490,7 @@ const MOCK_DATA = {
   [ENDPOINTS.ppPrintavo]: () => ({ configured: false, results: [], invoice: null }),
   [ENDPOINTS.ppSettings]: () => ({ settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] } }),
   [ENDPOINTS.ppArt]: () => ({ art: [] }),
+  [ENDPOINTS.ppSend]: () => ({ error: 'Sending is not available in sample mode.' }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
