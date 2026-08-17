@@ -1,3 +1,6 @@
+// PUT IN: apps/promopro.js (REPLACES the current one)
+// (this banner line is for verification only, delete it after checking the path)
+
 /**
  * PromoPro — purchase orders to vendors, and where each one stands.
  *
@@ -155,6 +158,13 @@ export default {
     }
     .pp-cattag.on { border-color: var(--accent); background: var(--accent-tint); color: var(--accent-deep); font-weight: 700; }
 
+    .pp-locked {
+      display: flex; align-items: center; gap: 12px; justify-content: space-between;
+      border: 1px solid var(--accent); background: var(--accent-tint);
+      border-radius: var(--radius-sm); padding: 12px 14px; margin-bottom: 14px; font-size: 13px;
+    }
+    .pp-confirm { display: flex; align-items: flex-end; gap: 12px; margin: 14px 0 4px; }
+
     .pp-artgrid { display: flex; flex-direction: column; gap: 6px; }
     .pp-artrow {
       display: flex; align-items: center; gap: 10px;
@@ -237,7 +247,9 @@ export default {
       filter: 'open',
       draftLines: [],
       draftVendorId: '',
-      pickedGroup: null,     // the imprint this PO covers
+      pickedGroups: [],      // the imprints this PO covers
+      imprintLocked: false,  // selection confirmed, picker collapsed
+      poSuffix: '',          // what goes after the invoice number
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -418,13 +430,14 @@ export default {
         (st.vendors.length ? '' : '<div class="pp-notice">No vendors yet. Add one on the Vendors tab first, since a purchase order has to go to somebody.</div>') +
         (st.settings.accountManagers.length ? '' : '<div class="pp-notice">No account managers set up yet. Add them in Settings, since every purchase order needs an owner and they get copied on the vendor email.</div>') +
 
-        '<div class="pp-field" style="margin-bottom:12px">' +
-          '<label>Find the Printavo quote or invoice</label>' +
-          '<input id="ppSearch" placeholder="Invoice number or customer name. Leave blank for a manual web order.">' +
-          '<div id="ppSearchResults"></div>' +
-        '</div>' +
+        (st.imprintLocked ? '' :
+          '<div class="pp-field" style="margin-bottom:12px">' +
+            '<label>Find the Printavo quote or invoice</label>' +
+            '<input id="ppSearch" placeholder="Invoice number or customer name. Leave blank for a manual web order.">' +
+            '<div id="ppSearchResults"></div>' +
+          '</div>') +
 
-        (st.picked
+        (st.picked && !st.imprintLocked
           ? '<div class="pp-notice">Filling from Printavo invoice <strong>' + esc(st.picked.invoiceNumber) + '</strong>' +
             (st.picked.customerName ? ' for ' + esc(st.picked.customerName) : '') +
             (st.picked.dueDate ? ', due ' + esc(st.picked.dueDate) : '') +
@@ -548,9 +561,10 @@ export default {
       // categories point at exactly one imprint, or the job only has one
       // imprint at all. Anything else is a real choice and stays unpicked,
       // because guessing would quietly put garments on a promo PO.
-      st.pickedGroup =
-        (promo.matched && promo.groups.length === 1) ? promo.groups[0].id
-        : ((inv.groups || []).length === 1 ? inv.groups[0].id : null);
+      st.pickedGroups =
+        (promo.matched && promo.groups.length) ? promo.groups.map((g) => g.id)
+        : ((inv.groups || []).length === 1 ? [inv.groups[0].id] : []);
+      st.imprintLocked = false;
       applyGroupSelection();
       // Which field set Printavo accepted. Worth surfacing once: it tells us
       // this account's real schema, so the fallback ladder can be trimmed to
@@ -562,17 +576,67 @@ export default {
       renderForm();
     }
 
-    /** Copy the chosen imprint's lines into the draft. */
+    /** Copy the chosen imprints' lines into the draft, in imprint order. */
     function applyGroupSelection() {
       const inv = st.picked;
       if (!inv) { st.draftLines = []; return; }
-      const g = (inv.groups || []).find((x) => x.id === st.pickedGroup);
-      st.draftLines = g ? g.lines.map((l) => ({ ...l })) : [];
+      const chosen = (inv.groups || [])
+        .filter((g) => st.pickedGroups.includes(g.id))
+        .sort((a, b) => a.imprintNumber - b.imprintNumber);
+      st.draftLines = chosen.reduce((acc, g) => acc.concat(g.lines.map((l) => ({ ...l }))), []);
+      st.poSuffix = defaultSuffix();
+    }
+
+    /**
+     * The suffix for the PO number, from the chosen imprints.
+     *
+     * One imprint is unambiguous: imprint 9 gives 26-66608-9. More than one
+     * has no established convention here, so it is joined with a plus and
+     * left EDITABLE rather than decided for you. A made-up number on a
+     * document a vendor reads is worse than asking.
+     */
+    function defaultSuffix() {
+      const inv = st.picked;
+      if (!inv) return '';
+      return (inv.groups || [])
+        .filter((g) => st.pickedGroups.includes(g.id))
+        .map((g) => g.imprintNumber)
+        .sort((a, b) => a - b)
+        .join('+');
+    }
+
+    function poNumberPreview() {
+      const inv = st.picked;
+      const year = String(new Date().getFullYear()).slice(-2);
+      if (!inv) return year + '-M###';
+      const suffix = String(st.poSuffix || '').trim();
+      return year + '-' + inv.invoiceNumber + (suffix ? '-' + suffix : '');
     }
 
     function imprintPickerHtml() {
       const inv = st.picked;
       if (!inv || !inv.groups || !inv.groups.length) return '';
+
+      // Confirmed: collapse to one line. The picker and the invoice banner
+      // have done their job by now, and leaving them open buries the fields
+      // still to be filled under choices already made.
+      if (st.imprintLocked) {
+        const chosen = inv.groups.filter((g) => st.pickedGroups.includes(g.id));
+        const pieces = chosen.reduce((a, g) => a + g.lines.reduce((x, l) => x + (Number(l.qty) || 0), 0), 0);
+        return '<div class="pp-locked">' +
+          '<div>' +
+            '<strong>' + esc(poNumberPreview()) + '</strong> &middot; ' +
+            esc(inv.customerName || ('Printavo ' + inv.invoiceNumber)) +
+            (inv.dueDate ? ' &middot; due ' + esc(inv.dueDate) : '') +
+            '<div class="pp-hint">Imprint' + (chosen.length === 1 ? ' ' : 's ') +
+              esc(chosen.map((g) => g.imprintNumber).join(', ')) +
+              ' &middot; ' + st.draftLines.length + ' line' + (st.draftLines.length === 1 ? '' : 's') +
+              ' &middot; ' + pieces + ' pieces</div>' +
+          '</div>' +
+          '<button class="pp-btn ghost" id="ppUnlockImprints">Change</button>' +
+        '</div>';
+      }
+
       const promo = promoGroups(inv, st.settings.promoCategories);
       const promoIds = new Set(promo.matched ? promo.groups.map((g) => g.id) : []);
 
@@ -582,9 +646,9 @@ export default {
           : '') +
         '<div class="pp-imprints">' + inv.groups.map((g) => {
           const qty = g.lines.reduce((a, l) => a + (Number(l.qty) || 0), 0);
-          return '<label class="pp-imprint' + (st.pickedGroup === g.id ? ' on' : '') + '">' +
-            '<input type="radio" name="ppImprint" data-imprint="' + esc(g.id) + '"' +
-              (st.pickedGroup === g.id ? ' checked' : '') + '>' +
+          const on = st.pickedGroups.includes(g.id);
+          return '<label class="pp-imprint' + (on ? ' on' : '') + '">' +
+            '<input type="checkbox" data-imprint="' + esc(g.id) + '"' + (on ? ' checked' : '') + '>' +
             '<span>' +
               '<span class="nm">Imprint ' + esc(g.imprintNumber) + (promoIds.has(g.id) ? ' <span class="pp-pill">Promo</span>' : '') + '</span>' +
               '<span class="em">' + esc(g.categories.join(', ') || 'No category') + '</span>' +
@@ -603,7 +667,18 @@ export default {
             }).join(' ') +
             (isAdmin ? '<button class="pp-btn ghost" id="ppSavePromoCats" style="margin-left:8px">Remember as promo</button>' : '') +
             '</div>'
-          : '');
+          : '') +
+
+        '<div class="pp-confirm">' +
+          '<div class="pp-field" style="max-width:200px">' +
+            '<label>PO number</label>' +
+            '<input id="ppSuffix" value="' + esc(st.poSuffix) + '" placeholder="imprint number">' +
+            '<div class="pp-hint" id="ppNumPreview">' + esc(poNumberPreview()) + '</div>' +
+          '</div>' +
+          '<button class="pp-btn" id="ppUseImprints"' + (st.pickedGroups.length ? '' : ' disabled') + '>' +
+            'Use ' + (st.pickedGroups.length === 1 ? 'this imprint' : st.pickedGroups.length + ' imprints') +
+          '</button>' +
+        '</div>';
     }
 
     /* ---------------- artwork ---------------- */
@@ -1040,6 +1115,9 @@ export default {
 
       if (t.id === 'ppNewFromPipe' || t.id === 'ppNewToggle') {
         st.picked = null;
+        st.pickedGroups = [];
+        st.imprintLocked = false;
+        st.poSuffix = '';
         st.draftVendorId = '';
         st.draftLines = [{ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
@@ -1052,7 +1130,22 @@ export default {
 
       if (t.id === 'ppCancel') { $('#ppFormWrap').hidden = true; return; }
       if (t.id === 'ppCloseDetail') { $('#ppDetailWrap').hidden = true; st.openPoId = null; return; }
-      if (t.id === 'ppClearPick') { st.picked = null; st.pickedGroup = null; st.draftLines = []; renderForm(); return; }
+      if (t.id === 'ppClearPick') {
+        st.picked = null; st.pickedGroups = []; st.imprintLocked = false;
+        st.poSuffix = ''; st.draftLines = [];
+        renderForm();
+        return;
+      }
+
+      if (t.id === 'ppUseImprints') {
+        if (!st.pickedGroups.length) return;
+        st.imprintLocked = true;
+        renderForm();
+        renderCcPreview();
+        return;
+      }
+
+      if (t.id === 'ppUnlockImprints') { st.imprintLocked = false; renderForm(); return; }
 
       if (t.id === 'ppAddLine') {
         st.draftLines.push({ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 });
@@ -1192,7 +1285,10 @@ export default {
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
       if (e.target.dataset && e.target.dataset.imprint) {
-        st.pickedGroup = e.target.dataset.imprint;
+        const gid = e.target.dataset.imprint;
+        st.pickedGroups = e.target.checked
+          ? st.pickedGroups.concat([gid])
+          : st.pickedGroups.filter((x) => x !== gid);
         applyGroupSelection();
         renderForm();
       }
@@ -1215,6 +1311,15 @@ export default {
         }
         return;
       }
+      if (e.target.id === 'ppSuffix') {
+        // Held in state, not read off the DOM at save time, so a re-render
+        // never loses what was typed.
+        st.poSuffix = e.target.value;
+        const prev = $('#ppNumPreview');
+        if (prev) prev.textContent = poNumberPreview();
+        return;
+      }
+
       if (e.target.id === 'ppVendorSearch') {
         // Typing after a pick clears the pick, so the hidden id can never be
         // left pointing at a vendor whose name is no longer in the box.
@@ -1251,17 +1356,20 @@ export default {
           customerName: st.picked.customerName,
           dueDate: st.picked.dueDate,
           // Drives the PO number's suffix: 26-66608-9.
-          imprintNumber: (() => {
-            const g = (st.picked.groups || []).find((x) => x.id === st.pickedGroup);
-            return g ? g.imprintNumber : null;
-          })(),
-          groupId: st.pickedGroup,
+          imprintNumber: st.poSuffix,
+          imprintNumbers: (st.picked.groups || [])
+            .filter((g) => st.pickedGroups.includes(g.id))
+            .map((g) => g.imprintNumber),
+          groupIds: st.pickedGroups.slice(),
         } : null,
       };
       try {
         const res = await ctx.api.post(ENDPOINTS.ppPos, payload);
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
         st.picked = null;
+        st.pickedGroups = [];
+        st.imprintLocked = false;
+        st.poSuffix = '';
         st.draftVendorId = '';
         st.draftLines = [];
         $('#ppFormWrap').hidden = true;
