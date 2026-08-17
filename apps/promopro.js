@@ -111,6 +111,7 @@ export default {
     .pp-lines th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--muted); padding: 6px; }
     .pp-lines td { padding: 4px; }
     .pp-lines input { width: 100%; padding: 6px 8px; font-size: 13px; font-family: inherit; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); }
+    .pp-lines .w-item { width: 130px; }
     .pp-lines .w-qty { width: 80px; }
     .pp-lines .w-cost { width: 100px; }
 
@@ -137,6 +138,14 @@ export default {
     .pp-amrow .nm { display: block; font-size: 13px; font-weight: 700; }
     .pp-amrow .dept { display: inline-block; font-size: 11px; color: var(--muted); }
     .pp-amrow .em { display: block; font-size: 11px; color: var(--muted); }
+
+    .pp-artgrid { display: flex; flex-direction: column; gap: 6px; }
+    .pp-artrow {
+      display: flex; align-items: center; gap: 10px;
+      border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 8px 12px; background: var(--bg);
+    }
+    .pp-artrow a { font-size: 13px; font-weight: 600; color: var(--accent-deep); }
+    .pp-artrow .sz { font-size: 11px; color: var(--muted); margin-left: auto; }
 
     .pp-detail { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 20px; }
     .pp-trail { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 14px 0; }
@@ -369,6 +378,7 @@ export default {
 
     function lineRowHtml(l, i) {
       return '<tr data-line="' + i + '">' +
+        '<td><input class="w-item" data-f="itemNumber" value="' + esc(l.itemNumber || '') + '" placeholder="e.g. 1234-BLK"></td>' +
         '<td><input data-f="description" value="' + esc(l.description) + '" placeholder="Item"></td>' +
         '<td><input data-f="detail" value="' + esc(l.detail || '') + '" placeholder="Color / sizes"></td>' +
         '<td><input class="w-qty" data-f="qty" type="number" min="0" value="' + esc(l.qty) + '"></td>' +
@@ -425,7 +435,7 @@ export default {
         '<div id="ppCcPreview" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>' +
 
         '<table class="pp-lines"><thead><tr>' +
-          '<th>Description</th><th>Detail</th><th>Qty</th><th>Our cost</th><th class="num">Line total</th><th></th>' +
+          '<th>Item #</th><th>Description</th><th>Detail</th><th>Qty</th><th>Our cost</th><th class="num">Line total</th><th></th>' +
         '</tr></thead><tbody id="ppLinesBody">' +
           (st.draftLines.length ? st.draftLines.map(lineRowHtml).join('') : '') +
         '</tbody></table>' +
@@ -434,7 +444,13 @@ export default {
         '<div style="clear:both"></div>' +
 
         '<div class="pp-row" style="margin-top:14px">' +
-          '<div class="pp-field"><label>Ship to</label><input id="ppShipTo" placeholder="Our shop, or drop ship address"></div>' +
+          '<div class="pp-field"><label>Ship to</label>' +
+            '<input id="ppShipTo" value="' + esc(st.settings.defaultShipTo || '') + '" placeholder="Our shop, or drop ship address">' +
+            '<div class="pp-hint">Prefilled from Settings. Change it for a drop ship.</div>' +
+          '</div>' +
+          '<div class="pp-field"><label>Shipping instructions</label>' +
+            '<input id="ppShipVia" value="' + esc(st.settings.shippingInstructions || '') + '" placeholder="Set a default in Settings">' +
+          '</div>' +
         '</div>' +
         '<div class="pp-field"><label>Notes to the vendor</label><textarea id="ppNotes"></textarea></div>' +
 
@@ -486,6 +502,65 @@ export default {
       renderForm();
     }
 
+    /* ---------------- artwork ---------------- */
+
+    const fileSize = (b) => {
+      const n = Number(b) || 0;
+      if (n < 1024) return n + ' B';
+      if (n < 1048576) return (n / 1024).toFixed(0) + ' KB';
+      return (n / 1048576).toFixed(1) + ' MB';
+    };
+
+    function artListHtml(po) {
+      const art = Array.isArray(po.art) ? po.art : [];
+      if (!art.length) return '<div class="pp-hint">Nothing attached yet.</div>';
+      return '<div class="pp-artgrid">' + art.map((a) =>
+        '<div class="pp-artrow">' +
+          '<a href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.filename) + '</a>' +
+          '<span class="sz">' + esc(fileSize(a.bytes)) + '</span>' +
+          (canEdit ? '<button class="pp-btn ghost" data-rmart="' + esc(a.url) + '">Remove</button>' : '') +
+        '</div>'
+      ).join('') + '</div>';
+    }
+
+    // Files go up one at a time rather than in one request. A 25 MB cap per
+    // file times a multi-select would blow the request limit, and one failure
+    // in a batch should not lose the ones that already worked.
+    async function uploadArt(files) {
+      const status = $('#ppArtStatus');
+      const list = Array.from(files || []);
+      if (!list.length) return;
+
+      for (let i = 0; i < list.length; i++) {
+        const f = list[i];
+        if (status) status.textContent = 'Uploading ' + (i + 1) + ' of ' + list.length + ': ' + f.name;
+        try {
+          const dataUrl = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result);
+            r.onerror = () => reject(new Error('Could not read ' + f.name));
+            r.readAsDataURL(f);
+          });
+          const res = await ctx.api.post(ENDPOINTS.ppArt, {
+            poId: st.openPoId, data_url: dataUrl, filename: f.name,
+          });
+          if (res && res.error) {
+            if (status) status.textContent = f.name + ': ' + res.error;
+            return;
+          }
+        } catch (e) {
+          if (status) status.textContent = f.name + ': ' + (e.message || 'upload failed');
+          return;
+        }
+      }
+
+      if (status) status.textContent = '';
+      await loadAll();
+      renderAll();
+      const po = st.pos.find((p) => p.id === st.openPoId);
+      if (po) renderDetail(po);
+    }
+
     /* ---------------- detail ---------------- */
 
     function renderDetail(po) {
@@ -524,14 +599,36 @@ export default {
           '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
         '</div>' +
 
-        '<table class="pp-table"><thead><tr><th>Description</th><th>Detail</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
+        '<table class="pp-table"><thead><tr><th>Item #</th><th>Description</th><th>Detail</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
           (po.lines || []).map((l) =>
-            '<tr><td>' + esc(l.description) + '</td><td>' + esc(l.detail || '') + '</td>' +
+            '<tr><td>' + esc(l.itemNumber || '') + '</td><td>' + esc(l.description) + '</td><td>' + esc(l.detail || '') + '</td>' +
             '<td class="num">' + esc(l.qty) + '</td><td class="num">' + money(l.unitCost) + '</td>' +
             '<td class="num">' + money(lineTotal(l)) + '</td></tr>'
           ).join('') +
-          '<tr><td colspan="4" class="num"><strong>Total</strong></td><td class="num"><strong>' + money(poTotal(po)) + '</strong></td></tr>' +
+          '<tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num"><strong>' + money(poTotal(po)) + '</strong></td></tr>' +
         '</tbody></table>' +
+
+        (po.shipTo || po.shippingInstructions
+          ? '<div class="pp-sect">Shipping</div>' +
+            '<div style="font-size:13px">' + esc(po.shipTo || '') +
+            (po.shippingInstructions ? '<div class="pp-hint" style="font-size:12px">' + esc(po.shippingInstructions) + '</div>' : '') +
+            '</div>'
+          : '') +
+
+        '<div class="pp-sect">Artwork for the vendor</div>' +
+        '<div class="pp-hint" style="margin-bottom:8px">' +
+          'Anyone with the link can open these without signing in, which is how the vendor gets them. ' +
+          'Treat the links as shareable.' +
+        '</div>' +
+        '<div id="ppArtList">' + artListHtml(po) + '</div>' +
+        (canEdit
+          ? '<div style="margin-top:8px">' +
+              '<input type="file" id="ppArtFile" multiple style="display:none" ' +
+                'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
+              '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
+              '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
+            '</div>'
+          : '') +
 
         (canEdit ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
         '<div class="pp-err" id="ppDetailErr" hidden></div>' +
@@ -738,6 +835,18 @@ export default {
             '<div class="pp-hint">Everyone here is copied on every PO, on top of the account manager and the vendor\u2019s own second contact.</div>' +
           '</div>' +
 
+          '<div class="pp-sect">Shipping</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Default ship to</label>' +
+              '<input id="ppDefaultShipTo" value="' + esc(S.defaultShipTo || '') + '"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">Prefilled on every new PO. Still editable per order for a drop ship.</div>' +
+            '</div>' +
+            '<div class="pp-field"><label>Shipping instructions</label>' +
+              '<input id="ppShipInstructions" value="' + esc(S.shippingInstructions || '') + '" placeholder="Please ship via our UPS number: ..."' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">Printed on every PO. Keep the freight account here rather than in the code: this repository is public.</div>' +
+            '</div>' +
+          '</div>' +
+
           '<div class="pp-sect">Who can own a purchase order</div>' +
           '<div class="pp-hint" style="margin-bottom:10px">' +
             'Pulled live from the CrewCore roster. Names and addresses are never stored here, so changing someone\u2019s email in CrewCore changes it everywhere.' +
@@ -788,6 +897,8 @@ export default {
       const payload = {
         alwaysCc: parseEmailList($('#ppAlwaysCc').value),
         chaseAfterDays: Number($('#ppChase').value) || 3,
+        defaultShipTo: $('#ppDefaultShipTo').value,
+        shippingInstructions: $('#ppShipInstructions').value,
       };
       // Only send the list when the picker was actually on screen. A
       // non-admin view has no checkboxes, and posting an empty array would
@@ -826,7 +937,7 @@ export default {
       if (t.id === 'ppNewFromPipe' || t.id === 'ppNewToggle') {
         st.picked = null;
         st.draftVendorId = '';
-        st.draftLines = [{ description: '', detail: '', qty: 1, unitCost: 0 }];
+        st.draftLines = [{ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
         renderCcPreview();
         $('#ppFormWrap').hidden = false;
@@ -840,7 +951,7 @@ export default {
       if (t.id === 'ppClearPick') { st.picked = null; renderForm(); return; }
 
       if (t.id === 'ppAddLine') {
-        st.draftLines.push({ description: '', detail: '', qty: 1, unitCost: 0 });
+        st.draftLines.push({ itemNumber: '', description: '', detail: '', qty: 1, unitCost: 0 });
         renderForm();
         return;
       }
@@ -865,6 +976,20 @@ export default {
 
       if (t.id === 'ppSave') { await saveNew(); return; }
       if (t.id === 'ppSaveDetail') { await saveDetail(); return; }
+
+      if (t.id === 'ppArtPick') { const el = $('#ppArtFile'); if (el) el.click(); return; }
+
+      if (t.dataset && t.dataset.rmart) {
+        await ctx.api.request(
+          ENDPOINTS.ppArt + '?poId=' + encodeURIComponent(st.openPoId) + '&url=' + encodeURIComponent(t.dataset.rmart),
+          { method: 'DELETE' }
+        );
+        await loadAll();
+        renderAll();
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
+        return;
+      }
 
       if (t.dataset && t.dataset.rmvendor) {
         await ctx.api.request(ENDPOINTS.ppVendors + '?id=' + encodeURIComponent(t.dataset.rmvendor), { method: 'DELETE' });
@@ -943,6 +1068,7 @@ export default {
 
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
+      if (e.target.id === 'ppArtFile') uploadArt(e.target.files);
     });
 
     root.addEventListener('focusin', (e) => {
@@ -988,6 +1114,7 @@ export default {
         neededBy: $('#ppNeededBy').value || null,
         decorateBufferDays: Number($('#ppBuffer').value) || 0,
         shipTo: $('#ppShipTo').value,
+        shippingInstructions: $('#ppShipVia').value,
         notes: $('#ppNotes').value,
         lines: st.draftLines,
         printavo: st.picked ? {
