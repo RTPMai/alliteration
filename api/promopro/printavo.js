@@ -41,14 +41,30 @@ export default async function handler(req, res) {
     // ?id=<id>&probe=1 — read-only schema dump, admin only. Exists so the
     // item-number field and the imprint numbering can be read off this
     // account rather than guessed at. Guessing has cost real time already.
-    if (req.query && req.query.probe && req.query.id) {
+    if (req.query && req.query.probe && (req.query.id || req.query.q)) {
       if (!(await isAdminSession(sess))) return res.status(403).json({ error: "Admin access required" });
+
+      // Accept an invoice NUMBER, not just an internal id. The hash in the
+      // Printavo web URL is not the GraphQL id, which cost a round trip:
+      // the probe answered "Field id with value f76a...: Not found" and told
+      // us nothing about the schema question we were actually asking.
+      let probeId = req.query.id ? String(req.query.id) : null;
+      let resolvedFrom = null;
+      if (!probeId && req.query.q) {
+        const hits = await searchInvoices(String(req.query.q), 1);
+        if (!hits.length) {
+          return res.status(200).json({ configured: true, probe: { error: "No invoice matched " + String(req.query.q) } });
+        }
+        probeId = hits[0].id;
+        resolvedFrom = { invoiceNumber: hits[0].invoiceNumber, customerName: hits[0].customerName };
+      }
+
       const types = await probeTypes();
       let invoice = null;
       let query = null;
       let probeError = null;
       try {
-        const r = await probeInvoice(String(req.query.id), types);
+        const r = await probeInvoice(String(probeId), types);
         invoice = r.invoice;
         query = r.query;
       } catch (e) {
@@ -57,7 +73,7 @@ export default async function handler(req, res) {
       // `types` is large and mostly noise once the invoice comes back, so it
       // is only included when the data fetch failed and the field list is
       // what would explain why.
-      const body = { configured: true, probe: { invoice, query, probeError } };
+      const body = { configured: true, probe: { resolvedFrom, invoice, query, probeError } };
       if (probeError || !invoice) body.probe.types = types;
       return res.status(200).json(body);
     }
