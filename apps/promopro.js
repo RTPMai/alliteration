@@ -247,6 +247,7 @@ export default {
       pickedGroups: [],      // the imprints this PO covers
       imprintLocked: false,  // selection confirmed, picker collapsed
       poSuffix: '',          // what goes after the invoice number
+      stagedArt: [],         // files chosen before the PO exists yet
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -487,6 +488,18 @@ export default {
         '</div>' +
         '<div class="pp-field"><label>Notes to the vendor</label><textarea id="ppNotes"></textarea></div>' +
 
+        '<div class="pp-sect">Artwork for the vendor</div>' +
+        '<div class="pp-hint" style="margin-bottom:8px">' +
+          'Optional now, and you can always add more later from the order itself. ' +
+          'Anyone with the link can open these without signing in, which is how the vendor gets them.' +
+        '</div>' +
+        '<div id="ppStagedArt">' + stagedArtHtml() + '</div>' +
+        '<div style="margin-top:8px">' +
+          '<input type="file" id="ppStageFile" multiple style="display:none" ' +
+            'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
+          '<button class="pp-btn ghost" id="ppStagePick">Attach artwork</button>' +
+        '</div>' +
+
         '<div style="margin-top:14px;display:flex;gap:8px">' +
           '<button class="pp-btn" id="ppSave">Create purchase order</button>' +
           '<button class="pp-btn ghost" id="ppCancel">Cancel</button>' +
@@ -687,6 +700,26 @@ export default {
       return (n / 1048576).toFixed(1) + ' MB';
     };
 
+    /**
+     * Files chosen before the PO exists.
+     *
+     * They cannot be uploaded yet: a blob has to be attached to a purchase
+     * order, and there is no purchase order until Create is pressed. So they
+     * are held in memory and sent immediately afterwards. The alternative,
+     * telling somebody to create the order and then go find it again to
+     * attach the art, is how art ends up never attached.
+     */
+    function stagedArtHtml() {
+      if (!st.stagedArt.length) return '<div class="pp-hint">Nothing attached yet.</div>';
+      return '<div class="pp-artgrid">' + st.stagedArt.map((f, i) =>
+        '<div class="pp-artrow">' +
+          '<span>' + esc(f.name) + '</span>' +
+          '<span class="sz">' + esc(fileSize(f.size)) + '</span>' +
+          '<button class="pp-btn ghost" data-rmstaged="' + i + '">Remove</button>' +
+        '</div>'
+      ).join('') + '</div>';
+    }
+
     function artListHtml(po) {
       const art = Array.isArray(po.art) ? po.art : [];
       if (!art.length) return '<div class="pp-hint">Nothing attached yet.</div>';
@@ -702,39 +735,54 @@ export default {
     // Files go up one at a time rather than in one request. A 25 MB cap per
     // file times a multi-select would blow the request limit, and one failure
     // in a batch should not lose the ones that already worked.
-    async function uploadArt(files) {
-      const status = $('#ppArtStatus');
+    /**
+     * Upload files to a PO, one at a time. Returns the names that failed.
+     *
+     * One request per file rather than one batch: a 25 MB cap times a
+     * multi-select would blow the request limit, and one bad file in a batch
+     * should not lose the ones that already worked. Which is also why a
+     * failure carries on to the next file instead of stopping the run.
+     */
+    async function uploadArtTo(poId, files, onProgress) {
       const list = Array.from(files || []);
-      if (!list.length) return;
+      const failed = [];
 
       for (let i = 0; i < list.length; i++) {
         const f = list[i];
-        if (status) status.textContent = 'Uploading ' + (i + 1) + ' of ' + list.length + ': ' + f.name;
+        if (onProgress) onProgress('Uploading ' + (i + 1) + ' of ' + list.length + ': ' + f.name);
         try {
           const dataUrl = await new Promise((resolve, reject) => {
             const r = new FileReader();
             r.onload = () => resolve(r.result);
-            r.onerror = () => reject(new Error('Could not read ' + f.name));
+            r.onerror = () => reject(new Error('could not be read'));
             r.readAsDataURL(f);
           });
-          const res = await ctx.api.post(ENDPOINTS.ppArt, {
-            poId: st.openPoId, data_url: dataUrl, filename: f.name,
-          });
-          if (res && res.error) {
-            if (status) status.textContent = f.name + ': ' + res.error;
-            return;
-          }
+          const res = await ctx.api.post(ENDPOINTS.ppArt, { poId, data_url: dataUrl, filename: f.name });
+          if (res && res.error) failed.push(f.name + ' (' + res.error + ')');
         } catch (e) {
-          if (status) status.textContent = f.name + ': ' + (e.message || 'upload failed');
-          return;
+          failed.push(f.name + ' (' + (e.message || 'upload failed') + ')');
         }
       }
 
-      if (status) status.textContent = '';
+      if (onProgress) onProgress('');
+      return failed;
+    }
+
+    /** Attach to the PO currently open on the detail screen. */
+    async function uploadArt(files) {
+      const status = $('#ppArtStatus');
+      const set = (msg) => { if (status) status.textContent = msg; };
+      const failed = await uploadArtTo(st.openPoId, files, set);
+
       await loadAll();
       renderAll();
       const po = st.pos.find((p) => p.id === st.openPoId);
       if (po) renderDetail(po);
+
+      if (failed.length) {
+        const s2 = $('#ppArtStatus');
+        if (s2) s2.textContent = 'Did not upload: ' + failed.join(', ');
+      }
     }
 
     /* ---------------- detail ---------------- */
@@ -1192,6 +1240,15 @@ export default {
 
       if (t.id === 'ppArtPick') { const el = $('#ppArtFile'); if (el) el.click(); return; }
 
+      if (t.id === 'ppStagePick') { const el = $('#ppStageFile'); if (el) el.click(); return; }
+
+      if (t.dataset && t.dataset.rmstaged !== undefined) {
+        st.stagedArt.splice(Number(t.dataset.rmstaged), 1);
+        const box = $('#ppStagedArt');
+        if (box) box.innerHTML = stagedArtHtml();
+        return;
+      }
+
       if (t.dataset && t.dataset.rmart) {
         await ctx.api.request(
           ENDPOINTS.ppArt + '?poId=' + encodeURIComponent(st.openPoId) + '&url=' + encodeURIComponent(t.dataset.rmart),
@@ -1290,6 +1347,15 @@ export default {
         renderForm();
       }
       if (e.target.id === 'ppArtFile') uploadArt(e.target.files);
+
+      if (e.target.id === 'ppStageFile') {
+        // Appended, not replaced: picking a second time should add rather
+        // than quietly discard the first selection.
+        st.stagedArt = st.stagedArt.concat(Array.from(e.target.files || []));
+        const box = $('#ppStagedArt');
+        if (box) box.innerHTML = stagedArtHtml();
+        e.target.value = '';
+      }
     });
 
     root.addEventListener('focusin', (e) => {
@@ -1363,15 +1429,38 @@ export default {
       try {
         const res = await ctx.api.post(ENDPOINTS.ppPos, payload);
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
+
+        // The PO exists now, so the staged files finally have something to
+        // attach to. Failures here are reported but do NOT roll back the PO:
+        // the order is real and correct, and losing it because an upload
+        // stalled would be far worse than an order with art still to add.
+        const newId = res && res.po && res.po.id;
+        let artProblem = '';
+        if (newId && st.stagedArt.length) {
+          const failed = await uploadArtTo(newId, st.stagedArt);
+          if (failed.length) {
+            artProblem = ' The order was created, but ' + failed.length +
+              ' file' + (failed.length === 1 ? '' : 's') + ' did not upload: ' + failed.join(', ') +
+              '. Open the order to try again.';
+          }
+        }
+
         st.picked = null;
         st.pickedGroups = [];
         st.imprintLocked = false;
         st.poSuffix = '';
         st.draftVendorId = '';
         st.draftLines = [];
+        st.stagedArt = [];
         $('#ppFormWrap').hidden = true;
         await loadAll();
         renderAll();
+
+        if (artProblem) {
+          err.textContent = artProblem.trim();
+          err.hidden = false;
+          $('#ppFormWrap').hidden = false;
+        }
       } catch (e) {
         err.textContent = e.message || 'Could not save.';
         err.hidden = false;
