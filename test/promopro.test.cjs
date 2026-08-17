@@ -788,6 +788,76 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.equal(inv.lines[0].description, 'Tee');
   });
 
+  /* -- clicking a search result must never do nothing -- */
+
+  function fakePrintavo(handler) {
+    const calls = [];
+    global.fetch = async (url, opts) => {
+      const q = JSON.parse(opts.body).query;
+      calls.push(q);
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => handler(q, calls.length) };
+    };
+    return calls;
+  }
+
+  const OK_INVOICE = {
+    id: '1', visualId: 66601, total: 900, customerDueAt: '2026-09-30T00:00:00Z',
+    contact: { fullName: 'Acme Corp' },
+    lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
+      { id: 'l1', description: 'Gildan Tee', quantity: 50 },
+    ] } }] },
+  };
+
+  t.test('an unknown line-item field degrades instead of failing the lookup', async () => {
+    // GraphQL validates the whole query first, so ONE field this account
+    // does not have makes the entire request fail and the invoice come back
+    // null. That is what made clicking a search result do nothing: a
+    // speculative styleNumber field was added without checking the schema.
+    process.env.PRINTAVO_API_TOKEN = 'x';
+    process.env.PRINTAVO_EMAIL = 'x@y.com';
+    const supported = new Set(['id', 'description', 'quantity']);
+    fakePrintavo((q) => {
+      const leaf = (q.match(/lineItems \{ nodes \{ ([^}]*)\}/) || [])[1] || '';
+      const asked = leaf.trim().split(/\s+/).filter((w) => /^[a-z]/i.test(w) && w !== 'name');
+      const bad = asked.find((f) => !supported.has(f.replace(/[{}]/g, '')));
+      if (bad) return { errors: [{ message: `Field '${bad}' doesn't exist on type 'LineItem'` }] };
+      return { data: { invoice: OK_INVOICE } };
+    });
+    const r = await pl.getInvoice('1');
+    t.assert(r.invoice, 'a reduced field set should still return the invoice');
+    t.equal(r.via, 'basic');
+    t.equal(r.invoice.lines[0].qty, 50);
+    t.equal(r.invoice.customerName, 'Acme Corp');
+  });
+
+  t.test('a real error stops immediately rather than retrying every field set', async () => {
+    // Retrying an auth failure five times just burns five requests against
+    // Printavo's rate limiter and reports the same thing at the end.
+    process.env.PRINTAVO_API_TOKEN = 'x';
+    process.env.PRINTAVO_EMAIL = 'x@y.com';
+    const calls = fakePrintavo(() => ({ errors: [{ message: 'Not authorized' }] }));
+    const r = await pl.getInvoice('1');
+    t.equal(r.invoice, null);
+    t.equal(calls.length, 1);
+    t.assert(/Not authorized/.test(r.tried[0].error), 'the real reason should be reported');
+  });
+
+  t.test('a failed lookup always carries a reason back to the screen', async () => {
+    process.env.PRINTAVO_API_TOKEN = 'x';
+    process.env.PRINTAVO_EMAIL = 'x@y.com';
+    fakePrintavo(() => ({ data: { invoice: null } }));
+    const r = await pl.getInvoice('999');
+    t.equal(r.invoice, null);
+    t.assert(r.tried.length && r.tried[0].error, 'there must be something to show the user');
+  });
+
+  t.test('the app shows the reason instead of returning silently', () => {
+    t.assert(app.includes('Could not load that order'),
+      'a search result that does nothing when clicked is the worst outcome');
+    t.assert(!/const inv = res && res\.invoice;\s*if \(!inv\) return;/.test(app),
+      'the silent return is back');
+  });
+
   t.test('autofill brings the style number across as the item number', () => {
     const inv = pl.normalizeInvoice({
       id: '1', visualId: 66601, contact: {},
