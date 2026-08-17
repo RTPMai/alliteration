@@ -179,6 +179,14 @@ t.test('the Printavo route answers cleanly when Printavo is not configured', () 
     'a Printavo outage should not 500 the form; it should degrade to manual entry');
 });
 
+t.test('the probe accepts an invoice number, not just an internal id', () => {
+  // The hash in the Printavo web URL is not the GraphQL id. Passing it cost
+  // a round trip: the probe answered "Not found" and said nothing about the
+  // schema question being asked.
+  t.assert(/req\.query\.q/.test(printavoRoute), 'the probe should resolve an invoice number');
+  t.assert(printavoRoute.includes('searchInvoices'), 'by searching for it first');
+});
+
 t.test('the schema probe is admin only and writes nothing', () => {
   // It dumps field names and one invoice's contents, which is more than a
   // normal user needs, so it sits behind the same gate as Settings.
@@ -1101,6 +1109,32 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     t.assert(/No imprint text is a smaller loss/.test(src), 'the reasoning should stay documented');
   });
 
+  t.test('the imprint query uses fields this account actually has', () => {
+    // Probed Aug 2026: Imprint has `details` and `typeOfWork` (an OBJECT,
+    // needing a sub-selection). It has NO `name`. Every rung of the first
+    // ladder asked for `name`, so all of them failed and the last rung, `id`
+    // alone, "succeeded" carrying no text. A fallback that lands on a rung
+    // with nothing useful on it is not a fallback.
+    const src = read('lib/promopro/printavo-lookup.js');
+    const sets = src.slice(src.indexOf('const IMPRINT_FIELD_SETS'), src.indexOf('function imprintText'));
+    t.assert(!/\bname\b(?!\s*\})/.test(sets.replace(/typeOfWork \{[^}]*\}/g, '').replace(/name: "\w+"/g, '')),
+      'the imprint query still asks for a bare `name`, which does not exist');
+    t.assert(/typeOfWork \{/.test(sets), 'typeOfWork is an object and needs a sub-selection');
+    t.assert(/details/.test(sets), 'details is where the imprint text lives');
+  });
+
+  t.test('every imprint field set can actually produce text', () => {
+    // The specific failure above: a rung that parses but yields nothing.
+    const src = read('lib/promopro/printavo-lookup.js');
+    const sets = src.slice(src.indexOf('const IMPRINT_FIELD_SETS'), src.indexOf('function imprintText'));
+    const rungs = [...sets.matchAll(/fields:\s*"([^"]+)"/g)].map((m) => m[1]);
+    t.assert(rungs.length >= 2, 'expected several rungs, found ' + rungs.length);
+    rungs.forEach((r) => {
+      t.assert(/details|typeOfWork/.test(r),
+        'a rung asking only for ids would succeed and show nothing: "' + r + '"');
+    });
+  });
+
   t.test('imprint text reads the way Printavo shows it', async () => {
     process.env.PRINTAVO_API_TOKEN = 'x';
     process.env.PRINTAVO_EMAIL = 'x@y.com';
@@ -1108,13 +1142,13 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
       const q = JSON.parse(o.body).query;
       if (/PromoProImprints/.test(q)) {
         // This account has no typeOfWork, so the ladder must step down.
-        if (/typeOfWork/.test(q)) {
+        if (/typeOfWork \{ id name \}/.test(q)) {
           return { ok: true, status: 200, headers: { get: () => null },
-            json: async () => ({ errors: [{ message: "Field 'typeOfWork' doesn't exist on type 'Imprint'" }] }) };
+            json: async () => ({ errors: [{ message: "Field 'id' doesn't exist on type 'TypeOfWork'" }] }) };
         }
         return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ data: { invoice: {
           id: '1', lineItemGroups: { nodes: [{ id: 'g9', imprints: { nodes: [
-            { id: 'i1', name: 'Laser Engraved', details: '023-185' },
+            { id: 'i1', details: '023-185', typeOfWork: { name: 'Laser Engraved' } },
           ] } }] },
         } } }) };
       }
@@ -1128,7 +1162,7 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     const r = await pl.getInvoice('f76a');
     t.equal(r.invoice.groups[0].imprintText, 'Laser Engraved // 023-185');
     t.equal(r.invoice.groups[0].lines[0].imprint, 'Laser Engraved // 023-185');
-    t.equal(r.imprintVia, 'named');
+    t.equal(r.imprintVia, 'typed');
   });
 
   t.test('autofill reads the field names this account actually has', () => {
