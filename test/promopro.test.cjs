@@ -344,6 +344,32 @@ t.test('the UPS account number is not committed to source', () => {
     'the shop address is public information and can stay in source');
 });
 
+t.test('confirming the imprints collapses the picker and the invoice banner', () => {
+  // Once the imprints are chosen those controls have done their job, and
+  // leaving them open buries the fields still to be filled under choices
+  // already made.
+  t.assert(app.includes('imprintLocked'), 'no locked state');
+  t.assert(app.includes('ppUseImprints') && app.includes('ppUnlockImprints'),
+    'there must be a way to confirm and a way to go back');
+  t.assert(/st\.picked && !st\.imprintLocked/.test(app),
+    'the "Filling from Printavo invoice" banner should hide once confirmed');
+  t.assert(/st\.imprintLocked \? '' :[\s\S]{0,200}ppSearch/.test(app),
+    'the Printavo search box should hide once confirmed');
+});
+
+t.test('a PO can cover more than one imprint', () => {
+  t.assert(app.includes('type="checkbox" data-imprint'),
+    'imprints should be multi-selectable, not one-of');
+  t.assert(/pickedGroups\.concat/.test(app), 'ticking a second imprint should add to the selection');
+});
+
+t.test('a multi-imprint PO number is editable rather than invented', () => {
+  // One imprint is unambiguous. Two has no established convention here, and
+  // a made-up number on a document a vendor reads is worse than asking.
+  t.assert(app.includes('ppSuffix'), 'the suffix must be editable');
+  t.assert(app.includes("join('+')"), 'a sensible default is fine, deciding silently is not');
+});
+
 t.test('no function in the app is defined but never called', () => {
   // Aug 2026: imprintPickerHtml() was written, wired to state, styled and
   // tested, and never actually called. A string replacement that was meant
@@ -416,6 +442,26 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     const b = st.numberFor({ year: '26', createdAt: '2026-08-05T00:00:00Z', printavo: { invoiceNumber: '66608', imprintNumber: 3 } });
     t.equal(a, '26-66608-9');
     t.equal(b, '26-66608-3');
+  });
+
+  t.test('the suffix can be whatever the buyer confirmed', () => {
+    // Including a two-imprint form. buildPoNumber does not get to decide
+    // what a multi-imprint PO is called.
+    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: '9+10' }), '26-66608-9+10');
+    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: 9 }), '26-66608-9');
+  });
+
+  t.test('a PO records every imprint it covers, not just the suffix', () => {
+    // The suffix is a label. Which imprints were actually ordered is data,
+    // and it is what a later reconciliation would need.
+    const r = s.validateNew({
+      vendorId: 'v1', accountManager: 'alexis',
+      lines: [{ description: 'Koozie', qty: 250, unitCost: 1 }],
+      printavo: { invoiceNumber: '66608', imprintNumber: '9+10', imprintNumbers: [9, 10], groupIds: ['g9', 'g10'] },
+    }, ['v1'], ['alexis']);
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.record.printavo.imprintNumbers.join(','), '9,10');
+    t.equal(r.record.printavo.groupIds.length, 2);
   });
 
   t.test('no imprint number means no suffix', () => {
