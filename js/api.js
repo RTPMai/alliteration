@@ -238,7 +238,8 @@ export const ENDPOINTS = {
   ppPos:           '/api/promopro/pos',
   ppVendors:       '/api/promopro/vendors',
   ppPrintavo:      '/api/promopro/printavo',
-  ppSettings:      '/api/promopro/settings'
+  ppSettings:      '/api/promopro/settings',
+  ppArt:           '/api/promopro/art'
 };
 
 /* ------------------------------------------------------------------ *
@@ -486,6 +487,7 @@ const MOCK_DATA = {
   [ENDPOINTS.ppVendors]: () => ({ vendors: [] }),
   [ENDPOINTS.ppPrintavo]: () => ({ configured: false, results: [], invoice: null }),
   [ENDPOINTS.ppSettings]: () => ({ settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] } }),
+  [ENDPOINTS.ppArt]: () => ({ art: [] }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
