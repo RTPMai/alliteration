@@ -382,25 +382,26 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
 
   /* -- PO numbering -- */
 
-  t.test('a single PO on a job has no suffix', () => {
-    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66601', seq: 1, total: 1 }), '26-66601');
+  t.test('the suffix is the imprint number, not a count of our POs', () => {
+    // Corrected Aug 2026. It used to be a running count: first PO on a job
+    // got -1, second got -2. The real rule is the imprint's own number on
+    // the Printavo job, so the promo imprint on 66608 is 66608-9 whether it
+    // is the first PO we raise or the only one. The two rules agree by
+    // accident on a single-imprint job and disagree on every other.
+    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: 9 }), '26-66608-9');
   });
 
-  t.test('a second PO on the same job gives both a suffix', () => {
-    const numbered = st.assignPoNumbers([
-      { id: 'a', createdAt: '2026-08-01T10:00:00Z', year: '26', printavo: { invoiceNumber: '66601' } },
-      { id: 'b', createdAt: '2026-08-02T10:00:00Z', year: '26', printavo: { invoiceNumber: '66601' } },
-    ]);
-    t.equal(numbered.map((p) => p.poNumber).join(','), '26-66601-1,26-66601-2');
+  t.test('the imprint number does not depend on what else exists', () => {
+    // A number a vendor already has must never change underneath them
+    // because somebody raised an unrelated PO on the same job.
+    const a = st.numberFor({ year: '26', createdAt: '2026-08-01T00:00:00Z', printavo: { invoiceNumber: '66608', imprintNumber: 9 } });
+    const b = st.numberFor({ year: '26', createdAt: '2026-08-05T00:00:00Z', printavo: { invoiceNumber: '66608', imprintNumber: 3 } });
+    t.equal(a, '26-66608-9');
+    t.equal(b, '26-66608-3');
   });
 
-  t.test('suffixes follow creation order, not the order they arrive in', () => {
-    const numbered = st.assignPoNumbers([
-      { id: 'later', createdAt: '2026-08-05T10:00:00Z', year: '26', printavo: { invoiceNumber: '70001' } },
-      { id: 'earlier', createdAt: '2026-08-01T10:00:00Z', year: '26', printavo: { invoiceNumber: '70001' } },
-    ]);
-    t.equal(numbered.find((p) => p.id === 'earlier').poNumber, '26-70001-1');
-    t.equal(numbered.find((p) => p.id === 'later').poNumber, '26-70001-2');
+  t.test('no imprint number means no suffix', () => {
+    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608' }), '26-66608');
   });
 
   t.test('a manual web order is obviously not a Printavo job', () => {
@@ -410,9 +411,15 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
   });
 
   t.test('two POs on different jobs never collide', () => {
-    const a = st.jobKeyOf({ year: '26', printavo: { invoiceNumber: '66601' } });
-    const b = st.jobKeyOf({ year: '26', printavo: { invoiceNumber: '66602' } });
-    t.assert(a !== b, 'different invoices should be different job keys');
+    const a = st.numberFor({ year: '26', printavo: { invoiceNumber: '66601', imprintNumber: 1 } });
+    const b = st.numberFor({ year: '26', printavo: { invoiceNumber: '66602', imprintNumber: 1 } });
+    t.assert(a !== b, 'different invoices should give different PO numbers');
+  });
+
+  t.test('two imprints on the same job get different numbers', () => {
+    const a = st.numberFor({ year: '26', printavo: { invoiceNumber: '66608', imprintNumber: 3 } });
+    const b = st.numberFor({ year: '26', printavo: { invoiceNumber: '66608', imprintNumber: 9 } });
+    t.assert(a !== b, 'different imprints on one job must differ');
   });
 
   /* -- stage derivation -- */
@@ -864,6 +871,75 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
       'a search result that does nothing when clicked is the worst outcome');
     t.assert(!/const inv = res && res\.invoice;\s*if \(!inv\) return;/.test(app),
       'the silent return is back');
+  });
+
+  /* -- only the promo imprint -- */
+
+  const INVOICE_66608 = {
+    id: 'f76a', visualId: 66608, contact: { fullName: 'Acme' },
+    lineItemGroups: { nodes: [
+      { id: 'g1', position: 1, lineItems: { nodes: [
+        { id: 'a', description: 'Tee', itemNumber: 'G500', items: 100, category: { name: 'T-Shirts' } },
+      ] } },
+      { id: 'g9', position: 9, lineItems: { nodes: [
+        { id: 'b', description: 'Koozie', itemNumber: 'KZ-100', items: 250, category: { name: 'Promotional Products' } },
+      ] } },
+    ] },
+  };
+
+  t.test('lines are grouped by imprint, each carrying its own number', () => {
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    t.equal(inv.groups.length, 2);
+    t.equal(inv.groups[0].imprintNumber, 1);
+    t.equal(inv.groups[1].imprintNumber, 9);
+  });
+
+  t.test('only the promo imprint is offered once categories are known', () => {
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    const promo = pl.promoGroups(inv, ['Promotional Products']);
+    t.equal(promo.groups.length, 1);
+    t.equal(promo.groups[0].imprintNumber, 9);
+    t.equal(promo.groups[0].lines[0].itemNumber, 'KZ-100');
+  });
+
+  t.test('the promo imprint on 66608 numbers the PO 26-66608-9', () => {
+    // The whole point, end to end: pick the invoice, pick the promo imprint,
+    // get the number Ryan actually uses.
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    const g = pl.promoGroups(inv, ['Promotional Products']).groups[0];
+    t.equal(st.numberFor({
+      year: '26',
+      printavo: { invoiceNumber: inv.invoiceNumber, imprintNumber: g.imprintNumber },
+    }), '26-66608-9');
+  });
+
+  t.test('before categories are configured, everything is shown rather than nothing', () => {
+    // Showing every imprint with "tell me which are promo" beats an empty
+    // list that looks broken, and beats guessing and quietly pulling
+    // garments onto a promo PO.
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    const promo = pl.promoGroups(inv, []);
+    t.equal(promo.groups.length, 2);
+    t.equal(promo.matched, false);
+  });
+
+  t.test('the categories on a job are surfaced for ticking', () => {
+    // So nobody has to type a category name exactly right.
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    t.equal(inv.categories.join('|'), 'T-Shirts|Promotional Products');
+  });
+
+  t.test('promo categories are matched without case sensitivity', () => {
+    const inv = pl.normalizeInvoice(INVOICE_66608);
+    t.equal(pl.promoGroups(inv, ['promotional products']).groups.length, 1);
+  });
+
+  t.test('promo categories are stored, not hardcoded', () => {
+    // Category names differ per account and change over time. A guess baked
+    // into code is a guess nobody can correct without a deploy.
+    const r = s.validateSettings({ promoCategories: ['Promotional Products', 'promotional products', 'Drinkware'] });
+    t.assert(r.ok, r.errors.join('; '));
+    t.equal(r.patch.promoCategories.length, 2);
   });
 
   t.test('autofill reads the field names this account actually has', () => {
