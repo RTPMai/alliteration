@@ -179,6 +179,14 @@ t.test('the Printavo route answers cleanly when Printavo is not configured', () 
     'a Printavo outage should not 500 the form; it should degrade to manual entry');
 });
 
+t.test('the schema probe is admin only and writes nothing', () => {
+  // It dumps field names and one invoice's contents, which is more than a
+  // normal user needs, so it sits behind the same gate as Settings.
+  const probeBlock = printavoRoute.slice(printavoRoute.indexOf('probe'));
+  t.assert(/isAdminSession/.test(probeBlock.slice(0, 400)), 'the probe should require admin');
+  t.assert(printavoRoute.includes('read-only'), 'the probe must not write to Printavo');
+});
+
 t.test('the Printavo route is read-only', () => {
   t.assert(/req\.method !== "GET"/.test(printavoRoute),
     'nothing in PromoPro should be able to write back to a Printavo quote');
