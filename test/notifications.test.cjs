@@ -1,13 +1,3 @@
-// PUT IN: test/notifications.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: test/notifications.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: test/notifications.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: test/notifications.test.cjs
 /**
  * Notifications tests (v3 — back to a routed screen, plus reassignment and
  * a per-item history log).
@@ -437,3 +427,64 @@ t.test('apps/notifications.js shows a clickable link pill that opens the record 
   ['backbone', 'traveltrack', 'givinggauge'].forEach((app) =>
     t.assert(src.includes("app: '" + app + "'"), 'LINK_ROUTE is missing an entry that opens into ' + app));
 });
+
+// ---- Private notifications (Aug 18 2026) --------------------------------
+// A personal scratch item must be invisible to everyone else, admins
+// included, and must never end up sitting in someone else's inbox.
+{
+  const schema = read('lib/notifications/schema.js');
+  const route = read('api/notifications.js');
+  const app = read('apps/notifications.js');
+
+  t.test('schema declares a visibility field with team as the default', () => {
+    t.assert(/VISIBILITIES\s*=\s*\[\s*"team",\s*"private"\s*\]/.test(schema),
+      'VISIBILITIES must list exactly team and private');
+    t.assert(/DEFAULT_VISIBILITY\s*=\s*"team"/.test(schema),
+      'an unmarked notification must stay visible to the team');
+  });
+
+  t.test('validateNew defaults visibility rather than trusting the body', () => {
+    t.assert(/visibility:\s*b\.visibility === "private" \? "private" : DEFAULT_VISIBILITY/.test(schema),
+      'anything other than the literal "private" must fall back to the default');
+  });
+
+  t.test('validatePatch rejects an unknown visibility', () => {
+    t.assert(/VISIBILITIES\.includes\(b\.visibility\)/.test(schema),
+      'a patch must check visibility against the allowlist');
+  });
+
+  t.test('the route hides private records from everyone but their creator', () => {
+    t.assert(/const hidden = \(n\) =>[\s\S]{0,160}n\.createdBy !== me/.test(route),
+      'there must be a single hidden() predicate keyed on createdBy');
+    t.assert(/listNotifications\(\)\)\.filter\(\(n\) => !hidden\(n\)\)/.test(route),
+      'the list must be filtered before any query filters run');
+  });
+
+  t.test('admin is not an override for private items', () => {
+    const patchGate = route.slice(route.indexOf('req.method === "PATCH"'));
+    t.assert(/!existing \|\| hidden\(existing\)/.test(patchGate),
+      'PATCH must 404 on a private record before the admin check');
+    const delGate = route.slice(route.indexOf('req.method === "DELETE"'));
+    t.assert(/!existing \|\| hidden\(existing\)/.test(delGate),
+      'DELETE must 404 on a private record before the admin check');
+  });
+
+  t.test('a private notification is forced back to its creator', () => {
+    t.assert(/record\.visibility === "private"\) record\.assignedTo = me/.test(route),
+      'POST must pin a private item to the caller');
+    t.assert(/willBePrivate\) patch\.assignedTo = existing\.createdBy/.test(route),
+      'PATCH must pin a private item to its creator');
+  });
+
+  t.test('the form offers Just for me and hides the assignee picker', () => {
+    t.assert(/id="nf-private"/.test(app), 'the create form needs a private checkbox');
+    t.assert(/visibility: \$\('#nf-private'\)/.test(app), 'the POST body must carry visibility');
+    t.assert(/nf-who-field'\)\.style\.display = priv\.checked \? 'none'/.test(app),
+      'assigning a private item is meaningless, so the picker must hide');
+  });
+
+  t.test('a private card is labelled on screen', () => {
+    t.assert(/nt-pill private">Just for me/.test(app),
+      'a private item must be visibly marked so it is never mistaken for shared work');
+  });
+}
