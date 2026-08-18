@@ -218,10 +218,17 @@ export async function mountApp(meta, host, ctxExtras) {
   } catch (e) {
     // Say which path failed. "Failed to fetch dynamically imported module" on
     // its own sends you looking in the wrong place.
-    throw new Error(
+    const err = new Error(
       'Could not load ' + url + '. Check that apps/' + rel + ' deployed ' +
       'and that the server is not rewriting .js paths. Original error: ' + e.message
     );
+    // Flagged so the shell can tell a genuinely missing file apart from a bug
+    // inside a file that loaded fine. Aug 18: a TypeError thrown AFTER the
+    // import succeeded (an app declared `html:` as a string, which is not part
+    // of the contract) rendered "the app file did not load", and the file was
+    // sitting there deployed and correct the whole time.
+    err.moduleLoadFailed = true;
+    throw err;
   }
 
   const app = mod.default || mod;
@@ -241,6 +248,14 @@ export async function mountApp(meta, host, ctxExtras) {
   if (app.template) {
     root.innerHTML = typeof app.template === 'function' ? await app.template() : app.template;
   } else if (app.html) {
+    // `html` is the FUNCTION form; `template` is the string form. Saying so
+    // out loud beats "app.html is not a function" from four frames deep.
+    if (typeof app.html !== 'function') {
+      throw new Error(
+        'apps/' + rel + ' set `html` to a ' + typeof app.html + '. Use `template:` for ' +
+        'a string, or make `html` a function.'
+      );
+    }
     root.innerHTML = await app.html();
   }
 
