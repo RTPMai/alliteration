@@ -84,6 +84,9 @@ const LIVE_PREFIXES = [
   // Notifications: api/notifications.js is deployed. Shell-level, not one of
   // the nine apps, same as auth/users/health above.
   '/api/notifications',
+  // Site Work: api/sitework.js is deployed. Superuser-only, gated in the
+  // route itself, not merely hidden from the rail.
+  '/api/sitework',
   // WebsiteWidget: api/websitewidget/{stats,sites}.js are deployed. Both
   // live under the folder (no flat api/websitewidget.js) because Vercel
   // treats a same-named file and folder as a route conflict once the .js
@@ -229,6 +232,9 @@ export const ENDPOINTS = {
 
   // ---- Notifications (shell-level) ----
   notifications:   '/api/notifications',
+
+  // ---- Site Work (superuser-only section, not an app) ----
+  sitework:        '/api/sitework',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',
