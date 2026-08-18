@@ -1,9 +1,3 @@
-// PUT IN: js/shell.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: js/shell.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * alliteration. — shell
  *
@@ -19,7 +13,7 @@
  *   #/<app>/<view>
  */
 
-import { APPS, SHELL_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
+import { APPS, SHELL_APPS, SITE_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
 import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
@@ -327,6 +321,22 @@ function renderRail() {
         <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}
       </button>`;
   });
+
+  // Site Work. A third section, not another Shared entry: these screens are
+  // about building Alliteration, not about running the business with it. The
+  // whole block disappears for anyone without the superuser flag, so most of
+  // the team never sees a section that would only confuse them.
+  const siteVisible = SITE_APPS.filter((a) => canAccess(state.perms, a.id));
+  if (siteVisible.length) {
+    html += '<div class="rail-hr"></div><div class="rail-label">Site Work</div>';
+    siteVisible.forEach((a) => {
+      html += `
+        <button class="rail-item${state.app === a.id ? ' active' : ''}"
+                data-app="${a.id}" style="--dot:${a.accent}">
+          <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}
+        </button>`;
+    });
+  }
 
   el.rail.innerHTML = html;
 
