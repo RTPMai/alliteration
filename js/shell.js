@@ -171,7 +171,13 @@ async function handleRoute(route) {
     // Distinguish "not built yet" from "built but failed to load". They look
     // identical to a user and have completely different fixes: the first is
     // waiting on work, the second is usually a file that did not deploy.
-    const missing = e && (e.name === 'TypeError' || /Failed to fetch|Importing a module|dynamically imported/i.test(e.message || ''));
+    // app-host.js sets moduleLoadFailed when the dynamic import itself threw.
+    // Anything else reached the file fine and broke later, so blaming the
+    // deploy sends you to check a file that is sitting there correct. The old
+    // rule treated ANY TypeError as a missing file, which is exactly what
+    // happened on Aug 18.
+    const missing = !!(e && (e.moduleLoadFailed ||
+      /Failed to fetch|Importing a module|dynamically imported/i.test(e.message || '')));
 
     renderMessage(
       'Could not load ' + meta.name,
