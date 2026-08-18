@@ -180,7 +180,7 @@ export default {
   }
   `,
 
-  html: `
+  template: `
     <div class="sk-wrap">
       <div class="sk-hd">
         <div>
