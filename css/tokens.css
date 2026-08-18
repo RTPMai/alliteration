@@ -196,6 +196,34 @@ body[data-app="givinggauge"] {
   --accent-tint: #FBF2E1;
 }
 
+/* Sticky Notes is a SITE WORK screen: not an app, not part of Shared. Muted
+   gold rather than a bright post-it yellow, because the accent themes the
+   whole chrome and a fluorescent rail is unreadable. The paper colours below
+   are the ones that actually appear on the notes. */
+body[data-app="stickies"] {
+  --accent:      #C9A227;
+  --accent-deep: #9A7A18;
+  --accent-tint: #FAF3DF;
+}
+
+/* ---- Sticky note paper -------------------------------------------------
+   Five paper colours plus a matching ink for each, kept here rather than in
+   apps/stickies.js like every other colour in this repo. Ink is a darkened
+   version of the same hue so text stays legible on its own note. */
+:root {
+  --sticky-yellow:      #FBF0B2;
+  --sticky-yellow-edge: #EFDF8A;
+  --sticky-green:       #D8EFC2;
+  --sticky-green-edge:  #BEE0A0;
+  --sticky-blue:        #CFE4F5;
+  --sticky-blue-edge:   #ABCDEB;
+  --sticky-pink:        #F8D6DE;
+  --sticky-pink-edge:   #EDB6C3;
+  --sticky-grey:        #E4E7EA;
+  --sticky-grey-edge:   #CDD2D7;
+  --sticky-ink:         #2E2A20;
+}
+
 /* Settings is a SHELL screen, not one of the five apps. Deliberately neutral
    grey: it belongs to the shell, and giving it a brand color would imply it is
    another app in the lineup. */
