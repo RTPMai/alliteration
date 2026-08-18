@@ -1,9 +1,3 @@
-// PUT IN: api/notifications.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: api/notifications.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 // api/notifications.js — shell-level notifications / to-do list.
 //
 // Every signed-in user can create a notification and assign it to anyone
@@ -184,6 +178,12 @@ export default async function handler(req, res) {
 
   const me = String(sess.username || "").toLowerCase();
 
+  // A private notification is invisible to everyone except its creator,
+  // admins included. Admin is a permission over shared team work, not a
+  // licence to read someone's personal scratch list, so this check sits
+  // ahead of every admin override below rather than beside it.
+  const hidden = (n) => n && n.visibility === "private" && n.createdBy !== me;
+
   try {
     if (req.method === "GET") {
       // Assignee picker data. Any signed-in user needs this (not just admins,
@@ -213,17 +213,18 @@ export default async function handler(req, res) {
       const id = req.query && req.query.id;
       if (id) {
         const rec = await getNotification(id);
-        if (!rec) return res.status(404).json({ error: "Notification not found" });
+        if (!rec || hidden(rec)) return res.status(404).json({ error: "Notification not found" });
         return res.status(200).json({ notification: rec });
       }
 
-      let list = await listNotifications();
+      let list = (await listNotifications()).filter((n) => !hidden(n));
       const q = req.query || {};
       if (q.assignedTo) list = list.filter((n) => n.assignedTo === String(q.assignedTo).toLowerCase());
       if (q.createdBy) list = list.filter((n) => n.createdBy === String(q.createdBy).toLowerCase());
       if (q.appId) list = list.filter((n) => Array.isArray(n.appIds) && n.appIds.includes(q.appId));
       if (q.type) list = list.filter((n) => Array.isArray(n.types) && n.types.includes(q.type));
       if (q.status) list = list.filter((n) => n.status === q.status);
+      if (q.visibility) list = list.filter((n) => (n.visibility || "team") === q.visibility);
 
       return res.status(200).json({ notifications: list });
     }
@@ -237,6 +238,10 @@ export default async function handler(req, res) {
 
       const { ok, errors, record } = validateNew(body, APP_IDS, usernames);
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
+
+      // Enforced server-side, not just hidden in the form: a private item
+      // nobody else can read must not sit in another person's inbox.
+      if (record.visibility === "private") record.assignedTo = me;
 
       const nameCache = new Map();
       const myName = sess.name || me;
@@ -266,7 +271,7 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: "Missing notification id" });
 
       const existing = await getNotification(id);
-      if (!existing) return res.status(404).json({ error: "Notification not found" });
+      if (!existing || hidden(existing)) return res.status(404).json({ error: "Notification not found" });
 
       const isParty = existing.assignedTo === me || existing.createdBy === me;
       if (!isParty && !(await callerIsAdmin(sess))) {
@@ -282,6 +287,11 @@ export default async function handler(req, res) {
       // stored as its own field on the record.
       const message = patch.message;
       delete patch.message;
+
+      // Turning an item private pulls it back to its creator. Handing a
+      // private item to someone else would make it invisible to both of you.
+      const willBePrivate = (patch.visibility || existing.visibility) === "private";
+      if (willBePrivate) patch.assignedTo = existing.createdBy;
 
       if (!Object.keys(patch).length && !message) {
         return res.status(400).json({ error: "No editable fields in patch" });
@@ -352,7 +362,7 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: "Missing notification id" });
 
       const existing = await getNotification(id);
-      if (!existing) return res.status(404).json({ error: "Notification not found" });
+      if (!existing || hidden(existing)) return res.status(404).json({ error: "Notification not found" });
 
       const isParty = existing.assignedTo === me || existing.createdBy === me;
       const admin = await callerIsAdmin(sess);
