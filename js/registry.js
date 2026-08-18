@@ -311,6 +311,34 @@ export const SHELL_APPS = [
   }
 ];
 
+/**
+ * Site Work screens. Not apps, and deliberately NOT shell screens either.
+ *
+ * Shared (Settings, Notifications) is the team's shell: things everyone uses
+ * while running the business. Site Work is the opposite audience — the list of
+ * what still needs building in Alliteration itself. Ryan asked for it as its
+ * own rail section rather than another Shared entry, because a sticky note
+ * reading "fix the ShopStock session bug" is not the same kind of object as a
+ * hand-off reading "call this customer back", and stacking them in one list is
+ * what made the first attempt unusable.
+ *
+ * Superuser only. Enforced in api/sitework.js as well; hiding a rail entry is
+ * not access control.
+ */
+export const SITE_APPS = [
+  {
+    id: 'stickies',
+    name: 'Sticky Notes',
+    role: 'What still needs building',
+    accent: '#C9A227',
+    views: [['board', 'Board']],
+    defaultView: 'board',
+    superuserOnly: true,
+    siteLevel: true,
+    stub: false
+  }
+];
+
 /* ------------------------------------------------------------------ *
  * VIEW HELPERS
  *
@@ -341,7 +369,7 @@ export function viewLabel(app, key) {
  * LOOKUPS
  * ------------------------------------------------------------------ */
 
-const BY_ID = new Map(APPS.concat(SHELL_APPS).map((a) => [a.id, a]));
+const BY_ID = new Map(APPS.concat(SHELL_APPS, SITE_APPS).map((a) => [a.id, a]));
 
 export function getApp(id) {
   return BY_ID.get(id) || null;
@@ -377,6 +405,14 @@ export function firstAllowed(perms) {
  */
 export function canAccess(perms, appId) {
   if (!perms) return false;
+
+  // Site Work screens gate on the per-account superuser flag alone. Not a
+  // role grant, not perms.tabs: this section is for whoever builds the
+  // platform, and that is not a job title anyone can be given by editing a
+  // role. Checked before the blanket superuser pass below so the rule reads
+  // in one place.
+  const site = SITE_APPS.find((a) => a.id === appId);
+  if (site) return perms.superuser === true;
 
   // Shell-level screens gate on ROLE, not on perms.tabs. They are not apps, so
   // they are never listed in a role's app grants.
