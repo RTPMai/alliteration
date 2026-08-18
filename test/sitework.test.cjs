@@ -223,6 +223,42 @@ Promise.all([
     t.assert(/var\(--sticky-yellow\)/.test(panel), 'the panel must reference the token, not a hex');
   });
 
+  /* ---- the module contract --------------------------------------------- *
+   * Aug 18: apps/stickies.js shipped with `html:` set to a template string.
+   * app-host.js only ever calls app.html() as a function; the string form is
+   * `template:`. It threw "app.html is not a function" four frames deep, the
+   * shell's error heuristic read the bare TypeError as a missing file, and the
+   * message blamed a deploy that was completely fine. Three separate holes,
+   * all covered below. */
+
+  t.test('EVERY app module uses the contract app-host actually supports', () => {
+    const dir = path.join(ROOT, 'apps');
+    fs.readdirSync(dir).filter((f) => f.endsWith('.js')).forEach((f) => {
+      const src = fs.readFileSync(path.join(dir, f), 'utf8');
+      const stringHtml = /^\s*html:\s*[`'"]/m.test(src);
+      t.equal(stringHtml, false,
+        'apps/' + f + ' sets `html` to a string. app-host.js calls app.html() as a ' +
+        'function; the string form is `template:`.');
+    });
+  });
+
+  t.test('app-host says which contract was broken instead of throwing from four frames deep', () => {
+    const src = read('js/app-host.js');
+    t.assert(/typeof app\.html !== 'function'/.test(src),
+      'a non-function html must be caught with a message naming the fix');
+  });
+
+  t.test('a module that loaded fine is never reported as a failed deploy', () => {
+    const host = read('js/app-host.js');
+    const shell = read('js/shell.js');
+    t.assert(/err\.moduleLoadFailed = true/.test(host),
+      'app-host must flag failures of the dynamic import itself');
+    t.assert(/e\.moduleLoadFailed/.test(shell),
+      'the shell must key "did not load" off that flag');
+    t.equal(/e\.name === 'TypeError'/.test(shell), false,
+      'a bare TypeError is not evidence of a missing file: that rule cost a debugging round');
+  });
+
   /* ---- the separation from Notifications ------------------------------- */
 
   t.test('Sticky Notes stays out of the Notifications keyspace and route', () => {
