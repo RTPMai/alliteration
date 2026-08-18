@@ -1,12 +1,3 @@
-// PUT IN: apps/notifications.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: apps/notifications.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
-// PUT IN: apps/notifications.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * Notifications — shell-level to-do / hand-off list.
  *
@@ -242,6 +233,10 @@ export default {
     cursor:pointer;font-family:inherit;padding:2px 9px 2px 7px;
   }
   .nt-pill.link:hover{border-color:var(--accent)}
+  .nt-pill.private{background:none;color:var(--faint);border:1px dashed var(--line)}
+  .nt-private label{display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:400}
+  .nt-private input{width:auto;margin:0}
+  .nt-hint{display:block;font-size:11.5px;color:var(--faint);margin-top:3px}
   .nt-meta{font-size:11.5px;color:var(--faint);margin-top:6px}
 
   /* Link-to-record picker — a type select plus a live search-as-you-type
@@ -539,7 +534,8 @@ export default {
         return '<span class="nt-pill app" style="--c:' + esc(a.accent) + '"><span class="sq"></span>' + esc(a.name) + '</span>';
       }).join('');
       const typePills = (n.types || []).map((t) =>
-        '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('');
+        '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('') +
+        (n.visibility === 'private' ? '<span class="nt-pill private">Just for me</span>' : '');
       const linkPill = (n.link && n.link.id)
         ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
             ' data-link-id="' + esc(n.link.id) + '" title="Open in BackBone">' +
@@ -619,7 +615,11 @@ export default {
           '<div class="nt-field"><label>App (select one or more)</label><div class="nt-toggles" id="nfAppToggles">' +
             toggleHtml(APP_OPTIONS, formApps, 'app') +
           '</div></div>' +
-          '<div class="nt-field"><label>Assign to</label><select id="nf-who"></select></div>' +
+          '<div class="nt-field nt-private">' +
+            '<label for="nf-private"><input type="checkbox" id="nf-private"> Just for me</label>' +
+            '<span class="nt-hint">Nobody else can see it, not even an admin. Stays assigned to you.</span>' +
+          '</div>' +
+          '<div class="nt-field" id="nf-who-field"><label>Assign to</label><select id="nf-who"></select></div>' +
           '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
           '<div class="nt-field"><label>Link to a record (optional)</label>' +
             linkPickerHtml('new', null) +
@@ -629,6 +629,14 @@ export default {
         '</div>';
 
       fillWhoSelect();
+      const priv = $('#nf-private');
+      if (priv) {
+        priv.addEventListener('change', () => {
+          // Assigning a private item is meaningless: the server pins it to
+          // you either way, so hide the control rather than let it lie.
+          $('#nf-who-field').style.display = priv.checked ? 'none' : '';
+        });
+      }
       $('#ntForm').style.display = 'block';
       $('#nf-title').focus();
     }
@@ -705,6 +713,7 @@ export default {
             types: [...formTypes],
             appIds: [...formApps],
             assignedTo: $('#nf-who').value,
+            visibility: $('#nf-private') && $('#nf-private').checked ? 'private' : 'team',
             dueDate: $('#nf-due').value || null,
             link: readLinkPicker('new')
           });
