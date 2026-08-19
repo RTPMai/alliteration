@@ -260,8 +260,61 @@ Promise.all([
     t.assert(app, 'stitchsense is missing from the registry');
     t.equal(app.stub, false, 'it is built, so it must not be marked a stub');
     t.assert(exists('apps/' + app.id + '.js'), 'the registry entry has no module');
-    ['estimate', 'library', 'guess', 'accuracy'].forEach((v) =>
+    ['estimate', 'library', 'colorway', 'guess', 'accuracy'].forEach((v) =>
       t.assert(app.views.some((pair) => pair[0] === v), 'missing view: ' + v));
+  });
+
+  /* ---- colourway ------------------------------------------------------- */
+
+  t.test('the decoder tags every stitch with its thread block', () => {
+    // A DST carries colour CHANGES but no colours. The block index is the only
+    // thing that makes recolouring possible, so if it stops being recorded the
+    // colourway view silently paints everything one colour.
+    const src = read('apps/stitchsense.js');
+    t.assert(/path\.push\(\[x, y, (?:true|false), block\]\)/.test(src),
+      'decodeDst must record a block index on every path point');
+    t.assert(/isColorChange\) \{[\s\S]{0,80}block\+\+/.test(src),
+      'the block index must advance on a colour change');
+  });
+
+  t.test('there is one renderer, not two', () => {
+    // The library thumbnail, the estimate preview and the exported PNG all go
+    // through renderDesign. A second renderer could drift and make the PNG a
+    // customer approved disagree with what was on screen.
+    const src = read('apps/stitchsense.js');
+    t.assert(src.includes('function renderDesign('), 'renderDesign is missing');
+    t.assert(/renderDstThumb[\s\S]{0,400}renderDesign\(/.test(src),
+      'the thumbnail must go through renderDesign, not paint its own path');
+  });
+
+  t.test('blocks are drawn in sewing order so overlaps are honest', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(/for \(let b = 0; b < total; b\+\+\)/.test(src),
+      'renderDesign must draw block by block, ascending, or a later colour will not cover an earlier one');
+  });
+
+  t.test('a transparent export is possible', () => {
+    // With no garment colour the PNG must come out transparent, which is what
+    // makes it droppable onto a mockup. Filling a default white would look
+    // identical on screen and be wrong in the file.
+    const src = read('apps/stitchsense.js');
+    t.assert(/if \(o\.garment\) \{[\s\S]{0,120}fillRect/.test(src),
+      'renderDesign must only paint a background when one was asked for');
+  });
+
+  t.test('typed colours are validated before they reach the canvas', () => {
+    // canvas SILENTLY ignores an invalid strokeStyle and keeps the previous
+    // colour, so an unvalidated typo renders as "the picker did nothing".
+    const src = read('apps/stitchsense.js');
+    t.assert(src.includes('function isColor('), 'there is no colour validation');
+    t.assert(/blockhex[\s\S]{0,400}isColor\(/.test(src),
+      'typed block colours must be validated');
+  });
+
+  t.test('the colourway view says what it is not', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(/not a Wilcom proof|not a Wilcom-quality/i.test(src),
+      'an AM emailing this as a finished proof is the one way it causes trouble, so the view must say so');
   });
 
   t.test('the app has an accent block in tokens.css', () => {
@@ -335,6 +388,7 @@ Promise.all([
     t.assert(!views.includes('estimate'), 'production staff do not need the quoting tool');
     t.assert(!views.includes('accuracy'), 'production staff do not need the accuracy log');
     t.assert(!views.includes('library'), 'the archive import lives behind Library');
+    t.assert(!views.includes('colorway'), 'colourway export is a customer-facing tool, not a production one');
   });
 
   t.test('the shipped employee role actually carries that grant', () => {
