@@ -6287,6 +6287,101 @@ export async function start(ctx) {
     }
   }
 
+  /* ---------------- reorder timing ----------------
+   *
+   * Thresholds are stored by the shell (lib/reorder-settings.js), not in
+   * BackBone's own data blob, because MailMe reads them too. BackBone owns the
+   * editing surface; both apps read one value.
+   *
+   * Fields are filled from the server on load rather than rendered with
+   * defaults baked into the markup: a form pre-filled with numbers that are
+   * not what is actually stored is worse than an empty one, because saving it
+   * would quietly overwrite the real settings with the placeholders.
+   */
+
+  const REORDER_FIELDS = [
+    ["reorderDue", "dueAt"],
+    ["reorderOverdue", "overdueAt"],
+    ["reorderLapsed", "lapsedAt"],
+    ["reorderMinOrders", "minOrders"],
+    ["reorderMinGap", "minGapDays"],
+  ];
+
+  let reorderCanEdit = true;
+
+  function paintReorder(settings) {
+    REORDER_FIELDS.forEach(function (pair) {
+      const el = $id(pair[0]);
+      if (el && settings && settings[pair[1]] != null) el.value = settings[pair[1]];
+    });
+    // A read-only user still sees the numbers. Hiding them would make the
+    // Due/Overdue pills on the roster look arbitrary.
+    [["reorderSaveBtn"], ["reorderResetBtn"]].forEach(function (pair) {
+      const b = $id(pair[0]);
+      if (b) b.disabled = !reorderCanEdit;
+    });
+    REORDER_FIELDS.forEach(function (pair) {
+      const el = $id(pair[0]);
+      if (el) el.disabled = !reorderCanEdit;
+    });
+    const status = $id("reorderStatus");
+    if (status && !reorderCanEdit) {
+      status.textContent = "Read-only: changing these is limited to admins";
+    }
+  }
+
+  async function loadReorderSettings() {
+    if (!$id("reorderDue")) return;
+    try {
+      const d = await api.get(ENDPOINTS.reorderSettings);
+      reorderCanEdit = d.canEdit !== false;
+      window.__bbReorderDefaults = d.defaults || null;
+      paintReorder(d.settings);
+    } catch (e) {
+      const errEl = $id("reorderErr");
+      if (errEl) errEl.innerHTML = '<div class="err">Could not load reorder timing: ' + e.message + "</div>";
+    }
+  }
+
+  async function handleSaveReorder() {
+    const errEl = $id("reorderErr");
+    const statusEl = $id("reorderStatus");
+    if (errEl) errEl.innerHTML = "";
+
+    const payload = {};
+    let bad = false;
+    REORDER_FIELDS.forEach(function (pair) {
+      const el = $id(pair[0]);
+      const n = Number(el ? el.value : NaN);
+      if (!isFinite(n)) bad = true;
+      payload[pair[1]] = n;
+    });
+    if (bad) {
+      if (errEl) errEl.innerHTML = '<div class="err">Every field needs a number.</div>';
+      return;
+    }
+
+    if (statusEl) statusEl.textContent = "Saving...";
+    try {
+      const d = await api.patch(ENDPOINTS.reorderSettings, payload);
+      paintReorder(d.settings);
+      if (statusEl) statusEl.textContent = "Saved. MailMe picks this up on its next load.";
+    } catch (e) {
+      if (statusEl) statusEl.textContent = "";
+      if (errEl) errEl.innerHTML = '<div class="err">' + e.message + "</div>";
+    }
+  }
+
+  function handleResetReorder() {
+    const d = window.__bbReorderDefaults;
+    if (!d) return;
+    // Fills the boxes only. Nothing is stored until Save is pressed, so a
+    // misclick on Reset is not a silent change to everyone's screens.
+    paintReorder(d);
+    const statusEl = $id("reorderStatus");
+    if (statusEl) statusEl.textContent = "Defaults filled in. Press Save to apply them.";
+  }
+
   async function handleReconcile() {
     var btn = $id("reconcileBtn");
     var statusEl = $id("reconcileStatus");
@@ -10057,6 +10152,16 @@ export async function start(ctx) {
   $id("importBtn").addEventListener("click", handleImport);
   $id("resetBtn").addEventListener("click", handleReset);
   $id("reconcileBtn").addEventListener("click", handleReconcile);
+  (function wireReorderTiming() {
+    const save = $id("reorderSaveBtn");
+    const reset = $id("reorderResetBtn");
+    if (save) save.addEventListener("click", handleSaveReorder);
+    if (reset) reset.addEventListener("click", handleResetReorder);
+    // Fetched once on mount rather than on every visit to Settings: these
+    // change a few times a year, and a stale number here is visible and
+    // editable rather than silently acted on.
+    loadReorderSettings();
+  })();
   (function(){
     var b = $id("calcDistBtn");
     var bf = $id("calcDistForceBtn");
