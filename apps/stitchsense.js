@@ -60,6 +60,41 @@ function pct(n, digits = 0) {
   return (n * 100).toFixed(digits) + '%';
 }
 
+/**
+ * Is this a colour the canvas will actually accept?
+ *
+ * Asked by setting it and seeing whether it took. An invalid strokeStyle is
+ * silently IGNORED by canvas, leaving the previous colour in place, so a typo
+ * would render as "the picker did nothing" rather than as an error.
+ */
+/* TOKEN-EXEMPT: canvas-rendered images. Two known-different colours used only
+   as a probe; nothing is ever painted with them. They must be literal values,
+   since the whole test is whether canvas CHANGED from a known starting point. */
+const PROBE_COLORS = ['#000000', '#ffffff'];
+
+function isColor(value) {
+  const v = String(value || '').trim();
+  if (!v) return false;
+  const probe = document.createElement('canvas').getContext('2d');
+  // Set twice from two different starting points. A value canvas rejects
+  // leaves strokeStyle untouched, so it reads back as whichever probe colour
+  // preceded it, and the two reads disagree. A value canvas accepts overwrites
+  // both, and they agree.
+  probe.strokeStyle = PROBE_COLORS[0];
+  probe.strokeStyle = v;
+  const first = probe.strokeStyle;
+  probe.strokeStyle = PROBE_COLORS[1];
+  probe.strokeStyle = v;
+  return probe.strokeStyle === first;
+}
+
+/* TOKEN-EXEMPT: canvas-rendered images. The transparency checkerboard behind a
+   colourway preview. Rendered as a data URI rather than themed, because it has
+   to mean "nothing here" in both light and dark mode. */
+const CHECKER = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16'>" +
+  "<rect width='16' height='16' fill='%23ffffff'/><rect width='8' height='8' fill='%23e6e6e6'/>" +
+  "<rect x='8' y='8' width='8' height='8' fill='%23e6e6e6'/></svg>\")";
+
 function inches(units10thMm) {
   // DST coordinates are tenths of a millimetre.
   return (units10thMm * 0.1) / 25.4;
@@ -90,7 +125,14 @@ function decodeDst(arrayBuffer) {
   let minX = 0, maxX = 0, minY = 0, maxY = 0;
   let stitches = 0, jumps = 0, colorChanges = 0;
   let totalLen = 0;
-  const path = [];          // [x, y, penDown]
+  // [x, y, penDown, block]. The block index is what makes recolouring possible:
+  // a DST stores stitch coordinates and colour-CHANGE commands, but no colours
+  // at all (those live in the .emb or a companion file Wilcom keeps). So the
+  // file tells us where one thread stops and the next starts, and nothing about
+  // what either of them looked like. That is why a colourway picker is easy
+  // here: there is no baked-in colour to fight, only unnamed blocks.
+  const path = [];
+  let block = 0;
   let started = false;
 
   for (let i = 512; i + 2 < bytes.length; i += 3) {
@@ -138,14 +180,15 @@ function decodeDst(arrayBuffer) {
 
     if (isColorChange) {
       colorChanges++;
-      path.push([x, y, false]);
+      block++;
+      path.push([x, y, false, block]);
     } else if (isJump) {
       jumps++;
-      path.push([x, y, false]);
+      path.push([x, y, false, block]);
     } else {
       stitches++;
       totalLen += Math.sqrt(dx * dx + dy * dy);
-      path.push([x, y, true]);
+      path.push([x, y, true, block]);
     }
   }
 
@@ -237,34 +280,101 @@ const CANVAS_INK = {
   overlay: [214, 31, 122]
 };
 
-function renderDstThumb(design, size = 260) {
+/**
+ * Default thread palette for a fresh colourway.
+ *
+ * TOKEN-EXEMPT: these are thread colours painted onto a canvas, not app chrome.
+ * They have to survive being exported as a PNG and mailed to a customer, so
+ * they cannot follow the person's theme. Deliberately spread across the wheel
+ * rather than harmonised: the point of the first render is telling the blocks
+ * apart, and the AM recolours from there.
+ */
+const DEFAULT_THREADS = [
+  '#1B3A6B', '#C8102E', '#F2A900', '#0F7B4F',
+  '#4B2E83', '#E36325', '#00A3AD', '#8C8279',
+  '#111111', '#FFFFFF', '#7A1F3D', '#5B8F22'
+];
+
+/** How many separate thread blocks a decoded design actually has. */
+function blockCount(design) {
+  let max = 0;
+  for (const pt of design.path) if (pt[3] > max) max = pt[3];
+  return max + 1;
+}
+
+/**
+ * Render a decoded design to a canvas.
+ *
+ * One function for every render in the app: the library thumbnail, the estimate
+ * preview, and the colourway export. They differ only in options, so there is
+ * no second renderer that can drift and make the exported PNG disagree with
+ * what was on screen when the customer approved it.
+ *
+ * opts:
+ *   size         longest edge in pixels
+ *   colors       array of CSS colours, one per block; short arrays wrap
+ *   garment      background colour, or null for transparent
+ *   thickness    thread weight multiplier, 1 is normal
+ */
+function renderDesign(design, opts) {
+  const o = opts || {};
+  const size = o.size || 260;
+  const pad = Math.max(8, Math.round(size * 0.04));
+
   const wUnits = Math.max(1, design.maxX - design.minX);
   const hUnits = Math.max(1, design.maxY - design.minY);
-  const scale = (size - 16) / Math.max(wUnits, hUnits);
+  const scale = (size - pad * 2) / Math.max(wUnits, hUnits);
 
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(wUnits * scale) + 16);
-  canvas.height = Math.max(1, Math.round(hUnits * scale) + 16);
+  canvas.width = Math.max(1, Math.round(wUnits * scale) + pad * 2);
+  canvas.height = Math.max(1, Math.round(hUnits * scale) + pad * 2);
   const g = canvas.getContext('2d');
-  g.fillStyle = CANVAS_INK.paper;
-  g.fillRect(0, 0, canvas.width, canvas.height);
-  g.strokeStyle = CANVAS_INK.thread;
-  g.lineWidth = Math.max(0.6, scale * 3);
+
+  // Left transparent when no garment colour is set, which is what makes the
+  // export droppable onto a mockup.
+  if (o.garment) {
+    g.fillStyle = o.garment;
+    g.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  g.lineWidth = Math.max(0.6, scale * 3 * (o.thickness || 1));
   g.lineCap = 'round';
   g.lineJoin = 'round';
 
-  g.beginPath();
-  let px = null;
-  for (const [ux, uy, penDown] of design.path) {
-    const cx = (ux - design.minX) * scale + 8;
-    const cy = (uy - design.minY) * scale + 8;
-    if (penDown && px != null) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
-    px = [cx, cy];
-  }
-  g.stroke();
+  const colors = (o.colors && o.colors.length) ? o.colors : [CANVAS_INK.thread];
+  const total = blockCount(design);
 
-  // JPEG rather than PNG: a stitch render is thousands of short strokes, which
-  // PNG compresses badly, and one design record has to fit comfortably in KV.
+  // One pass per block, in stitch order. Drawing block by block rather than in
+  // one path is what makes overlaps land the way the machine will actually sew
+  // them: a later colour covering an earlier one on screen means it covers it
+  // on the garment too.
+  for (let b = 0; b < total; b++) {
+    g.strokeStyle = colors[b % colors.length];
+    g.beginPath();
+    let px = null;
+    for (const [ux, uy, penDown, blk] of design.path) {
+      const cx = (ux - design.minX) * scale + pad;
+      const cy = (uy - design.minY) * scale + pad;
+      if (blk === b && penDown && px != null) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
+      px = [cx, cy];
+    }
+    g.stroke();
+  }
+
+  return canvas;
+}
+
+/**
+ * Small library thumbnail. JPEG rather than PNG: a stitch render is thousands
+ * of short strokes, which PNG compresses badly, and one design record has to
+ * fit comfortably in KV.
+ */
+function renderDstThumb(design, size = 260) {
+  const canvas = renderDesign(design, {
+    size,
+    garment: CANVAS_INK.paper,
+    colors: [CANVAS_INK.thread]
+  });
   return canvas.toDataURL('image/jpeg', 0.72);
 }
 
@@ -508,6 +618,7 @@ export default {
     <div class="ss-page">
       <div id="ssEstimate"></div>
       <div id="ssLibrary" class="ss-hidden"></div>
+      <div id="ssColorway" class="ss-hidden"></div>
       <div id="ssGuess" class="ss-hidden"></div>
       <div id="ssAccuracy" class="ss-hidden"></div>
     </div>
@@ -534,6 +645,9 @@ export default {
       designs: [],
       seenDesignIds: [],
       currentDesign: null,
+      cwDesign: null,        // decoded design loaded in the colourway view
+      cwColors: [],
+      cwGarment: '#F2F2F2',  // TOKEN-EXEMPT: canvas paint, not app chrome
       session: { rounds: 0, points: 0, beats: 0 }
     };
 
@@ -545,6 +659,7 @@ export default {
     const map = {
       estimate: 'ssEstimate',
       library: 'ssLibrary',
+      colorway: 'ssColorway',
       guess: 'ssGuess',
       accuracy: 'ssAccuracy'
     };
@@ -553,6 +668,9 @@ export default {
       if (el) el.classList.toggle('ss-hidden', key !== view);
     }
     if (view === 'library') this.renderLibrary();
+    // Re-rendered only when there is nothing loaded, so switching tabs does not
+    // throw away a colourway somebody is part way through picking.
+    if (view === 'colorway' && !this.state.cwDesign) this.renderColorway();
     if (view === 'guess') this.renderGuess();
     if (view === 'accuracy') this.renderAccuracy();
   },
@@ -1253,6 +1371,269 @@ export default {
       };
     }
     return map;
+  },
+
+  /* ================================================================ *
+   * VIEW: COLORWAY
+   *
+   * Drop an embroidery file, see the design, assign a thread colour to each
+   * block, set a garment colour behind it, export a PNG.
+   *
+   * WHY THIS IS EASY, WHICH IS NOT OBVIOUS
+   * A DST does not store thread colours. It stores stitch coordinates and
+   * colour-CHANGE commands, nothing more; the actual colours live in Wilcom's
+   * .emb or a companion file. So the file hands us cleanly separated blocks
+   * with no opinion about what any of them should look like. There is no baked
+   * in colour to strip out or fight, which is exactly the shape a colourway
+   * picker wants.
+   *
+   * WHAT THIS IS NOT
+   * Not a Wilcom-quality proof. No thread sheen, no texture, no dimension.
+   * It reads accurately at mockup size and will not pass as a photograph of a
+   * sewn garment up close. The view says so on screen, because an AM emailing
+   * it to a customer as a finished proof is the one way this causes trouble.
+   * ================================================================ */
+
+  renderColorway() {
+    const el = this.root.querySelector('#ssColorway');
+    el.innerHTML = `
+      <div class="ss-hd">
+        <h1>Colorway</h1>
+        <div class="sub">
+          Drop an embroidery file to see the design and try thread colours against a garment
+          colour. Export a PNG when you have something to show the customer.
+        </div>
+      </div>
+      <div class="ss-card">
+        <div class="ss-drop" id="ssCwDrop">
+          <div class="big">Drop a DST here</div>
+          <div class="small">The file tells us where each thread block starts and stops.<br>It does not carry any colours, so you pick them.</div>
+        </div>
+        <input type="file" id="ssCwFile" accept=".dst" style="display:none">
+        <div class="ss-err ss-hidden" id="ssCwErr"></div>
+      </div>
+      <div id="ssCwEditor"></div>
+    `;
+
+    const drop = el.querySelector('#ssCwDrop');
+    const file = el.querySelector('#ssCwFile');
+    drop.addEventListener('click', () => file.click());
+    drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+    drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+    drop.addEventListener('drop', (e) => {
+      e.preventDefault(); drop.classList.remove('over');
+      const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
+      if (f) this.loadColorway(f);
+    });
+    file.addEventListener('change', () => {
+      if (file.files && file.files[0]) this.loadColorway(file.files[0]);
+    });
+  },
+
+  async loadColorway(f) {
+    const err = this.root.querySelector('#ssCwErr');
+    err.classList.add('ss-hidden');
+    try {
+      if (!/\.dst$/i.test(f.name)) throw new Error('That is not a DST. Colorway needs the embroidery file, not the artwork.');
+      const decoded = decodeDst(await f.arrayBuffer());
+      if (!decoded) throw new Error('That DST could not be decoded. Check it is a Tajima DST and not a renamed file.');
+
+      this.state.cwDesign = decoded;
+      this.state.cwName = f.name.replace(/\.dst$/i, '');
+      // Seed each block from the default palette so the first render is
+      // legible. Every block a different colour is not a suggestion, it is the
+      // fastest way to see how many there are and where each one sits.
+      const n = blockCount(decoded);
+      this.state.cwColors = Array.from({ length: n }, (_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
+      this.drawColorwayEditor();
+    } catch (e) {
+      err.textContent = String((e && e.message) || e);
+      err.classList.remove('ss-hidden');
+    }
+  },
+
+  drawColorwayEditor() {
+    const d = this.state.cwDesign;
+    const box = this.root.querySelector('#ssCwEditor');
+    const n = this.state.cwColors.length;
+
+    box.innerHTML = `
+      <div class="ss-cols">
+        <div>
+          <div class="ss-card">
+            <h2>Preview</h2>
+            <div class="ss-preview" id="ssCwStage"></div>
+            <div class="ss-overlay-note">
+              ${esc(this.state.cwName)} &middot; ${fmt(d.stitches)} stitches &middot;
+              ${n} thread block${n === 1 ? '' : 's'} &middot;
+              ${d.wIn.toFixed(2)} by ${d.hIn.toFixed(2)} inches
+            </div>
+          </div>
+          <div class="ss-flag fair">
+            This is clean line work, not a Wilcom proof. No thread sheen, no texture, no
+            dimension. It reads right at mockup size and will not pass as a photo of a sewn
+            garment up close, so do not send it as a final proof.
+          </div>
+        </div>
+
+        <div>
+          <div class="ss-card">
+            <h2>Threads</h2>
+            <div class="ss-muted" style="margin-bottom:10px">
+              Blocks are listed in sewing order. A block further down covers the ones above it,
+              on screen and on the garment.
+            </div>
+            <div id="ssCwBlocks"></div>
+
+            <h3>Garment</h3>
+            <div class="ss-guessrow">
+              <div class="ss-field" style="flex:0 0 70px">
+                <input type="color" id="ssCwGarment" value="${esc(this.state.cwGarment)}">
+              </div>
+              <div class="ss-field">
+                <label for="ssCwGarmentHex">Colour</label>
+                <input type="text" id="ssCwGarmentHex" value="${esc(this.state.cwGarment)}">
+              </div>
+              <button class="ss-btn ghost" id="ssCwClear">No background</button>
+            </div>
+
+            <h3>Export</h3>
+            <div class="ss-pair">
+              <div class="ss-field">
+                <label for="ssCwSize">Size (pixels)</label>
+                <select id="ssCwSize">
+                  <option value="600">600, on screen</option>
+                  <option value="1200" selected>1200, email</option>
+                  <option value="2400">2400, print</option>
+                </select>
+              </div>
+              <div class="ss-field">
+                <label for="ssCwThick">Thread weight</label>
+                <select id="ssCwThick">
+                  <option value="0.8">Light</option>
+                  <option value="1" selected>Normal</option>
+                  <option value="1.3">Heavy</option>
+                </select>
+              </div>
+            </div>
+            <div class="ss-btnrow">
+              <button class="ss-btn" id="ssCwPng">Download PNG</button>
+              <button class="ss-btn ghost" id="ssCwReset">Reset colours</button>
+            </div>
+            <div class="ss-muted" style="margin-top:8px">
+              With no background set the PNG exports transparent, so it drops straight onto a
+              garment mockup.
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.drawColorwayBlocks();
+    this.wireColorway();
+    this.paintColorway();
+  },
+
+  drawColorwayBlocks() {
+    const box = this.root.querySelector('#ssCwBlocks');
+    box.innerHTML = this.state.cwColors.map((c, i) => `
+      <div class="ss-guessrow" style="margin-bottom:8px">
+        <div class="ss-field" style="flex:0 0 70px;margin-bottom:0">
+          <input type="color" data-block="${i}" value="${esc(c)}">
+        </div>
+        <div class="ss-field" style="margin-bottom:0">
+          <label for="ssCwHex${i}">Block ${i + 1}</label>
+          <input type="text" id="ssCwHex${i}" data-blockhex="${i}" value="${esc(c)}">
+        </div>
+      </div>
+    `).join('');
+
+    box.querySelectorAll('[data-block]').forEach((inp) => {
+      inp.addEventListener('input', () => {
+        const i = Number(inp.getAttribute('data-block'));
+        this.state.cwColors[i] = inp.value;
+        const hex = box.querySelector(`[data-blockhex="${i}"]`);
+        if (hex) hex.value = inp.value;
+        this.paintColorway();
+      });
+    });
+    box.querySelectorAll('[data-blockhex]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const i = Number(inp.getAttribute('data-blockhex'));
+        // Typed values get validated before they reach the canvas: an invalid
+        // colour makes strokeStyle silently keep the PREVIOUS block's colour,
+        // so a typo would look like the picker had ignored the click.
+        if (!isColor(inp.value)) { inp.value = this.state.cwColors[i]; return; }
+        this.state.cwColors[i] = inp.value;
+        const pick = box.querySelector(`[data-block="${i}"]`);
+        if (pick && /^#[0-9a-f]{6}$/i.test(inp.value)) pick.value = inp.value;
+        this.paintColorway();
+      });
+    });
+  },
+
+  wireColorway() {
+    const root = this.root;
+    const garment = root.querySelector('#ssCwGarment');
+    const garmentHex = root.querySelector('#ssCwGarmentHex');
+
+    garment.addEventListener('input', () => {
+      this.state.cwGarment = garment.value;
+      garmentHex.value = garment.value;
+      this.paintColorway();
+    });
+    garmentHex.addEventListener('change', () => {
+      if (!isColor(garmentHex.value)) { garmentHex.value = this.state.cwGarment || ''; return; }
+      this.state.cwGarment = garmentHex.value;
+      if (/^#[0-9a-f]{6}$/i.test(garmentHex.value)) garment.value = garmentHex.value;
+      this.paintColorway();
+    });
+    root.querySelector('#ssCwClear').addEventListener('click', () => {
+      this.state.cwGarment = null;
+      garmentHex.value = '';
+      this.paintColorway();
+    });
+
+    root.querySelector('#ssCwThick').addEventListener('change', () => this.paintColorway());
+    root.querySelector('#ssCwReset').addEventListener('click', () => {
+      this.state.cwColors = this.state.cwColors.map((_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
+      this.drawColorwayBlocks();
+      this.paintColorway();
+    });
+    root.querySelector('#ssCwPng').addEventListener('click', () => this.exportColorway());
+  },
+
+  paintColorway() {
+    const stage = this.root.querySelector('#ssCwStage');
+    if (!stage || !this.state.cwDesign) return;
+    const thickness = Number((this.root.querySelector('#ssCwThick') || {}).value || 1);
+    const canvas = renderDesign(this.state.cwDesign, {
+      size: 520,
+      colors: this.state.cwColors,
+      garment: this.state.cwGarment,
+      thickness
+    });
+    // A transparent export over a white card looks like a white garment, which
+    // is misleading. The checker makes "no background" visibly mean no
+    // background rather than accidentally reading as white.
+    stage.style.backgroundImage = this.state.cwGarment ? 'none' : CHECKER;
+    stage.innerHTML = '';
+    stage.appendChild(canvas);
+  },
+
+  exportColorway() {
+    const size = Number((this.root.querySelector('#ssCwSize') || {}).value || 1200);
+    const thickness = Number((this.root.querySelector('#ssCwThick') || {}).value || 1);
+    const canvas = renderDesign(this.state.cwDesign, {
+      size,
+      colors: this.state.cwColors,
+      garment: this.state.cwGarment,
+      thickness
+    });
+    const a = document.createElement('a');
+    a.download = (this.state.cwName || 'design') + '-colorway.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
   },
 
   /* ================================================================ *
