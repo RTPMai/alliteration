@@ -72,6 +72,19 @@ function pct(n, digits = 0) {
    since the whole test is whether canvas CHANGED from a known starting point. */
 const PROBE_COLORS = ['#000000', '#ffffff'];
 
+/**
+ * Show a colour input as a filled box.
+ *
+ * The swatch inside <input type="color"> is a browser-internal pseudo-element
+ * and how much of it is stylable varies. Rather than depend on that, the
+ * element's OWN background is painted, so the control shows its colour even
+ * where the pseudo-element rules are ignored. This shipped twice as a thin
+ * line before it was done this way.
+ */
+function paintSwatch(input) {
+  if (input) input.style.backgroundColor = input.value;
+}
+
 function isColor(value) {
   const v = String(value || '').trim();
   if (!v) return false;
@@ -803,17 +816,23 @@ export default {
 
     /* Colour inputs need their own rules. The shared padding above squeezes the
        native swatch down to a thin line, so the control reads as an empty field
-       with a rule through it rather than as the colour it is holding. Padding
-       goes to zero and the swatch is given the whole box. */
+       with a rule through it rather than as the colour it holds. The
+       appearance reset is the part that matters: without it the browser keeps
+       its own internal layout and ignores the swatch rules below entirely. */
     .ss-field input[type="color"] {
+      -webkit-appearance: none;
+      -moz-appearance: none;
+      appearance: none;
       padding: 0;
       height: 38px;
-      background: none;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
       cursor: pointer;
+      overflow: hidden;
     }
-    .ss-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 3px; }
-    .ss-field input[type="color"]::-webkit-color-swatch { border: none; border-radius: 3px; }
-    .ss-field input[type="color"]::-moz-color-swatch { border: none; border-radius: 3px; }
+    .ss-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; border: none; }
+    .ss-field input[type="color"]::-webkit-color-swatch { border: none; border-radius: 0; }
+    .ss-field input[type="color"]::-moz-color-swatch { border: none; border-radius: 0; }
     .ss-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
     .ss-btn {
@@ -1861,11 +1880,13 @@ export default {
     `).join('');
 
     box.querySelectorAll('[data-block]').forEach((inp) => {
+      paintSwatch(inp);
       inp.addEventListener('input', () => {
         const i = Number(inp.getAttribute('data-block'));
         this.state.cwColors[i] = inp.value;
         const hex = box.querySelector(`[data-blockhex="${i}"]`);
         if (hex) hex.value = inp.value;
+        paintSwatch(inp);
         this.paintColorway();
       });
     });
@@ -1879,7 +1900,7 @@ export default {
         if (!isColor(inp.value)) { inp.value = this.state.cwColors[i]; return; }
         this.state.cwColors[i] = inp.value;
         const pick = box.querySelector(`[data-block="${i}"]`);
-        if (pick && /^#[0-9a-f]{6}$/i.test(inp.value)) pick.value = inp.value;
+        if (pick && /^#[0-9a-f]{6}$/i.test(inp.value)) { pick.value = inp.value; paintSwatch(pick); }
         this.paintColorway();
       });
     });
@@ -1899,6 +1920,32 @@ export default {
     mirror.addEventListener('click', () => {
       this.state.cwMirror = !this.state.cwMirror;
       mirror.setAttribute('aria-pressed', String(this.state.cwMirror));
+      this.paintColorway();
+    });
+
+    // ---- garment ----
+    // These handlers were lost when the thread chart panel was removed: the
+    // chart block sat directly above them and the cut took them with it. The
+    // colour picker and the No background button both did nothing.
+    const garment = root.querySelector('#ssCwGarment');
+    const garmentHex = root.querySelector('#ssCwGarmentHex');
+    paintSwatch(garment);
+
+    garment.addEventListener('input', () => {
+      this.state.cwGarment = garment.value;
+      garmentHex.value = garment.value;
+      paintSwatch(garment);
+      this.paintColorway();
+    });
+    garmentHex.addEventListener('change', () => {
+      if (!isColor(garmentHex.value)) { garmentHex.value = this.state.cwGarment || ''; return; }
+      this.state.cwGarment = garmentHex.value;
+      if (/^#[0-9a-f]{6}$/i.test(garmentHex.value)) { garment.value = garmentHex.value; paintSwatch(garment); }
+      this.paintColorway();
+    });
+    root.querySelector('#ssCwClear').addEventListener('click', () => {
+      this.state.cwGarment = null;
+      garmentHex.value = '';
       this.paintColorway();
     });
 
