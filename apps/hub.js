@@ -84,6 +84,35 @@ function flowRow([fromId, to, what]) {
     </tr>`;
 }
 
+/**
+ * Replace any logo <img> that failed to load with a plain lettered badge.
+ *
+ * Handles the already-failed case as well as the still-loading one: by the time
+ * this runs a cached 404 has often resolved, and an error listener attached
+ * afterwards would never fire.
+ */
+function swapMissingArtwork(root) {
+  const swap = (img) => {
+    const el = document.createElement('div');
+    if (img.hasAttribute('data-fallback-mark')) {
+      el.className = 'app-mark-fallback';
+      el.textContent = img.getAttribute('data-fallback-mark') || '?';
+    } else {
+      el.className = 'app-wordmark-fallback';
+      el.textContent = img.getAttribute('data-fallback-word') || '';
+    }
+    if (img.parentNode) img.parentNode.replaceChild(el, img);
+  };
+
+  root.querySelectorAll('[data-fallback-mark], [data-fallback-word]').forEach((img) => {
+    if (img.complete) {
+      if (!img.naturalWidth) swap(img);
+      return;
+    }
+    img.addEventListener('error', () => swap(img), { once: true });
+  });
+}
+
 /* One skeleton card per app; mount() fills the metric/line/pill nodes in. */
 function appCard(app, sample) {
   const planned = app.stub;
@@ -95,11 +124,14 @@ function appCard(app, sample) {
 
   return `
     <button class="app${planned ? ' planned' : ''}"
+            style="--mark:${app.accent || 'var(--muted)'}"
             ${planned ? 'disabled' : `data-goto="${app.id}"`}>
       <div class="app-hd">
-        <img class="app-mark" src="/assets/logos/${app.id}-mark.svg" alt="" width="34" height="34">
+        <img class="app-mark" src="/assets/logos/${app.id}-mark.svg" alt="" width="34" height="34"
+             data-fallback-mark="${esc(app.letter || app.name.charAt(0))}">
         <div>
-          <img class="app-wordmark" src="/assets/logos/${app.id}-wordmark.svg" alt="${esc(app.name)}">
+          <img class="app-wordmark" src="/assets/logos/${app.id}-wordmark.svg" alt="${esc(app.name)}"
+               data-fallback-word="${esc(app.name)}">
           <div class="app-role">${esc(app.role || app.blurb)}</div>
         </div>
       </div>
@@ -160,6 +192,13 @@ export default {
     // Only apps this person can open; matches the rail.
     const visible = APPS.filter((a) => canAccess(ctx.perms, a.id));
     $('#hubApps').innerHTML = visible.map((a) => appCard(a, sampleApps.includes(a.id))).join('');
+
+    // An app can ship before its logo does. PromoPro did; StitchSense does.
+    // Without this the hub shows two broken-image icons, which reads as a
+    // failed deploy rather than as artwork nobody has drawn yet. The swap is
+    // driven off the real load result, not off a hardcoded list of which apps
+    // have art, so it fixes itself the moment a logo file lands.
+    swapMissingArtwork(root);
 
     root.querySelectorAll('[data-goto]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -334,6 +373,43 @@ export default {
             [[String(active), 'Active']].concat(soon ? [[String(soon), 'Anniversaries soon']] : []),
             soon ? soon + ' in the next 60 days' : 'Nothing coming up');
         } catch (e) { setCard('crewcore', [], 'Could not load the roster.'); }
+      })());
+    }
+
+    // ---- StitchSense: library size, and how the estimator is really doing. ----
+    // The live error figure is the one worth surfacing on the hub. The archive
+    // validation number (18.6 %) is fixed and already in the app; what changes,
+    // and what nobody would otherwise look at, is whether that holds up once a
+    // customer PNG is the input instead of a finished DST.
+    if (has('stitchsense')) {
+      jobs.push((async () => {
+        try {
+          const d = await api.get(ENDPOINTS.ssenseDesigns);
+          const designs = listOf(d, ['designs']);
+          if (!designs) return notWired('stitchsense');
+
+          let closed = 0, medErr = null;
+          try {
+            const e = await api.get(ENDPOINTS.ssenseEstimates, { withActual: 1 });
+            const done = listOf(e, ['estimates']) || [];
+            closed = done.length;
+            if (closed) {
+              const errs = done
+                .map((x) => Math.abs(x.likely - x.actualStitches) / x.actualStitches)
+                .sort((m, n) => m - n);
+              medErr = errs[Math.floor(errs.length / 2)];
+            }
+          } catch (err) { /* the log is optional; the library count still stands */ }
+
+          setCard('stitchsense',
+            [[String(designs.length), 'Designs']].concat(
+              // Under about 20 closed jobs the median is noise, so it is not
+              // shown at all rather than shown with a caveat nobody reads.
+              closed >= 20 && medErr != null ? [[(medErr * 100).toFixed(0) + '%', 'Live error']] : []),
+            closed
+              ? closed + ' quote' + (closed === 1 ? '' : 's') + ' checked against the real count'
+              : 'No quotes checked against a real count yet');
+        } catch (e) { setCard('stitchsense', [], 'Could not load the design library.'); }
       })());
     }
 
