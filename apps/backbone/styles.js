@@ -1,4 +1,3 @@
-// PUT IN: apps/backbone/styles.js
 /**
  * BackBone — styles.
  *
@@ -150,6 +149,16 @@ input.field:focus,textarea.field:focus,select.field:focus{outline:2px solid var(
 textarea.field{min-height:60px;resize:vertical}
 .modal-ft{padding:14px 20px;border-top:1px solid var(--line);display:flex;align-items:center;gap:10px}
 .save-status{font-size:12px;color:var(--muted)}
+/* Reorder timing fields. Auto-fit rather than a fixed column count so the
+   five inputs wrap sensibly instead of squeezing on a narrow window. */
+.reorder-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:14px;margin:14px 0 16px}
+.reorder-grid label{display:block;font-size:12px;font-weight:600;color:var(--muted)}
+.reorder-grid input{width:100%;margin-top:5px;padding:8px 10px;font-family:inherit;
+  font-size:13px;border:1px solid var(--line);border-radius:6px;background:var(--card);
+  color:var(--ink)}
+.reorder-grid .reorder-hint{display:block;margin-top:4px;font-size:11px;
+  font-weight:400;color:var(--faint)}
 
 .import-textarea{width:100%;min-height:180px;padding:10px;border:1px solid var(--line);border-radius:6px;font-size:12px;font-family:monospace;background:var(--head-bg);margin-bottom:10px}
 .err{background:var(--danger-tint);border:1px solid var(--danger-line);border-radius:8px;padding:10px 14px;color:var(--danger);font-size:13px;margin-bottom:10px}
