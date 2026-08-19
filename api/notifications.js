@@ -126,7 +126,12 @@ async function searchLinkable(type, q, sess) {
 // which asserts this list against js/registry.js's real app ids.
 const APP_IDS = [
   "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
-  "crewcore", "mailme", "teletally", "websitewidget", GENERAL_APP,
+  "crewcore", "mailme", "teletally", "websitewidget",
+  // Added when each app landed. This list is hand-synced, so an app missing
+  // from it cannot be tagged on a hand-off even though it exists in the rail:
+  // promopro and stitchsense were both in that state.
+  "promopro", "stitchsense",
+  GENERAL_APP,
 ];
 
 async function callerIsAdmin(sess) {
