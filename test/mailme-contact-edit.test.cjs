@@ -111,16 +111,23 @@ t.test('the shared contact editor opens for every source now, not just prospects
 });
 
 t.test('the editor explains that a non-prospect edit is a MailMe-local overlay, not a change to the source app', () => {
-  t.assert(/does not change/.test(appSrc) && /original record/.test(appSrc),
+  t.assert(/does not\s+change/.test(appSrc) && /original record/.test(appSrc),
     'the editor should tell the user a client/lead/giving edit only affects what MailMe shows, ' +
     'not the record BackBone/GivingGauge actually owns');
 });
 
-t.test('Edit appears on every row, in both Contacts and the list members panel', () => {
+t.test('Edit appears on every row, whether the table is showing the roster or a list', () => {
+  // Contacts and list members became ONE table in the Aug 2026 restructure
+  // (lists are a filter over the roster, not a separate screen), so there is
+  // one unconditional Edit button instead of two that could disagree.
   t.assert(/data-editct="\$\{esc\(ct\.id\)\}">Edit</.test(appSrc),
-    'the Contacts table Edit button should render unconditionally, not gated on source');
-  t.assert(/data-editmember="\$\{esc\(m\.id\)\}">Edit</.test(appSrc),
-    'the list members panel Edit button should render unconditionally, not gated on source');
+    'the Edit button should render unconditionally, not gated on source');
+  const fn = appSrc.slice(appSrc.indexOf('function renderContactsTable'));
+  const body = fn.slice(0, fn.indexOf('function wireListTools'));
+  t.assert(/listMode/.test(body),
+    'the one table must handle both the roster and a selected list');
+  t.assert(/rows\.find\(\(x\) => x\.id === b\.dataset\.editct\)/.test(body),
+    'Edit must resolve against whichever rows are on screen, roster or list members');
 });
 
 t.test('Delete stays prospect-only (deleting a client/lead/giving contact makes no sense here)', () => {
@@ -140,13 +147,22 @@ t.test('saving the editor sends company_name/contact_name/title/phone/city/state
   t.assert(/api\.patch\(ENDPOINTS\.mmContacts/.test(body), 'saveContactEditor must PATCH through ENDPOINTS.mmContacts');
 });
 
-t.test('saving refreshes contacts, lists, and a currently-open list members panel', () => {
+t.test('saving refreshes contacts, lists, and any list currently selected', () => {
+  // There is one reload path now (refreshAudience), so a change made from a
+  // list row and the same change made from the roster cannot leave the two in
+  // different states. That single function is what this asserts on.
   const fn = appSrc.slice(appSrc.indexOf('async function saveContactEditor'));
-  const body = fn.slice(0, fn.indexOf('async function', fn.indexOf('async function') + 1));
-  t.assert(/loadContacts\(\)/.test(body), 'saveContactEditor must reload contacts');
-  t.assert(/state\.viewingListId/.test(body),
-    'saveContactEditor must refresh the open list members panel if one is showing, so an edited ' +
-    'company name updates there too without a manual reopen');
+  const body = fn.slice(0, fn.indexOf('\n    /* ----------------', 10));
+  t.assert(/refreshAudience\(\)/.test(body),
+    'saveContactEditor must go through the shared audience reload');
+
+  const rf = appSrc.slice(appSrc.indexOf('async function refreshAudience'));
+  const rbody = rf.slice(0, rf.indexOf('\n    /* ----------------'));
+  t.assert(/loadContacts\(\)/.test(rbody), 'the shared reload must refetch contacts');
+  t.assert(/loadLists\(\)/.test(rbody), 'and lists, so member counts move too');
+  t.assert(/state\.activeListId/.test(rbody),
+    'and re-resolve the selected list, so an edited company name updates there ' +
+    'without a manual reopen');
 });
 
 process.exit(t.report());
