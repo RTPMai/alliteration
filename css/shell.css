@@ -1,6 +1,4 @@
-/* PUT IN: css/shell.css (REPLACES the current one) */
-/* (this banner line is for verification only, delete it after checking the path) */
-
+/* css/shell.css */
 /* ==========================================================================
    alliteration. — shell chrome
    Header, left rail, sub-nav, view host, and the shared component vocabulary
@@ -430,8 +428,8 @@ td.credited { color: var(--success-dk); }
 /* Real brand artwork (assets/logos/<id>-mark.svg, assets/logos/<id>-wordmark.svg)
    replaces the old CSS-built letter badge and w1/w2 text lockup. Each file
    carries its own accent color baked into the art, so nothing here needs the
-   --mark variable anymore; it stays on the button element for the footer dot
-   and other chrome that still wants it. */
+   --mark variable anymore. It is still set on the button element, for the
+   footer dot, other chrome that wants it, and the lettered fallback below. */
 .app-mark {
   width: 34px; height: 34px;
   flex: none;
@@ -465,6 +463,29 @@ td.credited { color: var(--success-dk); }
 .app.planned:hover { transform: none; box-shadow: none; }
 .app.planned .app-mark,
 .app.planned .app-wordmark { filter: grayscale(1); opacity: .5; }
+
+/* FALLBACK FOR APPS WITH NO ARTWORK YET.
+   The card asks for assets/logos/<id>-mark.svg and -wordmark.svg. An app that
+   ships before its logo does (PromoPro did, StitchSense does) otherwise renders
+   two broken-image icons on the hub, which reads as a deploy fault rather than
+   as artwork that has not been drawn yet. apps/hub.js swaps the <img> for these
+   on load failure. The accent comes from the registry's display-only `accent`
+   field, passed in as --mark, so this stays out of tokens.css's business. */
+.app-mark-fallback {
+  width: 34px; height: 34px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--mark, var(--muted));
+  color: var(--on-accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 16px; font-weight: 800; line-height: 1;
+}
+.app-wordmark-fallback {
+  display: block;
+  font-size: 15px; font-weight: 800; letter-spacing: -.02em;
+  color: var(--ink);
+  margin-bottom: 3px;
+}
 
 /* ==========================================================================
    SHELL-LEVEL STATES
