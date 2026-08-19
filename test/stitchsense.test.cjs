@@ -394,6 +394,30 @@ Promise.all([
       'hiding connectors must be defeatable, and on by default');
   });
 
+  t.test('every control in the colourway view is actually wired', () => {
+    // The garment picker and the No background button lost their handlers when
+    // an unrelated panel above them was removed, and nothing caught it: the
+    // controls still rendered, they just did nothing. Every id in the markup
+    // must have a listener attached somewhere in the file.
+    const src = read('apps/stitchsense.js');
+    ['ssCwGarment', 'ssCwGarmentHex', 'ssCwClear', 'ssCwRotL', 'ssCwRotR',
+     'ssCwMirror', 'ssCwThick', 'ssCwStyle', 'ssCwConnect', 'ssCwSize',
+     'ssCwPng', 'ssCwReset'].forEach((id) => {
+      const uses = (src.match(new RegExp(id, 'g')) || []).length;
+      t.assert(uses >= 2, id + ' appears in the markup but is never wired up');
+    });
+  });
+
+  t.test('colour inputs are painted, not left to the browser swatch', () => {
+    // The swatch inside an <input type="color"> is a browser-internal
+    // pseudo-element and how much of it is stylable varies. Relying on it
+    // shipped a thin line twice.
+    const src = read('apps/stitchsense.js');
+    t.assert(src.includes('function paintSwatch('), 'there is no swatch painter');
+    t.assert(/appearance: none/.test(src),
+      'without an appearance reset the browser ignores the swatch rules entirely');
+  });
+
   t.test('the colourway view says what it is not', () => {
     const src = read('apps/stitchsense.js');
     t.assert(/not a Wilcom proof|not a Wilcom-quality/i.test(src),
