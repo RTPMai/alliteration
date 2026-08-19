@@ -311,6 +311,65 @@ Promise.all([
       'typed block colours must be validated');
   });
 
+  t.test('Y is flipped, because DST and canvas disagree about which way is up', () => {
+    // DST measures Y upward from the origin; a canvas measures it downward.
+    // Mapping straight across renders every design vertically mirrored, which
+    // is subtle on a symmetrical logo and obvious on anything with text in it.
+    // This shipped wrong once.
+    const src = read('apps/stitchsense.js');
+    // The projection lives in pt(), shared by the flat and threaded renderers,
+    // so there is one place this can be got wrong rather than two.
+    t.assert(/\(design\.maxY - uy\) \* scale/.test(src),
+      'renderDesign must map Y from maxY downward, not from minY upward');
+    t.assert(!/const cy = \(uy - design\.minY\) \* scale \+ pad/.test(src),
+      'the old upward mapping is still in the render path');
+  });
+
+  t.test('rotation and mirroring are a transform, not rewritten coordinates', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(/g\.rotate\(turns \* Math\.PI \/ 2\)/.test(src),
+      'quarter turns must be applied as a canvas transform');
+    t.assert(/if \(o\.mirror\) g\.scale\(-1, 1\)/.test(src), 'mirroring is missing');
+    t.assert(/swap \? drawH : drawW/.test(src),
+      'a quarter turn must swap the canvas dimensions or the design is cropped');
+  });
+
+  t.test('thread rendering is four passes, not one thicker line', () => {
+    // Thread reads as thread because of a cast shadow, a dark cylinder edge, a
+    // body, and a highlight down its length. Drop any one and it goes back to
+    // looking like a diagram with fat lines.
+    const src = read('apps/stitchsense.js');
+    t.assert(src.includes('function drawThreaded('), 'the threaded renderer is missing');
+    ['Pass 1', 'Pass 2', 'Pass 3', 'Pass 4'].forEach((p) =>
+      t.assert(src.includes(p), 'missing render pass: ' + p));
+    t.assert(src.includes('function shade('), 'there is no way to derive the edge and highlight colours');
+  });
+
+  t.test('the highlight is offset perpendicular to each stitch', () => {
+    // A fixed light-vector offset displaces a stitch lying parallel to the
+    // light by almost nothing, so fills come out flat while outlines look
+    // round. This was wrong on the first pass and the fills gave it away.
+    const src = read('apps/stitchsense.js');
+    t.assert(/let nx = -dy \/ len;[\s\S]{0,60}let ny = dx \/ len;/.test(src),
+      'the highlight offset must be the unit perpendicular of each stitch');
+    t.assert(/if \(nx \* lx \+ ny \* ly < 0\)/.test(src),
+      'the perpendicular must be flipped toward the light, or half the stitches light the wrong side');
+  });
+
+  t.test('the sheen is deterministic, not random', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(!/Math\.random/.test(src),
+      'a customer comparing yesterday\'s proof to today\'s must not see the sheen move');
+  });
+
+  t.test('a transparent export gets no fabric texture', () => {
+    // There is no garment to texture, and a weave baked into a transparent PNG
+    // would tile across whatever mockup it is dropped onto.
+    const src = read('apps/stitchsense.js');
+    t.assert(/if \(o\.garment\) \{[\s\S]{0,400}paintWeave/.test(src),
+      'the weave must only be painted when a garment colour was set');
+  });
+
   t.test('the colourway view says what it is not', () => {
     const src = read('apps/stitchsense.js');
     t.assert(/not a Wilcom proof|not a Wilcom-quality/i.test(src),
