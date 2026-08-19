@@ -800,6 +800,20 @@ export default {
       background: var(--card); color: var(--ink);
     }
     .ss-field input:focus, .ss-field select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+
+    /* Colour inputs need their own rules. The shared padding above squeezes the
+       native swatch down to a thin line, so the control reads as an empty field
+       with a rule through it rather than as the colour it is holding. Padding
+       goes to zero and the swatch is given the whole box. */
+    .ss-field input[type="color"] {
+      padding: 0;
+      height: 38px;
+      background: none;
+      cursor: pointer;
+    }
+    .ss-field input[type="color"]::-webkit-color-swatch-wrapper { padding: 3px; }
+    .ss-field input[type="color"]::-webkit-color-swatch { border: none; border-radius: 3px; }
+    .ss-field input[type="color"]::-moz-color-swatch { border: none; border-radius: 3px; }
     .ss-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
     .ss-btn {
