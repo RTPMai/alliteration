@@ -266,6 +266,35 @@ export const APPS = [
     ],
     defaultView: 'dashboard',
     stub: false
+  },
+  {
+    id: 'stitchsense',
+    name: 'StitchSense',
+    w1: 'Stitch', w2: 'Sense', letter: 'S',
+    role: 'What it costs to sew',
+    blurb: 'Stitch count estimating, design library, and the guessing game.',
+    accent: '#D61F7A',           // display only (rail dot / app mark); tokens.css owns theming
+    // Built Aug 2026. The model behind it (lib/stitchsense/model.js) was
+    // fitted on 5,904 archive DST files with grouped cross validation, and
+    // replaces the earlier prototype's flat "covered area x 1666" rule.
+    //
+    // FOUR VIEWS, and the last two are not decoration:
+    //   estimate   what an AM opens to quote a job
+    //   library    the archive, and the accurate requote-at-a-new-size path
+    //   guess      Stitch Guess, the training game for the embroidery team.
+    //              It collects design-character labels, which is the feature
+    //              that failed validation when it was scraped from filenames.
+    //   accuracy   estimate versus actual on real jobs. The archive says the
+    //              model is 18.6% off; only this view can say whether that
+    //              holds once a customer PNG is the input instead of a DST.
+    views: [
+      ['estimate', 'Estimate'],
+      ['library', 'Library'],
+      ['guess', 'Stitch Guess'],
+      ['accuracy', 'Accuracy']
+    ],
+    defaultView: 'estimate',
+    stub: false
   }
 ];
 
