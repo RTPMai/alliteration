@@ -61,6 +61,7 @@ const LIVE_PREFIXES = [
   '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
+  '/api/reorder-settings',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
   // the 's' vs 'e' at position 10 keeps them distinct.)
@@ -214,6 +215,10 @@ export const ENDPOINTS = {
   // provider dashboard from memory.
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
+  // Reorder timing thresholds. NOT a MailMe endpoint despite MailMe being the
+  // heaviest reader: BackBone owns them (they describe the customer, not the
+  // email), so the path sits at the top level rather than under /api/mailme/.
+  reorderSettings: '/api/reorder-settings',
   // Read-only Resend domain verification check, surfaced in Settings.
   mmDomains:       '/api/mailme/domains',
   // Public, called from unsubscribe.html rather than the shell.
