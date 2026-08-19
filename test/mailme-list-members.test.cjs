@@ -19,74 +19,95 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 const src = read('apps/mailme.js');
 
-t.test('the members panel renders into the shared modal', () => {
-  // Was a #mmListMembers container inline in the Lists view. It is now the
-  // same modal Results and the editors use, so the assertion is that it
-  // routes through setModalContent under the 'members' kind rather than
-  // writing into a container that no longer exists.
+/* THE MEMBERS PANEL IS GONE, and that is the point of the Aug 2026
+   restructure. Lists stopped being a separate screen with their own table:
+   they are a filter over the ONE contacts table on Audience. So these tests
+   assert the merged behaviour rather than a panel that no longer exists.
+   Everything below about HOW membership is edited is unchanged, because that
+   logic was correct and moved across intact. */
+
+t.test('a list is a filter over the one contacts table, not a separate panel', () => {
   t.assert(!/id="mmListMembers"/.test(src),
     'the old inline members container should be gone');
-  const fn = src.slice(src.indexOf('async function viewListMembers'));
-  t.assert(/setModalContent\([^)]*'members'\)/.test(fn.slice(0, 900)),
-    'viewListMembers must open the members modal');
-  t.assert(/closeModalIf\('members'\)/.test(src),
-    'closing the panel must close that modal specifically, not whatever is open');
+  t.assert(!/function renderListMembersPanel/.test(src),
+    'the separate members panel renderer should be gone: one table renders both');
+  t.assert(/function renderContactsTable/.test(src),
+    'the shared table renderer is missing');
+  const fn = src.slice(src.indexOf('function renderContactsTable'));
+  const body = fn.slice(0, fn.indexOf('function wireListTools'));
+  t.assert(/state\.activeListId/.test(body) && /state\.activeListMembers/.test(body),
+    'the table must render list members when a list is selected');
 });
 
-t.test('viewing a list fetches its resolved members from the server, not a client-side rule match', () => {
-  t.assert(/async function viewListMembers/.test(src), 'viewListMembers() is missing');
-  const fn = src.slice(src.indexOf('async function viewListMembers'));
-  const body = fn.slice(0, fn.indexOf('\n    function renderListMembersPanel'));
+t.test('selecting a list fetches its resolved members from the server, not a client-side rule match', () => {
+  t.assert(/async function selectList/.test(src), 'selectList() is missing');
+  const fn = src.slice(src.indexOf('async function selectList'));
+  const body = fn.slice(0, fn.indexOf('\n    /* ----------------'));
   t.assert(/api\.get\(ENDPOINTS\.mmLists,\s*\{\s*id:\s*listId\s*\}\)/.test(body),
-    'viewListMembers must call GET ENDPOINTS.mmLists with ?id= to get resolved membership');
+    'selectList must call GET ENDPOINTS.mmLists with ?id= to get resolved membership');
   t.assert(!/matchesRule/.test(body), 'the front end must not re-implement list-rule matching itself');
 });
 
-t.test('every list row has a way to view its members', () => {
-  t.assert(/data-viewlist/.test(src), 'list rows are missing a data-viewlist trigger');
-  t.assert(/mm-linklike/.test(src), 'the list name should be clickable, not just a small "View" button');
+t.test('every list is one click away from the contacts table', () => {
+  t.assert(/data-list=/.test(src), 'the list rail is missing its data-list triggers');
+  t.assert(/function renderListRail/.test(src), 'renderListRail() is missing');
+  const fn = src.slice(src.indexOf('function renderListRail'));
+  const body = fn.slice(0, fn.indexOf('async function selectList'));
+  t.assert(/state\.lists\.map/.test(body), 'every saved list must get a rail chip');
+  t.assert(/Everyone/.test(body),
+    'there must be a way back to the unfiltered roster, or a selected list is a trap');
 });
 
-t.test('the members panel shows email, source, status and tags per member', () => {
-  const fn = src.slice(src.indexOf('function renderListMembersPanel'));
-  const body = fn.slice(0, fn.indexOf('\n    function renderListTable'));
-  ['m.email', 'm.source', 'm.status', 'm.tags'].forEach((field) => {
-    t.assert(body.includes(field), `renderListMembersPanel is missing ${field}`);
+t.test('the table shows email, source, status and tags per row, list or not', () => {
+  const fn = src.slice(src.indexOf('function renderContactsTable'));
+  const body = fn.slice(0, fn.indexOf('function wireListTools'));
+  ['ct.email', 'ct.source', 'ct.status', 'ct.tags'].forEach((field) => {
+    t.assert(body.includes(field), `renderContactsTable is missing ${field}`);
   });
   t.assert(/STATUS_META/.test(body) && /SOURCE_META/.test(body),
-    'renderListMembersPanel should reuse the shared STATUS_META/SOURCE_META labels, not invent new ones');
+    'the table should reuse the shared STATUS_META/SOURCE_META labels, not invent new ones');
 });
 
-t.test('the members panel can be closed and does not linger when a different list is edited', () => {
-  t.assert(/function closeListMembers/.test(src), 'closeListMembers() is missing');
-  t.assert(/\[data-editlist\]'\)\.forEach\(\(b\) => \{[\s\S]{0,200}closeListMembers\(\)/.test(src),
-    'opening the list editor should close any open members panel first');
+t.test('leaving a list is always possible and filtering by source does it explicitly', () => {
+  // Two filters at once (a list AND a source) is a state nothing else in the
+  // app can express, so picking a source drops the list rather than showing
+  // a silent intersection.
+  const fn = src.slice(src.indexOf('function renderFilters'));
+  const body = fn.slice(0, fn.indexOf('const COLUMNS'));
+  t.assert(/state\.activeListId = null/.test(body),
+    'choosing a source filter must leave the selected list rather than intersecting');
 });
 
 /* ---- editing membership: add/remove ---- */
 
 t.test('EVERY list allows adding and removing members by hand', () => {
-  // Previously a dynamic list built on source or free-text search offered no
-  // add box at all, because there was no per-contact field to toggle. The
-  // exception is now stored on the list instead, so no list is read-only.
-  t.assert(/function listIsMemberEditable/.test(src), 'listIsMemberEditable() is missing');
-  const fn = src.slice(src.indexOf('function listIsMemberEditable'));
-  const body = fn.slice(0, fn.indexOf('}'));
-  t.assert(/return !!list/.test(body),
-    'no list kind should be excluded from hand-editing');
+  // A dynamic list built on source or free-text search once offered no add
+  // box at all, because there was no per-contact field to toggle. The
+  // exception is stored on the list instead, so no list kind is read-only.
+  // Post-restructure there is no listIsMemberEditable() gate to check: the
+  // add row and the Remove button render for any selected list, which is a
+  // stronger guarantee than a function that returned true.
+  const fn = src.slice(src.indexOf('function renderContactsTable'));
+  const body = fn.slice(0, fn.indexOf('function wireListTools'));
+  t.assert(/mmAddMemberEmail/.test(body),
+    'a selected list must offer an add-by-email row, whatever kind it is');
+  t.assert(/data-removemember/.test(body),
+    'a selected list must offer Remove on every row, whatever kind it is');
+  t.assert(!/listIsMemberEditable/.test(body),
+    'no list kind should be gated out of hand-editing');
 });
 
 t.test('a non-tag dynamic list records the change on the list, not on the contact', () => {
   // Setting a tag the rule does not use would not add anyone to the list,
   // and would quietly edit the contact for no reason.
-  const add = src.slice(src.indexOf('async function addListMember'));
-  const addBody = add.slice(0, add.indexOf('\n    function renderListMembersPanel'));
+  const add = src.slice(src.indexOf('async function addListMemberByEmail'));
+  const addBody = add.slice(0, add.indexOf('\n    /* ----------------'));
   t.assert(/extraMembers/.test(addBody), 'adding must write extraMembers for a non-tag rule');
   t.assert(/excludedMembers.*filter/.test(addBody),
     'adding someone must also clear any prior exclusion, or the two cancel out');
 
   const rem = src.slice(src.indexOf('async function removeListMember'));
-  const remBody = rem.slice(0, rem.indexOf('\n    async function addListMember'));
+  const remBody = rem.slice(0, rem.indexOf('\n    async function addListMemberByEmail'));
   t.assert(/excludedMembers/.test(remBody),
     'removing must write excludedMembers, or the rule re-adds them immediately');
 });
@@ -95,7 +116,7 @@ t.test('a tag-based dynamic list still uses tags, not the override', () => {
   // Tags keep the contact and the rule telling the same story, so the
   // override is only for rules that have no tag to set.
   t.assert(/function usesTagMechanism/.test(src), 'usesTagMechanism() is missing');
-  const add = src.slice(src.indexOf('async function addListMember'));
+  const add = src.slice(src.indexOf('async function addListMemberByEmail'));
   t.assert(/usesTagMechanism\(list\)/.test(add.slice(0, 2600)),
     'the add path must branch on whether the rule is tag-based');
 });
@@ -139,18 +160,34 @@ t.test('the result tells you whether it created someone or reused them', () => {
     'both outcomes need distinct wording');
 });
 
-t.test('the member row actions refresh contacts, lists, and the open panel after a change', () => {
+t.test('the member row actions refresh contacts, lists, and the selected list after a change', () => {
+  // One shared reload path rather than each action remembering three calls.
+  // That is what stops a change made from a list row and the same change made
+  // from the roster leaving the screen in two different states.
   const removeFn = src.slice(src.indexOf('async function removeListMember'));
   const removeBody = removeFn.slice(0, removeFn.indexOf('\n    async function addListMemberByEmail'));
-  t.assert(/loadContacts\(\)/.test(removeBody) && /loadLists\(\)/.test(removeBody) && /viewListMembers\(list\.id\)/.test(removeBody),
-    'removeListMember should reload contacts/lists and refresh the open panel');
+  t.assert(/refreshAudience\(\)/.test(removeBody),
+    'removeListMember should go through the shared audience reload');
+
+  const rf = src.slice(src.indexOf('async function refreshAudience'));
+  const rbody = rf.slice(0, rf.indexOf('\n    /* ----------------'));
+  t.assert(/loadContacts\(\)/.test(rbody) && /loadLists\(\)/.test(rbody),
+    'the shared reload must refetch both contacts and lists');
+  t.assert(/selectList\(state\.activeListId\)/.test(rbody),
+    'and re-resolve the selected list, so a removal is visible without reopening it');
 });
 
-t.test('the Dashboard view has a message target, so a failed refresh is visible instead of silently showing zeros', () => {
-  t.assert(/dashboard:\s*['"]#mm\w+['"]/.test(src),
-    'MSG_TARGET is missing a "dashboard" entry — a failed Dashboard refresh currently fails ' +
-    'silently (shows 0s with no error), because refreshView() only announces errors when ' +
-    'opts.announce is set, and that comes from MSG_TARGET[view]');
+t.test('EVERY view has a message target, so a failed refresh is visible instead of silently showing zeros', () => {
+  // refreshView() only announces an error when opts.announce is set, and that
+  // comes from MSG_TARGET[view]. A view missing an entry fails silently: it
+  // shows stale numbers or zeros with nothing on screen saying why. The
+  // Dashboard used to be the gap; asserting on the whole set means a view
+  // added later cannot reintroduce it.
+  const block = src.slice(src.indexOf('const MSG_TARGET'), src.indexOf('const SOURCE_META'));
+  ['campaigns', 'audience', 'reports', 'settings'].forEach((v) => {
+    t.assert(new RegExp(v + "\\s*:\\s*['\"]#mm\\w+['\"]").test(block),
+      'MSG_TARGET is missing a "' + v + '" entry, so a failed refresh there is invisible');
+  });
 });
 
 
