@@ -309,6 +309,17 @@ body[data-app="websitewidget"] {
   --accent-tint: #E8F9F8;
 }
 
+/* StitchSense. Magenta, chosen to match the coverage overlay the estimator
+   paints over customer artwork: the AM sees the same colour on the picture and
+   in the app chrome, so the overlay reads as "this app measured that" rather
+   than as an unexplained highlight. Distinct from CrewCore's raspberry
+   (#C83E73) and PromoPro's red (#E31E2D) in the rail. */
+body[data-app="stitchsense"] {
+  --accent:      #D61F7A;
+  --accent-deep: #AE1862;
+  --accent-tint: #FCEBF3;
+}
+
 /* ==========================================================================
    COMPATIBILITY ALIASES
    Ported app markup references its own old variable names. Rather than
