@@ -51,13 +51,23 @@ t.test('mailme registry entry is no longer a stub', () => {
   t.assert(/stub:\s*false/.test(block), 'mailme should be un-stubbed now that it is built');
 });
 
-t.test('mailme declares its three views', () => {
+t.test('mailme declares its four views and opens on Campaigns', () => {
+  // Was six (dashboard/contacts/lists/import/campaigns/settings). Contacts
+  // and Lists showed the same people, so they merged into Audience with
+  // lists as a filter; Import became a button there; the Dashboard's live
+  // parts moved onto Campaigns.
   const src = read('js/registry.js');
   const entry = src.slice(src.indexOf("id: 'mailme'"));
   const block = entry.slice(0, entry.indexOf('},'));
-  ['dashboard', 'contacts', 'campaigns'].forEach((v) => {
+  ['campaigns', 'audience', 'reports', 'settings'].forEach((v) => {
     t.assert(block.includes("'" + v + "'"), 'mailme registry is missing the ' + v + ' view');
   });
+  ['dashboard', 'contacts', 'lists', 'import'].forEach((v) => {
+    t.assert(!new RegExp("\\['" + v + "',").test(block),
+      'the ' + v + ' view should be gone: it merged into another screen');
+  });
+  t.assert(/defaultView:\s*'campaigns'/.test(block),
+    'MailMe should open on Campaigns, since sending is what it is for');
 });
 
 t.test('mailme fetches through the seam', () => {
@@ -279,16 +289,27 @@ t.test('campaign results open in a modal, not inline in the list', () => {
     'unmount must be able to tear down the modal Escape listener');
 });
 
-t.test('every editor and viewer uses the shared modal, none render inline', () => {
+t.test('short bounded editors are modals; the composer and reports are not', () => {
+  // THE SPLIT THAT MATTERS. A list rule and a CSV import are glance-and-close,
+  // so a modal fits. Writing an email is the longest work in the app and used
+  // to happen in a popup you could not set aside, and campaign stats were
+  // buried in a modal called Results that also, confusingly, held the Send
+  // button. Both became real screens.
   const src = read('apps/mailme.js');
   ['mmResults', 'mmComposer', 'mmListEditor', 'mmListMembers'].forEach((id) => {
     t.assert(!new RegExp('id="' + id + '"').test(src),
-      'the inline ' + id + ' container should be gone; it is a modal now');
+      'the inline ' + id + ' container should be gone');
   });
-  ['results', 'composer', 'list', 'members'].forEach((kind) => {
+  ['list', 'import'].forEach((kind) => {
     t.assert(new RegExp("'" + kind + "'\\)").test(src),
       'no modal registered under the ' + kind + ' kind');
   });
+  t.assert(/id="mmComposeView"/.test(src),
+    'the campaign workspace must be a real pane, not a modal');
+  t.assert(/id="mmReportsView"/.test(src),
+    'reports must be a real view, not a modal');
+  t.assert(!/openModal\([\s\S]{0,80}'composer'\)/.test(src),
+    'the composer must not open as a modal any more');
 });
 
 t.test('the $ helper looks inside the modal, since modals live outside ctx.root', () => {
@@ -305,7 +326,7 @@ t.test('closing one modal cannot tear down an unrelated one', () => {
     'a targeted close must check the kind before closing');
   // A background repaint clears editor state; without the kind check it
   // would close whatever the person happened to have open.
-  t.assert(/closeModalIf\('composer'\)/.test(src) && /closeModalIf\('list'\)/.test(src),
+  t.assert(/closeModalIf\('list'\)/.test(src) && /closeModalIf\('import'\)/.test(src),
     'the editors must close by kind, not unconditionally');
 });
 
@@ -315,13 +336,12 @@ t.test('dismissing an editor drops its editing session', () => {
   const src = stripComments(read('apps/mailme.js'));
   const fn = src.slice(src.indexOf('function dismissModal'));
   const body = fn.slice(0, fn.indexOf('\n    }'));
-  t.assert(/state\.editingCampaign = null/.test(body), 'composer session must clear');
   t.assert(/state\.editingList = null/.test(body), 'list session must clear');
-  t.assert(/state\.viewingListId = null/.test(body), 'members session must clear');
+  t.assert(/state\.importPreview = null/.test(body), 'import session must clear');
   // openModal calls closeModal on the way in; if THAT cleared state it would
-  // wipe the very draft being opened.
+  // wipe the very thing being opened.
   const open = src.slice(src.indexOf('function openModal'));
-  t.assert(!/state\.editingCampaign = null/.test(open.slice(0, 700)),
+  t.assert(!/state\.editingList = null/.test(open.slice(0, 700)),
     'openModal must not clear editing state on the way in');
 });
 
@@ -556,37 +576,37 @@ t.test('every view refetches its data on entry', () => {
   const src = read('apps/mailme.js');
   t.assert(/const VIEW_LOADERS = \{/.test(src),
     'each view must declare which loaders it needs on entry');
-  ['dashboard', 'contacts', 'lists', 'import', 'campaigns'].forEach((v) => {
+  ['campaigns', 'audience', 'reports', 'settings'].forEach((v) => {
     t.assert(new RegExp(v + ':\\s*\\[').test(src),
       'VIEW_LOADERS is missing an entry for ' + v);
   });
   const renders = src.slice(src.indexOf('this._renders = {'));
   const block = renders.slice(0, renders.indexOf('};'));
-  ['dashboard', 'contacts', 'lists', 'import', 'campaigns'].forEach((v) => {
+  ['campaigns', 'audience', 'reports', 'settings'].forEach((v) => {
     t.assert(block.includes("refreshView('" + v + "')"),
       v + ' must refresh on entry, not just repaint stale state');
   });
 });
 
-t.test('the campaigns view reloads lists, so a new list appears in the composer', () => {
-  // A list saved on the Lists screen that is missing from the campaign
-  // dropdown reads as a failed save.
+t.test('the campaigns view reloads lists, so a new list appears in the audience picker', () => {
+  // A list saved on Audience that is missing from the campaign audience
+  // picker reads as a failed save.
   const src = read('apps/mailme.js');
   const loaders = src.slice(src.indexOf('const VIEW_LOADERS'));
-  const campaigns = loaders.slice(loaders.indexOf('campaigns:'), loaders.indexOf('};'));
+  const campaigns = loaders.slice(loaders.indexOf('campaigns:'), loaders.indexOf('audience:'));
   t.assert(campaigns.includes('loadLists'),
-    'entering Campaigns must reload lists for the composer dropdown');
-  const lists = loaders.slice(loaders.indexOf('lists:'), loaders.indexOf('import:'));
-  t.assert(lists.includes('loadContacts'),
-    'list member counts depend on contacts, so Lists must reload them too');
+    'entering Campaigns must reload lists for the audience picker');
+  t.assert(campaigns.includes('loadSettings'),
+    'the readiness check needs settings, or the Send button cannot know if it is safe');
+  const audience = loaders.slice(loaders.indexOf('audience:'), loaders.indexOf('reports:'));
+  t.assert(audience.includes('loadContacts') && audience.includes('loadLists'),
+    'list member counts depend on contacts, so Audience must reload both');
 });
 
 t.test('a refresh never clobbers an open editor', () => {
   // Re-rendering an editor rebuilds its inputs from state, wiping anything
   // half-typed. A background refresh must leave it alone.
   const src = read('apps/mailme.js');
-  t.assert(/if \(!state\.editingList\) renderListEditor\(\)/.test(src),
-    'the list editor must not be re-rendered while it is open');
   t.assert(/if \(!state\.editingCampaign\) renderComposer\(\)/.test(src),
     'the composer must not be re-rendered while it is open');
 });
