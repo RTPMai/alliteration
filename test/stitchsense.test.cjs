@@ -370,6 +370,30 @@ Promise.all([
       'the weave must only be painted when a garment colour was set');
   });
 
+  t.test('the decoder axes are checked against Wilcom, not assumed', () => {
+    // X and Y were swapped in the first version, which transposed every design
+    // and reported width and height the wrong way round. Caught by measuring
+    // the ink in the preview bitmaps OFM files carry.
+    const src = read('apps/stitchsense.js');
+    t.assert(/if \(b0 & 0x01\) dx \+= 1;/.test(src),
+      'the low bit of byte 0 moves X, not Y; the axes are swapped again');
+    t.assert(/if \(b0 & 0x20\) dy \+= 9;/.test(src), 'byte 0 bit 5 must move Y');
+    t.assert(src.includes('AXIS ORDER'), 'the axis reasoning must stay documented; it was wrong once');
+  });
+
+  t.test('connecting stitches are found by length AND isolation', () => {
+    // A fixed 6 mm cut-off was tried first and gutted a wordmark: wide satin
+    // columns are legitimately long, and 662 real stitches on one 4 inch design
+    // exceeded it. Length alone hollowed out every letter.
+    const src = read('apps/stitchsense.js');
+    t.assert(/median \* 2\.5/.test(src),
+      'the threshold must scale off this design\'s own median stitch, not a fixed number');
+    t.assert(/before == null \|\| before <= cutoff/.test(src),
+      'a long stitch between two other long ones is fill, not a connector');
+    t.assert(/o\.hideConnectors !== false/.test(src),
+      'hiding connectors must be defeatable, and on by default');
+  });
+
   t.test('the colourway view says what it is not', () => {
     const src = read('apps/stitchsense.js');
     t.assert(/not a Wilcom proof|not a Wilcom-quality/i.test(src),
