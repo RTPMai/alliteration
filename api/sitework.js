@@ -1,3 +1,4 @@
+// PUT IN: api/sitework.js
 // api/sitework.js — Sticky Notes route (Site Work section).
 //
 // Site Work is the list of what still needs doing to Alliteration itself, kept
@@ -25,6 +26,7 @@ import {
 const APP_IDS = [
   "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
   "crewcore", "mailme", "teletally", "websitewidget", "promopro",
+  "stitchsense",
 ];
 
 async function isBuilder(sess) {
