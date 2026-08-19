@@ -78,9 +78,10 @@ t.test('app modules declare no hex colors', () => {
   //   2. QR codes are generated images; a CSS variable renders nothing.
   //   3. Print windows are separate documents that never load tokens.css.
   //   4. Canvas-rendered images (StitchSense design thumbnails, the coverage
-  //      overlay). Same reasoning as QR codes: a CSS variable paints nothing
-  //      on a canvas, and a thumbnail is a stored JPEG that has to look the
-  //      same on everyone's screen regardless of the theme it was made under.
+  //      overlay, thread colours in the colourway view). Same reasoning as QR
+  //      codes: a CSS variable paints nothing on a canvas, and these are
+  //      EXPORTED as PNGs and sent to customers, so they must not follow
+  //      whatever theme the person who made them happened to be using.
   // Everything else must use a token. The exemption is DECLARED in the code,
   // so this stays a real rule rather than a blanket pass for one file.
   const EXEMPT = [
@@ -88,7 +89,11 @@ t.test('app modules declare no hex colors', () => {
     /new QRCode\([\s\S]*?\}\);/g,                        // generated images
     /<input type="color"[^>]*>/g,                      // color-picker defaults (data)
     /w\.document\.write\(`[\s\S]*?`\);/g,             // print windows
-    /const CANVAS_INK = \{[\s\S]*?\};/g              // canvas-rendered images
+    /const CANVAS_INK = \{[\s\S]*?\};/g,             // canvas-rendered images
+    /const DEFAULT_THREADS = \[[\s\S]*?\];/g,        // thread palette, exported in PNGs
+    /const CHECKER = "[\s\S]*?";/g,                 // transparency checkerboard
+    /const PROBE_COLORS = \[[\s\S]*?\];/g,           // colour-validity probe
+    /cwGarment: '#[0-9A-Fa-f]{6}',.*$/gm            // default garment colour
   ];
 
   const dir = path.join(ROOT, 'apps');
