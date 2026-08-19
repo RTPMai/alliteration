@@ -393,6 +393,52 @@ export default `
         <button class="btn btn-green" id="importBtn">Import</button>
       </div>
     </div>
+    <!-- Reorder timing moved here from MailMe in Aug 2026. "When is a customer
+         late to reorder" is a fact about the customer, not about email, so it
+         belongs where the roster and the order history live. MailMe still
+         reads these values to build audiences; it no longer owns them. -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-hd"><h3>Reorder timing</h3></div>
+      <div class="card-bd">
+        <div class="help">
+          These decide when a customer counts as Due, Overdue or Lapsed. They are
+          <b>multiples of that customer's own median gap</b> between orders, not fixed
+          day counts. A school ordering twice a year isn't late at day 90; a contractor
+          ordering every two weeks very much is. One threshold can't describe both,
+          which is why these are ratios.
+          <br/><br/>
+          Changing them changes what everyone sees on every screen at once, so saving
+          is limited to admins. MailMe reads these same numbers when it builds an
+          audience of clients who are due to reorder.
+        </div>
+        <div id="reorderErr"></div>
+        <div class="reorder-grid" id="reorderFields">
+          <label>Due at
+            <input type="number" step="0.1" min="0.1" id="reorderDue">
+            <span class="reorder-hint">At their normal gap</span>
+          </label>
+          <label>Overdue at
+            <input type="number" step="0.1" min="0.1" id="reorderOverdue">
+            <span class="reorder-hint">Half again past it</span>
+          </label>
+          <label>Lapsed at
+            <input type="number" step="0.1" min="0.1" id="reorderLapsed">
+            <span class="reorder-hint">Probably lost, not late</span>
+          </label>
+          <label>Minimum orders to judge
+            <input type="number" min="1" id="reorderMinOrders">
+            <span class="reorder-hint">Below this, a median isn't a pattern</span>
+          </label>
+          <label>Shortest gap to trust (days)
+            <input type="number" min="0" id="reorderMinGap">
+            <span class="reorder-hint">Ignores same-week clusters as noise</span>
+          </label>
+        </div>
+        <button class="btn btn-green" id="reorderSaveBtn">Save reorder timing</button>
+        <button class="btn" id="reorderResetBtn">Reset to defaults</button>
+        <span class="save-status" id="reorderStatus" style="margin-left:10px"></span>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-hd"><h3>Sync from Printavo</h3></div>
       <div class="card-bd">
