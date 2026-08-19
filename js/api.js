@@ -99,7 +99,13 @@ const LIVE_PREFIXES = [
   // route conflict WebsiteWidget hit. api/promopro/printavo.js answers 200
   // with configured:false when the Printavo env vars are missing, so it
   // counts as live either way.
-  '/api/promopro/'
+  '/api/promopro/',
+  // StitchSense: api/stitchsense/{designs,estimates,rounds,settings}.js are
+  // deployed. Live from the first deploy, so there is no mock block for it:
+  // an empty library is a real and expected state (nobody has imported the
+  // archive yet), and inventing sample designs would put fake stitch counts
+  // in front of somebody quoting a real job.
+  '/api/stitchsense/'
 ];
 
 function isLive(path) {
@@ -123,7 +129,8 @@ export function appsOnSampleData() {
     mailme:      [ENDPOINTS.mmContacts, ENDPOINTS.mmLists],
     crewcore:    [ENDPOINTS.ccEmployees],
     websitewidget: [ENDPOINTS.wwStats],
-    promopro:    [ENDPOINTS.ppPos]
+    promopro:    [ENDPOINTS.ppPos],
+    stitchsense: [ENDPOINTS.ssenseDesigns]
   };
   return Object.keys(byApp).filter(
     (id) => !byApp[id].every((p) => p && isLive(p))
@@ -247,7 +254,15 @@ export const ENDPOINTS = {
   ppSettings:      '/api/promopro/settings',
   ppArt:           '/api/promopro/art',
   ppSend:          '/api/promopro/send',
-  ppPrint:         '/api/promopro/print'
+  ppPrint:         '/api/promopro/print',
+
+  // ---- StitchSense ----
+  // Folder form, not a flat api/stitchsense.js, for the same Vercel
+  // file-vs-folder route conflict WebsiteWidget and PromoPro hit.
+  ssenseDesigns:   '/api/stitchsense/designs',
+  ssenseEstimates: '/api/stitchsense/estimates',
+  ssenseRounds:    '/api/stitchsense/rounds',
+  ssenseSettings:  '/api/stitchsense/settings'
 };
 
 /* ------------------------------------------------------------------ *
