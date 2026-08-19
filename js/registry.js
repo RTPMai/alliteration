@@ -288,6 +288,10 @@ export const APPS = [
     // FOUR VIEWS, and the last two are not decoration:
     //   estimate   what an AM opens to quote a job
     //   library    the archive, and the accurate requote-at-a-new-size path
+    //   colorway   drop a DST, assign a thread colour per block, export a PNG.
+    //              Possible because a DST carries colour CHANGES but no
+    //              colours, so the blocks arrive already separated and with
+    //              nothing baked in to strip out.
     //   guess      Stitch Guess, the training game for the embroidery team.
     //              It collects design-character labels, which is the feature
     //              that failed validation when it was scraped from filenames.
@@ -297,6 +301,7 @@ export const APPS = [
     views: [
       ['estimate', 'Estimate'],
       ['library', 'Library'],
+      ['colorway', 'Colorway'],
       ['guess', 'Stitch Guess'],
       ['accuracy', 'Accuracy']
     ],
