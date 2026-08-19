@@ -275,6 +275,8 @@ function stampSegment(grid, gw, gh, x0, y0, x1, y1, half) {
 const CANVAS_INK = {
   paper: '#ffffff',
   thread: '#222222',
+  // The shadow a stitch casts onto the fabric, drawn at low alpha.
+  shadow: '#000000',
   // The coverage overlay magenta. Matches StitchSense's accent in tokens.css
   // on purpose: the AM sees the same colour on the artwork and in the app.
   overlay: [214, 31, 122]
@@ -325,9 +327,18 @@ function renderDesign(design, opts) {
   const hUnits = Math.max(1, design.maxY - design.minY);
   const scale = (size - pad * 2) / Math.max(wUnits, hUnits);
 
+  // Quarter turns, plus an optional mirror. Cap designs in particular get
+  // digitised sideways as a matter of course, so a design arriving rotated is
+  // normal rather than a fault in the file.
+  const turns = ((Math.round((o.rotate || 0) / 90) % 4) + 4) % 4;
+  const swap = turns === 1 || turns === 3;
+
+  const drawW = Math.round(wUnits * scale);
+  const drawH = Math.round(hUnits * scale);
+
   const canvas = document.createElement('canvas');
-  canvas.width = Math.max(1, Math.round(wUnits * scale) + pad * 2);
-  canvas.height = Math.max(1, Math.round(hUnits * scale) + pad * 2);
+  canvas.width = Math.max(1, (swap ? drawH : drawW) + pad * 2);
+  canvas.height = Math.max(1, (swap ? drawW : drawH) + pad * 2);
   const g = canvas.getContext('2d');
 
   // Left transparent when no garment colour is set, which is what makes the
@@ -335,7 +346,21 @@ function renderDesign(design, opts) {
   if (o.garment) {
     g.fillStyle = o.garment;
     g.fillRect(0, 0, canvas.width, canvas.height);
+    // A perfectly flat fill reads as paper. A faint weave reads as cloth, and
+    // it costs one tiled pattern. Skipped entirely when the export is
+    // transparent, since there is no garment to texture.
+    if (o.style === 'thread') paintWeave(g, canvas.width, canvas.height);
   }
+
+  // Rotation and mirroring are applied as a canvas transform rather than by
+  // rewriting every coordinate: one place to get right, and the stitch data
+  // itself is never altered, so the exported PNG and the measurements still
+  // describe the same design.
+  g.save();
+  g.translate(canvas.width / 2, canvas.height / 2);
+  if (turns) g.rotate(turns * Math.PI / 2);
+  if (o.mirror) g.scale(-1, 1);
+  g.translate(-drawW / 2, -drawH / 2);
 
   g.lineWidth = Math.max(0.6, scale * 3 * (o.thickness || 1));
   g.lineCap = 'round';
@@ -343,25 +368,195 @@ function renderDesign(design, opts) {
 
   const colors = (o.colors && o.colors.length) ? o.colors : [CANVAS_INK.thread];
   const total = blockCount(design);
+  const width = Math.max(0.6, scale * 3 * (o.thickness || 1));
 
-  // One pass per block, in stitch order. Drawing block by block rather than in
-  // one path is what makes overlaps land the way the machine will actually sew
-  // them: a later colour covering an earlier one on screen means it covers it
-  // on the garment too.
-  for (let b = 0; b < total; b++) {
-    g.strokeStyle = colors[b % colors.length];
-    g.beginPath();
-    let px = null;
-    for (const [ux, uy, penDown, blk] of design.path) {
-      const cx = (ux - design.minX) * scale + pad;
-      const cy = (uy - design.minY) * scale + pad;
-      if (blk === b && penDown && px != null) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
-      px = [cx, cy];
+  // Project one path point into canvas space. DST measures Y upward from the
+  // origin; a canvas measures it downward. Mapping straight across renders
+  // every design vertically mirrored, which is subtle enough on a symmetrical
+  // logo to survive review and obvious on anything with text or a figure in it.
+  const pt = (ux, uy) => [(ux - design.minX) * scale, (design.maxY - uy) * scale];
+
+  if (o.style === 'thread') {
+    drawThreaded(g, design, { colors, total, width, pt, drawW, drawH });
+  } else {
+    g.lineWidth = width;
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+
+    // One pass per block, in stitch order. Drawing block by block rather than
+    // in one path is what makes overlaps land the way the machine will
+    // actually sew them: a later colour covering an earlier one on screen
+    // means it covers it on the garment too.
+    for (let b = 0; b < total; b++) {
+      g.strokeStyle = colors[b % colors.length];
+      g.beginPath();
+      let px = null;
+      for (const [ux, uy, penDown, blk] of design.path) {
+        const [cx, cy] = pt(ux, uy);
+        if (blk === b && penDown && px != null) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
+        px = [cx, cy];
+      }
+      g.stroke();
     }
-    g.stroke();
   }
 
+  g.restore();
   return canvas;
+}
+
+/* ------------------------------------------------------------------ *
+ * THREAD RENDERING
+ *
+ * Flat mode draws one line per stitch and stops. That reads as a diagram.
+ * Real thread reads as thread because of three things, and none of them need
+ * a 3D engine:
+ *
+ *   1. Each stitch is a little cylinder, so it has a dark edge, a body, and a
+ *      highlight running down its length.
+ *   2. Stitches sit ON the fabric, so they cast a shadow onto it.
+ *   3. Thread is not one flat colour. Neighbouring stitches catch the light
+ *      differently and the eye reads that variation as texture.
+ *
+ * So each stitch is drawn as four short strokes: a shadow offset down-right, a
+ * dark full-width base, the body slightly narrower, and a thin highlight offset
+ * along the light direction. Cheap, and no gradients, which matters because a
+ * full-back design is ten thousand stitches and a gradient object per stitch
+ * would take minutes.
+ *
+ * THIS IS STILL NOT A WILCOM PROOF. Real thread has fibre, sheen that shifts
+ * with the viewing angle, and satin columns that catch light as one surface
+ * rather than as separate stitches. This gets close enough for a customer to
+ * picture the finished garment, and no closer.
+ * ------------------------------------------------------------------ */
+
+/**
+ * A faint fabric weave, drawn over the garment fill.
+ *
+ * Deliberately almost invisible. Anything stronger competes with the design,
+ * and the job here is only to stop the background reading as paper.
+ */
+function paintWeave(g, w, h) {
+  // A 4 pixel checker at 5 % reads as a visible diagonal pattern, which is
+  // worse than a flat fill: it looks like a rendering artefact rather than
+  // cloth. Two pixel threads at a third of that opacity sit below the
+  // threshold where the eye resolves the pattern and above the one where it
+  // stops reading as texture.
+  const tile = document.createElement('canvas');
+  tile.width = tile.height = 2;
+  const t = tile.getContext('2d');
+  t.fillStyle = 'rgba(255,255,255,0.018)';  // TOKEN-EXEMPT: canvas-rendered images
+  t.fillRect(0, 0, 1, 2);
+  t.fillStyle = 'rgba(0,0,0,0.018)';        // TOKEN-EXEMPT: canvas-rendered images
+  t.fillRect(1, 0, 1, 2);
+  const pattern = g.createPattern(tile, 'repeat');
+  if (!pattern) return;
+  g.save();
+  g.fillStyle = pattern;
+  g.fillRect(0, 0, w, h);
+  g.restore();
+}
+
+/** Shift a colour toward white (positive) or black (negative). */
+function shade(hex, amount) {
+  const h = String(hex || '').replace('#', '');
+  if (h.length !== 6) return hex;
+  const parts = [0, 2, 4].map((i) => {
+    const v = parseInt(h.slice(i, i + 2), 16);
+    const out = amount >= 0 ? v + (255 - v) * amount : v * (1 + amount);
+    return Math.max(0, Math.min(255, Math.round(out)));
+  });
+  return `rgb(${parts[0]},${parts[1]},${parts[2]})`;
+}
+
+function drawThreaded(g, design, ctx) {
+  const { colors, total, width, pt } = ctx;
+
+  // Light from the upper left, which is what every rendering convention
+  // assumes and therefore what looks "right" without anyone thinking about it.
+  const lx = -0.45, ly = -0.45;
+  const shadowOffset = Math.max(0.5, width * 0.35);
+
+  g.lineCap = 'round';
+  g.lineJoin = 'round';
+
+  for (let b = 0; b < total; b++) {
+    const base = colors[b % colors.length];
+    const dark = shade(base, -0.45);
+    const body = base;
+    const light = shade(base, 0.42);
+
+    // Collect this block's stitches once rather than re-walking the path four
+    // times per block.
+    const segs = [];
+    let px = null;
+    for (const [ux, uy, penDown, blk] of design.path) {
+      const c = pt(ux, uy);
+      if (blk === b && penDown && px != null) segs.push([px[0], px[1], c[0], c[1]]);
+      px = c;
+    }
+    if (!segs.length) continue;
+
+    // Pass 1: the shadow the thread casts onto the fabric.
+    g.globalAlpha = 0.22;
+    g.strokeStyle = CANVAS_INK.shadow;
+    g.lineWidth = width * 1.05;
+    g.beginPath();
+    for (const [x0, y0, x1, y1] of segs) {
+      g.moveTo(x0 + shadowOffset, y0 + shadowOffset);
+      g.lineTo(x1 + shadowOffset, y1 + shadowOffset);
+    }
+    g.stroke();
+    g.globalAlpha = 1;
+
+    // Pass 2: the dark outer edge of the thread cylinder.
+    g.strokeStyle = dark;
+    g.lineWidth = width;
+    g.beginPath();
+    for (const [x0, y0, x1, y1] of segs) { g.moveTo(x0, y0); g.lineTo(x1, y1); }
+    g.stroke();
+
+    // Pass 3: the body, narrower so the dark edge survives on both sides.
+    g.strokeStyle = body;
+    g.lineWidth = width * 0.72;
+    g.beginPath();
+    for (const [x0, y0, x1, y1] of segs) { g.moveTo(x0, y0); g.lineTo(x1, y1); }
+    g.stroke();
+
+    // Pass 4: the highlight running down the length of each stitch.
+    //
+    // Offset PERPENDICULAR to the stitch, not along a fixed light vector. A
+    // fixed offset displaces a stitch lying parallel to the light by almost
+    // nothing, so half the design ends up with no highlight at all and the
+    // fills look flat while the outlines look round. Perpendicular offset,
+    // signed by which way the stitch faces, gives every stitch a highlight on
+    // its lit side regardless of the direction it was sewn.
+    g.strokeStyle = light;
+    g.lineWidth = Math.max(0.5, width * 0.34);
+    for (let i = 0; i < segs.length; i++) {
+      const [x0, y0, x1, y1] = segs[i];
+      const dx = x1 - x0;
+      const dy = y1 - y0;
+      const len = Math.hypot(dx, dy) || 1;
+      // Unit perpendicular, flipped so it always points toward the light.
+      let nx = -dy / len;
+      let ny = dx / len;
+      if (nx * lx + ny * ly < 0) { nx = -nx; ny = -ny; }
+
+      // Deterministic jitter, so the same design renders identically every
+      // time. A customer comparing yesterday's proof to today's should not see
+      // the sheen move. The variation is what reads as texture: a perfectly
+      // even highlight looks like plastic piping, not thread.
+      const j = ((i * 2654435761) % 1000) / 1000;
+      g.globalAlpha = 0.45 + j * 0.4;
+
+      const off = width * 0.2;
+      g.beginPath();
+      g.moveTo(x0 + nx * off, y0 + ny * off);
+      g.lineTo(x1 + nx * off, y1 + ny * off);
+      g.stroke();
+    }
+    g.globalAlpha = 1;
+  }
 }
 
 /**
@@ -648,7 +843,10 @@ export default {
       cwDesign: null,        // decoded design loaded in the colourway view
       cwColors: [],
       cwGarment: '#F2F2F2',  // TOKEN-EXEMPT: canvas paint, not app chrome
-      session: { rounds: 0, points: 0, beats: 0 }
+      cwRotate: 0,
+      cwStyle: 'thread',
+      cwMirror: false,
+            session: { rounds: 0, points: 0, beats: 0 }
     };
 
     this.renderEstimate();
@@ -1445,6 +1643,8 @@ export default {
       // fastest way to see how many there are and where each one sits.
       const n = blockCount(decoded);
       this.state.cwColors = Array.from({ length: n }, (_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
+      this.state.cwRotate = 0;
+      this.state.cwMirror = false;
       this.drawColorwayEditor();
     } catch (e) {
       err.textContent = String((e && e.message) || e);
@@ -1470,9 +1670,10 @@ export default {
             </div>
           </div>
           <div class="ss-flag fair">
-            This is clean line work, not a Wilcom proof. No thread sheen, no texture, no
-            dimension. It reads right at mockup size and will not pass as a photo of a sewn
-            garment up close, so do not send it as a final proof.
+            Close enough for a customer to picture the garment, not a Wilcom proof. Real
+            thread has fibre, sheen that shifts as you turn it, and satin columns that catch
+            light as one surface rather than as separate stitches. This will not hold up at
+            full size, so do not send it as a final proof.
           </div>
         </div>
 
@@ -1484,6 +1685,17 @@ export default {
               on screen and on the garment.
             </div>
             <div id="ssCwBlocks"></div>
+
+            <h3>Orientation</h3>
+            <div class="ss-muted" style="margin-bottom:8px">
+              Cap designs are routinely digitised sideways, so a design arriving rotated is normal
+              rather than a fault in the file.
+            </div>
+            <div class="ss-btnrow" style="margin-bottom:14px">
+              <button class="ss-btn ghost" id="ssCwRotL">Rotate left</button>
+              <button class="ss-btn ghost" id="ssCwRotR">Rotate right</button>
+              <button class="ss-btn ghost" id="ssCwMirror" aria-pressed="false">Mirror</button>
+            </div>
 
             <h3>Garment</h3>
             <div class="ss-guessrow">
@@ -1515,6 +1727,13 @@ export default {
                   <option value="1.3">Heavy</option>
                 </select>
               </div>
+            </div>
+            <div class="ss-field">
+              <label for="ssCwStyle">Render</label>
+              <select id="ssCwStyle">
+                <option value="thread" selected>Stitched, with depth</option>
+                <option value="flat">Flat line work</option>
+              </select>
             </div>
             <div class="ss-btnrow">
               <button class="ss-btn" id="ssCwPng">Download PNG</button>
@@ -1557,6 +1776,7 @@ export default {
         this.paintColorway();
       });
     });
+
     box.querySelectorAll('[data-blockhex]').forEach((inp) => {
       inp.addEventListener('change', () => {
         const i = Number(inp.getAttribute('data-blockhex'));
@@ -1574,27 +1794,26 @@ export default {
 
   wireColorway() {
     const root = this.root;
-    const garment = root.querySelector('#ssCwGarment');
-    const garmentHex = root.querySelector('#ssCwGarmentHex');
 
-    garment.addEventListener('input', () => {
-      this.state.cwGarment = garment.value;
-      garmentHex.value = garment.value;
+    // ---- orientation ----
+    const bump = (deg) => {
+      this.state.cwRotate = (((this.state.cwRotate + deg) % 360) + 360) % 360;
       this.paintColorway();
-    });
-    garmentHex.addEventListener('change', () => {
-      if (!isColor(garmentHex.value)) { garmentHex.value = this.state.cwGarment || ''; return; }
-      this.state.cwGarment = garmentHex.value;
-      if (/^#[0-9a-f]{6}$/i.test(garmentHex.value)) garment.value = garmentHex.value;
-      this.paintColorway();
-    });
-    root.querySelector('#ssCwClear').addEventListener('click', () => {
-      this.state.cwGarment = null;
-      garmentHex.value = '';
+    };
+    root.querySelector('#ssCwRotL').addEventListener('click', () => bump(-90));
+    root.querySelector('#ssCwRotR').addEventListener('click', () => bump(90));
+    const mirror = root.querySelector('#ssCwMirror');
+    mirror.addEventListener('click', () => {
+      this.state.cwMirror = !this.state.cwMirror;
+      mirror.setAttribute('aria-pressed', String(this.state.cwMirror));
       this.paintColorway();
     });
 
     root.querySelector('#ssCwThick').addEventListener('change', () => this.paintColorway());
+    root.querySelector('#ssCwStyle').addEventListener('change', (e) => {
+      this.state.cwStyle = e.target.value;
+      this.paintColorway();
+    });
     root.querySelector('#ssCwReset').addEventListener('click', () => {
       this.state.cwColors = this.state.cwColors.map((_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
       this.drawColorwayBlocks();
@@ -1611,7 +1830,10 @@ export default {
       size: 520,
       colors: this.state.cwColors,
       garment: this.state.cwGarment,
-      thickness
+      thickness,
+      rotate: this.state.cwRotate,
+      mirror: this.state.cwMirror,
+      style: this.state.cwStyle
     });
     // A transparent export over a white card looks like a white garment, which
     // is misleading. The checker makes "no background" visibly mean no
@@ -1628,7 +1850,10 @@ export default {
       size,
       colors: this.state.cwColors,
       garment: this.state.cwGarment,
-      thickness
+      thickness,
+      rotate: this.state.cwRotate,
+      mirror: this.state.cwMirror,
+      style: this.state.cwStyle
     });
     const a = document.createElement('a');
     a.download = (this.state.cwName || 'design') + '-colorway.png';
