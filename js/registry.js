@@ -207,25 +207,32 @@ export const APPS = [
     role: 'What we tell them',
     blurb: 'Email marketing, opens, clicks, unsubscribes.',
     accent: '#8CA9CC',           // display only (rail dot / app mark); tokens.css owns theming — exact value from the vector logo file (was #85A0C6, close but off)
+    // FOUR views, restructured Aug 2026 (was six). Contacts and Lists were
+    // two screens showing the same people, so they merged into Audience, with
+    // lists as a filter rail over one table. Import stopped being a permanent
+    // tab for a task done a few times a year and became a button there. The
+    // old Dashboard was mostly an explanatory essay; its live parts moved to
+    // a strip on Campaigns. Reports is what the "Results" modal became, now
+    // that sending no longer happens on it.
     views: [
-      ['dashboard', 'Dashboard'],
-      ['contacts', 'Contacts'],
-      ['lists', 'Lists'],
-      ['import', 'Import'],
       ['campaigns', 'Campaigns'],
+      ['audience', 'Audience'],
+      ['reports', 'Reports'],
       ['settings', 'Settings']
     ],
-    defaultView: 'dashboard',
-    // BUILT, but deliberately still ungranted. stub:false means the real app
-    // mounts; access stays superuser-only because no role's apps[] lists
-    // 'mailme'. That is intentional and should stay that way until sending is
-    // switched on: the app exposes the whole customer email list, and the
-    // suppression ledger is the record that keeps sends CAN-SPAM compliant.
+    // Campaigns, not a dashboard. The thing people open MailMe to do is send
+    // something; landing them on a summary screen first was a step in the way.
+    defaultView: 'campaigns',
+    // BUILT and SENDING, through Resend. Access stays tightly held because the
+    // app exposes the whole customer email list, and the suppression ledger is
+    // the record that keeps sends CAN-SPAM compliant. Grant it per person
+    // rather than opening it to a role wholesale.
     //
-    // SENDING IS NOT WIRED. Campaigns save as drafts and api/mailme/campaigns.js
-    // rejects any status but "draft". Three things must land first: a provider
-    // account (Postmark/Resend/SendGrid), a sending domain with SPF/DKIM/DMARC,
-    // and the tokenized unsubscribe page plus its webhook receiver.
+    // Safety does not come from who can click Send: it comes from the checks
+    // that run immediately before dispatch every time (CAN-SPAM compliance,
+    // live domain verification, a from-address, and current suppression for
+    // every recipient). A draft can sit for weeks, so nothing about it is
+    // trusted as still true at send time.
     stub: false
   },
   {
