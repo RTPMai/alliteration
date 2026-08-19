@@ -1,6 +1,3 @@
-// PUT IN: test/shell.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * Shell contract tests.
  *
@@ -80,13 +77,18 @@ t.test('app modules declare no hex colors', () => {
   //   1. Department colors are DATA the user picks, not theming.
   //   2. QR codes are generated images; a CSS variable renders nothing.
   //   3. Print windows are separate documents that never load tokens.css.
+  //   4. Canvas-rendered images (StitchSense design thumbnails, the coverage
+  //      overlay). Same reasoning as QR codes: a CSS variable paints nothing
+  //      on a canvas, and a thumbnail is a stored JPEG that has to look the
+  //      same on everyone's screen regardless of the theme it was made under.
   // Everything else must use a token. The exemption is DECLARED in the code,
   // so this stays a real rule rather than a blanket pass for one file.
   const EXEMPT = [
     /const DEFAULT_DEPT_COLORS = \{[\s\S]*?\};/g,      // department data
     /new QRCode\([\s\S]*?\}\);/g,                        // generated images
     /<input type="color"[^>]*>/g,                      // color-picker defaults (data)
-    /w\.document\.write\(`[\s\S]*?`\);/g              // print windows
+    /w\.document\.write\(`[\s\S]*?`\);/g,             // print windows
+    /const CANVAS_INK = \{[\s\S]*?\};/g              // canvas-rendered images
   ];
 
   const dir = path.join(ROOT, 'apps');
@@ -109,6 +111,10 @@ t.test('color exemptions are declared, not assumed', () => {
     'shopstock uses exempt hex values but does not mark them');
   const marks = (src.match(/TOKEN-EXEMPT/g) || []).length;
   t.assert(marks >= 3, 'each exempt category should be marked, found ' + marks);
+
+  const ss = read('apps/stitchsense.js');
+  t.assert(ss.includes('TOKEN-EXEMPT'),
+    'stitchsense renders to canvas but does not mark its exempt colors');
 });
 
 /* ---- api.js is the seam ------------------------------------------------ */
@@ -252,6 +258,19 @@ t.test('every non-stub registered app has a module in apps/', () => {
     }
   });
   t.assert(true);
+});
+
+t.test('an app that ships before its logo does not render a broken image', () => {
+  // PromoPro and StitchSense both landed before their artwork. Without a
+  // fallback the hub shows broken-image icons, which reads as a failed deploy.
+  const src = read('apps/hub.js');
+  t.assert(src.includes('swapMissingArtwork'), 'apps/hub.js has no artwork fallback');
+  t.assert(src.includes('data-fallback-mark'), 'the mark carries no fallback letter');
+  t.assert(src.includes('img.complete'),
+    'a cached 404 resolves before the listener attaches, so the already-failed case must be handled');
+  const css = read('css/shell.css');
+  ['.app-mark-fallback', '.app-wordmark-fallback']
+    .forEach((k) => t.assert(css.includes(k), 'css/shell.css is missing ' + k));
 });
 
 t.test('hub module exists and implements the contract', () => {
