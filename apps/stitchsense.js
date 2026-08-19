@@ -139,29 +139,38 @@ function decodeDst(arrayBuffer) {
     const b0 = bytes[i], b1 = bytes[i + 1], b2 = bytes[i + 2];
     if (b2 === 0xF3) break;
 
+    // AXIS ORDER. These two accumulators were the wrong way round in the first
+    // version, which transposed every design: it rendered as if mirrored and
+    // rotated a quarter turn, and reported width and height swapped.
+    //
+    // Checked against Wilcom's own preview bitmap, which OFM files carry
+    // alongside the design. Measuring the ink in those previews gives width to
+    // height ratios of 0.71, 2.83 and 3.17 for three sample designs; this
+    // decoder now gives 0.71, 2.95 and 3.20 for the same three. It gave the
+    // reciprocals before. That is the check, not an assumption about the spec.
     let dx = 0, dy = 0;
-    if (b0 & 0x01) dy += 1;
-    if (b0 & 0x02) dy -= 1;
-    if (b0 & 0x04) dy += 9;
-    if (b0 & 0x08) dy -= 9;
-    if (b0 & 0x10) dx -= 9;
-    if (b0 & 0x20) dx += 9;
-    if (b0 & 0x40) dx -= 1;
-    if (b0 & 0x80) dx += 1;
+    if (b0 & 0x01) dx += 1;
+    if (b0 & 0x02) dx -= 1;
+    if (b0 & 0x04) dx += 9;
+    if (b0 & 0x08) dx -= 9;
+    if (b0 & 0x10) dy -= 9;
+    if (b0 & 0x20) dy += 9;
+    if (b0 & 0x40) dy -= 1;
+    if (b0 & 0x80) dy += 1;
 
-    if (b1 & 0x01) dy += 3;
-    if (b1 & 0x02) dy -= 3;
-    if (b1 & 0x04) dy += 27;
-    if (b1 & 0x08) dy -= 27;
-    if (b1 & 0x10) dx -= 27;
-    if (b1 & 0x20) dx += 27;
-    if (b1 & 0x40) dx -= 3;
-    if (b1 & 0x80) dx += 3;
+    if (b1 & 0x01) dx += 3;
+    if (b1 & 0x02) dx -= 3;
+    if (b1 & 0x04) dx += 27;
+    if (b1 & 0x08) dx -= 27;
+    if (b1 & 0x10) dy -= 27;
+    if (b1 & 0x20) dy += 27;
+    if (b1 & 0x40) dy -= 3;
+    if (b1 & 0x80) dy += 3;
 
-    if (b2 & 0x04) dy += 81;
-    if (b2 & 0x08) dy -= 81;
-    if (b2 & 0x10) dx -= 81;
-    if (b2 & 0x20) dx += 81;
+    if (b2 & 0x04) dx += 81;
+    if (b2 & 0x08) dx -= 81;
+    if (b2 & 0x10) dy -= 81;
+    if (b2 & 0x20) dy += 81;
 
     // Record type. Colour change is checked BEFORE jump: a colour change
     // record also has the jump bit set, so testing jump first would classify
@@ -376,8 +385,64 @@ function renderDesign(design, opts) {
   // logo to survive review and obvious on anything with text or a figure in it.
   const pt = (ux, uy) => [(ux - design.minX) * scale, (design.maxY - uy) * scale];
 
+  // CONNECTING STITCHES.
+  //
+  // A design is not one continuous line. The needle travels between elements,
+  // and those travels are real stitches in the file that get trimmed on the
+  // machine. Drawn, they are thin lines cutting across the middle of the logo,
+  // which is the first thing a customer asks about.
+  //
+  // The file does not mark them, so they have to be identified by shape.
+  //
+  // LENGTH ALONE IS NOT ENOUGH, and this is worth stating because a fixed
+  // 6 mm cut-off was tried first and gutted a design: wide satin columns are
+  // legitimately long, and on a 4 inch wordmark 662 real stitches exceeded
+  // 6 mm. Filtering on length alone hollowed out every letter.
+  //
+  // Two signals together:
+  //
+  //   1. Long RELATIVE TO THIS DESIGN. The threshold scales off the median
+  //      stitch, so a dense fill and an open wordmark are judged on their own
+  //      terms rather than against a number picked from one sample.
+  //   2. ISOLATED. Satin stitches arrive in runs, so a long stitch sitting
+  //      between two other long ones is fill. A connector is a single long
+  //      stitch with short stitches either side of it.
+  //
+  // On the same wordmark that goes from 662 false positives to 26 real
+  // connectors, while a dense logo is untouched.
+  const lengths = [];
+  {
+    let prev = null;
+    for (const [ux, uy, penDown] of design.path) {
+      if (penDown && prev) lengths.push(Math.hypot(ux - prev[0], uy - prev[1]));
+      else lengths.push(null);
+      prev = [ux, uy];
+    }
+  }
+  const realLengths = lengths.filter((v) => v != null).sort((a2, b2) => a2 - b2);
+  const median = realLengths.length ? realLengths[Math.floor(realLengths.length / 2)] : 0;
+  // 60 units is 6 mm, the floor for a sparse design where the median is tiny.
+  const cutoff = Math.max(60, median * 2.5);
+
+  const hide = new Array(lengths.length).fill(false);
+  if (o.hideConnectors !== false) {
+    const neighbour = (from, step) => {
+      for (let i = from + step; i >= 0 && i < lengths.length; i += step) {
+        if (lengths[i] != null) return lengths[i];
+      }
+      return null;
+    };
+    for (let i = 0; i < lengths.length; i++) {
+      const v = lengths[i];
+      if (v == null || v <= cutoff) continue;
+      const before = neighbour(i, -1);
+      const after = neighbour(i, 1);
+      if ((before == null || before <= cutoff) && (after == null || after <= cutoff)) hide[i] = true;
+    }
+  }
+
   if (o.style === 'thread') {
-    drawThreaded(g, design, { colors, total, width, pt, drawW, drawH });
+    drawThreaded(g, design, { colors, total, width, pt, hide, drawW, drawH });
   } else {
     g.lineWidth = width;
     g.lineCap = 'round';
@@ -391,9 +456,10 @@ function renderDesign(design, opts) {
       g.strokeStyle = colors[b % colors.length];
       g.beginPath();
       let px = null;
-      for (const [ux, uy, penDown, blk] of design.path) {
+      for (let i = 0; i < design.path.length; i++) {
+        const [ux, uy, penDown, blk] = design.path[i];
         const [cx, cy] = pt(ux, uy);
-        if (blk === b && penDown && px != null) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
+        if (blk === b && penDown && px != null && !hide[i]) { g.moveTo(px[0], px[1]); g.lineTo(cx, cy); }
         px = [cx, cy];
       }
       g.stroke();
@@ -469,7 +535,7 @@ function shade(hex, amount) {
 }
 
 function drawThreaded(g, design, ctx) {
-  const { colors, total, width, pt } = ctx;
+  const { colors, total, width, pt, hide } = ctx;
 
   // Light from the upper left, which is what every rendering convention
   // assumes and therefore what looks "right" without anyone thinking about it.
@@ -489,9 +555,10 @@ function drawThreaded(g, design, ctx) {
     // times per block.
     const segs = [];
     let px = null;
-    for (const [ux, uy, penDown, blk] of design.path) {
+    for (let i = 0; i < design.path.length; i++) {
+      const [ux, uy, penDown, blk] = design.path[i];
       const c = pt(ux, uy);
-      if (blk === b && penDown && px != null) segs.push([px[0], px[1], c[0], c[1]]);
+      if (blk === b && penDown && px != null && !hide[i]) segs.push([px[0], px[1], c[0], c[1]]);
       px = c;
     }
     if (!segs.length) continue;
@@ -801,6 +868,9 @@ export default {
     .ss-score { display: flex; justify-content: center; gap: 20px; font-size: 12.5px; color: var(--muted); margin-bottom: 14px; }
     .ss-score b { color: var(--ink); font-size: 15px; }
 
+    .ss-check { display: flex; align-items: center; gap: 7px; font-size: 13px; margin-bottom: 6px; cursor: pointer; }
+    .ss-check input { width: 15px; height: 15px; accent-color: var(--accent); }
+
     .ss-muted { color: var(--muted); font-size: 12.5px; line-height: 1.6; }
     .ss-empty { text-align: center; color: var(--muted); font-size: 13px; padding: 30px 10px; line-height: 1.6; }
     .ss-err { color: var(--danger); font-size: 12.5px; margin-top: 8px; }
@@ -845,6 +915,7 @@ export default {
       cwGarment: '#F2F2F2',  // TOKEN-EXEMPT: canvas paint, not app chrome
       cwRotate: 0,
       cwStyle: 'thread',
+      cwHideConnectors: true,
       cwMirror: false,
             session: { rounds: 0, points: 0, beats: 0 }
     };
@@ -1735,6 +1806,14 @@ export default {
                 <option value="flat">Flat line work</option>
               </select>
             </div>
+            <label class="ss-check">
+              <input type="checkbox" id="ssCwConnect" checked>
+              Hide connecting stitches
+            </label>
+            <div class="ss-muted" style="margin-bottom:12px">
+              The needle travels between elements and those travels get trimmed on the machine.
+              Shown, they are thin lines cutting across the logo.
+            </div>
             <div class="ss-btnrow">
               <button class="ss-btn" id="ssCwPng">Download PNG</button>
               <button class="ss-btn ghost" id="ssCwReset">Reset colours</button>
@@ -1814,6 +1893,10 @@ export default {
       this.state.cwStyle = e.target.value;
       this.paintColorway();
     });
+    root.querySelector('#ssCwConnect').addEventListener('change', (e) => {
+      this.state.cwHideConnectors = e.target.checked;
+      this.paintColorway();
+    });
     root.querySelector('#ssCwReset').addEventListener('click', () => {
       this.state.cwColors = this.state.cwColors.map((_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
       this.drawColorwayBlocks();
@@ -1833,7 +1916,8 @@ export default {
       thickness,
       rotate: this.state.cwRotate,
       mirror: this.state.cwMirror,
-      style: this.state.cwStyle
+      style: this.state.cwStyle,
+      hideConnectors: this.state.cwHideConnectors
     });
     // A transparent export over a white card looks like a white garment, which
     // is misleading. The checker makes "no background" visibly mean no
@@ -1853,7 +1937,8 @@ export default {
       thickness,
       rotate: this.state.cwRotate,
       mirror: this.state.cwMirror,
-      style: this.state.cwStyle
+      style: this.state.cwStyle,
+      hideConnectors: this.state.cwHideConnectors
     });
     const a = document.createElement('a');
     a.download = (this.state.cwName || 'design') + '-colorway.png';
