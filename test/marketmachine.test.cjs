@@ -409,6 +409,24 @@ import('../lib/marketmachine/schema.js').then((m) => {
       'and an empty box is sent as null, not coerced to a number');
   });
 
+  t.test('MarketMachine can start the email, MailMe still owns the link', () => {
+    // The work flows campaign-first: the plan calls for an email, so the
+    // campaign starts it. The DATA still points one way only, from MailMe to
+    // here. MarketMachine keeping its own list of email ids would drift the
+    // moment an email was deleted over there, and the drift would show up on
+    // this screen as reach that never happened.
+    const app = read('apps/marketmachine.js');
+    t.assert(/data-makeemail/.test(app), 'the delegated channel row needs a draft button');
+    const fn = app.slice(app.indexOf('async function draftEmailFor'));
+    const body = fn.slice(0, 2200);
+    t.assert(/ENDPOINTS\.mmCampaigns/.test(body), 'it creates the draft in MailMe');
+    t.assert(/marketingCampaignId: c\.id/.test(body), 'with the pointer already set');
+    t.assert(/marketingChannelId: item\.id/.test(body), 'down to the channel item');
+    t.assert(!/subject:/.test(body),
+      'and omits subject/body rather than sending empty strings the validator refuses');
+    t.assert(/catch/.test(body), 'MailMe being down must not read as MarketMachine breaking');
+  });
+
   t.test('deleting a campaign is admin only', () => {
     // It holds the spend record for work that actually happened, and it is
     // the only place that was written down.
