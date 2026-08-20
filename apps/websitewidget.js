@@ -76,6 +76,43 @@ function deltaText(delta) {
   return arrow + ' ' + Math.abs(delta.pct).toFixed(1) + '%';
 }
 
+// GA4 gives engagement rate as a 0-1 fraction and session duration in
+// seconds with a long decimal tail. Neither is readable raw.
+function fmtPct(v) {
+  return (Number(v || 0) * 100).toFixed(1) + '%';
+}
+
+function fmtDuration(seconds) {
+  const s = Math.round(Number(seconds || 0));
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60);
+  return m + 'm ' + String(s % 60).padStart(2, '0') + 's';
+}
+
+function fmtDecimal(v) {
+  return Number(v || 0).toFixed(1);
+}
+
+// GA4's own event names are machine-shaped. These are the ones Enhanced
+// Measurement turns on by default, given plain-English names. Anything not
+// listed is shown as GA4 named it rather than guessed at.
+const EVENT_LABELS = {
+  page_view: 'Page views',
+  session_start: 'Visits started',
+  first_visit: 'First-time visits',
+  user_engagement: 'Engaged with a page',
+  scroll: 'Scrolled to the bottom',
+  click: 'Clicked a link off-site',
+  form_start: 'Started a form',
+  form_submit: 'Submitted a form',
+  file_download: 'Downloaded a file',
+  video_start: 'Started a video',
+  view_search_results: 'Searched the site'
+};
+
+const VISITOR_LABELS = { new: 'First time here', returning: 'Been here before' };
+const DEVICE_LABELS = { desktop: 'Computer', mobile: 'Phone', tablet: 'Tablet', smart_tv: 'TV' };
+
 const CHANNEL_LABELS = {
   'Organic Search': 'Organic search',
   'Direct': 'Direct',
@@ -177,6 +214,18 @@ export default {
     .bar-row .v { width: 44px; text-align: right; font-weight: 600; flex: none; }
 
     .ww-empty { text-align: center; color: var(--muted); font-size: 13px; padding: 24px 0; }
+    .ww-cardfail {
+      font-size: 12px; color: var(--danger-dk); background: var(--danger-tint);
+      border: 1px solid var(--danger-line); border-radius: var(--radius-sm);
+      padding: 9px 11px; line-height: 1.5;
+    }
+    .ww-cardfail .why { color: var(--muted); display: block; margin-top: 4px; font-size: 11px; word-break: break-word; }
+
+    /* Secondary stats. Smaller than the four headline cards on purpose:
+       they explain the traffic rather than count it. */
+    .ww-sub { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 24px; }
+    .ww-sub .ww-kpi { padding: 13px 15px; }
+    .ww-sub .ww-kpi .val { font-size: 20px; }
     .ww-error { color: var(--danger); font-size: 12.5px; margin-top: 4px; }
 
     .ww-setup { max-width: 620px; margin: 40px auto; text-align: center; }
@@ -449,39 +498,64 @@ export default {
           esc(deltaText(delta)) + '</div>';
       }
 
-      const chanMax = Math.max(1, ...((data.channels || []).map((c) => c.sessions)));
-      const chanHtml = (data.channels || []).length
-        ? data.channels.map((c) =>
-            '<div class="bar-row"><div class="k" title="' + esc(CHANNEL_LABELS[c.channel] || c.channel) + '">' +
-              esc(CHANNEL_LABELS[c.channel] || c.channel) + '</div>' +
-              '<div class="track"><div class="fill" style="width:' + (c.sessions / chanMax) * 100 + '%"></div></div>' +
-              '<div class="v">' + fmtNum(c.sessions) + '</div>' + cmpCell(c.delta) + '</div>'
-          ).join('')
-        : '<div class="ww-empty">No traffic yet in this range.</div>';
-
-      const pageMax = Math.max(1, ...((data.topPages || []).map((p) => p.views)));
-      const pagesHtml = (data.topPages || []).length
-        ? data.topPages.map((p) =>
-            '<div class="bar-row"><div class="k" title="' + esc(p.path) + '">' + esc(p.path) + '</div>' +
-              '<div class="track"><div class="fill" style="width:' + (p.views / pageMax) * 100 + '%"></div></div>' +
-              '<div class="v">' + fmtNum(p.views) + '</div>' + cmpCell(p.delta) + '</div>'
-          ).join('')
-        : '<div class="ww-empty">No page views yet in this range.</div>';
+      // One builder for every breakdown card. Each card renders from the
+      // catalogue on the server (BREAKDOWNS in lib/websitewidget/ga4.js), so
+      // the bar rows, the comparison column, the empty state and the failure
+      // state are written once rather than per card.
+      function barCard(heading, rows, keyField, valueField, labels, emptyMsg) {
+        const failure = (data.failed || {})[heading.section];
+        if (failure) {
+          return '<div class="ww-card"><h2>' + esc(heading.title) + '</h2>' +
+            '<div class="ww-cardfail">This section could not be read from Google.' +
+            '<span class="why">' + esc(failure) + '</span></div></div>';
+        }
+        const list = rows || [];
+        if (!list.length) {
+          return '<div class="ww-card"><h2>' + esc(heading.title) + '</h2>' +
+            '<div class="ww-empty">' + esc(emptyMsg) + '</div></div>';
+        }
+        const max = Math.max(1, ...list.map((r) => r[valueField] || 0));
+        const body = list.map((r) => {
+          const raw = r[keyField];
+          const label = (labels && labels[raw]) || raw;
+          return '<div class="bar-row"><div class="k" title="' + esc(label) + '">' + esc(label) + '</div>' +
+            '<div class="track"><div class="fill" style="width:' + ((r[valueField] || 0) / max) * 100 + '%"></div></div>' +
+            '<div class="v">' + fmtNum(r[valueField]) + '</div>' + cmpCell(r.delta) + '</div>';
+        }).join('');
+        return '<div class="ww-card"><h2>' + esc(heading.title) + '</h2>' + body + '</div>';
+      }
 
       const d = data.deltas || {};
       // The prior figure sits next to the percentage on purpose. "Up 40%"
       // means one thing off a base of 2,000 and nothing at all off a base
       // of 5, and the percentage alone does not say which you are looking at.
-      function kpi(label, value, delta) {
+      function kpi(label, value, delta, fmt) {
+        const render = fmt || fmtNum;
         const pill = delta
           ? '<div class="ww-delta">' +
               '<span class="pill ' + deltaClass(delta) + '">' + esc(deltaText(delta)) + '</span>' +
-              '<span class="was">was ' + fmtNum(delta.prior) + '</span>' +
+              '<span class="was">was ' + esc(render(delta.prior)) + '</span>' +
             '</div>'
           : '';
         return '<div class="ww-kpi"><div class="lbl">' + esc(label) + '</div>' +
-          '<div class="val">' + fmtNum(value) + '</div>' + pill + '</div>';
+          '<div class="val">' + esc(render(value)) + '</div>' + pill + '</div>';
       }
+
+      // Engagement is its own small row. It answers "was the traffic any
+      // good", which is a different question from "how much was there", and
+      // it is absent rather than zero when GA4 would not give it up.
+      const eng = data.engagement;
+      const ed = data.engagementDeltas || {};
+      const engRow = eng
+        ? `<div class="ww-sub">
+             ${kpi('Engaged visits', eng.engagementRate, ed.engagementRate, fmtPct)}
+             ${kpi('Avg time on site', eng.avgSessionSeconds, ed.avgSessionSeconds, fmtDuration)}
+             ${kpi('Pages per visit', eng.pagesPerSession, ed.pagesPerSession, fmtDecimal)}
+           </div>`
+        : (data.failed && data.failed.engagement
+            ? '<div class="ww-sub"><div class="ww-cardfail">Engagement figures could not be read.' +
+              '<span class="why">' + esc(data.failed.engagement) + '</span></div></div>'
+            : '');
 
       body.innerHTML = `
         <div class="ww-kpis">
@@ -490,13 +564,19 @@ export default {
           ${kpi('Sessions', t.sessions, d.sessions)}
           ${kpi('Page views', t.pageViews, d.pageViews)}
         </div>
+        ${engRow}
         <div class="ww-grid">
           <div>
             <div class="ww-card"><h2>Sessions, daily</h2>${trendHtml}</div>
+            ${barCard({ title: 'Where visits start', section: 'landingPages' }, data.landingPages, 'path', 'sessions', null, 'No landing pages in this range yet.')}
+            ${barCard({ title: 'Top pages', section: 'topPages' }, data.topPages, 'path', 'views', null, 'No page views yet in this range.')}
+            ${barCard({ title: 'What people do', section: 'events' }, data.events, 'event', 'count', EVENT_LABELS, 'No events recorded in this range yet.')}
           </div>
           <div>
-            <div class="ww-card"><h2>Traffic source</h2>${chanHtml}</div>
-            <div class="ww-card"><h2>Top pages</h2>${pagesHtml}</div>
+            ${barCard({ title: 'Traffic source', section: 'channels' }, data.channels, 'channel', 'sessions', CHANNEL_LABELS, 'No traffic yet in this range.')}
+            ${barCard({ title: 'Phone or computer', section: 'devices' }, data.devices, 'device', 'sessions', DEVICE_LABELS, 'No device data in this range yet.')}
+            ${barCard({ title: 'New or returning', section: 'visitorType' }, data.visitorType, 'type', 'sessions', VISITOR_LABELS, 'No visitor data in this range yet.')}
+            ${barCard({ title: 'Where visitors are', section: 'places' }, data.places, 'place', 'sessions', null, 'No location data in this range yet.')}
           </div>
         </div>
       `;
