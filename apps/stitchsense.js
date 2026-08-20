@@ -1,3 +1,4 @@
+/* apps/stitchsense.js */
 /**
  * StitchSense — stitch count estimating for quoting embroidery.
  *
@@ -40,6 +41,7 @@ import {
   MODEL_VERSION
 } from '../lib/stitchsense/model.js';
 import { CHARACTERS, characterLabel } from '../lib/stitchsense/schema.js';
+import { loadPdfJs } from '../js/pdf-loader.js';
 
 /* ------------------------------------------------------------------ *
  * SMALL HELPERS
@@ -752,6 +754,78 @@ function paintOverlay(canvas, img, measured) {
 }
 
 /* ------------------------------------------------------------------ *
+ * VECTOR ARTWORK
+ *
+ * PDF, and .ai files that carry a PDF version inside them, which is most of
+ * them: Illustrator's "Create PDF Compatible File" has been on by default
+ * since version 9, and when it is on the .ai IS a PDF with an Illustrator
+ * payload bolted alongside. pdf.js reads the bytes and neither knows nor cares
+ * about the extension.
+ *
+ * When it is off, the file is Illustrator's private format and nothing outside
+ * Adobe can open it. That case is detected and named rather than reported as a
+ * corrupt file, because the fix is a re-save and the AM needs to know that.
+ *
+ * EPS IS NOT HANDLED, deliberately. EPS is PostScript, a programming language,
+ * and rendering it means running a PostScript interpreter. There is no such
+ * thing in a browser. Some EPS files carry a small preview image, but it is
+ * typically 72 dpi and often missing entirely, and measuring coverage off a
+ * blurry thumbnail would produce a confident number built on nothing. Better
+ * to refuse and say so.
+ * ------------------------------------------------------------------ */
+
+const VECTOR_RE = /\.(pdf|ai)$/i;
+
+/**
+ * Render one page of a PDF or PDF-compatible AI into an Image.
+ *
+ * Rendered onto a TRANSPARENT canvas on purpose. Everything the file does not
+ * draw stays at alpha zero, so the coverage step reads the alpha channel and
+ * is exact, rather than guessing a background colour from the corners the way
+ * it has to on a JPEG.
+ */
+async function renderVectorPage(file, pageNumber = 1) {
+  const pdfjs = await loadPdfJs();
+  const data = new Uint8Array(await file.arrayBuffer());
+
+  let doc;
+  try {
+    doc = await pdfjs.getDocument({ data }).promise;
+  } catch (err) {
+    if (/\.ai$/i.test(file.name)) {
+      throw new Error(
+        'That .ai file has no PDF version inside it, so nothing outside Illustrator can open it. ' +
+        'Re-save it with "Create PDF Compatible File" ticked, or save a copy as PDF.'
+      );
+    }
+    throw new Error('That PDF could not be opened. It may be damaged or password protected.');
+  }
+
+  const page = await doc.getPage(Math.min(Math.max(1, pageNumber), doc.numPages));
+
+  // Rendered big. Coverage is measured per pixel, so a page rendered at screen
+  // size throws away detail on thin line art and reads the artwork as lighter
+  // than it is.
+  const base = page.getViewport({ scale: 1 });
+  const scale = Math.min(6, Math.max(1, 1600 / Math.max(base.width, base.height)));
+  const viewport = page.getViewport({ scale });
+
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+
+  const img = await new Promise((resolve, reject) => {
+    const i = new Image();
+    i.onload = () => resolve(i);
+    i.onerror = () => reject(new Error('The rendered page could not be read back.'));
+    i.src = canvas.toDataURL('image/png');
+  });
+
+  return { img, pages: doc.numPages, widthPt: base.width, heightPt: base.height };
+}
+
+/* ------------------------------------------------------------------ *
  * PLACEMENT PRESETS
  *
  * Standard finished sizes, so an AM quoting a left chest does not have to
@@ -949,6 +1023,9 @@ export default {
       cwRotate: 0,
       cwStyle: 'thread',
       cwHideConnectors: true,
+      vectorFile: null,
+      vectorPages: 0,
+      vectorPage: 1,
       cwMirror: false,
             session: { rounds: 0, points: 0, beats: 0 }
     };
@@ -998,9 +1075,12 @@ export default {
           <div class="ss-card">
             <div class="ss-drop" id="ssDrop">
               <div class="big">Drop artwork or a DST here</div>
-              <div class="small">PNG, JPG, GIF, WEBP or SVG for an estimate.<br>DST for an exact count.</div>
+              <div class="small">
+                PDF or AI reads most accurately, then PNG with a transparent background.<br>
+                JPG, GIF, WEBP and SVG work too. DST gives an exact count.
+              </div>
             </div>
-            <input type="file" id="ssFile" accept=".dst,image/*" style="display:none">
+            <input type="file" id="ssFile" accept=".dst,.pdf,.ai,image/*" style="display:none">
 
             <div id="ssPreviewWrap" class="ss-hidden" style="margin-top:14px">
               <div class="ss-preview">
@@ -1092,13 +1172,79 @@ export default {
 
   async takeFile(f) {
     this.showEstimateError('');
-    const isDst = /\.dst$/i.test(f.name);
     try {
-      if (isDst) await this.takeDst(f);
-      else await this.takeImage(f);
+      if (/\.eps$/i.test(f.name)) {
+        throw new Error(
+          'EPS cannot be read here. It is PostScript, which needs an interpreter no browser has. ' +
+          'Open it in Illustrator and save a copy as PDF, or export a PNG.'
+        );
+      }
+      if (/\.dst$/i.test(f.name)) {
+        await this.takeDst(f);
+      } else if (VECTOR_RE.test(f.name)) {
+        await this.takeVector(f);
+      } else {
+        await this.takeImage(f);
+      }
       this.root.querySelector('#ssRun').disabled = false;
     } catch (err) {
       this.showEstimateError(String((err && err.message) || err));
+    }
+  },
+
+  async takeVector(f, pageNumber = 1) {
+    this.showEstimateError('');
+    const note = this.root.querySelector('#ssOverlayNote');
+    const wrap = this.root.querySelector('#ssPreviewWrap');
+    wrap.classList.remove('ss-hidden');
+    if (note) note.textContent = 'Rendering the page...';
+
+    const { img, pages } = await renderVectorPage(f, pageNumber);
+
+    const measured = measureImageCoverage(img);
+    if (!measured) {
+      throw new Error('That page looks empty. If the artwork is on another page, pick it below.');
+    }
+
+    this.state.measured = measured;
+    this.state.decoded = null;
+    this.state.fileName = f.name;
+    this.state.image = img;
+    this.state.vectorFile = f;
+    this.state.vectorPages = pages;
+    this.state.vectorPage = pageNumber;
+
+    paintOverlay(this.root.querySelector('#ssCanvas'), img, measured);
+
+    // Rendering onto a transparent canvas means the alpha channel says exactly
+    // what was drawn, so there is no background guessing at all. Worth telling
+    // the AM, because it makes a PDF the most reliable thing they can ask a
+    // customer for.
+    note.innerHTML =
+      `Magenta is what was counted as thread. Read from the page itself, so this is exact rather ` +
+      `than a guess at the background. Artwork fills ${pct(measured.inkFractionOfBox, 1)} of its ` +
+      `own bounding box.` +
+      (pages > 1
+        ? `<br><br><b>This file has ${pages} pages and page ${pageNumber} is being measured.</b> ` +
+          `Everything drawn on the page counts, so a brand sheet with several logos on it will ` +
+          `read far too high.<br>` +
+          `<span id="ssPageNav"></span>`
+        : '');
+
+    if (pages > 1) {
+      const nav = this.root.querySelector('#ssPageNav');
+      nav.innerHTML = Array.from({ length: Math.min(pages, 20) }, (_, i) =>
+        `<button class="ss-btn ghost" data-page="${i + 1}" style="margin:4px 4px 0 0"${i + 1 === pageNumber ? ' disabled' : ''}>Page ${i + 1}</button>`
+      ).join('');
+      nav.querySelectorAll('[data-page]').forEach((btn) => {
+        btn.addEventListener('click', async () => {
+          try {
+            await this.takeVector(this.state.vectorFile, Number(btn.getAttribute('data-page')));
+          } catch (err) {
+            this.showEstimateError(String((err && err.message) || err));
+          }
+        });
+      });
     }
   },
 
