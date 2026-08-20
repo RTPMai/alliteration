@@ -487,6 +487,133 @@ t.test('a per-site GA4 error is shown distinctly from "not configured"', () => {
     t.equal(merged[1].prior, null, 'GA4 returned nothing at all, which is not a fact about the number');
   });
 
+  /* -- the breakdown catalogue -- */
+
+  t.test('every breakdown declares the fields the view reads off it', () => {
+    // The cards are generated from this table, so a half-filled entry is a
+    // card that renders blank labels rather than an error anyone would notice.
+    Object.entries(ga4.BREAKDOWNS).forEach(([name, spec]) => {
+      t.assert(Array.isArray(spec.dims) && spec.dims.length >= 1, name + ' needs at least one GA4 dimension');
+      t.assert(typeof spec.metric === 'string' && spec.metric, name + ' needs a metric');
+      t.assert(typeof spec.key === 'string' && spec.key, name + ' needs a key field');
+      t.assert(typeof spec.value === 'string' && spec.value, name + ' needs a value field');
+      t.assert(typeof spec.limit === 'number' && spec.limit > 0, name + ' needs a row limit');
+      t.assert(spec.key !== spec.value, name + ' cannot use one field for both label and number');
+    });
+  });
+
+  t.test('the catalogue still covers the two original cards', () => {
+    // channels and topPages were hand-written before the table existed. If a
+    // refactor drops them from the catalogue the dashboard loses them silently.
+    t.assert(ga4.BREAKDOWNS.channels, 'channels must stay in the catalogue');
+    t.assert(ga4.BREAKDOWNS.topPages, 'topPages must stay in the catalogue');
+    t.equal(ga4.BREAKDOWNS.channels.key, 'channel');
+    t.equal(ga4.BREAKDOWNS.topPages.value, 'views');
+  });
+
+  t.test('the new reports are all present', () => {
+    ['landingPages', 'devices', 'visitorType', 'places', 'events'].forEach((n) => {
+      t.assert(ga4.BREAKDOWNS[n], n + ' should be in the catalogue');
+    });
+  });
+
+  t.test('comparison works on every catalogue entry, not just the first two', () => {
+    // compareSeries is keyed by field name, so a card whose key field is
+    // wrong compares nothing and silently shows dashes forever.
+    Object.entries(ga4.BREAKDOWNS).forEach(([name, spec]) => {
+      const now = [{ [spec.key]: 'X', [spec.value]: 10 }];
+      const was = [{ [spec.key]: 'X', [spec.value]: 5 }];
+      const merged = ga4.compareSeries(now, was, spec.key, spec.value);
+      t.equal(merged[0].delta.pct, 100, name + ' should compare its own rows');
+    });
+  });
+
+  t.test('a multi-dimension breakdown joins its parts into one label', () => {
+    // "Springfield" is not an answer. places uses city plus region so two
+    // Springfields stay apart.
+    t.assert(ga4.BREAKDOWNS.places.dims.length === 2, 'places should carry a second dimension');
+    t.equal(ga4.BREAKDOWNS.places.dims[0], 'city', 'city must be first, since only the first dimension can be filtered');
+  });
+
+  /* -- failure isolation, the property the whole layout depends on -- */
+
+  // Exercises the REAL fetchSiteStats against a stand-in GA4 that rejects one
+  // dimension and one metric, which is what Google does when a field is
+  // renamed. Ten reports now go out per window using names that cannot be
+  // verified from a test environment, so the thing worth pinning is not that
+  // the names are right, it is that being wrong costs one card instead of the
+  // page. Under the previous Promise.all, one 400 blanked everything.
+  const crypto = require('crypto');
+  const { privateKey } = crypto.generateKeyPairSync('rsa', {
+    modulusLength: 2048,
+    privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+    publicKeyEncoding: { type: 'spki', format: 'pem' }
+  });
+
+  const savedFetch = globalThis.fetch;
+  const savedEmail2 = process.env.GA4_CLIENT_EMAIL;
+  const savedKey2 = process.env.GA4_PRIVATE_KEY;
+  process.env.GA4_CLIENT_EMAIL = 'stub@stub.iam.gserviceaccount.com';
+  process.env.GA4_PRIVATE_KEY = privateKey;
+
+  globalThis.fetch = async (url, init) => {
+    if (String(url).includes('oauth2.googleapis.com')) {
+      return new Response(JSON.stringify({ access_token: 'tok' }), { status: 200 });
+    }
+    const body = JSON.parse(init.body);
+    const dims = (body.dimensions || []).map((d) => d.name);
+    if (dims.includes('landingPage')) {
+      return new Response('{"error":{"message":"not a valid dimension"}}', { status: 400 });
+    }
+    if ((body.metrics || []).some((m) => m.name === 'engagementRate')) {
+      return new Response('{"error":{"message":"not a valid metric"}}', { status: 400 });
+    }
+    const mk = (names, rows) => JSON.stringify({
+      dimensionHeaders: names.map((n) => ({ name: n })),
+      metricHeaders: (body.metrics || []).map((m) => ({ name: m.name })),
+      rows
+    });
+    if (!dims.length) {
+      return new Response(mk([], [{ dimensionValues: [], metricValues: (body.metrics || []).map(() => ({ value: '42' })) }]), { status: 200 });
+    }
+    if (dims[0] === 'date') {
+      return new Response(mk(['date'], [{ dimensionValues: [{ value: '20260819' }], metricValues: [{ value: '44' }, { value: '31' }] }]), { status: 200 });
+    }
+    return new Response(mk(dims, [{ dimensionValues: dims.map(() => ({ value: 'Alpha' })), metricValues: [{ value: '7' }] }]), { status: 200 });
+  };
+
+  const isolated = await ga4.fetchSiteStats('123', 7, 'none');
+
+  globalThis.fetch = savedFetch;
+  if (savedEmail2 !== undefined) process.env.GA4_CLIENT_EMAIL = savedEmail2; else delete process.env.GA4_CLIENT_EMAIL;
+  if (savedKey2 !== undefined) process.env.GA4_PRIVATE_KEY = savedKey2; else delete process.env.GA4_PRIVATE_KEY;
+
+  t.test('one rejected dimension costs one card, not the dashboard', () => {
+    t.equal(isolated.totals.sessions, 42, 'the headline numbers must survive a broken breakdown');
+    t.equal(isolated.trend.length, 7, 'the chart must survive too');
+    t.assert(isolated.failed.landingPages, 'the rejected section must report itself as failed');
+  });
+
+  t.test('the sections Google accepted still carry their rows', () => {
+    ['channels', 'topPages', 'devices', 'visitorType', 'places', 'events'].forEach((n) => {
+      t.assert((isolated[n] || []).length > 0, n + ' should still have data');
+      t.assert(!isolated.failed[n], n + ' should not be marked failed');
+    });
+  });
+
+  t.test('a failed section is null or empty, never a confident zero', () => {
+    // The distinction the whole app runs on. A card that could not be read
+    // must not render as "0 visits from phones", which is a claim.
+    t.equal(isolated.engagement, null, 'unreadable engagement must be null, not zeroes');
+    t.assert(isolated.failed.engagement, 'and it must say why');
+    t.equal((isolated.landingPages || []).length, 0);
+  });
+
+  t.test('the failure message names what went wrong', () => {
+    t.assert(/400/.test(isolated.failed.landingPages),
+      'the message should carry enough to act on, not just "error"');
+  });
+
   /* -- connection probe -- */
 
   // The harness runs t.test synchronously and does not await a returned
