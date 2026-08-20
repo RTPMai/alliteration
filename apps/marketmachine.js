@@ -574,7 +574,7 @@ export default {
         } else {
           nums = counted
             ? '<span class="gap">No email in MailMe points at this yet</span>'
-            : '<span class="who">Build the email in MailMe and attach it to this campaign</span>';
+            : '<span class="who">No email drafted for this yet</span>';
         }
       } else {
         const gap = (v) => v == null
@@ -596,6 +596,9 @@ export default {
             </div>
             <div class="mk-actions">
               <span class="pill ${st.cls}">${esc(st.label)}</span>
+              ${m.delegated && state.canEdit
+                ? `<button class="mk-btn ghost sm" data-makeemail="${esc(item.id)}">${
+                    linked ? 'Draft another email' : 'Draft the email'}</button>` : ''}
               ${state.canEdit ? `<button class="mk-btn ghost sm" data-editch="${esc(item.id)}">Edit</button>` : ''}
               ${state.canEdit ? `<button class="mk-btn ghost sm" data-delch="${esc(item.id)}">Remove</button>` : ''}
             </div>
@@ -725,6 +728,61 @@ export default {
       pane.querySelectorAll('[data-delch]').forEach((b) => {
         b.addEventListener('click', () => removeChannel(b.dataset.delch));
       });
+      pane.querySelectorAll('[data-makeemail]').forEach((b) => {
+        b.addEventListener('click', () => draftEmailFor(b.dataset.makeemail));
+      });
+    }
+
+    /**
+     * Start the email for an email channel item, over in MailMe.
+     *
+     * WHICH WAY THE WORK FLOWS. Linking used to only be possible from the
+     * MailMe end: build the email there, then find this campaign in a
+     * dropdown. That is backwards from how the work actually happens, because
+     * the campaign is planned first and the email is one of the things the
+     * plan calls for. So the campaign can now start the email.
+     *
+     * WHICH WAY THE DATA POINTS IS UNCHANGED. MailMe still holds the only
+     * copy of the link. This creates a draft over there with the pointer
+     * already set; MarketMachine does not keep a list of email ids, because
+     * two copies of one fact drift the moment an email is deleted in MailMe,
+     * and the drift shows up here as reach that never happened.
+     *
+     * The draft is deliberately EMPTY apart from the link and a working
+     * title. Pre-filling a subject line from the campaign name would put
+     * words in front of a customer that nobody wrote on purpose, and a
+     * half-written subject is harder to notice than a blank one.
+     */
+    async function draftEmailFor(channelItemId) {
+      const c = state.detail && state.detail.campaign;
+      if (!c || !channelItemId) return;
+      const item = (c.channels || []).find((x) => x.id === channelItemId);
+      if (!item) return;
+
+      try {
+        // Subject and body are OMITTED, not sent as empty strings. MailMe's
+        // validator refuses an explicitly blanked subject, which is the right
+        // rule for an edit: nobody should be able to wipe the subject off an
+        // email that has one. Leaving the keys out entirely takes the record's
+        // own defaults instead, so the draft starts genuinely blank without
+        // arguing with a rule that exists for a different reason.
+        const d = await api.post(ENDPOINTS.mmCampaigns, {
+          marketingCampaignId: c.id,
+          marketingChannelId: item.id
+        });
+        const made = d && d.campaign;
+        if (!made || !made.id) throw new Error('MailMe did not return the draft');
+
+        await loadDetail(c.id);
+        renderDetail();
+        detailMsg(
+          'Draft ' + esc(made.id) + ' created in MailMe, already attached to this campaign. ' +
+          'Open MailMe and go to Sends to write it.', 'mk-ok');
+      } catch (e) {
+        // MailMe being unreachable must not look like MarketMachine breaking,
+        // and it must not leave a channel item half-created here.
+        detailMsg('Could not start the draft in MailMe: ' + esc(e.message), 'mk-err');
+      }
     }
 
     /* ---------------- campaign form ---------------- */
