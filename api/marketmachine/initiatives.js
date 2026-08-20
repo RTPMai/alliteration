@@ -17,7 +17,33 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
-import { getInitiatives, saveInitiatives, DEFAULT_INITIATIVES } from "../../lib/marketmachine/store.js";
+import {
+  getInitiatives, saveInitiatives, DEFAULT_INITIATIVES,
+  getIndustries, saveIndustries, DEFAULT_INDUSTRIES,
+} from "../../lib/marketmachine/store.js";
+
+// SECOND LIST ON THE SAME ROUTE. ?kind=industries serves the industry
+// vocabulary, which has identical rules: everyone reads it, admins edit it,
+// and free text would fracture it into near-duplicates.
+//
+// It shares this file rather than getting its own because BackBone already
+// calls this endpoint with no parameters and must keep getting exactly the
+// same response it gets today. Defaulting `kind` to initiatives guarantees
+// that: the existing caller is untouched by construction, not by care.
+const LISTS = {
+  initiatives: {
+    field: "initiatives", get: getInitiatives, save: saveInitiatives,
+    defaults: DEFAULT_INITIATIVES,
+    denial: "Editing the initiative list is admin only: it changes what every lead appears tagged with.",
+  },
+  industries: {
+    field: "industries", get: getIndustries, save: saveIndustries,
+    defaults: DEFAULT_INDUSTRIES,
+    denial: "Editing the industry list is admin only: it changes how every campaign is segmented.",
+  },
+};
+
+const listFor = (q) => LISTS[String((q && q.kind) || "initiatives")] || null;
 
 function parseBody(req) {
   let b = req.body;
@@ -33,12 +59,15 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
+    const list = listFor(req.query);
+    if (!list) return res.status(400).json({ error: "Unknown list" });
+
     if (req.method === "GET") {
       const perms = await permsFor(sess.username);
       const canEdit = !!(perms && (perms.superuser === true || perms.role === "admin"));
       return res.status(200).json({
-        initiatives: await getInitiatives(),
-        defaults: DEFAULT_INITIATIVES,
+        [list.field]: await list.get(),
+        defaults: list.defaults,
         canEdit,
       });
     }
@@ -46,17 +75,13 @@ export default async function handler(req, res) {
     if (req.method === "PUT" || req.method === "PATCH" || req.method === "POST") {
       const perms = await permsFor(sess.username);
       const admin = !!(perms && (perms.superuser === true || perms.role === "admin"));
-      if (!admin) {
-        return res.status(403).json({
-          error: "Editing the initiative list is admin only: it changes what every lead appears tagged with.",
-        });
-      }
+      if (!admin) return res.status(403).json({ error: list.denial });
       const body = parseBody(req);
-      if (!Array.isArray(body.initiatives)) {
-        return res.status(400).json({ error: "initiatives must be an array" });
+      if (!Array.isArray(body[list.field])) {
+        return res.status(400).json({ error: `${list.field} must be an array` });
       }
-      const saved = await saveInitiatives(body.initiatives);
-      return res.status(200).json({ ok: true, initiatives: saved });
+      const saved = await list.save(body[list.field]);
+      return res.status(200).json({ ok: true, [list.field]: saved });
     }
 
     res.setHeader("Allow", "GET, PUT, PATCH, POST, OPTIONS");
