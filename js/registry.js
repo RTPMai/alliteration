@@ -215,7 +215,16 @@ export const APPS = [
     // a strip on Campaigns. Reports is what the "Results" modal became, now
     // that sending no longer happens on it.
     views: [
-      ['campaigns', 'Campaigns'],
+      // "Sends", not "Campaigns". A MailMe record is ONE EMAIL; a campaign is
+      // the whole multi-channel effort and lives in MarketMachine. Both apps
+      // calling their record a campaign meant the word answered two different
+      // questions, the same conflict as Roster meaning customers in BackBone
+      // and employees in CrewCore.
+      //
+      // The VIEW KEY stays 'campaigns'. It is in stored dashboard layouts and
+      // in deep links, so renaming it would break those for no gain, and the
+      // key is not something anyone reads.
+      ['campaigns', 'Sends'],
       ['audience', 'Audience'],
       ['reports', 'Reports'],
       ['settings', 'Settings']
