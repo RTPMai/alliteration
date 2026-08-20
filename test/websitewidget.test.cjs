@@ -362,6 +362,67 @@ t.test('a per-site GA4 error is shown distinctly from "not configured"', () => {
     t.equal(w.prior.endDate, '2026-10-05');
   });
 
+  /* -- missing days in the trend -- */
+
+  t.test('a day GA4 omits is filled in as zero, not dropped', () => {
+    // Found live on Aug 20, 2026: PMApparel's 7 day chart drew SIX bars.
+    // Sunday the 16th had no sessions, GA4 returned no row for it, and the
+    // day silently vanished. The flat spot is the news; dropping it hides it.
+    const w = { startDate: '2026-08-13', endDate: '2026-08-19' };
+    const sparse = [
+      { date: '20260813', sessions: 2, users: 2 },
+      { date: '20260814', sessions: 3, users: 3 },
+      { date: '20260815', sessions: 1, users: 1 },
+      // 20260816 absent, exactly as GA4 returns it
+      { date: '20260817', sessions: 40, users: 33 },
+      { date: '20260818', sessions: 35, users: 30 },
+      { date: '20260819', sessions: 44, users: 31 },
+    ];
+    const dense = ga4.fillTrendGaps(sparse, w);
+    t.equal(dense.length, 7, 'a 7 day window must produce 7 bars');
+    t.equal(dense[3].date, '20260816', 'the missing day belongs in position 3');
+    t.equal(dense[3].sessions, 0);
+    t.equal(dense[3].users, 0);
+    t.equal(dense[5].sessions, 35, 'real days must not be shifted by the insert');
+  });
+
+  t.test('filling gaps keeps the two periods aligned day for day', () => {
+    // The reason this matters beyond the chart looking right. The overlay
+    // pairs periods by position. One missing day in one period and not the
+    // other shifts everything after it, so a Monday gets measured against a
+    // Sunday and the 364-day weekday alignment is wasted.
+    const cur = ga4.fillTrendGaps(
+      [{ date: '20260813', sessions: 2, users: 2 }, { date: '20260819', sessions: 44, users: 31 }],
+      { startDate: '2026-08-13', endDate: '2026-08-19' }
+    );
+    const prior = ga4.fillTrendGaps(
+      [{ date: '20260806', sessions: 5, users: 5 }],
+      { startDate: '2026-08-06', endDate: '2026-08-12' }
+    );
+    t.equal(cur.length, prior.length, 'both series must be the same length to pair by index');
+    cur.forEach((d, i) => {
+      const a = new Date(d.date.slice(0,4) + '-' + d.date.slice(4,6) + '-' + d.date.slice(6,8) + 'T12:00:00Z');
+      const b = new Date(prior[i].date.slice(0,4) + '-' + prior[i].date.slice(4,6) + '-' + prior[i].date.slice(6,8) + 'T12:00:00Z');
+      t.equal(a.getUTCDay(), b.getUTCDay(), 'position ' + i + ' must pair the same weekday');
+    });
+  });
+
+  t.test('an entirely empty period still produces a full row of zeros', () => {
+    // Exactly the state Iowa On Demand and Flyover Con were in on day one.
+    // An empty array would draw no chart at all rather than a flat one.
+    const dense = ga4.fillTrendGaps([], { startDate: '2026-08-13', endDate: '2026-08-19' });
+    t.equal(dense.length, 7);
+    t.equal(dense.reduce((n, d) => n + d.sessions, 0), 0);
+  });
+
+  t.test('gap filling spans a month boundary correctly', () => {
+    const dense = ga4.fillTrendGaps([], { startDate: '2026-07-29', endDate: '2026-08-02' });
+    t.equal(dense.length, 5);
+    t.equal(dense[0].date, '20260729');
+    t.equal(dense[2].date, '20260731', 'July has 31 days');
+    t.equal(dense[3].date, '20260801');
+  });
+
   /* -- deltas -- */
 
   t.test('a delta reports direction and magnitude off the prior figure', () => {
