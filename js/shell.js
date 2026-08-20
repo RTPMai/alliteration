@@ -410,8 +410,13 @@ function renderAvatar() {
  * call: the small header number wasn't eye-catching enough). refreshBell()
  * still owns the polling, it just calls setBadge('notifications', n) rather
  * than painting a number onto the bell itself. Refreshed on every
- * navigation (cheap: one filtered GET) plus a standing interval so the
- * count updates even while parked on one screen.
+ * navigation plus a standing interval so the count updates even while
+ * parked on one screen.
+ *
+ * That "one filtered GET" was described as cheap here and was not: the
+ * route loaded every notification record to hand back a length. It now
+ * asks for ?count=1, which the notifications index answers on its own.
+ * See lib/notifications/store.js.
  *
  * This briefly rendered its own dropdown (Aug 6) and got reverted the same
  * day — Ryan preferred Notifications stay a full routed screen.
@@ -419,6 +424,40 @@ function renderAvatar() {
 
 const BELL_POLL_MS = 60000;
 let bellTimer = null;
+let bellVisibilityBound = false;
+
+/**
+ * A BACKGROUND TAB POLLS NOTHING (Aug 2026).
+ *
+ * The interval below runs per open tab, and a tab nobody is looking at was
+ * calling just as often as the one on screen. A laptop left open over a
+ * weekend polled all weekend. Since the count is only ever read off the
+ * rail badge, a hidden tab has nothing to update, so it stops entirely and
+ * refreshes once when it comes back into view.
+ *
+ * Guarded rather than assumed: `document.visibilityState` is checked for
+ * existence so this cannot throw in any context without it.
+ */
+function bellVisible() {
+  return typeof document === 'undefined' ||
+    typeof document.visibilityState !== 'string' ||
+    document.visibilityState === 'visible';
+}
+
+function startBellPolling() {
+  stopBellPolling();
+  bellTimer = setInterval(refreshBell, BELL_POLL_MS);
+}
+
+function stopBellPolling() {
+  if (bellTimer) { clearInterval(bellTimer); bellTimer = null; }
+}
+
+function onBellVisibilityChange() {
+  if (!state.user) { stopBellPolling(); return; }
+  if (bellVisible()) { refreshBell(); startBellPolling(); }
+  else stopBellPolling();
+}
 
 function initBell() {
   if (!el.bellBtn || !canAccess(state.perms, 'notifications')) return;
@@ -426,17 +465,33 @@ function initBell() {
 
   el.bellBtn.addEventListener('click', () => router.go('notifications', 'inbox'));
 
+  // Bound once. initBell() runs on every sign-in, and stacking a listener
+  // per sign-in would multiply the refresh on each visibility change.
+  if (!bellVisibilityBound && typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', onBellVisibilityChange);
+    bellVisibilityBound = true;
+  }
+
   refreshBell();
-  if (bellTimer) clearInterval(bellTimer);
-  bellTimer = setInterval(refreshBell, BELL_POLL_MS);
+  if (bellVisible()) startBellPolling();
 }
 
 async function refreshBell() {
   if (!state.user) return;
+  if (!bellVisible()) return;
   try {
     const username = String(state.user.username || '').toLowerCase();
-    const data = await api.get(api.ENDPOINTS.notifications, { assignedTo: username, status: 'open' });
-    const n = Array.isArray(data && data.notifications) ? data.notifications.length : 0;
+    // count=1 answers from the notifications index alone: ONE storage read
+    // no matter how many notifications exist. Asking for the full list and
+    // taking .length read every record on every poll. The list shape is
+    // still accepted below so an older cached shell keeps working through
+    // a deploy.
+    const data = await api.get(api.ENDPOINTS.notifications, {
+      assignedTo: username, status: 'open', count: '1',
+    });
+    const n = (data && typeof data.count === 'number')
+      ? data.count
+      : (Array.isArray(data && data.notifications) ? data.notifications.length : 0);
     // The count now lives on the rail item next to "Notifications" (Ryan's
     // call: the small header badge wasn't eye-catching enough), reusing the
     // same rail-badge mechanism apps like ShopStock already use for counts.
