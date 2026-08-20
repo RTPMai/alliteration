@@ -39,6 +39,13 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
+import {
+  CHANNELS, CHANNEL_KEYS, channelMeta, channelMetrics, metricLabel,
+  isDelegated, isFunded, FUNDING, PLATFORMS
+} from '../lib/marketmachine/schema.js';
+import {
+  TYPED_METRICS, DERIVED_METRICS, SOURCED_FIELDS, metricMeta, deriveMetrics
+} from '../lib/marketmachine/metrics.js';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -59,23 +66,19 @@ function money(n) {
   return '$' + Math.round(n).toLocaleString();
 }
 
-const CHANNELS = [
-  { key: 'email', label: 'Email', delegated: true,
-    note: 'Built and sent in MailMe. Reach and results come back automatically.' },
-  { key: 'direct_mail', label: 'Direct mail / print', delegated: false,
-    note: 'Postcards, flyers, catalogs, anything physical.' },
-  { key: 'social', label: 'Social media', delegated: false,
-    note: 'Organic posts on your own channels.' },
-  { key: 'paid_ads', label: 'Paid ads', delegated: false,
-    note: 'Anything you paid to place: search, social, print, radio.' },
-  { key: 'event', label: 'Event / trade show', delegated: false,
-    note: 'Booths, conferences, sponsorships, open houses.' },
-  { key: 'phone', label: 'Phone / outreach calls', delegated: false,
-    note: 'Deliberate calling pushes, not day-to-day account calls.' }
-];
-
-const channelMeta = (k) => CHANNELS.find((c) => c.key === k) || CHANNELS[1];
-const isDelegated = (k) => !!channelMeta(k).delegated;
+// CHANNELS, channelMeta and isDelegated are imported from the schema above.
+//
+// They used to be copied out into this file. That copy is exactly the kind of
+// second definition this app was built to argue against: when `paid_ads` was
+// folded into `social` in the schema, the screen would have gone on offering
+// a channel the API had stopped accepting, and the failure would have shown
+// up as a save that silently landed under the wrong channel.
+//
+// The imported channelMeta returns null for an unknown key rather than
+// guessing, so this wrapper supplies the old fallback for render paths that
+// assume an object. A stored record naming a channel the schema no longer has
+// still draws, labelled with its raw key instead of blowing up the row.
+const chanMeta = (k) => channelMeta(k) || { key: String(k || ''), label: String(k || 'Unknown'), note: '' };
 
 const CAMPAIGN_STATUS = {
   planning:  { label: 'Planning',  cls: 'mute' },
@@ -94,8 +97,23 @@ const CHANNEL_STATUS = {
 const MSG_TARGET = {
   campaigns: '#mkCampaignMsg',
   calendar: '#mkCalendarMsg',
+  entry: '#mkEntryMsg',
+  definitions: '#mkDefsMsg',
   settings: '#mkSettingsMsg'
 };
+
+// Shown under a number rather than the number itself when the number is null.
+// Deliberately words, not a dash: "not reported" and "0" have to look
+// different at a glance or every gap reads as a real zero.
+const NOT_REPORTED = '<span class="mk-null">not reported</span>';
+
+function fmtMetric(kind, v) {
+  if (v == null) return NOT_REPORTED;
+  if (kind === 'money') return '$' + Math.round(v).toLocaleString();
+  if (kind === 'percent') return v + '%';
+  if (kind === 'ratio') return String(v);
+  return Math.round(v).toLocaleString();
+}
 
 export default {
   id: 'marketmachine',
@@ -202,6 +220,30 @@ export default {
   .mk-chan-nums b{color:var(--ink);font-variant-numeric:tabular-nums}
   .mk-chan-nums .gap{color:var(--warn-dk);font-weight:700}
 
+  .mk-null{color:var(--muted);font-style:italic;font-weight:400;font-size:12px}
+  .mk-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+  .mk-sub-hd{font-size:13px;font-weight:700;color:var(--ink);margin:0 0 10px}
+  .mk-await{background:var(--bg);border-radius:10px;padding:14px 16px;margin-top:6px}
+  .mk-await .pill{display:inline-block;font-size:10px;font-weight:800;letter-spacing:.06em;
+    text-transform:uppercase;color:var(--warn-dk);background:var(--warn-bg);
+    padding:3px 8px;border-radius:20px;margin-bottom:8px}
+  .mk-await .slot{border:1px dashed var(--line);border-radius:8px;padding:9px 11px;
+    font-size:12.5px;color:var(--muted);background:transparent}
+  .mk-derived{display:flex;flex-wrap:wrap;gap:16px;margin-top:4px}
+  .mk-derived .d{min-width:110px}
+  .mk-derived .d .k{font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted)}
+  .mk-derived .d .v{font-size:17px;font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums}
+  .mk-defs dt{font-size:13.5px;font-weight:700;color:var(--ink);margin-top:14px}
+  .mk-defs dd{margin:3px 0 0;font-size:12.5px;color:var(--muted);line-height:1.6}
+  .mk-defs .calc{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;
+    color:var(--ink);background:var(--bg);padding:2px 6px;border-radius:5px}
+  .mk-rows{width:100%;border-collapse:collapse;font-size:12.5px}
+  .mk-rows th{text-align:left;font-size:10.5px;text-transform:uppercase;letter-spacing:.05em;
+    color:var(--muted);padding:8px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
+  .mk-rows td{padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  .mk-rows tr:last-child td{border-bottom:0}
+  .mk-rows td.num{text-align:right;font-variant-numeric:tabular-nums}
+
   .mk-modal-back{position:fixed;inset:0;background:rgba(15,20,28,.55);
     z-index:400;overflow-y:auto;padding:40px 16px}
   .mk-modal{background:var(--card);border-radius:12px;width:100%;
@@ -254,6 +296,32 @@ export default {
         <div id="mkCalendarBody"></div>
       </section>
 
+      <section id="mkEntryView" hidden>
+        <div class="mk-hd">
+          <div>
+            <h1>Add performance data<span class="dot">.</span></h1>
+            <div class="sub">Type what happened. Everything that can be calculated is.</div>
+          </div>
+          <div class="mk-refresh">
+            <span class="stamp" data-mk-stamp></span>
+            <button class="mk-btn ghost sm" data-mk-refresh="entry">Refresh</button>
+          </div>
+        </div>
+        <div id="mkEntryMsg"></div>
+        <div id="mkEntryBody"></div>
+      </section>
+
+      <section id="mkDefinitionsView" hidden>
+        <div class="mk-hd">
+          <div>
+            <h1>Definitions<span class="dot">.</span></h1>
+            <div class="sub">What every number on this screen means, and which ones nobody types.</div>
+          </div>
+        </div>
+        <div id="mkDefsMsg"></div>
+        <div id="mkDefsBody"></div>
+      </section>
+
       <section id="mkSettingsView" hidden>
         <div class="mk-hd">
           <div>
@@ -286,6 +354,19 @@ export default {
       detail: null,        // the open campaign, with its rollup and emails
       openId: null,
       initiatives: [],
+      industries: [],
+      // Data Entry keeps its own selection, separate from the campaign the
+      // Campaigns screen has open. Somebody entering last week's numbers is
+      // doing a different job from somebody reading a campaign, and sharing
+      // one selection between the two screens means each one keeps yanking
+      // the other somewhere it did not ask to go.
+      entryCampaignId: null,
+      entryChannel: 'social',
+      entries: [],
+      entryTotals: null,
+      byCreative: [],
+      byPlatform: [],
+      lastSavedDerived: null,
       canEdit: true,
       canDelete: false,
       lastLoaded: null,
@@ -315,6 +396,27 @@ export default {
       } catch (e) {
         state.initiatives = [];
       }
+    }
+
+    async function loadIndustries() {
+      try {
+        const d = await api.get(ENDPOINTS.mkIndustries);
+        state.industries = Array.isArray(d && d.industries) ? d.industries : [];
+      } catch (e) {
+        // Same reasoning as the initiative list: an empty dropdown reads as a
+        // broken form and stops somebody filling anything in, so a failed
+        // load leaves whatever was there rather than blanking it.
+      }
+    }
+
+    async function loadEntries() {
+      const id = state.entryCampaignId;
+      if (!id) { state.entries = []; state.entryTotals = null; state.byCreative = []; state.byPlatform = []; return; }
+      const d = await api.get(ENDPOINTS.mkEntries, { campaignId: id });
+      state.entries = Array.isArray(d && d.entries) ? d.entries : [];
+      state.entryTotals = (d && d.totals) || null;
+      state.byCreative = Array.isArray(d && d.byCreative) ? d.byCreative : [];
+      state.byPlatform = Array.isArray(d && d.byPlatform) ? d.byPlatform : [];
     }
 
     async function loadDetail(id) {
@@ -358,7 +460,7 @@ export default {
       const counts = {};
       items.forEach((i) => { counts[i.type] = (counts[i.type] || 0) + 1; });
       return Object.keys(counts).map((k) => {
-        const m = channelMeta(k);
+        const m = chanMeta(k);
         return `<span class="pill ${m.delegated ? 'src' : 'mute'}">${esc(m.label)}${
           counts[k] > 1 ? ' \u00d7' + counts[k] : ''}</span>`;
       }).join(' ');
@@ -457,7 +559,7 @@ export default {
     }
 
     function renderChannelRow(item, emails) {
-      const m = channelMeta(item.type);
+      const m = chanMeta(item.type);
       const st = CHANNEL_STATUS[item.status] || CHANNEL_STATUS.planned;
       const linked = emails && emails.byChannel ? emails.byChannel[item.id] : null;
       const counted = item.status === 'in_progress' || item.status === 'done';
@@ -670,6 +772,19 @@ export default {
                   and the leads it produced can be matched up later.</div>
               </div>
               <div class="mk-field">
+                <label for="mkIndustry">Industry</label>
+                <select id="mkIndustry">
+                  <option value="">Not set</option>
+                  ${(state.industries || []).map((i) => `<option value="${esc(i)}"${
+                    String(c.industry || '') === i ? ' selected' : ''
+                  }>${esc(i)}</option>`).join('')}
+                </select>
+                <div class="hint">Who this campaign was aimed at. It sits on the campaign
+                  rather than on each week's numbers, because a campaign has one audience
+                  by definition: a push going to schools and to dental practices is two
+                  campaigns with two budgets and two answers to whether it worked.</div>
+              </div>
+              <div class="mk-field">
                 <label for="mkStart">Starts</label>
                 <input id="mkStart" type="date" value="${esc(c.startDate || '')}">
               </div>
@@ -711,6 +826,7 @@ export default {
         goal: val('#mkGoal'),
         status: val('#mkStatus'),
         initiative: val('#mkInitiative'),
+        industry: val('#mkIndustry') || null,
         startDate: val('#mkStart') || null,
         endDate: val('#mkEnd') || null,
         budget: val('#mkBudget') === '' ? null : val('#mkBudget'),
@@ -851,7 +967,7 @@ export default {
 
       const typeSel = $('#mkChanType');
       const paintType = () => {
-        const meta = channelMeta(typeSel.value);
+        const meta = chanMeta(typeSel.value);
         const note = $('#mkChanNote');
         if (note) note.textContent = meta.note;
         const actuals = $('#mkChanActuals');
@@ -882,7 +998,7 @@ export default {
       const item = {
         id: id || undefined,
         type,
-        name: val('#mkChanName') || channelMeta(type).label,
+        name: val('#mkChanName') || chanMeta(type).label,
         status: val('#mkChanStatus'),
         dueDate: val('#mkChanDue') || null,
         plannedCost: numOrNull('#mkChanPlanned'),
@@ -972,7 +1088,7 @@ export default {
             <tr class="clickable" data-goto="${esc(r.campaign.id)}">
               <td class="who">${esc(fmtDate(r.item.dueDate))}</td>
               <td><div class="co">${esc(r.item.name)}</div>
-                  <div class="who">${esc(channelMeta(r.item.type).label)}</div></td>
+                  <div class="who">${esc(chanMeta(r.item.type).label)}</div></td>
               <td>${esc(r.campaign.name)}</td>
               <td><span class="pill ${(CHANNEL_STATUS[r.item.status] || CHANNEL_STATUS.planned).cls}"
                     >${esc((CHANNEL_STATUS[r.item.status] || CHANNEL_STATUS.planned).label)}</span></td>
@@ -1035,8 +1151,48 @@ export default {
           </div>
         </div>`;
 
+      const inds = state.industries || [];
+      box.insertAdjacentHTML('beforeend', `
+        <div class="mk-card">
+          <div class="mk-card-hd">
+            <h3>Industries</h3>
+            <span class="meta">${inds.length} in the list</span>
+          </div>
+          <div class="mk-card-bd">
+            <div class="hint" style="font-size:12.5px;color:var(--muted);line-height:1.55;margin-bottom:14px">
+              The segments campaigns are aimed at. A picked list rather than a typed one,
+              because "Dental", "dental" and "Dental &amp; Ortho" typed into three campaigns
+              are three segments as far as any rollup is concerned.
+            </div>
+            <div class="mk-field">
+              <label for="mkIndList">One per line</label>
+              <textarea id="mkIndList" style="min-height:150px"${state.canEdit ? '' : ' disabled'}
+                >${esc(inds.join('\n'))}</textarea>
+            </div>
+            ${state.canEdit ? `<div class="mk-actions">
+              <button class="mk-btn" id="mkSaveInds">Save the list</button>
+            </div>` : ''}
+          </div>
+        </div>`);
+
       const b = $('#mkSaveInits');
       if (b) b.addEventListener('click', saveInitiatives);
+      const b2 = $('#mkSaveInds');
+      if (b2) b2.addEventListener('click', saveIndustries);
+    }
+
+    async function saveIndustries() {
+      const el = $('#mkIndList');
+      if (!el) return;
+      const industries = el.value.split('\n').map((x) => x.trim()).filter(Boolean);
+      try {
+        const d = await api.put(ENDPOINTS.mkIndustries, { industries });
+        state.industries = d.industries || industries;
+        renderSettings();
+        msg('#mkSettingsMsg', 'Saved.', 'mk-ok');
+      } catch (e) {
+        msg('#mkSettingsMsg', 'Could not save: ' + esc(e.message), 'mk-err');
+      }
     }
 
     async function saveInitiatives() {
@@ -1092,13 +1248,494 @@ export default {
     // background repaint cannot tear down an unrelated modal.
     function closeModalIf(kind) { if (modalKind === kind) closeModal(); }
 
+    /* ---------------- data entry ---------------- */
+
+    // Channels that take hand-entered numbers. Email is excluded at the
+    // source rather than hidden in the dropdown, because MailMe already knows
+    // exactly who received what, and a typed email row would be a second set
+    // of numbers guaranteed to disagree with the first.
+    const ENTERABLE = CHANNELS.filter((c) => !c.delegated);
+
+    function entryCampaign() {
+      return state.campaigns.find((c) => String(c.id) === String(state.entryCampaignId)) || null;
+    }
+
+    function renderEntry() {
+      const box = $('#mkEntryBody');
+      if (!box) return;
+
+      if (!state.campaigns.length) {
+        box.innerHTML = `<div class="mk-card"><div class="mk-card-bd">
+          <div class="hint">There are no campaigns yet. Numbers have to belong to
+          something, so create a campaign first and the rows will have somewhere
+          to go.</div></div></div>`;
+        return;
+      }
+      if (!state.entryCampaignId) state.entryCampaignId = String(state.campaigns[0].id);
+
+      const camp = entryCampaign() || {};
+      const channel = CHANNEL_KEYS.includes(state.entryChannel) && !isDelegated(state.entryChannel)
+        ? state.entryChannel : 'social';
+      const meta = chanMeta(channel);
+      const keys = channelMetrics(channel);
+      const creatives = Array.isArray(camp.creatives) ? camp.creatives : [];
+
+      const metricInputs = keys.map((k) => {
+        const m = metricMeta(k) || { label: k, kind: 'count' };
+        return `<div class="mk-field">
+          <label for="mkM_${k}">${esc(metricLabel(channel, k, m.label))}</label>
+          <input id="mkM_${k}" data-metric="${k}" type="number" min="0"
+            ${m.kind === 'money' ? 'step="0.01"' : 'step="1"'}
+            placeholder="not reported" inputmode="decimal">
+        </div>`;
+      }).join('');
+
+      box.innerHTML = `
+        <div class="mk-card">
+          <div class="mk-card-hd">
+            <h3>Record identity</h3>
+            <span class="meta">Manual now, CSV and connectors later, same fields</span>
+          </div>
+          <div class="mk-card-bd">
+            <div class="mk-grid">
+              <div class="mk-field">
+                <label for="mkEntryCampaign">Campaign</label>
+                <select id="mkEntryCampaign">
+                  ${state.campaigns.map((c) => `<option value="${esc(c.id)}"${
+                    String(c.id) === String(state.entryCampaignId) ? ' selected' : ''
+                  }>${esc(c.name)}</option>`).join('')}
+                </select>
+                <div class="hint">Picked from the real list, never typed. Two spellings
+                  of one campaign name would split every total it appears in.</div>
+              </div>
+              <div class="mk-field">
+                <label for="mkEntryChannel">Channel</label>
+                <select id="mkEntryChannel">
+                  ${ENTERABLE.map((c) => `<option value="${esc(c.key)}"${
+                    c.key === channel ? ' selected' : ''
+                  }>${esc(c.label)}</option>`).join('')}
+                </select>
+                <div class="hint">${esc(meta.note || '')}</div>
+              </div>
+              <div class="mk-field">
+                <label for="mkEntryPlatform">Platform</label>
+                <input id="mkEntryPlatform" list="mkPlatformList" placeholder="Facebook, radio, county fair...">
+                <datalist id="mkPlatformList">
+                  ${PLATFORMS.map((pl) => `<option value="${esc(pl)}"></option>`).join('')}
+                </datalist>
+              </div>
+              ${isFunded(channel) ? `<div class="mk-field">
+                <label for="mkEntryFunding">Organic or paid</label>
+                <select id="mkEntryFunding">
+                  ${FUNDING.map((f) => `<option value="${f}">${f === 'organic' ? 'Organic' : 'Paid'}</option>`).join('')}
+                </select>
+                <div class="hint">A flag, not a separate channel: the same Facebook push
+                  often runs both, and splitting it in two made neither half comparable.</div>
+              </div>` : ''}
+              <div class="mk-field">
+                <label for="mkEntryCreative">Content / ad name</label>
+                <input id="mkEntryCreative" list="mkCreativeList" placeholder="Dental sample kit - carousel A">
+                <datalist id="mkCreativeList">
+                  ${creatives.map((c) => `<option value="${esc(c.name)}"></option>`).join('')}
+                </datalist>
+                <div class="hint">Matched to an existing name on this campaign, or added
+                  as a new one. That is what makes carousel A comparable to carousel B
+                  across every week they both ran.</div>
+              </div>
+              <div class="mk-field">
+                <label for="mkEntryStart">Start date</label>
+                <input id="mkEntryStart" type="date">
+              </div>
+              <div class="mk-field">
+                <label for="mkEntryEnd">End date</label>
+                <input id="mkEntryEnd" type="date">
+                <div class="hint">One row per week or per flight, not one row for the
+                  whole run. A single lump cannot show you it stopped working.</div>
+              </div>
+            </div>
+
+            <div class="mk-sub-hd" style="margin-top:8px">What was measured</div>
+            <div class="mk-metrics">${metricInputs}</div>
+            <div class="hint" style="margin-top:10px">
+              Leave a box empty if nobody reported it. Empty means not reported and
+              stays out of every total; a typed 0 means it really was zero. They are
+              different facts and the app keeps them apart.
+            </div>
+            <div class="hint" style="margin-top:6px">
+              ${esc(DERIVED_METRICS.map((d) => d.label).join(', '))} are calculated and
+              are never typed by hand.
+            </div>
+
+            <div class="mk-await">
+              <span class="pill">Awaiting sources</span>
+              <div class="mk-sub-hd">Conversions and revenue</div>
+              <div class="hint" style="margin-bottom:10px">These are already part of every
+                row and stay empty until GA4, Printavo or an ad account is connected.
+                They are deliberately not typeable: a revenue figure somebody remembers
+                is not a revenue figure, and once it sits in the same column as a real
+                one nobody can tell them apart again.</div>
+              <div class="mk-metrics">
+                ${SOURCED_FIELDS.map((f) => `<div class="slot">${esc(f.label)}
+                  <div style="font-size:11px;margin-top:2px">waiting on ${esc(f.awaiting)}</div>
+                </div>`).join('')}
+              </div>
+            </div>
+
+            <div class="mk-actions">
+              <button class="mk-btn ghost" id="mkEntryClear">Clear</button>
+              <button class="mk-btn" id="mkEntrySave"${state.canEdit ? '' : ' disabled'}>Save and calculate</button>
+            </div>
+            ${state.canEdit ? '' : '<div class="hint">Your role is read-only in MarketMachine.</div>'}
+            <div id="mkEntryCalc"></div>
+          </div>
+        </div>
+
+        ${renderEntryTotals()}
+        ${renderBreakdown('By creative', state.byCreative, (r) => r.name)}
+        ${renderBreakdown('By platform', state.byPlatform, (r) => r.platform)}
+        ${renderEntryRows()}`;
+
+      wireEntry();
+    }
+
+    function derivedStrip(derived) {
+      if (!derived) return '';
+      const flags = derived._flags || {};
+      const cells = DERIVED_METRICS.filter((d) => d.key !== 'revenue' || derived.revenue != null)
+        .map((d) => `<div class="d"><div class="k">${esc(d.label)}</div>
+          <div class="v">${fmtMetric(d.kind, derived[d.key])}</div></div>`).join('');
+      const notes = [];
+      if (flags.engagementPartial) {
+        notes.push('Engagement is partial: only some of likes, comments and shares were entered, ' +
+          'so the total is what was reported and the rate is withheld rather than understated.');
+      }
+      if (flags.responseRateImpossible) {
+        notes.push('More responses than inquiries were recorded, which cannot happen. ' +
+          'That usually means the two figures cover different date ranges.');
+      }
+      if (derived.revenueSourceLabel) {
+        notes.push('Revenue is taken from ' + derived.revenueSourceLabel + '.');
+      }
+      return `<div class="mk-derived">${cells}</div>` +
+        (notes.length ? `<div class="hint" style="margin-top:10px">${esc(notes.join(' '))}</div>` : '');
+    }
+
+    function renderEntryTotals() {
+      const t = state.entryTotals;
+      if (!t || !t.rowCount) return '';
+      const gaps = (t.partialMetrics || []).map((k) => (metricMeta(k) || {}).label || k);
+      return `<div class="mk-card">
+        <div class="mk-card-hd">
+          <h3>Campaign totals</h3>
+          <span class="meta">${t.rowCount} row${t.rowCount === 1 ? '' : 's'}</span>
+        </div>
+        <div class="mk-card-bd">
+          <div class="mk-derived">
+            ${TYPED_METRICS.map((m) => `<div class="d"><div class="k">${esc(m.label)}</div>
+              <div class="v">${fmtMetric(m.kind, t.metrics[m.key])}</div></div>`).join('')}
+          </div>
+          <div style="margin-top:16px">${derivedStrip(t.derived)}</div>
+          ${gaps.length ? `<div class="hint" style="margin-top:10px">
+            Reported on some rows and left blank on others: ${esc(gaps.join(', '))}.
+            The totals above are what was actually reported, not an estimate of the rest.
+          </div>` : ''}
+        </div>
+      </div>`;
+    }
+
+    function renderBreakdown(title, rows, nameFn) {
+      if (!rows || !rows.length) return '';
+      return `<div class="mk-card">
+        <div class="mk-card-hd"><h3>${esc(title)}</h3>
+          <span class="meta">sorted by what produced inquiries</span></div>
+        <div class="mk-card-bd flush">
+          <table class="mk-rows">
+            <thead><tr>
+              <th>Name</th><th class="num">Spend</th><th class="num">Reach</th>
+              <th class="num">Inquiries</th><th class="num">Cost per inquiry</th>
+            </tr></thead>
+            <tbody>
+              ${rows.map((r) => {
+                const inq = r.metrics.inboundInquiries;
+                const spend = r.metrics.spend;
+                // Computed here rather than stored, and null unless BOTH sides
+                // are real: spend with no inquiries is not an infinite cost, it
+                // is an unanswered question.
+                const cpi = (spend != null && inq != null && inq > 0)
+                  ? Math.round((spend / inq) * 100) / 100 : null;
+                return `<tr>
+                  <td>${esc(nameFn(r))}${r.missing ? ' <span class="mk-null">(deleted creative)</span>' : ''}</td>
+                  <td class="num">${fmtMetric('money', spend)}</td>
+                  <td class="num">${fmtMetric('count', r.metrics.reach)}</td>
+                  <td class="num">${fmtMetric('count', inq)}</td>
+                  <td class="num">${fmtMetric('money', cpi)}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    function renderEntryRows() {
+      if (!state.entries.length) {
+        return `<div class="mk-card"><div class="mk-card-bd">
+          <div class="hint">No rows for this campaign yet.</div></div></div>`;
+      }
+      return `<div class="mk-card">
+        <div class="mk-card-hd"><h3>Rows</h3>
+          <span class="meta">${state.entries.length} entered</span></div>
+        <div class="mk-card-bd flush">
+          <table class="mk-rows">
+            <thead><tr>
+              <th>Period</th><th>Channel</th><th>Platform</th><th>Creative</th>
+              <th class="num">Spend</th><th class="num">Reach</th><th class="num">Inquiries</th>
+              <th>Source</th><th></th>
+            </tr></thead>
+            <tbody>
+              ${state.entries.map((e) => {
+                const cr = (entryCampaign() || {}).creatives || [];
+                const name = (cr.find((c) => c.id === e.creativeId) || {}).name;
+                const period = e.startDate
+                  ? fmtDate(e.startDate) + (e.endDate && e.endDate !== e.startDate ? ' to ' + fmtDate(e.endDate) : '')
+                  : '<span class="mk-null">undated</span>';
+                return `<tr>
+                  <td>${period}</td>
+                  <td>${esc(chanMeta(e.channel).label)}${
+                    e.funding ? ' <span class="mk-null">' + esc(e.funding) + '</span>' : ''}</td>
+                  <td>${e.platform ? esc(e.platform) : NOT_REPORTED}</td>
+                  <td>${name ? esc(name) : NOT_REPORTED}</td>
+                  <td class="num">${fmtMetric('money', e.metrics.spend)}</td>
+                  <td class="num">${fmtMetric('count', e.metrics.reach)}</td>
+                  <td class="num">${fmtMetric('count', e.metrics.inboundInquiries)}</td>
+                  <td>${esc(e.source)}</td>
+                  <td class="num">${state.canEdit
+                    ? `<button class="mk-btn ghost sm" data-del-entry="${esc(e.id)}">Remove</button>` : ''}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+    }
+
+    /**
+     * Turn a typed creative name into a real creative on the campaign.
+     *
+     * Matching is case-insensitive and whitespace-trimmed, because "Carousel
+     * A" and "carousel a" are one piece of artwork and treating them as two
+     * defeats the entire point of rolling up by creative.
+     */
+    async function ensureCreative(campaign, typed) {
+      const name = String(typed || '').trim();
+      if (!name || !campaign) return null;
+      const existing = (campaign.creatives || [])
+        .find((c) => String(c.name).trim().toLowerCase() === name.toLowerCase());
+      if (existing) return existing.id;
+      const creatives = (campaign.creatives || []).concat([{ name }]);
+      const d = await api.patch(ENDPOINTS.mkCampaigns, { id: campaign.id, creatives });
+      const saved = ((d && d.campaign && d.campaign.creatives) || [])
+        .find((c) => String(c.name).trim().toLowerCase() === name.toLowerCase());
+      // The campaign in local state is replaced so the datalist offers the new
+      // name immediately, without a round trip nobody asked for.
+      if (d && d.campaign) {
+        const i = state.campaigns.findIndex((c) => String(c.id) === String(campaign.id));
+        if (i >= 0) state.campaigns[i] = { ...state.campaigns[i], creatives: d.campaign.creatives };
+      }
+      return saved ? saved.id : null;
+    }
+
+    function wireEntry() {
+      const campSel = $('#mkEntryCampaign');
+      if (campSel) campSel.addEventListener('change', async () => {
+        state.entryCampaignId = campSel.value;
+        state.lastSavedDerived = null;
+        try { await loadEntries(); } catch (e) { /* stale beats blank */ }
+        renderEntry();
+      });
+
+      const chanSel = $('#mkEntryChannel');
+      // Re-rendered on change rather than showing every field and hiding some:
+      // a trade show row asked for video views gets a zero typed in to make the
+      // form go away, and that zero is then indistinguishable from a real one.
+      if (chanSel) chanSel.addEventListener('change', () => {
+        state.entryChannel = chanSel.value;
+        renderEntry();
+      });
+
+      const clear = $('#mkEntryClear');
+      if (clear) clear.addEventListener('click', () => {
+        state.lastSavedDerived = null;
+        renderEntry();
+      });
+
+      const save = $('#mkEntrySave');
+      if (save) save.addEventListener('click', saveEntry);
+
+      root.querySelectorAll('[data-del-entry]').forEach((b) => {
+        b.addEventListener('click', () => removeEntry(b.dataset.delEntry));
+      });
+    }
+
+    async function saveEntry() {
+      const btn = $('#mkEntrySave');
+      const camp = entryCampaign();
+      if (!camp) return;
+
+      const metrics = {};
+      let anyEntered = false;
+      root.querySelectorAll('#mkEntryBody [data-metric]').forEach((el) => {
+        const raw = String(el.value == null ? '' : el.value).trim();
+        // Blank stays blank all the way down. Coercing it to 0 here would be
+        // the single easiest way to undo the whole point of this screen.
+        metrics[el.dataset.metric] = raw === '' ? null : Number(raw);
+        if (raw !== '') anyEntered = true;
+      });
+
+      if (!anyEntered) {
+        msg('#mkEntryMsg', 'Nothing was entered, so there is nothing to save.', 'mk-err');
+        return;
+      }
+
+      const val = (sel) => { const el = $(sel); return el ? String(el.value || '').trim() : ''; };
+      const start = val('#mkEntryStart');
+      const end = val('#mkEntryEnd');
+      if (start && end && end < start) {
+        msg('#mkEntryMsg', 'The end date is before the start date.', 'mk-err');
+        return;
+      }
+
+      if (btn) btn.disabled = true;
+      try {
+        const creativeId = await ensureCreative(camp, val('#mkEntryCreative'));
+        const payload = {
+          campaignId: camp.id,
+          channel: state.entryChannel,
+          platform: val('#mkEntryPlatform') || null,
+          funding: isFunded(state.entryChannel) ? (val('#mkEntryFunding') || 'organic') : null,
+          creativeId,
+          startDate: start || null,
+          endDate: end || start || null,
+          metrics,
+          source: 'manual'
+        };
+        const d = await api.post(ENDPOINTS.mkEntries, payload);
+        state.lastSavedDerived = (d && d.entry && d.entry.derived) || null;
+        await loadEntries();
+        // The campaign list carries the rollup, and a row that just changed a
+        // campaign's spend has to be reflected there or the two screens
+        // disagree the moment somebody switches between them.
+        try { await loadCampaigns(); } catch (e) { /* the row still saved */ }
+        renderEntry();
+        const calc = $('#mkEntryCalc');
+        if (calc && state.lastSavedDerived) {
+          calc.innerHTML = `<div class="mk-sub-hd" style="margin-top:18px">Calculated from what you just entered</div>`
+            + derivedStrip(state.lastSavedDerived);
+        }
+        msg('#mkEntryMsg', 'Saved.', 'mk-ok');
+      } catch (e) {
+        msg('#mkEntryMsg', 'Could not save: ' + esc(e.message), 'mk-err');
+      } finally {
+        const b2 = $('#mkEntrySave');
+        if (b2) b2.disabled = !state.canEdit;
+      }
+    }
+
+    async function removeEntry(id) {
+      if (!id) return;
+      try {
+        await api.del(ENDPOINTS.mkEntries, { query: { campaignId: state.entryCampaignId, id } });
+        await loadEntries();
+        try { await loadCampaigns(); } catch (e) { /* the row is still gone */ }
+        renderEntry();
+        msg('#mkEntryMsg', 'Row removed.', 'mk-ok');
+      } catch (e) {
+        msg('#mkEntryMsg', 'Could not remove that row: ' + esc(e.message), 'mk-err');
+      }
+    }
+
+    /* ---------------- definitions ---------------- */
+
+    /**
+     * Built from the metric catalog rather than written out here.
+     *
+     * A definitions page maintained by hand is a definitions page that is
+     * wrong within a month, and a wrong one is worse than none: it settles
+     * arguments in the wrong direction with an air of authority. Generating it
+     * from the same constants the maths uses means it cannot drift.
+     */
+    function renderDefinitions() {
+      const box = $('#mkDefsBody');
+      if (!box) return;
+
+      const section = (title, blurb, items) => `<div class="mk-card">
+        <div class="mk-card-hd"><h3>${esc(title)}</h3></div>
+        <div class="mk-card-bd">
+          <div class="hint" style="margin-bottom:6px">${blurb}</div>
+          <dl class="mk-defs">${items}</dl>
+        </div>
+      </div>`;
+
+      const typed = TYPED_METRICS.map((m) => `<dt>${esc(m.label)}</dt>
+        <dd>${esc(m.def)}</dd>`).join('');
+
+      const derived = DERIVED_METRICS.map((m) => `<dt>${esc(m.label)}
+        <span class="calc">${esc(m.formula)}</span></dt>
+        <dd>${esc(m.def)}</dd>`).join('');
+
+      const sourced = SOURCED_FIELDS.map((f) => `<dt>${esc(f.label)}</dt>
+        <dd>${esc(f.def)} Currently empty on every row, waiting on ${esc(f.awaiting)}.</dd>`).join('');
+
+      const channels = CHANNELS.map((c) => {
+        const ks = channelMetrics(c.key);
+        return `<dt>${esc(c.label)}</dt><dd>${esc(c.note)}${
+          c.delegated
+            ? ' Numbers come back from MailMe and cannot be entered by hand here.'
+            : ' Fields on this channel: ' + esc(ks.map((k) => metricLabel(c.key, k, (metricMeta(k) || {}).label)).join(', ')) + '.'
+        }</dd>`;
+      }).join('');
+
+      box.innerHTML = `
+        <div class="mk-card">
+          <div class="mk-card-hd"><h3>The two rules everything else follows</h3></div>
+          <div class="mk-card-bd">
+            <dl class="mk-defs">
+              <dt>A number is either typed or calculated, never both</dt>
+              <dd>Spend, reach and impressions are things somebody observed, so a person
+                types them. Rates are arithmetic on those facts, so nobody types them.
+                If two people could type two different click-through rates for the same
+                week, this app would have two answers to one question and no way to say
+                which was right.</dd>
+              <dt>Missing is not zero</dt>
+              <dd>An empty box means nobody reported it, and it stays out of every total.
+                A typed 0 means it really was zero. A response rate of 0% says we reached
+                people and none answered; a blank says nobody has entered the numbers.
+                Folding the second into the first makes every report quietly pessimistic,
+                and the mistake is invisible because both print the same width.</dd>
+              <dt>Revenue has an order of precedence</dt>
+              <dd>Verified revenue first, then GA4, then whatever the ad platform claims.
+                The three will disagree, so the app fixes the order in advance and always
+                names which one a figure came from.</dd>
+            </dl>
+          </div>
+        </div>
+        ${section('Typed by hand', 'Observed facts. Somebody counted these or read them off a platform.', typed)}
+        ${section('Calculated', 'Never typed, never stored. Recalculated every time from the raw counts above, so they cannot fall out of step with them.', derived)}
+        ${section('Waiting on a source', 'Already part of every record, deliberately empty until something real fills them.', sourced)}
+        ${section('Channels', 'Which fields each channel asks for, and why the list is different for each.', channels)}`;
+    }
+
     /* ---------------- refresh ---------------- */
 
     const VIEW_LOADERS = {
       // The campaign form offers the initiative list, so it loads here too.
       campaigns: [loadCampaigns, loadInitiatives],
       calendar: [loadCampaigns],
-      settings: [loadInitiatives]
+      // Data Entry needs the campaign list for its picker and the rows for the
+      // campaign currently chosen. Definitions needs nothing: it is generated
+      // from constants, so there is nothing to go stale.
+      entry: [loadCampaigns, loadEntries],
+      settings: [loadInitiatives, loadIndustries]
     };
 
     const REPAINT = {
@@ -1110,6 +1747,8 @@ export default {
         if (!modalCarrier) renderDetail();
       },
       calendar: () => renderCalendar(),
+      entry: () => renderEntry(),
+      definitions: () => renderDefinitions(),
       settings: () => renderSettings()
     };
 
@@ -1169,7 +1808,7 @@ export default {
     });
 
     try {
-      await Promise.all([loadCampaigns(), loadInitiatives()]);
+      await Promise.all([loadCampaigns(), loadInitiatives(), loadIndustries()]);
     } catch (e) {
       msg('#mkCampaignMsg', 'Could not load MarketMachine: ' + esc(e.message), 'mk-err');
     }
@@ -1178,6 +1817,8 @@ export default {
     renderList();
     renderDetail();
     renderCalendar();
+    renderEntry();
+    renderDefinitions();
     renderSettings();
 
     if (newBtn) newBtn.disabled = !state.canEdit;
@@ -1189,6 +1830,8 @@ export default {
     this._renders = {
       campaigns: () => refreshView('campaigns'),
       calendar: () => refreshView('calendar'),
+      entry: () => refreshView('entry'),
+      definitions: () => renderDefinitions(),
       settings: () => refreshView('settings')
     };
   },
@@ -1202,6 +1845,8 @@ export default {
     const ids = {
       campaigns: 'mkCampaignsView',
       calendar: 'mkCalendarView',
+      entry: 'mkEntryView',
+      definitions: 'mkDefinitionsView',
       settings: 'mkSettingsView'
     };
     Object.entries(ids).forEach(([v, id]) => {
