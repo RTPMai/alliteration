@@ -6551,17 +6551,41 @@ export async function start(ctx) {
   }
 
   // Marketing initiatives, matching the "Marketing Initiative Templates - Step
-  // Library" board in Monday. PLACEHOLDER SET: replace these entries with the
-  // real Step Library names once they're pasted in from Monday. The field is a
-  // label only for now — nothing fires when one is picked. It exists so the
-  // choice is captured today and the automation can key off it later.
-  const MARKETING_INITIATIVES = [
+  // Library" board in Monday.
+  //
+  // MOVED TO MARKETMACHINE (Aug 2026). This list describes marketing, so the
+  // marketing app owns it and BackBone reads it. Editing it is now a Settings
+  // change there rather than a deploy here, which is what finally closes the
+  // "replace these with the real Step Library names" item that sat in this
+  // comment since July.
+  //
+  // The array below is now only a FALLBACK, used when the fetch fails. That
+  // matters: an empty dropdown reads as a broken form and stops someone
+  // filling in a lead, whereas slightly stale choices do not.
+  let MARKETING_INITIATIVES = [
     "New lead welcome sequence",
     "Event follow-up sequence",
     "Reorder nudge",
     "Seasonal outreach",
     "Win-back campaign"
   ];
+
+  async function loadMarketingInitiatives() {
+    try {
+      const d = await api.get(ENDPOINTS.mkInitiatives);
+      if (Array.isArray(d.initiatives) && d.initiatives.length) {
+        MARKETING_INITIATIVES = d.initiatives;
+        // The dropdown may already be built by the time this lands, and
+        // populateMarketingInitiativeDropdown() bails when it is. Clearing it
+        // first lets the real list replace the fallback in place.
+        const sel = $id("leadMarketingInitiative");
+        if (sel) { sel.innerHTML = ""; populateMarketingInitiativeDropdown(); }
+      }
+    } catch (e) {
+      // Keeps the fallback. Deliberately silent: a lead form is not the place
+      // to report that another app is down.
+    }
+  }
 
   function populateMarketingInitiativeDropdown() {
     const sel = $id("leadMarketingInitiative");
@@ -10152,6 +10176,7 @@ export async function start(ctx) {
   $id("importBtn").addEventListener("click", handleImport);
   $id("resetBtn").addEventListener("click", handleReset);
   $id("reconcileBtn").addEventListener("click", handleReconcile);
+  loadMarketingInitiatives();
   (function wireReorderTiming() {
     const save = $id("reorderSaveBtn");
     const reset = $id("reorderResetBtn");
