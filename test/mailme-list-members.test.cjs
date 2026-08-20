@@ -48,22 +48,31 @@ t.test('selecting a list fetches its resolved members from the server, not a cli
   t.assert(!/matchesRule/.test(body), 'the front end must not re-implement list-rule matching itself');
 });
 
-t.test('every list is one click away from the contacts table', () => {
-  t.assert(/data-list=/.test(src), 'the list rail is missing its data-list triggers');
-  t.assert(/function renderListRail/.test(src), 'renderListRail() is missing');
-  const fn = src.slice(src.indexOf('function renderListRail'));
-  const body = fn.slice(0, fn.indexOf('async function selectList'));
-  t.assert(/state\.lists\.map/.test(body), 'every saved list must get a rail chip');
+t.test('every list is reachable from one searchable picker', () => {
+  // Chips became a dropdown once the list count grew: a dozen of them wrapped
+  // onto three rows and pushed the table below the fold, and the only way to
+  // find one was to read all of them.
+  t.assert(/function renderPickers/.test(src), 'renderPickers() is missing');
+  const fn = src.slice(src.indexOf('function pickerOptions'));
+  const body = fn.slice(0, fn.indexOf('function renderPickers'));
+  t.assert(/state\.lists\.map/.test(body), 'every saved list must appear in the picker');
   t.assert(/Everyone/.test(body),
     'there must be a way back to the unfiltered roster, or a selected list is a trap');
+  t.assert(/SEARCH_THRESHOLD/.test(src),
+    'the picker must offer a filter box once there are enough options to need one');
 });
 
-t.test('the table shows email, source, status and tags per row, list or not', () => {
+t.test('the table shows email, source and status per row, list or not', () => {
+  // Tags and Reorder left this table on Aug 19. Reorder is BackBone's now, so
+  // MailMe was showing a column it could not change; tags were a workaround
+  // for having no multi-select, which the checkboxes replaced.
   const fn = src.slice(src.indexOf('function renderContactsTable'));
-  const body = fn.slice(0, fn.indexOf('function wireListTools'));
-  ['ct.email', 'ct.source', 'ct.status', 'ct.tags'].forEach((field) => {
+  const body = fn.slice(0, fn.indexOf('/* ---------------- bulk selection'));
+  ['ct.email', 'ct.source', 'ct.status'].forEach((field) => {
     t.assert(body.includes(field), `renderContactsTable is missing ${field}`);
   });
+  t.assert(!/reorderCell/.test(src), 'the reorder column should be gone');
+  t.assert(!/data-tags=/.test(src), 'the per-row Tags button should be gone');
   t.assert(/STATUS_META/.test(body) && /SOURCE_META/.test(body),
     'the table should reuse the shared STATUS_META/SOURCE_META labels, not invent new ones');
 });
@@ -72,10 +81,12 @@ t.test('leaving a list is always possible and filtering by source does it explic
   // Two filters at once (a list AND a source) is a state nothing else in the
   // app can express, so picking a source drops the list rather than showing
   // a silent intersection.
-  const fn = src.slice(src.indexOf('function renderFilters'));
-  const body = fn.slice(0, fn.indexOf('const COLUMNS'));
+  const fn = src.slice(src.indexOf('async function choosePicker'));
+  const body = fn.slice(0, fn.indexOf('async function selectList'));
   t.assert(/state\.activeListId = null/.test(body),
     'choosing a source filter must leave the selected list rather than intersecting');
+  t.assert(/clearSelection\(\)/.test(body),
+    'changing the filter must drop the selection, or a bulk action hits rows nobody can see');
 });
 
 /* ---- editing membership: add/remove ---- */
