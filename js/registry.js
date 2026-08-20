@@ -236,6 +236,39 @@ export const APPS = [
     stub: false
   },
   {
+    id: 'marketmachine',
+    name: 'MarketMachine',
+    w1: 'Market', w2: 'Machine', letter: 'M',
+    role: 'Every campaign, every channel',
+    blurb: 'Campaigns across email, mail, ads, events and calls, with what each one cost.',
+    accent: '#6D28D9',           // display only (rail dot / app mark); tokens.css owns theming. PROVISIONAL: see the note in tokens.css, this needs checking against the logo lineup sheet.
+    // OWNS THE CAMPAIGN OF RECORD. MailMe grew a Campaigns tab because email
+    // was the first channel P&M automated, but a real campaign is rarely only
+    // email: a spring school push is a postcard drop, a booth, a paid social
+    // run and an email, all aimed at the same people over the same weeks.
+    // Keeping the campaign inside the email tool made the other five channels
+    // invisible and made "did that work" unanswerable.
+    //
+    // MailMe keeps EMAIL: composing, suppression, the cold ramp, domain
+    // reputation, CAN-SPAM. None of that has an analogue in a postcard drop,
+    // which is exactly why it does not belong in a planner.
+    //
+    // The link is ONE pointer and MailMe holds it (marketingCampaignId on its
+    // own records). MarketMachine asks "which of your emails belong to me"
+    // rather than keeping its own list, because two copies of one fact drift
+    // the first time an email is deleted.
+    //
+    // Reading is open to any signed-in user: a campaign plan is something AMs
+    // need to see without asking. Writing is can_edit, deleting is admin.
+    views: [
+      ['campaigns', 'Campaigns'],
+      ['calendar', 'Calendar'],
+      ['settings', 'Settings']
+    ],
+    defaultView: 'campaigns',
+    stub: false
+  },
+  {
     id: 'teletally',
     name: 'TeleTally',
     w1: 'Tele', w2: 'Tally', letter: 'T',
