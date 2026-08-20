@@ -1,6 +1,3 @@
-// PUT IN: api/websitewidget/stats.js (new file — replaces api/websitewidget.js, which must be DELETED)
-// (this banner line is for verification only, delete it after checking the path)
-
 // api/websitewidget/stats.js — GA4 site stats, for whichever site is requested.
 //
 // Lives alongside api/websitewidget/sites.js rather than as a flat
@@ -19,10 +16,18 @@
 //                    Required once more than one site exists; if omitted and
 //                    exactly one site is configured, that one is used.
 //   range=7|30|90   days back, default 30
+//   compare=none|previous|year
+//                    add a comparison period. "previous" is the matching
+//                    window immediately before; "year" is the same window
+//                    52 weeks back, so weekdays line up. Default none.
 //   fresh=1         bypass the cache and pull live
 //
 // Response shape, always:
-//   { configured: bool, siteId, generatedAt, days, totals, trend, channels, topPages }
+//   { configured, siteId, generatedAt, days, compare, period, priorPeriod,
+//     totals, priorTotals, deltas, trend, priorTrend, channels, topPages }
+// Every window ends YESTERDAY, not today. A part-day measured against a
+// full one is not a comparison, it is a fake decline. See periodWindows()
+// in lib/websitewidget/ga4.js.
 // configured is false when the shared GA4 service account isn't set up yet,
 // OR when no sites have been added yet. Either way the numeric fields are
 // zero/empty rather than invented — the app shows a setup message, not fake
@@ -32,20 +37,27 @@
 // message explains what to fix.
 
 import { requireAuth } from "../../lib/session.js";
-import { isConfigured, fetchSiteStats } from "../../lib/websitewidget/ga4.js";
+import { isConfigured, fetchSiteStats, COMPARE_MODES, periodWindows } from "../../lib/websitewidget/ga4.js";
 import { getSites, getSite } from "../../lib/websitewidget/sites-store.js";
 import { getCached, setCached } from "../../lib/websitewidget/store.js";
 
 const ALLOWED_RANGES = [7, 30, 90];
 
-function emptyStats(siteId, days) {
+function emptyStats(siteId, days, compare = "none") {
+  const windows = periodWindows(days, compare);
   return {
     configured: false,
     siteId: siteId || null,
     generatedAt: new Date().toISOString(),
     days,
+    compare,
+    period: windows.current,
+    priorPeriod: windows.prior,
     totals: { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0 },
+    priorTotals: null,
+    deltas: null,
     trend: [],
+    priorTrend: null,
     channels: [],
     topPages: []
   };
@@ -67,9 +79,10 @@ export default async function handler(req, res) {
   let days = parseInt(query.range, 10);
   if (!ALLOWED_RANGES.includes(days)) days = 30;
   const fresh = query.fresh === "1" || query.fresh === "true";
+  const compare = COMPARE_MODES.includes(query.compare) ? query.compare : "none";
 
   if (!isConfigured()) {
-    return res.status(200).json(emptyStats(query.site, days));
+    return res.status(200).json(emptyStats(query.site, days, compare));
   }
 
   let sites;
@@ -77,11 +90,11 @@ export default async function handler(req, res) {
     sites = await getSites();
   } catch (e) {
     console.error("websitewidget sites lookup error:", e);
-    return res.status(200).json({ ...emptyStats(query.site, days), configured: true, error: e.message });
+    return res.status(200).json({ ...emptyStats(query.site, days, compare), configured: true, error: e.message });
   }
 
   if (!sites.length) {
-    return res.status(200).json(emptyStats(query.site, days));
+    return res.status(200).json(emptyStats(query.site, days, compare));
   }
 
   let siteId = query.site;
@@ -101,20 +114,20 @@ export default async function handler(req, res) {
 
   try {
     if (!fresh) {
-      const cached = await getCached(site.id, days);
+      const cached = await getCached(site.id, days, compare);
       if (cached) {
         return res.status(200).json({ configured: true, siteId: site.id, generatedAt: cached.cachedAt, ...cached });
       }
     }
 
-    const stats = await fetchSiteStats(site.propertyId, days);
-    await setCached(site.id, days, stats);
+    const stats = await fetchSiteStats(site.propertyId, days, compare);
+    await setCached(site.id, days, stats, compare);
     return res.status(200).json({ configured: true, siteId: site.id, generatedAt: new Date().toISOString(), ...stats });
   } catch (e) {
     console.error("websitewidget route error:", e);
     // Fail open with a clear flag rather than a 500: a GA4 hiccup (or a site
     // that hasn't been granted Viewer access yet) shouldn't take the whole
     // dashboard down. configured stays true and the message says what's wrong.
-    return res.status(200).json({ ...emptyStats(site.id, days), configured: true, error: e.message });
+    return res.status(200).json({ ...emptyStats(site.id, days, compare), configured: true, error: e.message });
   }
 }
