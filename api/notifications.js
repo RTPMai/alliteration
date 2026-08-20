@@ -130,7 +130,7 @@ const APP_IDS = [
   // Added when each app landed. This list is hand-synced, so an app missing
   // from it cannot be tagged on a hand-off even though it exists in the rail:
   // promopro and stitchsense were both in that state.
-  "promopro", "stitchsense",
+  "promopro", "stitchsense", "marketmachine",
   GENERAL_APP,
 ];
 
