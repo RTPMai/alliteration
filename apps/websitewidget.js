@@ -418,9 +418,11 @@ export default {
 
       const trendHtml = (data.trend || []).length
         ? trendLegend + '<div class="ww-trend">' + data.trend.map((d, i) => {
-            // Aligned by position, not by date: day one against day one.
-            // Both windows are the same length, so index i is the same
-            // offset into each, and for a year comparison the same weekday.
+            // Aligned by position, not by date: day one against day one,
+            // which is what a year comparison needs since the dates differ.
+            // Safe only because the server fills GA4's missing zero-session
+            // days before this runs (fillTrendGaps in lib/websitewidget/ga4.js).
+            // Without that a single quiet Sunday shifts every bar after it.
             const was = priorTrend && priorTrend[i] ? priorTrend[i] : null;
             const tip = fmtDate(d.date) + ': ' + fmtNum(d.sessions) + ' sessions' +
               (was ? ' (was ' + fmtNum(was.sessions) + ' on ' + fmtDate(was.date) + ')' : '');
