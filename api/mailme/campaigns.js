@@ -318,9 +318,15 @@ export default async function handler(req, res) {
 
       const { ok, errors, patch } = validateCampaignPatch(body);
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
-      if (!patch.subject || !patch.body) {
-        return res.status(400).json({ error: "A campaign needs both a subject and a body" });
-      }
+      // A DRAFT MAY BE EMPTY. It could not be, until MarketMachine needed to
+      // start one: a campaign that plans an email creates the shell here and
+      // the copy gets written afterwards in the composer.
+      //
+      // Nothing was loosened by this. The subject-and-body requirement moved
+      // to sendCampaign(), which is where it bites on the way to a real
+      // inbox, and it now covers every route into sending rather than only
+      // records the composer created. The composer still refuses to SAVE a
+      // half-finished one, so nothing about the normal flow changed.
 
       const campaign = await createCampaign(patch, sess);
       return res.status(201).json({ ok: true, campaign });
