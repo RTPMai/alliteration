@@ -238,6 +238,150 @@ t.test('reorder timing is gone from MailMe settings and says where it went', () 
     'MailMe should point at where the setting actually lives now');
 });
 
+/* ---- Aug 19: audience rework --------------------------------------------
+ *
+ * Chips out, dropdowns in; multi-select in; two columns out; manual add in;
+ * imports land in a list. Each of these replaced something that only worked
+ * at small scale, so the tests say what broke rather than just what exists.
+ */
+
+t.test('filtering is three dropdowns, not three rows of chips', () => {
+  t.assert(/function renderPickers/.test(src), 'renderPickers() is missing');
+  t.assert(!/mm-listrail/.test(src), 'the list chip rail should be gone');
+  const defs = src.slice(src.indexOf('function pickerOptions'), src.indexOf('function renderPickers'));
+  ['list', 'source', 'status'].forEach((k) => {
+    t.assert(new RegExp('\\b' + k + ': \\{').test(defs), 'the ' + k + ' picker is missing');
+  });
+});
+
+t.test('the picker only shows a search box when there is enough to search', () => {
+  // A filter box over four options is furniture. Over thirty lists it is the
+  // only way to find anything.
+  t.assert(/const SEARCH_THRESHOLD/.test(src), 'SEARCH_THRESHOLD is missing');
+  const fn = src.slice(src.indexOf('function togglePicker'));
+  const body = fn.slice(0, fn.indexOf('async function choosePicker'));
+  t.assert(/d\.options\.length > SEARCH_THRESHOLD/.test(body),
+    'the search box must be conditional on the option count');
+  t.assert(/data-pfilter/.test(body), 'the filter input is missing');
+});
+
+t.test('only one picker popup can be open at a time', () => {
+  const fn = src.slice(src.indexOf('function togglePicker'));
+  const body = fn.slice(0, fn.indexOf('async function choosePicker'));
+  t.assert(/closePicker\(\)/.test(body), 'opening a picker must close whatever else was open');
+  t.assert(/setTimeout\(\(\) => document\.addEventListener/.test(body),
+    'the outside-click handler must be deferred, or the opening click closes it again');
+});
+
+t.test('selection survives a re-render', () => {
+  // Reading checkboxes off the DOM means a sort, a closed modal or a refresh
+  // silently drops what someone picked, and the next bulk action is wrong in
+  // a way nobody can see.
+  t.assert(/selected: new Set\(\)/.test(src), 'selection must live on state as a Set of ids');
+  const fn = src.slice(src.indexOf('function selectedContacts'));
+  const body = fn.slice(0, fn.indexOf('function renderBulkBar'));
+  t.assert(/state\.selected\.forEach/.test(body),
+    'the selection must be resolved from state, not from checked inputs');
+});
+
+t.test('the select-all box is tri-state, so it cannot lie about a partial pick', () => {
+  // A plain checked/unchecked box on a partial selection makes someone click
+  // it expecting to add the rest and instead clear everything.
+  const fn = src.slice(src.indexOf('function paintSelectAll'));
+  const body = fn.slice(0, fn.indexOf('function selectedContacts'));
+  t.assert(/indeterminate/.test(body), 'a partial selection must render as indeterminate');
+  t.assert(/picked === rows\.length/.test(body),
+    'checked must mean every visible row, not merely some');
+});
+
+t.test('a stale selection cannot outlive the rows it pointed at', () => {
+  const fn = src.slice(src.indexOf('async function refreshAudience'));
+  const body = fn.slice(0, fn.indexOf('/* ---------------- contact detail editor'));
+  t.assert(/state\.selected\.delete/.test(body),
+    'ids that no longer resolve must be dropped, or a bulk action hits ghosts');
+});
+
+t.test('bulk work is sequential, not a hundred parallel writes', () => {
+  // Parallel PATCHes against the same KV keys is how you get last-write-wins
+  // clobbering, and a progress count is only honest if the calls are serial.
+  const fn = src.slice(src.indexOf('async function runBulk'));
+  const body = fn.slice(0, fn.indexOf('async function bulkAddToList'));
+  t.assert(/for \(const item of items\)/.test(body), 'bulk work must run one at a time');
+  t.assert(/await fn\(item\)/.test(body), 'and await each one');
+  t.assert(/failures/.test(body), 'partial failure must be reported, not swallowed');
+});
+
+t.test('bulk remove reloads once, not once per contact', () => {
+  const fn = src.slice(src.indexOf('async function removeListMember'));
+  const body = fn.slice(0, fn.indexOf('async function addListMemberByEmail'));
+  t.assert(/quiet/.test(body), 'removeListMember must support a quiet mode for bulk runs');
+  t.assert(/if \(quiet\) throw e/.test(body),
+    'in quiet mode the error must reach the bulk runner rather than being swallowed');
+});
+
+t.test('adding people to a new list makes a STATIC one', () => {
+  // A rule would be a guess at why these particular people were picked, and
+  // would then pull in strangers who happened to match it.
+  const fn = src.slice(src.indexOf('async function bulkAddToList'));
+  const body = fn.slice(0, fn.indexOf('async function bulkRemoveFromList'));
+  t.assert(/kind: 'static'/.test(body), 'a hand-picked list must be static');
+  t.assert(/usesTagMechanism\(existing\)/.test(body),
+    'adding to an existing tag-based list must still go through its tags');
+  t.assert(/excludedMembers/.test(body),
+    'adding to a rule-based list must clear any prior exclusion, or the two cancel out');
+});
+
+t.test('contacts can be added by hand, and only ever as a prospect', () => {
+  // Letting MailMe mint a client would put a customer record somewhere the
+  // rest of the shell cannot see it.
+  t.assert(/function openAddContact/.test(src), 'openAddContact() is missing');
+  t.assert(/id="mmAddContactBtn"/.test(src), 'the Add contact button is missing');
+  const fn = src.slice(src.indexOf('async function saveNewContact'));
+  const body = fn.slice(0, fn.indexOf('/* ---------------- import'));
+  t.assert(/api\.post\(ENDPOINTS\.mmContacts/.test(body),
+    'a manual add must go through the contacts endpoint, which creates prospects');
+  t.assert(/res\.created/.test(body),
+    'an address that already exists must be reported as reused, not duplicated');
+});
+
+t.test('the create route accepts the fields the add form collects', () => {
+  // Otherwise adding someone by hand and then reopening them to fill in a
+  // phone number is two steps for one job.
+  const api = read('api/mailme/contacts.js');
+  const post = api.slice(api.indexOf('if (req.method === "POST")'), api.indexOf('if (req.method === "PATCH")'));
+  ['title', 'phone', 'city', 'state'].forEach((f) => {
+    t.assert(new RegExp('body\\.' + f).test(post),
+      'POST /contacts drops ' + f + ', so the add form would silently lose it');
+  });
+});
+
+t.test('an import can land straight in a list, and warns when it will not', () => {
+  // Without this an imported batch dissolves into the roster and there is no
+  // way to find those people again as a group.
+  t.assert(/id="mmImportList"/.test(src), 'the import list field is missing');
+  t.assert(/function listForBatch/.test(src), 'listForBatch() is missing');
+  const fn = src.slice(src.indexOf('async function commitImport'));
+  const body = fn.slice(0, fn.indexOf('async function listForBatch'));
+  t.assert(/without putting them in a list/.test(body),
+    'importing with no list must ask first, since it is the harder thing to undo');
+
+  const lf = src.slice(src.indexOf('async function listForBatch'));
+  const lbody = lf.slice(0, lf.indexOf('function rejectTable'));
+  t.assert(/importBatch === batchId/.test(lbody),
+    'the list must be built from the batch the server stamped, not a client guess');
+  t.assert(/extraMembers/.test(lbody),
+    'importing into a rule-based list must record exceptions rather than doing nothing');
+});
+
+t.test('a failed list creation does not hide a successful import', () => {
+  // The contacts are in either way. Reporting the whole thing as failed would
+  // send someone off to re-import people who are already there.
+  const fn = src.slice(src.indexOf('async function commitImport'));
+  const body = fn.slice(0, fn.indexOf('async function listForBatch'));
+  t.assert(/could not be created/.test(body),
+    'a list failure must be reported separately from the import result');
+});
+
 /* ---- the deliberate second implementation ----------------------------- */
 
 (async () => {
