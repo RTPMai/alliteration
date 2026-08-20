@@ -254,13 +254,47 @@ export default {
     font-family:inherit;font-size:13px;color:var(--ink);background:var(--card)}
   .mm-search:focus{outline:2px solid var(--accent);outline-offset:-1px;border-color:var(--accent)}
 
-  /* The list rail on Audience. Lists used to be a separate tab, which made
-     "my contacts" and "a saved slice of my contacts" feel like different
-     things to learn. They are the same table with a different filter. */
-  .mm-listrail{display:flex;gap:8px;flex-wrap:wrap;align-items:center;
-    margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid var(--line-soft)}
-  .mm-listrail .lbl{font-size:11px;text-transform:uppercase;letter-spacing:.05em;
-    color:var(--faint);font-weight:700;margin-right:2px}
+  /* Audience pickers. These replaced three rows of chips: with a dozen saved
+     lists the chip rail wrapped onto three lines and pushed the table below
+     the fold, and there was no way to find a list except reading all of them. */
+  .mm-pickers{display:flex;gap:12px;flex-wrap:wrap;align-items:flex-end;
+    margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--line-soft)}
+  .mm-picker{position:relative;min-width:210px}
+  .mm-picker .plbl{display:block;font-size:11px;text-transform:uppercase;
+    letter-spacing:.05em;color:var(--faint);font-weight:700;margin-bottom:5px}
+  .mm-picker .ptrig{width:100%;text-align:left;background:var(--card);
+    border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 28px 8px 11px;
+    font-size:13px;font-family:inherit;color:var(--ink);cursor:pointer;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .mm-picker .ptrig:hover{border-color:var(--line-strong)}
+  .mm-picker .ptrig:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .mm-picker .ptrig .cnt{color:var(--muted);font-weight:600;margin-left:5px}
+  .mm-picker .caret{position:absolute;right:10px;bottom:11px;pointer-events:none;
+    color:var(--faint);font-size:10px}
+  /* The popup is absolutely positioned inside the picker rather than fixed,
+     so it scrolls with the page and cannot be stranded mid-screen. */
+  .mm-pop{position:absolute;top:100%;left:0;right:0;z-index:30;margin-top:4px;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);
+    box-shadow:0 10px 30px rgba(0,0,0,.16);overflow:hidden}
+  .mm-pop input{width:100%;border:0;border-bottom:1px solid var(--line-soft);
+    padding:9px 11px;font-family:inherit;font-size:13px;background:var(--card);color:var(--ink)}
+  .mm-pop input:focus{outline:none}
+  .mm-pop .opts{max-height:260px;overflow-y:auto}
+  .mm-pop .opt{display:flex;justify-content:space-between;gap:10px;width:100%;
+    text-align:left;background:none;border:0;padding:8px 11px;font-family:inherit;
+    font-size:13px;color:var(--ink);cursor:pointer}
+  .mm-pop .opt:hover,.mm-pop .opt.active{background:var(--row-hover)}
+  .mm-pop .opt[aria-selected="true"]{color:var(--accent-deep);font-weight:600}
+  .mm-pop .opt .n{color:var(--faint);font-variant-numeric:tabular-nums}
+  .mm-pop .none{padding:10px 11px;font-size:12.5px;color:var(--faint)}
+
+  /* Bulk action bar. Only rendered when something is selected. */
+  .mm-bulk{display:flex;gap:8px;align-items:center;flex-wrap:wrap;
+    background:var(--accent-tint);border-radius:var(--radius-sm);
+    padding:10px 14px;margin-bottom:14px}
+  .mm-bulk .cnt{font-size:12.5px;font-weight:700;color:var(--accent-deep);margin-right:4px}
+  .mm-table td.sel,.mm-table th.sel{width:34px;padding-right:0}
+  .mm-table input[type="checkbox"]{cursor:pointer}
 
   .mm-table{width:100%;border-collapse:collapse;font-size:13px}
   .mm-table th{text-align:left;font-size:11px;text-transform:uppercase;
@@ -496,13 +530,19 @@ export default {
             <span class="stamp" data-mm-stamp></span>
             <button class="mm-btn ghost sm" data-mm-refresh="audience">Refresh</button>
             <button class="mm-btn ghost" id="mmImportBtn">Import CSV</button>
+            <button class="mm-btn ghost" id="mmAddContactBtn">Add contact</button>
             <button class="mm-btn ghost" id="mmSaveAsList">Save this view as a list</button>
             <button class="mm-btn" id="mmNewList">New list</button>
           </div>
         </div>
         <div id="mmAudienceMsg"></div>
-        <div class="mm-listrail" id="mmListRail"></div>
-        <div class="mm-filters" id="mmContactFilters"></div>
+        <!-- Three searchable dropdowns replacing three rows of chips. The
+             chips did not survive the list count growing: a dozen of them
+             wrapped onto three lines and pushed the table below the fold. -->
+        <div class="mm-pickers" id="mmPickers"></div>
+        <!-- Appears only when rows are selected, so it costs nothing the rest
+             of the time. -->
+        <div id="mmBulkBar"></div>
         <div class="mm-card">
           <div class="mm-card-hd">
             <h3 id="mmTableTitle">All contacts</h3>
@@ -573,6 +613,9 @@ export default {
       // Which list the Audience table is showing, or null for everyone. This
       // is a FILTER over the same table, not a separate screen.
       activeListId: null, activeListMembers: null, activeList: null,
+      // Ids of picked rows. A Set, and on state rather than read off the DOM,
+      // so a re-render cannot silently drop what someone selected.
+      selected: new Set(),
       editingList: null, editingContact: null, listMemberIds: [],
       // The campaign open in the workspace, plus the server's verdict on it.
       // `composerDetail` is the same payload the old Results modal used: it
@@ -581,6 +624,7 @@ export default {
       // Which campaign Reports is showing, or null for the picker.
       reportId: null,
       importPreview: null, importCsv: '',
+      marketing: [], marketingDown: false,
       settings: null, blockers: [], footerPreview: '', coldCapToday: 0,
       domains: null,
       settingsTab: 'brands'
@@ -628,6 +672,21 @@ export default {
     async function loadCampaigns() {
       const d = await api.get(ENDPOINTS.mmCampaigns);
       state.campaigns = Array.isArray(d && d.campaigns) ? d.campaigns : [];
+    }
+
+    // MarketMachine's campaigns, so an email can say which one it belongs to.
+    // Failure is soft on purpose: MarketMachine being down must not stop
+    // anyone sending email. The attach control just says so and the email
+    // sends as a standalone, which is a legitimate thing for it to be.
+    async function loadMarketingCampaigns() {
+      try {
+        const d = await api.get(ENDPOINTS.mkCampaigns);
+        state.marketing = Array.isArray(d && d.campaigns) ? d.campaigns : [];
+        state.marketingDown = false;
+      } catch (e) {
+        state.marketing = [];
+        state.marketingDown = true;
+      }
     }
 
     async function loadSettings() {
@@ -781,7 +840,10 @@ export default {
                     <div class="who">${esc(c.id)}</div></td>
                 <td><span class="pill ${st.cls}">${esc(st.label)}</span>
                     ${detail ? `<div class="who" style="margin-top:3px">${esc(detail)}</div>` : ''}</td>
-                <td class="em">${esc(audienceLabel(c))}</td>
+                <td class="em">${esc(audienceLabel(c))}${(() => {
+                  const mk = (state.marketing || []).find((m) => m.id === c.marketingCampaignId);
+                  return mk ? `<div class="who">${esc(mk.name)}</div>` : '';
+                })()}</td>
                 <td class="num">${c.recipientCount != null ? c.recipientCount : '\u2014'}</td>
                 <td class="em">${esc(fmtDate(c.updatedAt))}</td>
                 <td style="text-align:right;white-space:nowrap">
@@ -906,7 +968,18 @@ export default {
           : `"${String(d.subject).slice(0, 60)}"`
       };
 
-      return { who, from, write };
+      // Deliberately never a warning marker. Not belonging to a campaign is a
+      // legitimate state, so this step reports which it is rather than
+      // nagging toward one answer.
+      const mk = (state.marketing || []).find((m) => m.id === d.marketingCampaignId);
+      const campaign = {
+        done: true,
+        text: mk
+          ? mk.name + (d.marketingChannelId ? '' : ' (no channel slot picked)')
+          : 'A one-off send, not part of a campaign'
+      };
+
+      return { who, from, write, campaign };
     }
 
     function stepMark(done) {
@@ -1047,6 +1120,53 @@ export default {
           </div>
         </div>`;
 
+      /* ---- step 4: which campaign ----
+       * A campaign is MarketMachine's now. This is the pointer, and MailMe is
+       * the only place it is stored: MarketMachine finds its emails by asking
+       * for these rather than keeping its own list, because two copies of one
+       * fact drift the first time an email is deleted here.
+       *
+       * "Not part of a campaign" is a real answer, not a gap. A one-off note
+       * to a list is not a campaign, and forcing one to be created would fill
+       * MarketMachine with single-email records that mean nothing. */
+      const mkChosen = (state.marketing || []).find((m) => m.id === d.marketingCampaignId);
+      const mkChannels = mkChosen
+        ? (mkChosen.channels || []).filter((ch) => ch.type === 'email') : [];
+
+      const campaignBody = state.marketingDown ? `
+        <div class="mm-notice">
+          <b>MarketMachine is not answering.</b> This email can still be written and sent;
+          it just cannot be attached to a campaign right now. Attach it later and the
+          campaign picks up its numbers retroactively.
+        </div>`
+        : `
+        <div class="mm-field">
+          <label for="mmMarketing">Part of a campaign</label>
+          <select id="mmMarketing"${readOnly || sent ? ' disabled' : ''}>
+            <option value="">Not part of a campaign (a one-off send)</option>
+            ${(state.marketing || []).map((m) => `
+              <option value="${esc(m.id)}"${d.marketingCampaignId === m.id ? ' selected' : ''}
+                >${esc(m.name)}</option>`).join('')}
+          </select>
+          <div class="hint">Attaching it means this email's delivered count and
+            click-throughs roll into that campaign's totals alongside the postcards, ads
+            and events.</div>
+        </div>
+        ${mkChosen ? `
+          <div class="mm-field">
+            <label for="mmMarketingChannel">Which email slot</label>
+            <select id="mmMarketingChannel"${readOnly || sent ? ' disabled' : ''}>
+              <option value="">Pick the channel item this counts toward</option>
+              ${mkChannels.map((ch) => `
+                <option value="${esc(ch.id)}"${d.marketingChannelId === ch.id ? ' selected' : ''}
+                  >${esc(ch.name)}</option>`).join('')}
+            </select>
+            ${mkChannels.length ? '' : `<div class="hint">
+              ${esc(mkChosen.name)} has no email channel yet. Add one in MarketMachine, or
+              leave this blank: the email still sends, it just will not be counted against
+              a specific slot.</div>`}
+          </div>` : ''}`;
+
       pane.innerHTML = `
         <div class="mm-sendbar">
           <div style="min-width:0">
@@ -1069,6 +1189,8 @@ export default {
         ${stepHtml('Who gets it', stepMark(steps.who.done), esc(steps.who.text), whoBody)}
         ${stepHtml('Who it comes from', stepMark(steps.from.done), esc(steps.from.text), fromBody)}
         ${stepHtml('What it says', stepMark(steps.write.done), esc(steps.write.text), writeBody)}
+        ${stepHtml('Part of a campaign', stepMark(steps.campaign.done),
+          esc(steps.campaign.text), campaignBody)}
         <div id="mmReadyBlock"></div>
         ${sent || readOnly ? '' : `<div class="mm-actions" style="margin-top:6px">
           <button class="mm-btn ghost" id="mmDeleteCampaign">Delete this campaign</button>
@@ -1252,6 +1374,31 @@ export default {
         });
       }
 
+      const mk = $('#mmMarketing');
+      if (mk) {
+        mk.addEventListener('change', async () => {
+          syncComposerFromDom();
+          const d2 = state.editingCampaign;
+          d2.marketingCampaignId = mk.value || null;
+          // Detaching clears the channel slot too. A slot id left pointing at
+          // a campaign the email no longer belongs to would make that
+          // campaign count reach against a channel nothing is linked to.
+          d2.marketingChannelId = null;
+          renderComposer();
+          if (d2.id) await saveCampaign({ silent: true });
+        });
+      }
+
+      const mkCh = $('#mmMarketingChannel');
+      if (mkCh) {
+        mkCh.addEventListener('change', async () => {
+          syncComposerFromDom();
+          state.editingCampaign.marketingChannelId = mkCh.value || null;
+          renderComposer();
+          if (state.editingCampaign.id) await saveCampaign({ silent: true });
+        });
+      }
+
       const ident = $('#mmIdentity');
       if (ident) {
         ident.addEventListener('change', () => {
@@ -1358,7 +1505,9 @@ export default {
         source: d.source || 'client',
         listId: d.listId || null,
         segmentTags: d.segmentTags || [],
-        identityKey: d.identityKey || null
+        identityKey: d.identityKey || null,
+        marketingCampaignId: d.marketingCampaignId || null,
+        marketingChannelId: d.marketingChannelId || null
       };
 
       if (!payload.subject.trim() || !payload.body.trim()) {
@@ -1503,24 +1652,194 @@ export default {
     // Lists as a filter over one table, rather than a separate tab. "My
     // contacts" and "a saved slice of my contacts" are the same people, and
     // making them two screens meant two mental models for one idea.
-    function renderListRail() {
-      const rail = $('#mmListRail');
-      if (!rail) return;
+    /* ---------------- audience: the three pickers ----------------
+     *
+     * ONE combobox component, used for lists, source and status. Chips were
+     * fine at four lists and unusable at a dozen: they wrapped onto three
+     * rows, pushed the table below the fold, and offered no way to find a
+     * list except reading every one of them.
+     *
+     * The search box only appears above about eight options. A filter box
+     * over four choices is furniture, not help.
+     */
 
-      rail.innerHTML =
-        '<span class="lbl">Lists</span>' +
-        `<button class="mm-filt" data-list="" aria-pressed="${!state.activeListId}">
-           Everyone<span class="n">${state.counts.total || 0}</span></button>` +
-        state.lists.map((l) => `
-          <button class="mm-filt" data-list="${esc(l.id)}" aria-pressed="${state.activeListId === l.id}">
-            ${esc(l.name)}<span class="n">${l.mailableCount != null ? l.mailableCount : '?'}</span>
-          </button>`).join('') +
-        (state.lists.length ? '' : '<span class="mm-hint">None yet. Filter below and press ' +
-          '"Save this view as a list".</span>');
+    const SEARCH_THRESHOLD = 8;
 
-      rail.querySelectorAll('[data-list]').forEach((b) => {
-        b.addEventListener('click', () => selectList(b.dataset.list || null));
+    // Which picker popup is open, if any. Only one at a time: two open
+    // dropdowns overlapping each other is nobody's idea of a filter bar.
+    let openPicker = null;
+
+    function pickerOptions() {
+      const c = state.counts;
+      return {
+        list: {
+          label: 'List',
+          value: state.activeListId || '',
+          options: [{ value: '', label: 'Everyone', n: c.total || 0 }].concat(
+            state.lists.map((l) => ({
+              value: l.id, label: l.name,
+              n: l.mailableCount != null ? l.mailableCount : null
+            }))
+          ),
+          empty: 'No saved lists yet. Filter below and press "Save this view as a list".'
+        },
+        source: {
+          label: 'Source',
+          value: state.source,
+          options: [
+            { value: 'all', label: 'All sources', n: c.total || 0 },
+            { value: 'client', label: 'Clients', n: c.client || 0 },
+            { value: 'lead', label: 'Leads', n: c.lead || 0 },
+            { value: 'giving', label: 'Giving', n: c.giving || 0 },
+            { value: 'prospect', label: 'Prospects', n: c.prospect || 0 }
+          ]
+        },
+        status: {
+          label: 'Status',
+          value: state.status,
+          options: [
+            { value: 'all', label: 'Any status', n: null },
+            { value: 'mailable', label: 'Mailable', n: c.mailable || 0 },
+            { value: 'unsubscribed', label: 'Unsubscribed', n: c.unsubscribed || 0 },
+            { value: 'bounced', label: 'Bounced', n: c.bounced || 0 }
+          ]
+        }
+      };
+    }
+
+    function renderPickers() {
+      const box = $('#mmPickers');
+      if (!box) return;
+      const defs = pickerOptions();
+
+      box.innerHTML = Object.keys(defs).map((key) => {
+        const d = defs[key];
+        const chosen = d.options.find((o) => String(o.value) === String(d.value)) || d.options[0];
+        return `
+          <div class="mm-picker" data-picker="${key}">
+            <span class="plbl">${esc(d.label)}</span>
+            <button class="ptrig" type="button" data-ptrig="${key}"
+                    aria-haspopup="listbox" aria-expanded="false">
+              ${esc(chosen ? chosen.label : '')}${chosen && chosen.n != null
+                ? `<span class="cnt">${chosen.n}</span>` : ''}
+            </button>
+            <span class="caret">\u25BC</span>
+          </div>`;
+      }).join('') +
+      `<input class="mm-search" id="mmSearch" type="search"
+              placeholder="Search company, email or title" value="${esc(state.search)}">`;
+
+      box.querySelectorAll('[data-ptrig]').forEach((b) => {
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          togglePicker(b.dataset.ptrig);
+        });
       });
+
+      // Debounced so typing does not fire a request per keystroke.
+      const search = $('#mmSearch');
+      let timer = null;
+      if (search) {
+        search.addEventListener('input', (e) => {
+          state.search = e.target.value;
+          clearTimeout(timer);
+          timer = setTimeout(async () => {
+            clearSelection();
+            await loadContacts();
+            renderContactsTable();
+          }, 250);
+        });
+      }
+    }
+
+    function closePicker() {
+      if (!openPicker) return;
+      const host = root.querySelector(`.mm-picker[data-picker="${openPicker}"]`);
+      if (host) {
+        const pop = host.querySelector('.mm-pop');
+        if (pop) pop.remove();
+        const trig = host.querySelector('.ptrig');
+        if (trig) trig.setAttribute('aria-expanded', 'false');
+      }
+      openPicker = null;
+      document.removeEventListener('click', onDocClickForPicker);
+    }
+
+    function onDocClickForPicker() { closePicker(); }
+
+    function togglePicker(key) {
+      const wasOpen = openPicker === key;
+      closePicker();
+      if (wasOpen) return;
+
+      const defs = pickerOptions();
+      const d = defs[key];
+      const host = root.querySelector(`.mm-picker[data-picker="${key}"]`);
+      if (!host || !d) return;
+
+      const searchable = d.options.length > SEARCH_THRESHOLD;
+      const pop = document.createElement('div');
+      pop.className = 'mm-pop';
+      pop.innerHTML =
+        (searchable ? '<input type="search" placeholder="Type to filter" data-pfilter>' : '') +
+        '<div class="opts" data-popts></div>';
+      host.appendChild(pop);
+      openPicker = key;
+      host.querySelector('.ptrig').setAttribute('aria-expanded', 'true');
+
+      const paint = (term) => {
+        const q = String(term || '').trim().toLowerCase();
+        const shown = q
+          ? d.options.filter((o) => o.label.toLowerCase().includes(q))
+          : d.options;
+        const slot = pop.querySelector('[data-popts]');
+        if (!shown.length) {
+          slot.innerHTML = `<div class="none">${esc(d.empty || 'Nothing matches that.')}</div>`;
+          return;
+        }
+        slot.innerHTML = shown.map((o) => `
+          <button class="opt" type="button" role="option" data-pval="${esc(o.value)}"
+                  aria-selected="${String(o.value) === String(d.value)}">
+            <span>${esc(o.label)}</span>
+            ${o.n != null ? `<span class="n">${o.n}</span>` : ''}
+          </button>`).join('');
+        slot.querySelectorAll('[data-pval]').forEach((b) => {
+          b.addEventListener('click', (ev) => {
+            ev.stopPropagation();
+            choosePicker(key, b.dataset.pval);
+          });
+        });
+      };
+      paint('');
+
+      const filter = pop.querySelector('[data-pfilter]');
+      if (filter) {
+        filter.addEventListener('click', (ev) => ev.stopPropagation());
+        filter.addEventListener('input', () => paint(filter.value));
+        filter.focus();
+      }
+      pop.addEventListener('click', (ev) => ev.stopPropagation());
+      // Deferred, or the click that opened this closes it again immediately.
+      setTimeout(() => document.addEventListener('click', onDocClickForPicker), 0);
+    }
+
+    async function choosePicker(key, value) {
+      closePicker();
+      clearSelection();
+
+      if (key === 'list') { await selectList(value || null); return; }
+
+      if (key === 'source') {
+        state.source = value;
+        // Filtering by source while a list is selected is two rules at once.
+        // The list is the container, so leaving it is the honest move rather
+        // than showing an intersection nothing else in the app can express.
+        state.activeListId = null; state.activeList = null; state.activeListMembers = null;
+      } else {
+        state.status = value;
+      }
+      await loadContacts();
+      renderPickers(); renderContactsTable();
     }
 
     // Membership is resolved SERVER-side (GET /api/mailme/lists?id=), the
@@ -1532,7 +1851,7 @@ export default {
       if (!listId) {
         state.activeList = null;
         state.activeListMembers = null;
-        renderListRail(); renderContactsTable();
+        renderPickers(); renderContactsTable();
         return;
       }
       try {
@@ -1545,81 +1864,21 @@ export default {
         state.activeListMembers = [];
         msg('#mmAudienceMsg', 'Could not load that list: ' + esc(e.message), 'mm-err');
       }
-      renderListRail(); renderContactsTable();
+      renderPickers(); renderContactsTable();
     }
 
-    /* ---------------- audience: filters ---------------- */
-
-    function renderFilters() {
-      const c = state.counts;
-      const srcOpts = [
-        ['all', 'All sources', c.total || 0],
-        ['client', 'Clients', c.client || 0],
-        ['lead', 'Leads', c.lead || 0],
-        ['giving', 'Giving', c.giving || 0],
-        ['prospect', 'Prospects', c.prospect || 0]
-      ];
-      const statOpts = [
-        ['all', 'Any status', null],
-        ['mailable', 'Mailable', c.mailable || 0],
-        ['unsubscribed', 'Unsubscribed', c.unsubscribed || 0],
-        ['bounced', 'Bounced', c.bounced || 0]
-      ];
-
-      const box = $('#mmContactFilters');
-      if (!box) return;
-
-      box.innerHTML =
-        srcOpts.map(([k, label, n]) =>
-          `<button class="mm-filt" data-src="${k}" aria-pressed="${state.source === k}">
-             ${esc(label)}<span class="n">${n}</span></button>`).join('') +
-        '<span class="mm-sep"></span>' +
-        statOpts.map(([k, label, n]) =>
-          `<button class="mm-filt" data-stat="${k}" aria-pressed="${state.status === k}">
-             ${esc(label)}${n === null ? '' : `<span class="n">${n}</span>`}</button>`).join('') +
-        `<input class="mm-search" id="mmSearch" type="search"
-                placeholder="Search company, email, title or tag" value="${esc(state.search)}">`;
-
-      box.querySelectorAll('[data-src]').forEach((b) => {
-        b.addEventListener('click', async () => {
-          state.source = b.dataset.src;
-          // Filtering by source while a list is selected is two rules at
-          // once. The list wins as the container, so leaving it is the
-          // honest move rather than showing an intersection nothing else
-          // in the app can express.
-          state.activeListId = null; state.activeList = null; state.activeListMembers = null;
-          await loadContacts(); renderFilters(); renderListRail(); renderContactsTable();
-        });
-      });
-      box.querySelectorAll('[data-stat]').forEach((b) => {
-        b.addEventListener('click', async () => {
-          state.status = b.dataset.stat;
-          await loadContacts(); renderFilters(); renderContactsTable();
-        });
-      });
-
-      // Debounced so typing does not fire a request per keystroke.
-      const search = $('#mmSearch');
-      let timer = null;
-      if (search) {
-        search.addEventListener('input', (e) => {
-          state.search = e.target.value;
-          clearTimeout(timer);
-          timer = setTimeout(async () => {
-            await loadContacts(); renderContactsTable();
-          }, 250);
-        });
-      }
-    }
-
+    // REORDER AND TAGS LEFT THIS TABLE (Aug 19). Reorder timing is BackBone's
+    // now, and a column MailMe cannot change was decoration on a screen this
+    // dense. Tags were a workaround for having no way to select several
+    // people at once; with the checkboxes below you select them and add them
+    // to a list, which is the thing tags were being used to fake. Tags still
+    // exist underneath and every list built on them keeps working.
     const COLUMNS = [
       ['company_name', 'Company'],
       ['contact_name', 'Contact'],
       ['email', 'Email'],
       ['source', 'Source'],
-      ['status', 'Status'],
-      ['reorder', 'Reorder'],
-      ['tags', 'Tags']
+      ['status', 'Status']
     ];
 
     async function setSort(key) {
@@ -1634,19 +1893,6 @@ export default {
     // Reorder timing only means anything for clients, and only when they have
     // enough order history for a median gap to be a real pattern. The
     // thresholds are BackBone's (Settings -> Reorder timing).
-    function reorderCell(ct) {
-      const r = ct.reorder;
-      if (!r || !r.confident || r.state === 'unknown') {
-        return ct.source === 'client'
-          ? '<span class="who">not enough history</span>' : '';
-      }
-      const m = REORDER_META[r.state] || REORDER_META.unknown;
-      const detail = r.daysSince != null && r.expectedGap
-        ? `${r.daysSince}d since, usually ${Math.round(r.expectedGap)}d` : '';
-      return `<span class="pill ${m.cls}">${esc(m.label)}</span>` +
-        (detail ? `<div class="who" style="margin-top:3px">${esc(detail)}</div>` : '');
-    }
-
     /* ---------------- audience: the table ---------------- */
 
     // ONE table renderer for both modes. When a list is selected it shows
@@ -1733,14 +1979,20 @@ export default {
 
       box.innerHTML = listTools + `
         <table class="mm-table">
-          <thead><tr>${head}<th style="text-align:right">Actions</th></tr></thead>
+          <thead><tr>
+            <th class="sel"><input type="checkbox" id="mmPickAll"
+              aria-label="Select every row shown"></th>
+            ${head}<th style="text-align:right">Actions</th></tr></thead>
           <tbody>
             ${rows.map((ct) => {
               const m = STATUS_META[ct.status] || STATUS_META.subscribed;
               const src = SOURCE_META[ct.source] || SOURCE_META.client;
               const locked = ct.status === 'bounced' || ct.status === 'complained';
+              const picked = state.selected.has(String(ct.id));
               return `
               <tr>
+                <td class="sel"><input type="checkbox" data-pick="${esc(ct.id)}"
+                    ${picked ? 'checked' : ''} aria-label="Select ${esc(ct.company_name || ct.email)}"></td>
                 <td><div class="co">${esc(ct.company_name || '(no company)')}</div>
                     ${ct.city ? `<div class="who">${esc([ct.city, ct.state].filter(Boolean).join(', '))}</div>` : ''}</td>
                 <td>${esc(ct.contact_name || '')}
@@ -1750,15 +2002,10 @@ export default {
                 <td><span class="pill ${m.cls}">${esc(m.label)}</span>
                     ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}
                     ${ct.verification === 'invalid' ? '<div class="who">Failed verification</div>' : ''}</td>
-                <td>${reorderCell(ct)}</td>
-                <td>${ct.tags && ct.tags.length
-                  ? ct.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')
-                  : '<span class="tag-none">none</span>'}</td>
                 <td style="text-align:right;white-space:nowrap">
                   ${locked ? '<span class="who">provider-set</span>'
                     : `<button class="mm-btn ghost sm" data-toggle="${esc(ct.id)}">${
                         ct.status === 'unsubscribed' ? 'Resubscribe' : 'Unsubscribe'}</button>`}
-                  <button class="mm-btn ghost sm" data-tags="${esc(ct.id)}">Tags</button>
                   <button class="mm-btn ghost sm" data-editct="${esc(ct.id)}">Edit</button>
                   ${listMode
                     ? `<button class="mm-btn ghost sm" data-removemember="${esc(ct.id)}">Remove</button>`
@@ -1776,9 +2023,30 @@ export default {
       box.querySelectorAll('[data-toggle]').forEach((b) => {
         b.addEventListener('click', () => toggleSub(b.dataset.toggle));
       });
-      box.querySelectorAll('[data-tags]').forEach((b) => {
-        b.addEventListener('click', () => editTags(b.dataset.tags));
+      // SELECTION. Kept in a Set of ids rather than read off the DOM, so it
+      // survives a re-render: sorting the table or coming back from a modal
+      // must not silently drop what someone picked.
+      box.querySelectorAll('[data-pick]').forEach((cb) => {
+        cb.addEventListener('change', () => {
+          const id = String(cb.dataset.pick);
+          if (cb.checked) state.selected.add(id); else state.selected.delete(id);
+          paintSelectAll(rows);
+          renderBulkBar();
+        });
       });
+      const all = box.querySelector('#mmPickAll');
+      if (all) {
+        all.addEventListener('change', () => {
+          rows.forEach((r) => {
+            if (all.checked) state.selected.add(String(r.id));
+            else state.selected.delete(String(r.id));
+          });
+          renderContactsTable();
+          renderBulkBar();
+        });
+      }
+      paintSelectAll(rows);
+      renderBulkBar();
       box.querySelectorAll('[data-editct]').forEach((b) => {
         b.addEventListener('click', () => {
           const ct = rows.find((x) => x.id === b.dataset.editct);
@@ -1796,6 +2064,192 @@ export default {
       });
 
       if (listMode) wireListTools();
+    }
+
+    /* ---------------- bulk selection ----------------
+     *
+     * The thing tags were being used to fake. Pick people, do one thing to
+     * all of them. Selection lives in a Set of ids on state rather than being
+     * read off the DOM, so a re-render (a sort, a closed modal, a refresh)
+     * cannot silently drop what someone chose.
+     */
+
+    function clearSelection() {
+      state.selected.clear();
+      renderBulkBar();
+    }
+
+    // Tri-state header box: checked when every visible row is picked,
+    // indeterminate when some are. A plain checked/unchecked box lies about a
+    // partial selection, and lying here means someone clicks it expecting to
+    // add the rest and instead clears everything.
+    function paintSelectAll(rows) {
+      const all = root.querySelector('#mmPickAll');
+      if (!all) return;
+      const picked = rows.filter((r) => state.selected.has(String(r.id))).length;
+      all.checked = picked > 0 && picked === rows.length;
+      all.indeterminate = picked > 0 && picked < rows.length;
+    }
+
+    function selectedContacts() {
+      const pool = (state.activeListMembers || []).concat(state.contacts);
+      const seen = new Set();
+      const out = [];
+      state.selected.forEach((id) => {
+        if (seen.has(id)) return;
+        const found = pool.find((c) => String(c.id) === id);
+        if (found) { seen.add(id); out.push(found); }
+      });
+      return out;
+    }
+
+    function renderBulkBar() {
+      const box = $('#mmBulkBar');
+      if (!box) return;
+      const n = state.selected.size;
+      if (!n) { box.innerHTML = ''; return; }
+
+      const picked = selectedContacts();
+      const prospects = picked.filter((c) => c.source === 'prospect').length;
+      const listMode = !!state.activeListId;
+
+      box.innerHTML = `
+        <div class="mm-bulk">
+          <span class="cnt">${n} selected</span>
+          <button class="mm-btn sm" id="mmBulkAddList">Add to a list</button>
+          ${listMode ? '<button class="mm-btn ghost sm" id="mmBulkRemoveList">Remove from this list</button>' : ''}
+          <button class="mm-btn ghost sm" id="mmBulkUnsub">Unsubscribe</button>
+          ${prospects ? `<button class="mm-btn ghost sm" id="mmBulkDelete">Delete ${prospects} prospect${prospects === 1 ? '' : 's'}</button>` : ''}
+          <button class="mm-btn ghost sm" id="mmBulkClear">Clear</button>
+        </div>`;
+
+      const wire = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
+      wire('#mmBulkClear', () => { clearSelection(); renderContactsTable(); });
+      wire('#mmBulkAddList', bulkAddToList);
+      wire('#mmBulkRemoveList', bulkRemoveFromList);
+      wire('#mmBulkUnsub', bulkUnsubscribe);
+      wire('#mmBulkDelete', bulkDeleteProspects);
+    }
+
+    // Bulk work runs one request at a time rather than firing everything at
+    // once. A hundred parallel PATCHes against the same KV keys is how you get
+    // last-write-wins clobbering, and the progress line is only honest if the
+    // calls are actually sequential.
+    async function runBulk(items, label, fn) {
+      let done = 0;
+      const failures = [];
+      for (const item of items) {
+        try {
+          await fn(item);
+        } catch (e) {
+          failures.push((item.company_name || item.email || item.id) + ': ' + e.message);
+        }
+        done++;
+        msg('#mmAudienceMsg', `${label} ${done} of ${items.length}...`, 'mm-ok');
+      }
+      await refreshAudience();
+      if (failures.length) {
+        msg('#mmAudienceMsg',
+          `${done - failures.length} of ${items.length} done. ${failures.length} failed: ` +
+          esc(failures.slice(0, 5).join('; ')), 'mm-err');
+      } else {
+        msg('#mmAudienceMsg', `${label} ${done} contact${done === 1 ? '' : 's'}. Done.`, 'mm-ok');
+      }
+    }
+
+    async function bulkAddToList() {
+      const picked = selectedContacts();
+      if (!picked.length) return;
+
+      // Existing list by name, or a new static list. A dropdown of lists plus
+      // a "new list" text box is two controls for one decision, so this is one
+      // box that does both.
+      const names = state.lists.map((l) => l.name);
+      const answer = window.prompt(
+        `Add ${picked.length} contact${picked.length === 1 ? '' : 's'} to which list?\n\n` +
+        (names.length ? 'Existing lists: ' + names.join(', ') + '\n\n' : '') +
+        'Type an existing name to add to it, or a new name to create a list.', '');
+      if (answer === null) return;
+      const name = String(answer).trim();
+      if (!name) return;
+
+      const existing = state.lists.find(
+        (l) => l.name.trim().toLowerCase() === name.toLowerCase());
+      const ids = picked.map((c) => String(c.id));
+
+      try {
+        if (!existing) {
+          // A static list: these are hand-picked people, which is exactly what
+          // a static list is for. A rule would be a guess at why they were
+          // chosen, and would then pull in strangers who happened to match it.
+          await api.post(ENDPOINTS.mmLists, { name, kind: 'static', members: ids });
+        } else if (existing.kind === 'static') {
+          const members = [...new Set([...(existing.members || []).map(String), ...ids])];
+          await api.patch(ENDPOINTS.mmLists, { id: existing.id, members });
+        } else if (usesTagMechanism(existing)) {
+          // A tag-based rule: setting the tag is the same act as joining.
+          const ruleTags = listRuleTags(existing);
+          for (const c of picked) {
+            const tags = [...new Set([
+              ...(c.tags || []).map((t) => String(t).trim().toLowerCase()), ...ruleTags])];
+            await api.patch(ENDPOINTS.mmContacts, { id: c.id, tags });
+          }
+        } else {
+          // Any other rule: recorded as an exception on the list, and any
+          // prior exclusion cleared or the two cancel out.
+          const extraMembers = [...new Set([...(existing.extraMembers || []).map(String), ...ids])];
+          const excludedMembers = (existing.excludedMembers || [])
+            .map(String).filter((x) => !ids.includes(x));
+          await api.patch(ENDPOINTS.mmLists, { id: existing.id, extraMembers, excludedMembers });
+        }
+        clearSelection();
+        await refreshAudience();
+        msg('#mmAudienceMsg',
+          `${picked.length} contact${picked.length === 1 ? '' : 's'} added to ${esc(name)}` +
+          (existing ? '.' : ' (new list).'), 'mm-ok');
+      } catch (e) {
+        msg('#mmAudienceMsg', 'Could not add to that list: ' + esc(e.message), 'mm-err');
+      }
+    }
+
+    async function bulkRemoveFromList() {
+      const list = state.activeList;
+      const picked = selectedContacts();
+      if (!list || !picked.length) return;
+      if (!window.confirm(
+        `Remove ${picked.length} contact${picked.length === 1 ? '' : 's'} from ${list.name}?\n\n` +
+        'The contacts themselves are not deleted.')) return;
+      clearSelection();
+      await runBulk(picked, 'Removed', (c) => removeListMember(list, c, { quiet: true }));
+    }
+
+    async function bulkUnsubscribe() {
+      const picked = selectedContacts().filter(
+        (c) => c.status !== 'bounced' && c.status !== 'complained');
+      if (!picked.length) {
+        msg('#mmAudienceMsg', 'Nothing selected that can be unsubscribed by hand. ' +
+          'Bounced and complained are set by the mail provider.', 'mm-err');
+        return;
+      }
+      const reason = window.prompt(
+        `Unsubscribe ${picked.length} contact${picked.length === 1 ? '' : 's'}.\n\n` +
+        'Reason (optional, for your own reporting):', '');
+      if (reason === null) return;
+      clearSelection();
+      await runBulk(picked, 'Unsubscribed', (c) =>
+        api.patch(ENDPOINTS.mmContacts, { id: c.id, status: 'unsubscribed', reason }));
+    }
+
+    async function bulkDeleteProspects() {
+      const picked = selectedContacts().filter((c) => c.source === 'prospect');
+      if (!picked.length) return;
+      if (!window.confirm(
+        `Delete ${picked.length} prospect${picked.length === 1 ? '' : 's'}?\n\n` +
+        'Anyone who ever unsubscribed stays on record: deleting and re-importing ' +
+        'will not start mailing them again.')) return;
+      clearSelection();
+      await runBulk(picked, 'Deleted', (c) =>
+        api.del(ENDPOINTS.mmContacts, { query: { id: c.id } }));
     }
 
     function wireListTools() {
@@ -1845,24 +2299,6 @@ export default {
       }
     }
 
-    async function editTags(id) {
-      const pool = state.activeListMembers || state.contacts;
-      const ct = pool.find((x) => x.id === id) || state.contacts.find((x) => x.id === id);
-      if (!ct) return;
-      const next = window.prompt(
-        'Tags for ' + (ct.company_name || ct.email) +
-        '.\n\nComma separated. These are how you build a list later.', (ct.tags || []).join(', '));
-      if (next === null) return;
-      const tags = next.split(',').map((t) => t.trim()).filter(Boolean);
-      try {
-        await api.patch(ENDPOINTS.mmContacts, { id, tags });
-        await refreshAudience();
-        msg('#mmAudienceMsg', 'Tags updated.', 'mm-ok');
-      } catch (e) {
-        msg('#mmAudienceMsg', 'Could not update tags: ' + esc(e.message), 'mm-err');
-      }
-    }
-
     async function deleteProspect(id) {
       const ct = state.contacts.find((x) => x.id === id);
       if (!ct) return;
@@ -1884,7 +2320,13 @@ export default {
     async function refreshAudience() {
       await Promise.all([loadContacts(), loadLists()]);
       if (state.activeListId) await selectList(state.activeListId);
-      renderFilters(); renderListRail(); renderContactsTable(); renderHealth();
+      // Anyone who has vanished from the roster cannot stay selected, or a
+      // later bulk action would act on a ghost id.
+      const live = new Set(
+        (state.activeListMembers || []).concat(state.contacts).map((c) => String(c.id)));
+      Array.from(state.selected).forEach((id) => { if (!live.has(id)) state.selected.delete(id); });
+
+      renderPickers(); renderContactsTable(); renderHealth(); renderBulkBar();
     }
 
     /* ---------------- contact detail editor ----------------
@@ -2100,7 +2542,7 @@ export default {
         // having to go find it is the sort of small tax that adds up.
         const newId = (res && res.list && res.list.id) || l.id;
         if (newId) await selectList(newId);
-        else { renderListRail(); renderContactsTable(); }
+        else { renderPickers(); renderContactsTable(); }
         msg('#mmAudienceMsg', 'List saved.', 'mm-ok');
       } catch (e) {
         listEditorMsg('Could not save: ' + esc(e.message), 'mm-err');
@@ -2115,7 +2557,7 @@ export default {
         closeModalIf('list');
         state.activeListId = null; state.activeList = null; state.activeListMembers = null;
         await loadLists();
-        renderListRail(); renderContactsTable();
+        renderPickers(); renderContactsTable();
         msg('#mmAudienceMsg', 'List deleted.', 'mm-ok');
       } catch (e) {
         msg('#mmAudienceMsg', 'Could not delete: ' + esc(e.message), 'mm-err');
@@ -2136,8 +2578,12 @@ export default {
       return list && list.kind === 'dynamic' && listRuleTags(list).length > 0;
     }
 
-    async function removeListMember(list, member) {
+    async function removeListMember(list, member, opts) {
       if (!list) return;
+      // `quiet` skips the refresh so a bulk run reloads once at the end
+      // instead of once per contact. It also lets the error surface to the
+      // bulk runner rather than being swallowed here.
+      const quiet = !!(opts && opts.quiet);
       try {
         const mid = String(member.id);
         if (list.kind === 'static') {
@@ -2157,8 +2603,9 @@ export default {
           const extraMembers = (list.extraMembers || []).map(String).filter((x) => x !== mid);
           await api.patch(ENDPOINTS.mmLists, { id: list.id, excludedMembers, extraMembers });
         }
-        await refreshAudience();
+        if (!quiet) await refreshAudience();
       } catch (e) {
+        if (quiet) throw e;
         msg('#mmListMembersMsg', 'Could not remove: ' + esc(e.message), 'mm-err');
       }
     }
@@ -2219,6 +2666,141 @@ export default {
       }
     }
 
+    /* ---------------- add one contact by hand ----------------
+     *
+     * There was no way to do this except importing a one-row CSV or typing an
+     * address into a list's add box, which only existed once a list was
+     * selected. Someone you met at a show should not require either.
+     *
+     * Creates a PROSPECT, always. Clients come from the BackBone roster and
+     * leads from its pipeline; letting MailMe mint one would put a customer
+     * record somewhere the rest of the shell cannot see it.
+     */
+
+    function openAddContact() {
+      const listOpts = state.lists.filter((l) => l.kind === 'static');
+      openModal(`
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Add a contact</h3>
+            <span class="meta">Added as a prospect</span>
+          </div>
+          <div class="mm-card-bd">
+            <div id="mmAddMsg"></div>
+            <div class="mm-hint" style="margin-bottom:14px">
+              Clients come from the BackBone roster and leads from its pipeline, so
+              anyone added here is a prospect. If this address already exists in MailMe
+              under any source, you will get the existing record back rather than a
+              duplicate.
+            </div>
+            <div class="mm-edit-grid">
+              <div class="mm-field full">
+                <label for="mmNewEmail">Email</label>
+                <input id="mmNewEmail" type="text" placeholder="name@company.com">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewCompany">Company</label>
+                <input id="mmNewCompany" type="text">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewName">Contact name</label>
+                <input id="mmNewName" type="text">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewTitle">Title</label>
+                <input id="mmNewTitle" type="text">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewPhone">Phone</label>
+                <input id="mmNewPhone" type="text">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewCity">City</label>
+                <input id="mmNewCity" type="text">
+              </div>
+              <div class="mm-field">
+                <label for="mmNewState">State</label>
+                <input id="mmNewState" type="text">
+              </div>
+              <div class="mm-field full">
+                <label for="mmNewList">Add to a list (optional)</label>
+                <input id="mmNewList" type="text" list="mmNewListOpts"
+                       placeholder="Type an existing list name, or a new one">
+                <datalist id="mmNewListOpts">
+                  ${listOpts.map((l) => `<option value="${esc(l.name)}"></option>`).join('')}
+                </datalist>
+                <div class="hint">Only fixed lists are offered: a rule-based list decides
+                  its own membership, so dropping someone into one by hand would be an
+                  exception to the rule rather than a normal add.</div>
+              </div>
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmSaveNewContact">Add contact</button>
+              <button class="mm-btn ghost" id="mmCancelNewContact">Cancel</button>
+            </div>
+          </div>
+        </div>`, 'addcontact');
+
+      $('#mmSaveNewContact').addEventListener('click', saveNewContact);
+      $('#mmCancelNewContact').addEventListener('click', () => closeModalIf('addcontact'));
+      $('#mmNewEmail').focus();
+    }
+
+    async function saveNewContact() {
+      const val = (id) => ($('#' + id) ? $('#' + id).value.trim() : '');
+      const email = val('mmNewEmail');
+      if (!email || email.indexOf('@') < 1) {
+        msg('#mmAddMsg', 'Enter a valid email address.', 'mm-err');
+        return;
+      }
+
+      try {
+        const res = await api.post(ENDPOINTS.mmContacts, {
+          email,
+          company_name: val('mmNewCompany'),
+          contact_name: val('mmNewName'),
+          title: val('mmNewTitle'),
+          phone: val('mmNewPhone'),
+          city: val('mmNewCity'),
+          state: val('mmNewState')
+        });
+        const contact = res.contact;
+        const wasNew = !!res.created;
+
+        const listName = val('mmNewList');
+        let listNote = '';
+        if (listName && contact) {
+          const existing = state.lists.find(
+            (l) => l.name.trim().toLowerCase() === listName.toLowerCase());
+          if (existing && existing.kind === 'static') {
+            const members = [...new Set([...(existing.members || []).map(String), String(contact.id)])];
+            await api.patch(ENDPOINTS.mmLists, { id: existing.id, members });
+            listNote = ' Added to ' + listName + '.';
+          } else if (!existing) {
+            await api.post(ENDPOINTS.mmLists, {
+              name: listName, kind: 'static', members: [String(contact.id)]
+            });
+            listNote = ' Created the list ' + listName + '.';
+          } else {
+            listNote = ' Not added to ' + listName + ': that is a rule-based list.';
+          }
+        }
+
+        closeModalIf('addcontact');
+        clearSelection();
+        await refreshAudience();
+        msg('#mmAudienceMsg', wasNew
+          ? esc(email) + ' added as a prospect.' + esc(listNote)
+          : esc(email) + ' was already in MailMe as a ' + esc(contact.source || 'contact') +
+            ', so nothing was duplicated.' + esc(listNote),
+          wasNew ? 'mm-ok' : 'mm-ok');
+      } catch (e) {
+        // A suppressed address comes back 409 with a real explanation. That is
+        // the one refusal here that must not read as a bug.
+        msg('#mmAddMsg', esc(e.message), 'mm-err');
+      }
+    }
+
     /* ---------------- import ----------------
      *
      * Was a permanent tab. It is a task done a few times a year, so it is a
@@ -2249,13 +2831,28 @@ export default {
               <textarea id="mmCsvText" class="csv" placeholder="Email,Company,Name,Title"></textarea>
             </div>
             <div class="mm-field">
-              <label for="mmImportTags">Tag this batch</label>
-              <input id="mmImportTags" type="text" placeholder="cold-2026-q3, school-districts">
+              <label for="mmImportList">Put this batch in a list</label>
+              <input id="mmImportList" type="text"
+                     placeholder="Central Iowa schools, spring 2026">
               <div class="hint">
-                Comma separated, applied to every imported row. This is how a cold batch
-                stays segmentable later, so it is worth filling in.
+                Strongly recommended. Without it, an imported batch dissolves into the
+                roster and there is no way to find those people again as a group. Type an
+                existing list name to add to it, or a new name to create one.
               </div>
             </div>
+            <details style="margin-bottom:14px">
+              <summary style="cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600">
+                Tags (optional)
+              </summary>
+              <div class="mm-field" style="margin-top:10px">
+                <input id="mmImportTags" type="text" placeholder="cold-2026-q3, school-districts">
+                <div class="hint">
+                  Comma separated, applied to every imported row. The list above covers
+                  most of what tags were used for; these are still here for rule-based
+                  lists that key on them.
+                </div>
+              </div>
+            </details>
             <div class="mm-actions">
               <button class="mm-btn" id="mmPreviewImport">Preview</button>
               <button class="mm-btn" id="mmCommitImport" hidden>Import them</button>
@@ -2291,8 +2888,10 @@ export default {
       $('#mmCommitImport').addEventListener('click', commitImport);
     }
 
-    const importTags = () =>
-      $('#mmImportTags').value.split(',').map((t) => t.trim()).filter(Boolean);
+    const importTags = () => {
+      const el = $('#mmImportTags');
+      return el ? el.value.split(',').map((t) => t.trim()).filter(Boolean) : [];
+    };
 
     async function previewImport() {
       const csv = $('#mmCsvText').value;
@@ -2318,20 +2917,74 @@ export default {
     async function commitImport() {
       if (!state.importPreview) return;
       const n = state.importPreview.summary.importable;
-      if (!window.confirm('Import ' + n + ' new prospect' + (n === 1 ? '' : 's') + '?')) return;
+      const listName = $('#mmImportList') ? $('#mmImportList').value.trim() : '';
+
+      if (!listName && !window.confirm(
+        'Import ' + n + ' prospect' + (n === 1 ? '' : 's') + ' without putting them in a list?\n\n' +
+        'They will be mixed into the roster with no way to find this batch as a group ' +
+        'later. Naming a list now is much easier than reconstructing it afterwards.')) return;
+      if (listName && !window.confirm(
+        'Import ' + n + ' prospect' + (n === 1 ? '' : 's') + ' into "' + listName + '"?')) return;
+
       try {
         const d = await api.post(ENDPOINTS.mmImport, {
           csv: state.importCsv, tags: importTags(), commit: true
         });
+
+        let listNote = '';
+        if (listName) {
+          // The imported rows are identified by their batch, which the server
+          // stamps on every record. A DYNAMIC list on that batch is the right
+          // shape: it keeps meaning "the people from this import" even if a
+          // later cleanup deletes some of them, and it needs no id list the
+          // client would have to fetch back.
+          try {
+            listNote = ' ' + await listForBatch(listName, d.batchId);
+          } catch (e) {
+            listNote = ' The contacts imported, but the list could not be created: ' + e.message;
+          }
+        }
+
         state.importPreview = null;
         closeModalIf('import');
+        clearSelection();
         await refreshAudience();
         msg('#mmAudienceMsg',
-          'Imported ' + d.imported + ' prospect' + (d.imported === 1 ? '' : 's') +
-          '. Batch ' + esc(d.batchId) + '.', 'mm-ok');
+          'Imported ' + d.imported + ' prospect' + (d.imported === 1 ? '' : 's') + '.' +
+          esc(listNote), 'mm-ok');
       } catch (e) {
         msg('#mmImportMsg', 'Import failed: ' + esc(e.message), 'mm-err');
       }
+    }
+
+    // Create or extend the list an import lands in. Returns the sentence to
+    // show, so the caller does not have to reproduce the branching in a
+    // message string.
+    async function listForBatch(listName, batchId) {
+      await loadContacts();
+      const imported = state.contacts
+        .filter((c) => c.importBatch === batchId)
+        .map((c) => String(c.id));
+
+      const existing = state.lists.find(
+        (l) => l.name.trim().toLowerCase() === listName.toLowerCase());
+
+      if (!existing) {
+        await api.post(ENDPOINTS.mmLists, {
+          name: listName, kind: 'static', members: imported
+        });
+        return 'Created the list "' + listName + '" with them in it.';
+      }
+      if (existing.kind === 'static') {
+        const members = [...new Set([...(existing.members || []).map(String), ...imported])];
+        await api.patch(ENDPOINTS.mmLists, { id: existing.id, members });
+        return 'Added them to "' + listName + '".';
+      }
+      // A rule-based list decides its own membership, so these go on as
+      // exceptions rather than silently doing nothing.
+      const extraMembers = [...new Set([...(existing.extraMembers || []).map(String), ...imported])];
+      await api.patch(ENDPOINTS.mmLists, { id: existing.id, extraMembers });
+      return 'Added them to "' + listName + '" as exceptions to its rule.';
     }
 
     function rejectTable(title, rows, tone) {
@@ -2455,6 +3108,7 @@ export default {
     function dismissModal() {
       if (modalKind === 'list') state.editingList = null;
       if (modalKind === 'import') state.importPreview = null;
+      if (modalKind === 'addcontact') { /* nothing held on state */ }
       closeModal();
     }
     // Held on the instance so unmount() can tear down the document-level
@@ -3060,7 +3714,7 @@ export default {
     const VIEW_LOADERS = {
       // The audience picker is built from lists, and the readiness check
       // needs settings, so a campaign screen needs all four.
-      campaigns: [loadContacts, loadLists, loadCampaigns, loadSettings],
+      campaigns: [loadContacts, loadLists, loadCampaigns, loadSettings, loadMarketingCampaigns],
       audience: [loadContacts, loadLists],
       reports: [loadCampaigns],
       settings: [loadSettings]
@@ -3094,7 +3748,7 @@ export default {
         if (!state.editingCampaign) renderComposer();
       },
       audience: () => {
-        renderFilters(); renderListRail(); renderContactsTable();
+        renderPickers(); renderContactsTable(); renderBulkBar();
       },
       reports: () => renderReports(),
       settings: () => { renderBlockers(); renderSettingsTabs(); renderSettings(); }
@@ -3133,7 +3787,8 @@ export default {
     $('#mmNewCampaign').addEventListener('click', () => {
       const d = {
         subject: '', preheader: '', body: '',
-        source: 'client', listId: null, segmentTags: [], status: 'draft'
+        source: 'client', listId: null, segmentTags: [], status: 'draft',
+        marketingCampaignId: null, marketingChannelId: null
       };
       d.identityKey = defaultIdentityFor(d);
       state.editingCampaign = d;
@@ -3168,6 +3823,7 @@ export default {
     });
 
     $('#mmImportBtn').addEventListener('click', openImport);
+    $('#mmAddContactBtn').addEventListener('click', openAddContact);
 
     root.querySelectorAll('[data-mm-refresh]').forEach((b) => {
       b.addEventListener('click', () => {
@@ -3179,7 +3835,9 @@ export default {
     /* ---------------- boot ---------------- */
 
     try {
-      await Promise.all([loadContacts(), loadLists(), loadCampaigns(), loadSettings()]);
+      await Promise.all([
+        loadContacts(), loadLists(), loadCampaigns(), loadSettings(), loadMarketingCampaigns()
+      ]);
     } catch (e) {
       msg('#mmCampaignMsg', 'Could not load MailMe: ' + esc(e.message), 'mm-err');
     }
@@ -3187,8 +3845,7 @@ export default {
     renderHealth();
     renderCampaignList();
     renderComposer();
-    renderFilters();
-    renderListRail();
+    renderPickers();
     renderContactsTable();
     renderSettingsTabs();
     renderBlockers();
