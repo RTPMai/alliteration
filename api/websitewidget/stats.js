@@ -37,7 +37,7 @@
 // message explains what to fix.
 
 import { requireAuth } from "../../lib/session.js";
-import { isConfigured, fetchSiteStats, COMPARE_MODES, periodWindows } from "../../lib/websitewidget/ga4.js";
+import { isConfigured, fetchSiteStats, COMPARE_MODES, periodWindows, BREAKDOWNS } from "../../lib/websitewidget/ga4.js";
 import { getSites, getSite } from "../../lib/websitewidget/sites-store.js";
 import { getCached, setCached } from "../../lib/websitewidget/store.js";
 
@@ -56,10 +56,16 @@ function emptyStats(siteId, days, compare = "none") {
     totals: { activeUsers: 0, newUsers: 0, sessions: 0, pageViews: 0 },
     priorTotals: null,
     deltas: null,
+    engagement: null,
+    priorEngagement: null,
+    engagementDeltas: null,
     trend: [],
     priorTrend: null,
-    channels: [],
-    topPages: []
+    failed: {},
+    // Every breakdown the catalogue defines gets an empty array, so the view
+    // never has to guard against a missing key. Driven off BREAKDOWNS rather
+    // than listed by hand, so a new card cannot be forgotten here.
+    ...Object.fromEntries(Object.keys(BREAKDOWNS).map((n) => [n, []]))
   };
 }
 
