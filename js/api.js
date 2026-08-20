@@ -61,7 +61,7 @@ const LIVE_PREFIXES = [
   '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
-  '/api/reorder-settings',
+  '/api/reorder-settings', '/api/marketmachine/',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
   // the 's' vs 'e' at position 10 keeps them distinct.)
@@ -215,6 +215,11 @@ export const ENDPOINTS = {
   // provider dashboard from memory.
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
+  // MarketMachine. Campaigns of record across every channel; MailMe is one of
+  // them. See lib/marketmachine/store.js for why the link between them points
+  // this way rather than the other.
+  mkCampaigns:     '/api/marketmachine/campaigns',
+  mkInitiatives:   '/api/marketmachine/initiatives',
   // Reorder timing thresholds. NOT a MailMe endpoint despite MailMe being the
   // heaviest reader: BackBone owns them (they describe the customer, not the
   // email), so the path sits at the top level rather than under /api/mailme/.
