@@ -1,3 +1,4 @@
+/* test/stitchsense.test.cjs */
 /**
  * StitchSense tests (Aug 19, 2026).
  *
@@ -262,6 +263,52 @@ Promise.all([
     t.assert(exists('apps/' + app.id + '.js'), 'the registry entry has no module');
     ['estimate', 'library', 'colorway', 'guess', 'accuracy'].forEach((v) =>
       t.assert(app.views.some((pair) => pair[0] === v), 'missing view: ' + v));
+  });
+
+  /* ---- vector artwork -------------------------------------------------- */
+
+  t.test('PDF and AI are accepted, EPS is refused with a reason', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(src.includes('const VECTOR_RE'), 'PDF and AI must both be accepted');
+    t.assert(/pdf\|ai/.test(src), 'the vector pattern must cover both extensions');
+    t.assert(/eps\$\/i\.test\(f\.name\)/.test(src), 'EPS must be caught explicitly');
+    t.assert(/PostScript/.test(src),
+      'refusing EPS without saying why just looks like a bug to the person holding the file');
+  });
+
+  t.test('a vector page renders onto a transparent canvas', () => {
+    // That is the whole reason a PDF beats a JPEG here: anything the file does
+    // not draw stays at alpha zero, so coverage is read exactly instead of
+    // being guessed from a background colour sampled at the corners.
+    const src = read('apps/stitchsense.js');
+    t.assert(!/fillRect[\s\S]{0,80}viewport/.test(src),
+      'the page canvas must not be given a background fill before rendering');
+    t.assert(/transparent canvas/i.test(src), 'the reasoning must stay documented');
+  });
+
+  t.test('an AI with no PDF payload is named, not reported as corrupt', () => {
+    // The fix is a re-save with "Create PDF Compatible File" ticked, and the AM
+    // cannot act on "that file is damaged".
+    const src = read('apps/stitchsense.js');
+    t.assert(/Create PDF Compatible File/.test(src),
+      'the .ai failure path must tell the AM what to actually do');
+  });
+
+  t.test('a multi-page file warns that everything on the page counts', () => {
+    const src = read('apps/stitchsense.js');
+    t.assert(/brand sheet/.test(src),
+      'a page with several logos on it reads far too high and must say so');
+    t.assert(/data-page=/.test(src), 'there must be a way to measure a different page');
+  });
+
+  t.test('the PDF library loads on demand, not on every page view', () => {
+    t.assert(exists('js/pdf-loader.js'), 'js/pdf-loader.js is missing');
+    const loader = read('js/pdf-loader.js');
+    t.assert(loader.includes('workerSrc'),
+      'pdf.js guesses a worker path relative to the page and fails silently without this');
+    const shell = read('index.html');
+    t.assert(!shell.includes('pdf.min.js'),
+      'a megabyte library for one view in one app must not be in index.html');
   });
 
   /* ---- colourway ------------------------------------------------------- */
