@@ -45,6 +45,7 @@ import { validateNew, validatePatch, GENERAL_APP } from "../lib/notifications/sc
 import {
   listNotifications, saveNotification, nextNotificationId,
   getNotification, updateNotification, deleteNotification,
+  listNotificationSummaries, countSummaries, canCountFromIndex,
 } from "../lib/notifications/store.js";
 import { KEYS, readKey, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
 
@@ -222,8 +223,33 @@ export default async function handler(req, res) {
         return res.status(200).json({ notification: rec });
       }
 
-      let list = (await listNotifications()).filter((n) => !hidden(n));
       const q = req.query || {};
+
+      // COUNT-ONLY MODE. This is what the header bell asks for, once a
+      // minute per open tab, and it used to come through the full list
+      // path below: one Upstash command per notification in the system,
+      // every poll, growing forever. The index now carries assignedTo,
+      // createdBy, status and visibility, so the same question is one
+      // command regardless of how many notifications exist.
+      //
+      // It falls back to the full path for a filter the index cannot
+      // answer (an app tag, a type tag). Returning a wrong number quickly
+      // would be worse than returning the right one slowly, and this is
+      // deliberately a fallback rather than a 400 so a future caller
+      // cannot break by asking a fair question.
+      if (q.count === "1" || q.count === "true") {
+        const filters = {
+          assignedTo: q.assignedTo, createdBy: q.createdBy,
+          status: q.status, visibility: q.visibility,
+        };
+        const extra = { appId: q.appId, type: q.type };
+        if (canCountFromIndex({ ...filters, ...extra })) {
+          const summaries = await listNotificationSummaries();
+          return res.status(200).json({ count: countSummaries(summaries, filters, me) });
+        }
+      }
+
+      let list = (await listNotifications()).filter((n) => !hidden(n));
       if (q.assignedTo) list = list.filter((n) => n.assignedTo === String(q.assignedTo).toLowerCase());
       if (q.createdBy) list = list.filter((n) => n.createdBy === String(q.createdBy).toLowerCase());
       if (q.appId) list = list.filter((n) => Array.isArray(n.appIds) && n.appIds.includes(q.appId));
