@@ -263,6 +263,15 @@ export const APPS = [
     views: [
       ['campaigns', 'Campaigns'],
       ['calendar', 'Calendar'],
+      // Data Entry is a screen rather than a form buried inside a campaign.
+      // Entering last week's numbers is a recurring chore across several
+      // campaigns at once, and making somebody open each campaign to do it is
+      // how the numbers stop getting entered.
+      ['entry', 'Data Entry'],
+      // Definitions is generated from the metric catalog, so it cannot drift
+      // from the maths. It exists to end the "these numbers look low" argument
+      // before it starts.
+      ['definitions', 'Definitions'],
       ['settings', 'Settings']
     ],
     defaultView: 'campaigns',
