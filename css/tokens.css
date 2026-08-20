@@ -320,6 +320,23 @@ body[data-app="stitchsense"] {
   --accent-tint: #FCEBF3;
 }
 
+/* MarketMachine. PROVISIONAL VIOLET, not off a logo file.
+   The palette is crowded by this point: blue (BackBone), orange (ShopStock),
+   muted purple (ErrorEngine), gold (GivingGauge), green (TravelTrack),
+   raspberry (CrewCore), red (PromoPro), slate (MailMe), navy (TeleTally),
+   teal (WebsiteWidget) and magenta (StitchSense) are all taken. This violet is
+   saturated enough to read as its own colour beside ErrorEngine's greyer
+   #745DA8 at rail-dot size, but it is a placeholder chosen by elimination.
+   CHECK IT AGAINST THE LOGO LINEUP SHEET and correct it here before the app
+   has been in front of the team long enough for the colour to stick. CrewCore
+   went blue -> red -> the exact logo red precisely because that check was
+   skipped the first time. */
+body[data-app="marketmachine"] {
+  --accent:      #6D28D9;
+  --accent-deep: #571FAE;
+  --accent-tint: #F1ECFC;
+}
+
 /* ==========================================================================
    COMPATIBILITY ALIASES
    Ported app markup references its own old variable names. Rather than
