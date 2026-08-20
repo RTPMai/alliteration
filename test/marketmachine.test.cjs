@@ -195,12 +195,39 @@ import('../lib/marketmachine/schema.js').then((m) => {
   });
 
   t.test('every channel Ryan asked for exists, and SMS does not', () => {
-    ['email', 'direct_mail', 'social', 'paid_ads', 'event', 'phone'].forEach((k) => {
+    ['email', 'direct_mail', 'social', 'event', 'phone'].forEach((k) => {
       t.assert(m.CHANNEL_KEYS.includes(k), 'missing channel: ' + k);
     });
     t.assert(!m.CHANNEL_KEYS.includes('sms'), 'SMS was deliberately not included');
     t.equal(m.isDelegated('email'), true, 'email is the delegated channel');
     t.equal(m.isDelegated('direct_mail'), false, 'nothing else is');
+  });
+
+  t.test('paid_ads folded into social, and old records still resolve', () => {
+    // Ryan's call: organic and paid are the same platform with different
+    // economics, so it is a flag on the row rather than two channels. The
+    // rename must not strand records already stored under the old key, and it
+    // must not quietly turn every historic ad into an organic post.
+    t.assert(!m.CHANNEL_KEYS.includes('paid_ads'), 'paid_ads is no longer its own channel');
+    t.equal(m.normalizeChannelKey('paid_ads'), 'social', 'the old key resolves to social');
+    t.assert(m.channelMeta('paid_ads'), 'and still finds real metadata rather than null');
+
+    const item = m.newChannelItem({ type: 'paid_ads', name: 'Spring boost' });
+    t.equal(item.type, 'social', 'a stored paid_ads item reads as social');
+    t.equal(item.funding, 'paid', 'and keeps the fact that it was paid');
+
+    const fresh = m.newChannelItem({ type: 'social' });
+    t.equal(fresh.funding, 'organic', 'a new social item defaults to organic');
+    t.equal(m.newChannelItem({ type: 'event' }).funding, null,
+      'channels without placed media carry no funding at all');
+  });
+
+  t.test('a patch naming the retired channel still validates', () => {
+    // A browser tab open since before the rename would otherwise start
+    // failing saves with "unknown channel", which reads as a broken app.
+    const r = m.validateCampaignPatch({ channels: [{ type: 'paid_ads', name: 'x' }] });
+    t.equal(r.ok, true, r.errors.join('; '));
+    t.equal(r.patch.channels[0].type, 'social', 'and is normalized on the way in');
   });
 
   /* ---- the link to MailMe ---------------------------------------------- */
@@ -292,13 +319,18 @@ import('../lib/marketmachine/schema.js').then((m) => {
     const reg = read('js/registry.js');
     const entry = reg.slice(reg.indexOf("id: 'marketmachine'"));
     const block = entry.slice(0, entry.indexOf('},'));
-    ['campaigns', 'calendar', 'settings'].forEach((v) => {
+    t.assert(exists('api/marketmachine/entries.js'), 'the performance rows route is missing');
+    ['campaigns', 'calendar', 'entry', 'definitions', 'settings'].forEach((v) => {
       t.assert(block.includes("'" + v + "'"), 'the registry is missing the ' + v + ' view');
     });
 
     const api = read('js/api.js');
     t.assert(/mkCampaigns:\s*'\/api\/marketmachine\/campaigns'/.test(api),
       'ENDPOINTS.mkCampaigns is missing');
+    t.assert(/mkEntries:\s*'\/api\/marketmachine\/entries'/.test(api),
+      'ENDPOINTS.mkEntries is missing');
+    t.assert(/mkIndustries:/.test(api),
+      'ENDPOINTS.mkIndustries is missing: screens must not build query strings by hand');
     t.assert(api.includes("'/api/marketmachine/"),
       'the route must be in LIVE_PREFIXES or the app runs on mock data');
 
@@ -315,6 +347,66 @@ import('../lib/marketmachine/schema.js').then((m) => {
     ['api/sitework.js', 'api/notifications.js'].forEach((p) => {
       t.assert(/"marketmachine"/.test(read(p)), p + ' APP_IDS is missing marketmachine');
     });
+  });
+
+  t.test('BackBone still gets exactly the response it already gets', () => {
+    // The industry list shares the initiatives route under a kind parameter.
+    // BackBone calls that route with NO parameters and its lead form depends
+    // on the shape coming back unchanged, so the default has to be initiatives
+    // by construction rather than by care.
+    const src = read('api/marketmachine/initiatives.js');
+    t.assert(/\|\| *"initiatives"/.test(src),
+      'an absent kind must default to initiatives');
+    t.assert(/industries/.test(src), 'and the second list must be served here');
+  });
+
+  t.test('a performance row can be removed by whoever typed it', () => {
+    // Deliberately looser than campaign delete. A row is one week of one
+    // channel; making somebody wait for an admin to remove a typo guarantees
+    // the typo stays in the numbers.
+    const src = read('api/marketmachine/entries.js');
+    const fn = src.slice(src.indexOf('if (req.method === "DELETE")'));
+    t.assert(/canEditFor/.test(fn.slice(0, 400)), 'delete is gated on edit, not admin');
+    t.assert(/campaignId \|\| !id/.test(fn.slice(0, 400)),
+      'and always scoped by campaign, so a stray id cannot reach another campaign');
+  });
+
+  t.test('the app does not keep its own copy of the channel list', () => {
+    // It did, and when paid_ads was folded into social the screen would have
+    // gone on offering a channel the API had stopped accepting. The failure
+    // shows up as a save landing under the wrong channel, which is silent.
+    const app = read('apps/marketmachine.js');
+    t.assert(/import \{[^}]*CHANNELS[^}]*\} from '\.\.\/lib\/marketmachine\/schema\.js'/s.test(app),
+      'CHANNELS must be imported from the schema');
+    t.assert(!/^const CHANNELS = \[/m.test(app),
+      'and must not be redeclared in the app file');
+  });
+
+  t.test('Definitions is generated, not written out by hand', () => {
+    // A definitions page maintained by hand is wrong within a month, and a
+    // wrong one is worse than none: it settles arguments with an air of
+    // authority. Generating it from the same constants the maths uses means
+    // it cannot drift.
+    const app = read('apps/marketmachine.js');
+    const fn = app.slice(app.indexOf('function renderDefinitions'));
+    const body = fn.slice(0, fn.indexOf('\n    }\n'));
+    t.assert(/TYPED_METRICS\.map/.test(body), 'the typed list comes from the catalog');
+    t.assert(/DERIVED_METRICS\.map/.test(body), 'so does the calculated list');
+    t.assert(/SOURCED_FIELDS\.map/.test(body), 'and the waiting-on-a-source list');
+  });
+
+  t.test('the entry form never pre-fills a number with zero', () => {
+    // The whole point of the screen. A typed 0 and an untouched box print the
+    // same width, so a pre-filled zero makes the difference invisible.
+    const app = read('apps/marketmachine.js');
+    const fn = app.slice(app.indexOf('const metricInputs'));
+    const body = fn.slice(0, fn.indexOf('}).join('));
+    t.assert(/placeholder="not reported"/.test(body), 'blank boxes say what blank means');
+    t.assert(!/value="0"/.test(body), 'and nothing is seeded with a zero');
+
+    const save = app.slice(app.indexOf('async function saveEntry'));
+    t.assert(/raw === '' \? null :/.test(save.slice(0, 1500)),
+      'and an empty box is sent as null, not coerced to a number');
   });
 
   t.test('deleting a campaign is admin only', () => {
