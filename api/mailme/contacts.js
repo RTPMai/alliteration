@@ -140,10 +140,17 @@ export default async function handler(req, res) {
       const tags = Array.isArray(body.tags)
         ? body.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean) : [];
 
+      // Title/phone/city/state are accepted on create, not just on a later
+      // PATCH. Adding someone by hand and then having to reopen them to fill
+      // in a phone number is two steps for one job.
       const { added } = await addProspects([{
         email,
         contact_name: String(body.contact_name || "").trim(),
         company_name: String(body.company_name || "").trim(),
+        title: String(body.title || "").trim(),
+        phone: String(body.phone || "").trim(),
+        city: String(body.city || "").trim(),
+        state: String(body.state || "").trim(),
         tags,
       }], sess, null);
 
