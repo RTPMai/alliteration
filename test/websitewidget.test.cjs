@@ -1,6 +1,4 @@
-// PUT IN: test/websitewidget.test.cjs (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
+// test/websitewidget.test.cjs
 /**
  * WebsiteWidget contract tests.
  *
@@ -182,10 +180,10 @@ t.test('lib/websitewidget/store.js uses its own key prefix, not the shell users/
   t.assert(store.includes('websitewidget_data:'), 'the cache should live under its own prefix, matching the other apps data namespaces');
 });
 
-t.test('the stats cache is keyed per site, not shared across sites', () => {
-  t.assert(/cacheKey\(siteId,\s*days\)/.test(store),
-    'caching by day range alone would leak one site\u2019s cached numbers onto another site\u2019s tab');
-});
+// Superseded a regex over the source of store.js. Grepping for the shape of
+// a key proves the letters are in the file, not that two different requests
+// get two different keys. This calls the real function.
+// (Real assertions live in the async block at the bottom of this file.)
 
 /* ---- multi-site sites store ------------------------------------------------ */
 
@@ -265,4 +263,204 @@ t.test('a per-site GA4 error is shown distinctly from "not configured"', () => {
     'a 403/denied-access error for one site should explain itself, not look identical to GA4 never having been set up');
 });
 
-process.exit(t.report());
+/* ---- the real logic, called rather than grepped ------------------------- */
+
+(async () => {
+  const ga4 = await import('../lib/websitewidget/ga4.js');
+  const cache = await import('../lib/websitewidget/store.js');
+
+  /* -- cache keys -- */
+
+  t.test('the stats cache is keyed per site, not shared across sites', () => {
+    t.assert(cache.cacheKey('pmapparel', 30, 'none') !== cache.cacheKey('iowaondemand', 30, 'none'),
+      'two sites over the same range must not share a cache entry, or one site\u2019s numbers show on the other\u2019s tab');
+    t.assert(cache.cacheKey('pmapparel', 7, 'none') !== cache.cacheKey('pmapparel', 30, 'none'),
+      'two ranges must not share a cache entry');
+  });
+
+  t.test('the cache key separates comparison modes', () => {
+    // Same site, same range, different question. Without the mode in the key
+    // a "vs last year" load serves whatever "vs previous" cached, for ten
+    // minutes, with no sign anything is wrong.
+    const none = cache.cacheKey('pmapparel', 30, 'none');
+    const prev = cache.cacheKey('pmapparel', 30, 'previous');
+    const year = cache.cacheKey('pmapparel', 30, 'year');
+    t.assert(new Set([none, prev, year]).size === 3, 'all three comparison modes need distinct cache keys');
+  });
+
+  /* -- period windows -- */
+
+  const AUG20 = new Date('2026-08-20T15:00:00Z'); // 10 AM Central, mid-morning
+
+  t.test('a window ends yesterday, never today', () => {
+    // The whole point of the comparison work. A window ending today holds a
+    // part-day, and a part-day against a full period reads as a drop that
+    // did not happen.
+    const w = ga4.periodWindows(30, 'none', AUG20);
+    t.equal(w.current.endDate, '2026-08-19', 'the window should end on the last complete day');
+  });
+
+  t.test('a window covers exactly the number of days asked for', () => {
+    const w7 = ga4.periodWindows(7, 'none', AUG20);
+    t.equal(w7.current.startDate, '2026-08-13');
+    t.equal(w7.current.endDate, '2026-08-19'); // 13th through 19th inclusive is 7 days
+    const w30 = ga4.periodWindows(30, 'none', AUG20);
+    t.equal(w30.current.startDate, '2026-07-21');
+  });
+
+  t.test('windows are computed in Central time, not the server\u2019s UTC', () => {
+    // 00:30 UTC on Aug 21 is still 7:30 PM Central on Aug 20. Off a UTC
+    // clock "yesterday" would be Aug 20, a day still in progress in Iowa,
+    // and the last bar of the chart would be a partial day pretending to be
+    // whole.
+    const lateUtc = new Date('2026-08-21T00:30:00Z');
+    const w = ga4.periodWindows(7, 'none', lateUtc);
+    t.equal(w.current.endDate, '2026-08-19', 'the Central date has not rolled over yet, so yesterday is still the 19th');
+  });
+
+  t.test('the previous period abuts the current one without overlapping it', () => {
+    const w = ga4.periodWindows(30, 'previous', AUG20);
+    t.equal(w.prior.endDate, '2026-07-20', 'the prior window must end the day before the current one starts');
+    t.equal(w.prior.startDate, '2026-06-21');
+    t.assert(w.prior.endDate < w.current.startDate, 'the two windows must not share a day');
+  });
+
+  t.test('a year comparison shifts 364 days so the weekdays line up', () => {
+    // 364 is 52 weeks exactly. Web traffic is strongly weekly, so a 365-day
+    // shift slides a Saturday into the slot being compared with a Monday.
+    const w = ga4.periodWindows(30, 'year', AUG20);
+    const end = new Date(w.current.endDate + 'T12:00:00Z');
+    const priorEnd = new Date(w.prior.endDate + 'T12:00:00Z');
+    t.equal(priorEnd.getUTCDay(), end.getUTCDay(), 'the prior window must end on the same weekday');
+    t.equal((end - priorEnd) / 86400000, 364, 'the shift should be 364 days, not 365');
+  });
+
+  t.test('the prior window is the same length as the current one', () => {
+    ['previous', 'year'].forEach((mode) => {
+      [7, 30, 90].forEach((days) => {
+        const w = ga4.periodWindows(days, mode, AUG20);
+        const span = (a, b) => (new Date(b + 'T12:00:00Z') - new Date(a + 'T12:00:00Z')) / 86400000;
+        t.equal(span(w.prior.startDate, w.prior.endDate), span(w.current.startDate, w.current.endDate),
+          'comparing windows of different lengths would make the percentage meaningless (' + mode + '/' + days + ')');
+      });
+    });
+  });
+
+  t.test('no comparison mode means no prior window at all', () => {
+    t.equal(ga4.periodWindows(30, 'none', AUG20).prior, null);
+    t.equal(ga4.periodWindows(30, 'nonsense', AUG20).prior, null, 'an unrecognised mode should fall back to none, not throw');
+  });
+
+  t.test('window math survives a daylight-saving change', () => {
+    // Central moved off DST on Nov 1, 2026. Day arithmetic anchored at
+    // midnight can slip an hour across a date boundary here and silently
+    // drop or repeat a day mid-range.
+    const nov = new Date('2026-11-05T15:00:00Z');
+    const w = ga4.periodWindows(30, 'previous', nov);
+    t.equal(w.current.endDate, '2026-11-04');
+    t.equal(w.current.startDate, '2026-10-06'); // Oct 6 through Nov 4 is 30 days across the change
+    t.equal(w.prior.endDate, '2026-10-05');
+  });
+
+  /* -- deltas -- */
+
+  t.test('a delta reports direction and magnitude off the prior figure', () => {
+    const d = ga4.deltaOf(120, 100);
+    t.equal(d.diff, 20);
+    t.equal(d.pct, 20);
+    t.equal(d.basis, 'ok');
+    t.equal(ga4.deltaOf(80, 100).pct, -20);
+  });
+
+  t.test('a zero baseline gives no percentage rather than a made-up one', () => {
+    // 5 sessions against 0 is not "up 100%" and not "up infinity". Either
+    // number reads as measured fact on a dashboard. The honest answer is
+    // that there is nothing to divide by.
+    const d = ga4.deltaOf(5, 0);
+    t.equal(d.pct, null);
+    t.equal(d.basis, 'no-baseline');
+    t.equal(d.diff, 5, 'the raw difference is still real and still worth showing');
+  });
+
+  t.test('zero against zero is flat, not an error', () => {
+    const d = ga4.deltaOf(0, 0);
+    t.equal(d.pct, null);
+    t.equal(d.basis, 'flat');
+  });
+
+  /* -- breakdown comparison -- */
+
+  t.test('a breakdown row picks up its prior figure by key, not by position', () => {
+    // Rows are ordered by size, and the order changes between periods. Zipping
+    // two lists by index would compare organic search against direct.
+    const now = [{ channel: 'Direct', sessions: 90 }, { channel: 'Organic Search', sessions: 50 }];
+    const was = [{ channel: 'Organic Search', sessions: 40 }, { channel: 'Direct', sessions: 100 }];
+    const merged = ga4.compareSeries(now, was, 'channel', 'sessions');
+    t.equal(merged[0].channel, 'Direct');
+    t.equal(merged[0].prior, 100);
+    t.equal(merged[0].delta.pct, -10);
+    t.equal(merged[1].prior, 40);
+  });
+
+  t.test('a row with no prior match reports unknown, not zero', () => {
+    // A page that did not exist last year has no prior figure. Folding that
+    // in as zero produces a confident "up from nothing" on a page that may
+    // simply not have been captured, and the reverse case invents a -100%.
+    const merged = ga4.compareSeries(
+      [{ path: '/new-landing-page', views: 300 }],
+      [],
+      'path', 'views'
+    );
+    t.equal(merged[0].prior, null, 'absent must stay absent, never collapse to 0');
+    t.equal(merged[0].delta, null);
+  });
+
+  t.test('a genuine zero in the prior period is kept apart from a missing row', () => {
+    const merged = ga4.compareSeries(
+      [{ path: '/a', views: 10 }, { path: '/b', views: 10 }],
+      [{ path: '/a', views: 0 }],
+      'path', 'views'
+    );
+    t.equal(merged[0].prior, 0, 'GA4 returned a row saying zero, which is a fact');
+    t.equal(merged[0].delta.basis, 'no-baseline');
+    t.equal(merged[1].prior, null, 'GA4 returned nothing at all, which is not a fact about the number');
+  });
+
+  /* -- connection probe -- */
+
+  // The harness runs t.test synchronously and does not await a returned
+  // promise, so anything async has to be resolved out here first and only
+  // asserted inside. A promise handed to t.test passes whatever it does.
+  const savedEmail = process.env.GA4_CLIENT_EMAIL;
+  const savedKey = process.env.GA4_PRIVATE_KEY;
+  delete process.env.GA4_CLIENT_EMAIL;
+  delete process.env.GA4_PRIVATE_KEY;
+  const probeNoCreds = await ga4.probeProperty('123456');
+  if (savedEmail !== undefined) process.env.GA4_CLIENT_EMAIL = savedEmail;
+  if (savedKey !== undefined) process.env.GA4_PRIVATE_KEY = savedKey;
+
+  t.test('probeProperty tells missing credentials apart from a bad property id', () => {
+    // Each of these is a different fix in a different place: one is Vercel
+    // env vars, one is the number typed in the form, one is a permission in
+    // analytics.google.com. "Error" alone sends someone to the wrong one.
+    t.equal(probeNoCreds.ok, false);
+    t.equal(probeNoCreds.status, 'no-credentials');
+    t.assert(/GA4_CLIENT_EMAIL/.test(probeNoCreds.message),
+      'the message should name the thing that is missing');
+  });
+
+  t.test('probeProperty never throws, it returns a status', () => {
+    // It is called from a settings form. A throw there is a blank box.
+    const p = ga4.probeProperty('');
+    t.assert(p && typeof p.then === 'function', 'probeProperty should return a promise');
+  });
+
+  const probeEmpty = await ga4.probeProperty('');
+  t.test('probeProperty asks for a property id before calling Google', () => {
+    t.equal(probeEmpty.ok, false);
+    t.assert(probeEmpty.status === 'no-property-id' || probeEmpty.status === 'no-credentials',
+      'an empty id should be refused locally, not spent on a GA4 call');
+  });
+
+  process.exit(t.report());
+})();
