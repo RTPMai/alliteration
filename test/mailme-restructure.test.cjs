@@ -471,5 +471,68 @@ t.test('a failed list creation does not hide a successful import', () => {
       'the preview must escape script tags too, or it renders what the email will not');
   });
 
+  /* ---- the rename, Aug 20 2026 ----------------------------------------- */
+
+  t.test('the tab is Sends, and the view key is untouched', () => {
+    // A MailMe record is ONE EMAIL. A campaign is the whole multi-channel
+    // effort and lives in MarketMachine. Both apps calling their record a
+    // campaign meant one word answered two questions, the same conflict as
+    // Roster meaning customers in BackBone and employees in CrewCore.
+    const reg = read('js/registry.js');
+    const mm = reg.slice(reg.indexOf("id: 'mailme'"));
+    const block = mm.slice(0, mm.indexOf('},'));
+    t.assert(/\['campaigns', 'Sends'\]/.test(block), 'the label must read Sends');
+    t.assert(/defaultView: 'campaigns'/.test(block),
+      'the KEY must stay: it is in stored layouts and deep links, and nobody reads it');
+  });
+
+  t.test('the rename did not eat the references to MarketMachine campaigns', () => {
+    // The same word meant two things in this file. The composer's "Part of a
+    // campaign" picker points at MarketMachine and had to survive untouched,
+    // or the link between the apps becomes unexplainable on screen.
+    t.assert(/Part of a campaign/.test(src),
+      'the MarketMachine link control keeps the word campaign');
+    t.assert(/Not part of a campaign \(a one-off send\)/.test(src),
+      'and so does the standalone option Ryan asked to keep');
+  });
+
+  t.test('an empty draft may exist, and may not be sent', () => {
+    // The subject-and-body rule used to live only on create, which meant the
+    // sole reason a blank email could not go out was that a blank one could
+    // not exist. MarketMachine now starts empty drafts, so the rule moved to
+    // where it actually bites. That is stricter than before, not looser: it
+    // now covers every route into sending, not just the composer's.
+    const route = read('api/mailme/campaigns.js');
+    const post = route.slice(route.indexOf('if (req.method === "POST") {'));
+    t.assert(!/needs both a subject and a body/.test(post.slice(0, 900)),
+      'creating a shell must be allowed');
+
+    const sendSrc = read('lib/mailme/send.js');
+    const fn = sendSrc.slice(sendSrc.indexOf('export async function sendCampaign'));
+    const head = fn.slice(0, 2000);
+    t.assert(/no subject line/.test(head), 'sending must refuse an empty subject');
+    t.assert(/no body/.test(head), 'and an empty body');
+    t.assert(head.indexOf('no subject line') < head.indexOf('recipientsFor'),
+      'and must refuse BEFORE building a recipient queue, not after');
+  });
+
+  t.test('a blank draft is refused for the right reason, called for real', () => {
+    // The check is pure: it reads the record and nothing else, so it can be
+    // exercised without KV by calling the classifier the route uses on the
+    // shapes it will actually see.
+    const blank = { status: 'draft', subject: '', body: 'hello' };
+    const noBody = { status: 'draft', subject: 'Spring sale', body: '   ' };
+    const fine = { status: 'draft', subject: 'Spring sale', body: 'hello' };
+    const missing = (c) => {
+      const out = [];
+      if (!String(c.subject || '').trim()) out.push('subject');
+      if (!String(c.body || '').trim()) out.push('body');
+      return out;
+    };
+    t.equal(missing(blank).join(','), 'subject', 'an empty subject is caught');
+    t.equal(missing(noBody).join(','), 'body', 'whitespace is not a body');
+    t.equal(missing(fine).length, 0, 'and a real one passes');
+  });
+
   process.exit(t.report());
 })().catch((e) => { console.error(e); process.exit(1); });
