@@ -220,6 +220,14 @@ export const ENDPOINTS = {
   // this way rather than the other.
   mkCampaigns:     '/api/marketmachine/campaigns',
   mkInitiatives:   '/api/marketmachine/initiatives',
+  // Dated performance rows: one per period, per channel, per creative. The
+  // hand-entered half of the app, and the same shape a CSV import or a future
+  // GA4 / platform connector writes into.
+  mkEntries:       '/api/marketmachine/entries',
+  // The industry vocabulary, served by the initiatives route under a kind
+  // parameter. Named separately here so callers never build query strings by
+  // hand, which is how the seam stops being one.
+  mkIndustries:    '/api/marketmachine/initiatives?kind=industries',
   // Reorder timing thresholds. NOT a MailMe endpoint despite MailMe being the
   // heaviest reader: BackBone owns them (they describe the customer, not the
   // email), so the path sits at the top level rather than under /api/mailme/.
