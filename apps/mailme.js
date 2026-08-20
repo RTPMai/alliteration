@@ -22,12 +22,12 @@
  *      the same markdown-lite rules the sender uses, so what you see is what
  *      actually arrives.
  *
- *   4. FOUR TABS, NOT SIX. Campaigns, Audience, Reports, Settings. Contacts
+ *   4. FOUR TABS, NOT SIX. Sends, Audience, Reports, Settings. Contacts
  *      and Lists were two views of the same people, so they merged. Import is
  *      a button on that screen rather than a permanent tab for a task done a
  *      few times a year. The old Dashboard was mostly an explanatory essay;
  *      its live parts (deliverability warnings, list health) moved to a strip
- *      on Campaigns where they are actually acted on.
+ *      on Sends where they are actually acted on.
  *
  * TWO CONTACT SOURCES:
  *   client   — the BackBone roster, resolved live server-side, never stored
@@ -481,9 +481,9 @@ export default {
     <div class="mm-page">
       <div id="mmContactEditor" hidden></div>
 
-      <!-- ===== Campaigns (default). Holds two panes: the list, and the
-           workspace for whichever campaign is open. They are the same tab
-           because "my campaigns" and "this campaign" are one job, and
+      <!-- ===== Sends (default). Holds two panes: the list, and the
+           workspace for whichever send is open. They are the same tab
+           because "my sends" and "this send" are one job, and
            splitting them into two nav items is what made sending feel like
            it lived somewhere else. ===== -->
       <section id="mmCampaignsView" hidden>
@@ -491,13 +491,13 @@ export default {
         <div id="mmCampaignListPane">
           <div class="mm-hd">
             <div>
-              <h1>Campaigns<span class="dot">.</span></h1>
+              <h1>Sends<span class="dot">.</span></h1>
               <div class="sub">Write it, check who gets it, send it.</div>
             </div>
             <div class="mm-refresh">
               <span class="stamp" data-mm-stamp></span>
               <button class="mm-btn ghost sm" data-mm-refresh="campaigns">Refresh</button>
-              <button class="mm-btn" id="mmNewCampaign">New campaign</button>
+              <button class="mm-btn" id="mmNewCampaign">New send</button>
             </div>
           </div>
           <div id="mmCampaignMsg"></div>
@@ -505,7 +505,7 @@ export default {
           <div class="mm-strip" id="mmStrip"></div>
           <div class="mm-card">
             <div class="mm-card-hd">
-              <h3>All campaigns</h3><span class="meta" id="mmCampaignCount"></span>
+              <h3>All sends</h3><span class="meta" id="mmCampaignCount"></span>
             </div>
             <div class="mm-card-bd flush"><div id="mmCampaignList"></div></div>
           </div>
@@ -559,7 +559,7 @@ export default {
         <div class="mm-hd">
           <div>
             <h1>Reports<span class="dot">.</span></h1>
-            <div class="sub">How campaigns actually performed once they went out.</div>
+            <div class="sub">How sends actually performed once they went out.</div>
           </div>
           <div class="mm-refresh">
             <span class="stamp" data-mm-stamp></span>
@@ -712,7 +712,7 @@ export default {
         state.composerDetail = await api.get(ENDPOINTS.mmCampaigns, { id });
       } catch (e) {
         state.composerDetail = null;
-        composerMsg('Could not check this campaign: ' + esc(e.message), 'mm-err');
+        composerMsg('Could not check this send: ' + esc(e.message), 'mm-err');
       }
     }
 
@@ -812,7 +812,7 @@ export default {
 
       if (!state.campaigns.length) {
         box.innerHTML =
-          '<div class="mm-empty"><h4>No campaigns yet</h4>' +
+          '<div class="mm-empty"><h4>No sends yet</h4>' +
           '<div>Start one to work out the wording and who it goes to. ' +
           'Nothing sends until you press Send on it.</div></div>';
         return;
@@ -1029,7 +1029,7 @@ export default {
       // because "clients" and "the list I made of clients" are answers to the
       // same question and used to be two separate dropdowns plus a tag box.
       const legacyTags = (d.segmentTags && d.segmentTags.length && !d.listId)
-        ? `<div class="mm-notice"><b>This campaign still uses tags.</b>
+        ? `<div class="mm-notice"><b>This send still uses tags.</b>
              It targets ${esc(d.segmentTags.join(', '))}, from before audiences and
              tags were merged. It still sends correctly. To make it easier to reuse,
              build a list on those tags in Audience and pick it above; the tags are
@@ -1170,8 +1170,8 @@ export default {
       pane.innerHTML = `
         <div class="mm-sendbar">
           <div style="min-width:0">
-            <div class="who">${esc(d.id || 'New campaign')}${d.status ? ' \u00b7 ' + esc(d.status) : ''}</div>
-            <h2>${esc(d.subject || 'Untitled campaign')}</h2>
+            <div class="who">${esc(d.id || 'New send')}${d.status ? ' \u00b7 ' + esc(d.status) : ''}</div>
+            <h2>${esc(d.subject || 'Untitled send')}</h2>
           </div>
           <div class="mm-actions">
             <span class="count" id="mmSendCount"></span>
@@ -1183,7 +1183,7 @@ export default {
           </div>
         </div>
         <div id="mmComposeMsg"></div>
-        ${sent ? `<div class="mm-notice good"><b>This campaign has already been sent.</b>
+        ${sent ? `<div class="mm-notice good"><b>This send has already gone out.</b>
           It is shown read-only so the record of what went out stays accurate. Its
           numbers are on the Reports tab.</div>` : ''}
         ${stepHtml('Who gets it', stepMark(steps.who.done), esc(steps.who.text), whoBody)}
@@ -1193,7 +1193,7 @@ export default {
           esc(steps.campaign.text), campaignBody)}
         <div id="mmReadyBlock"></div>
         ${sent || readOnly ? '' : `<div class="mm-actions" style="margin-top:6px">
-          <button class="mm-btn ghost" id="mmDeleteCampaign">Delete this campaign</button>
+          <button class="mm-btn ghost" id="mmDeleteCampaign">Delete this send</button>
         </div>`}`;
 
       wireComposer();
@@ -1415,7 +1415,7 @@ export default {
           syncComposerFromDom();
           renderPreview();
           const title = root.querySelector('.mm-sendbar h2');
-          if (title) title.textContent = state.editingCampaign.subject || 'Untitled campaign';
+          if (title) title.textContent = state.editingCampaign.subject || 'Untitled send';
         });
       });
 
@@ -1511,7 +1511,7 @@ export default {
       };
 
       if (!payload.subject.trim() || !payload.body.trim()) {
-        const error = 'A campaign needs both a subject and a body before it can be saved.';
+        const error = 'A send needs both a subject and a body before it can be saved.';
         if (!(opts && opts.silent)) composerMsg(esc(error), 'mm-err');
         return { ok: false, error };
       }
@@ -1606,7 +1606,7 @@ export default {
       const isContinuation = !!(detail.sendPlan && detail.sendPlan.queueRemaining);
       const n = state.composerDetail ? state.composerDetail.recipientCount : detail.recipientCount;
       const label = isContinuation
-        ? 'Send the next batch of this campaign now, rather than waiting for it to continue automatically?'
+        ? 'Send the next batch of this one now, rather than waiting for it to continue automatically?'
         : `Send this campaign for real, to ${n} recipient${n === 1 ? '' : 's'}? This cannot be taken back.`;
       if (!window.confirm(label)) return;
 
@@ -1636,12 +1636,12 @@ export default {
     async function deleteCampaign() {
       const d = state.editingCampaign;
       if (!d || !d.id) { closeCampaign(); return; }
-      if (!window.confirm('Delete this campaign? This cannot be undone.')) return;
+      if (!window.confirm('Delete this send? This cannot be undone.')) return;
       try {
         await api.del(ENDPOINTS.mmCampaigns, { query: { id: d.id } });
         await loadCampaigns();
         closeCampaign();
-        msg('#mmCampaignMsg', 'Campaign deleted.', 'mm-ok');
+        msg('#mmCampaignMsg', 'Send deleted.', 'mm-ok');
       } catch (e) {
         composerMsg('Could not delete: ' + esc(e.message), 'mm-err');
       }
@@ -3151,7 +3151,7 @@ export default {
       if (!sent.length) {
         box.innerHTML = '<div class="mm-card"><div class="mm-card-bd">' +
           '<div class="mm-empty"><h4>Nothing has been sent yet</h4>' +
-          '<div>Once a campaign goes out, its opens, clicks, bounces and unsubscribes ' +
+          '<div>Once a send goes out, its opens, clicks, bounces and unsubscribes ' +
           'show up here.</div></div></div></div>';
         return;
       }
@@ -3439,7 +3439,7 @@ export default {
                 before anything can send, regardless of what is filled in above.</div>` : ''}
               ${renderWebhookStatus()}
               ${(st.identities || []).some((i) => i.cold) ? '' : `<div class="mm-notice">
-                <b>No brand is marked for cold outreach.</b> Campaigns to imported prospects
+                <b>No brand is marked for cold outreach.</b> Sends to imported prospects
                 will warn until one is. Cold email draws complaints at rates a customer list
                 never does, and reputation is scored per domain, so it is worth keeping cold
                 traffic off a domain that also sends quotes and invoices.</div>`}
@@ -3542,7 +3542,7 @@ export default {
               <div class="mm-row">
                 <div class="mm-field"><label for="setFreq">Days between emails to one person</label>
                   <input id="setFreq" type="number" min="0" value="${p.minDaysBetweenEmails}">
-                  <div class="hint">Stops the same contact getting three campaigns in a week
+                  <div class="hint">Stops the same contact getting three sends in a week
                     because they match three lists.</div></div>
                 <div class="mm-field"><label for="setClientCap">Client daily cap</label>
                   <input id="setClientCap" type="number" min="1" value="${p.clientDailyCap}"></div>
