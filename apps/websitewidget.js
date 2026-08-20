@@ -1,3 +1,4 @@
+// apps/websitewidget.js
 /**
  * WebsiteWidget — web analytics across every site P&M tracks.
  *
@@ -43,6 +44,38 @@ function fmtDate(yyyymmdd) {
   return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+// "2026-08-19" to "Aug 19". Separate from fmtDate, which takes GA4's
+// compact YYYYMMDD row keys; these come off the period bounds, which are
+// real ISO dates.
+function fmtIso(iso) {
+  if (!iso || iso.length !== 10) return iso || '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
+function fmtIsoYear(iso) {
+  if (!iso || iso.length !== 10) return iso || '';
+  const [y, m, d] = iso.split('-').map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+// A delta renders as direction + magnitude. `basis` carries why a
+// percentage might be absent: nothing to divide by, or nothing comparable
+// found at all. Neither gets dressed up as a number.
+function deltaClass(delta) {
+  if (!delta || delta.pct === null) return 'unknown';
+  if (Math.abs(delta.pct) < 0.05) return 'flat';
+  return delta.pct > 0 ? 'up' : 'down';
+}
+
+function deltaText(delta) {
+  if (!delta) return 'no comparison';
+  if (delta.pct === null) return delta.basis === 'flat' ? 'none either way' : 'no baseline';
+  if (Math.abs(delta.pct) < 0.05) return 'flat';
+  const arrow = delta.pct > 0 ? '\u25B2' : '\u25BC';
+  return arrow + ' ' + Math.abs(delta.pct).toFixed(1) + '%';
+}
+
 const CHANNEL_LABELS = {
   'Organic Search': 'Organic search',
   'Direct': 'Direct',
@@ -75,10 +108,56 @@ export default {
 
     .ww-sitetabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; }
 
+    .ww-compare { display: flex; gap: 6px; }
+    .ww-compare button {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm);
+      padding: 6px 12px; font-size: 13px; font-weight: 600; color: var(--muted);
+      cursor: pointer; font-family: inherit; transition: .12s;
+    }
+    .ww-compare button:hover { color: var(--ink); }
+    .ww-compare button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+    .ww-basis { font-size: 12px; color: var(--muted); margin-bottom: 16px; line-height: 1.5; }
+    .ww-basis strong { color: var(--ink); font-weight: 600; }
+
     .ww-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; margin-bottom: 24px; }
     .ww-kpi { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 16px 18px; }
     .ww-kpi .lbl { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
     .ww-kpi .val { font-size: 28px; font-weight: 800; letter-spacing: -.01em; margin-top: 4px; }
+
+    /* Movement against the comparison period. Colour is a second signal, not
+       the only one: the arrow carries the direction on its own for anyone who
+       reads the two greens and reds the same way. */
+    .ww-delta { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; font-size: 12px; flex-wrap: wrap; }
+    .ww-delta .pill {
+      display: inline-flex; align-items: center; gap: 3px; padding: 2px 7px;
+      border-radius: var(--radius-pill); font-weight: 700; font-size: 11.5px;
+    }
+    .ww-delta .pill.up { background: var(--success-tint); color: var(--success-dk); }
+    .ww-delta .pill.down { background: var(--danger-tint); color: var(--danger-dk); }
+    .ww-delta .pill.flat, .ww-delta .pill.unknown { background: var(--bg); color: var(--muted); }
+    .ww-delta .was { color: var(--muted); }
+
+    .ww-trend-legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--muted); margin-bottom: 10px; align-items: center; }
+    .ww-trend-legend .key { display: inline-flex; align-items: center; gap: 5px; }
+    .ww-trend-legend .swatch { width: 10px; height: 10px; border-radius: 2px; }
+    .ww-trend-legend .swatch.now { background: var(--accent); }
+    .ww-trend-legend .swatch.was { background: var(--line); }
+
+    /* The ghost sits behind the live bar and both scale to the same maximum,
+       so the height difference on screen is the real difference. */
+    .ww-trend .stack { position: relative; width: 100%; height: 100%; display: flex; align-items: flex-end; justify-content: center; }
+    .ww-trend .ghost {
+      position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
+      width: 100%; max-width: 18px; background: var(--line);
+      border-radius: 3px 3px 0 0; min-height: 2px;
+    }
+    .ww-trend .bar { position: relative; z-index: 1; }
+
+    .bar-row .cmp { width: 62px; text-align: right; font-size: 11.5px; font-weight: 700; flex: none; }
+    .bar-row .cmp.up { color: var(--success-dk); }
+    .bar-row .cmp.down { color: var(--danger-dk); }
+    .bar-row .cmp.flat, .bar-row .cmp.unknown { color: var(--faint); }
 
     .ww-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
     @media (max-width: 860px) { .ww-grid { grid-template-columns: 1fr; } }
@@ -144,7 +223,22 @@ export default {
       background: var(--accent); color: var(--on-accent); border: none; border-radius: var(--radius-sm);
       padding: 8px 16px; font-size: 13px; font-weight: 700; cursor: pointer; font-family: inherit;
     }
+    .ww-form .ghost-btn {
+      background: transparent; color: var(--muted); border: 1px solid var(--line);
+      border-radius: var(--radius-sm); padding: 8px 14px; font-size: 13px; font-weight: 600;
+      cursor: pointer; font-family: inherit; margin-left: 8px;
+    }
+    .ww-form .ghost-btn:hover { color: var(--ink); }
     .ww-noaccess { text-align: center; color: var(--muted); font-size: 13px; padding: 40px 0; }
+
+    .ww-check {
+      margin-top: 12px; padding: 11px 14px; border-radius: var(--radius-sm);
+      font-size: 12.5px; line-height: 1.55; border: 1px solid var(--line); background: var(--bg);
+    }
+    .ww-check.ok { background: var(--success-tint); border-color: var(--success); color: var(--success-dk); }
+    .ww-check.bad { background: var(--danger-tint); border-color: var(--danger-line); color: var(--danger-dk); }
+    .ww-check.busy { color: var(--muted); }
+    .ww-check .who { display: block; margin-top: 6px; font-family: var(--font-mono); font-size: 11.5px; word-break: break-all; }
   `,
 
   template: `
@@ -154,13 +248,21 @@ export default {
           <h1>WebsiteWidget.</h1>
           <div class="sub" id="wwMeta"></div>
         </div>
-        <div class="ww-range" id="wwRange">
-          <button data-days="7">7 days</button>
-          <button data-days="30" aria-pressed="true">30 days</button>
-          <button data-days="90">90 days</button>
+        <div style="display:flex; gap:16px; flex-wrap:wrap;">
+          <div class="ww-range" id="wwRange">
+            <button data-days="7">7 days</button>
+            <button data-days="30" aria-pressed="true">30 days</button>
+            <button data-days="90">90 days</button>
+          </div>
+          <div class="ww-compare" id="wwCompare">
+            <button data-cmp="none" aria-pressed="true">No compare</button>
+            <button data-cmp="previous">vs previous</button>
+            <button data-cmp="year">vs last year</button>
+          </div>
         </div>
       </div>
       <div class="ww-sitetabs" id="wwSiteTabs"></div>
+      <div class="ww-basis" id="wwBasis"></div>
       <div id="wwBody">Loading…</div>
     </div>
 
@@ -186,6 +288,7 @@ export default {
     ctx.activeSiteId = null;
     ctx.data = null;
     ctx.days = 30;
+    ctx.compare = 'none';
 
     async function loadSites() {
       const payload = await ctx.api.get(ENDPOINTS.wwSites);
@@ -210,10 +313,34 @@ export default {
         renderDashboard();
         return;
       }
-      const params = { range: String(ctx.days), site: ctx.activeSiteId };
+      const params = { range: String(ctx.days), site: ctx.activeSiteId, compare: ctx.compare };
       if (fresh) params.fresh = '1';
       ctx.data = await ctx.api.get(ENDPOINTS.wwStats, params);
       renderDashboard();
+    }
+
+    // The window every number on screen covers, spelled out. Two things
+    // people would otherwise have to guess at and would guess wrong: that
+    // today is not in it, and, for a year comparison, that the window was
+    // shifted a day off the calendar date to keep the weekdays lined up.
+    function renderBasis() {
+      const el = $('#wwBasis');
+      const data = ctx.data;
+      if (!data || !data.configured || !data.period) { el.innerHTML = ''; return; }
+
+      const p = data.period;
+      let html = '<strong>' + esc(fmtIso(p.startDate)) + ' to ' + esc(fmtIso(p.endDate)) + '</strong>' +
+        ', ' + data.days + ' complete days. Today is not included, so it can be measured against a full period.';
+
+      if (data.priorPeriod) {
+        html += ' Compared with <strong>' + esc(fmtIsoYear(data.priorPeriod.startDate)) +
+          ' to ' + esc(fmtIsoYear(data.priorPeriod.endDate)) + '</strong>';
+        html += data.compare === 'year'
+          ? ', the same 52 weeks back, so each day lands on the same weekday it is being compared with.'
+          : ', the ' + data.days + ' days immediately before.';
+      }
+
+      el.innerHTML = html;
     }
 
     function renderDashboard() {
@@ -223,8 +350,11 @@ export default {
 
       if (!data) { body.innerHTML = 'Loading…'; return; }
 
+      renderBasis();
+
       if (!data.configured) {
         meta.textContent = '';
+        $('#wwBasis').innerHTML = '';
         const noSites = ctx.sites.length === 0;
         body.innerHTML = `
           <div class="ww-setup">
@@ -255,6 +385,7 @@ export default {
         : '';
 
       if (data.error) {
+        $('#wwBasis').innerHTML = '';
         body.innerHTML = `
           <div class="ww-setup">
             <span class="badge">Needs attention</span>
@@ -268,15 +399,53 @@ export default {
         return;
       }
 
-      const trendMax = Math.max(1, ...((data.trend || []).map((d) => d.sessions)));
+      const priorTrend = data.priorTrend || null;
+      // Both series scale to the SAME maximum. Scaling each to its own would
+      // make two very different weeks draw identical charts, which is the
+      // one thing a comparison chart must never do.
+      const trendMax = Math.max(
+        1,
+        ...((data.trend || []).map((d) => d.sessions)),
+        ...((priorTrend || []).map((d) => d.sessions))
+      );
+
+      const trendLegend = priorTrend
+        ? '<div class="ww-trend-legend">' +
+            '<span class="key"><span class="swatch now"></span>' + esc(fmtIso(data.period.startDate)) + ' to ' + esc(fmtIso(data.period.endDate)) + '</span>' +
+            '<span class="key"><span class="swatch was"></span>' + esc(fmtIsoYear(data.priorPeriod.startDate)) + ' to ' + esc(fmtIsoYear(data.priorPeriod.endDate)) + '</span>' +
+          '</div>'
+        : '';
+
       const trendHtml = (data.trend || []).length
-        ? '<div class="ww-trend">' + data.trend.map((d) =>
-            '<div class="col" title="' + esc(fmtDate(d.date)) + ': ' + fmtNum(d.sessions) + ' sessions">' +
-              '<div class="bar" style="height:' + Math.max(2, (d.sessions / trendMax) * 100) + '%"></div>' +
+        ? trendLegend + '<div class="ww-trend">' + data.trend.map((d, i) => {
+            // Aligned by position, not by date: day one against day one.
+            // Both windows are the same length, so index i is the same
+            // offset into each, and for a year comparison the same weekday.
+            const was = priorTrend && priorTrend[i] ? priorTrend[i] : null;
+            const tip = fmtDate(d.date) + ': ' + fmtNum(d.sessions) + ' sessions' +
+              (was ? ' (was ' + fmtNum(was.sessions) + ' on ' + fmtDate(was.date) + ')' : '');
+            const ghost = was
+              ? '<div class="ghost" style="height:' + Math.max(2, (was.sessions / trendMax) * 100) + '%"></div>'
+              : '';
+            return '<div class="col" title="' + esc(tip) + '">' +
+              '<div class="stack">' + ghost +
+                '<div class="bar" style="height:' + Math.max(2, (d.sessions / trendMax) * 100) + '%"></div>' +
+              '</div>' +
               '<div class="lbl">' + esc(fmtDate(d.date)) + '</div>' +
-            '</div>'
-          ).join('') + '</div>'
+            '</div>';
+          }).join('') + '</div>'
         : '<div class="ww-empty">No trend data for this range yet.</div>';
+
+      // A row with no prior figure shows a dash, not a minus sign. The prior
+      // pull is filtered to the keys this period surfaced, so a missing row
+      // means GA4 had nothing for that key back then, which for a page that
+      // did not exist yet is not a 100% drop.
+      function cmpCell(delta) {
+        if (!data.priorPeriod) return '';
+        if (!delta) return '<div class="cmp unknown" title="Nothing to compare against in that period">&mdash;</div>';
+        return '<div class="cmp ' + deltaClass(delta) + '" title="was ' + fmtNum(delta.prior) + '">' +
+          esc(deltaText(delta)) + '</div>';
+      }
 
       const chanMax = Math.max(1, ...((data.channels || []).map((c) => c.sessions)));
       const chanHtml = (data.channels || []).length
@@ -284,7 +453,7 @@ export default {
             '<div class="bar-row"><div class="k" title="' + esc(CHANNEL_LABELS[c.channel] || c.channel) + '">' +
               esc(CHANNEL_LABELS[c.channel] || c.channel) + '</div>' +
               '<div class="track"><div class="fill" style="width:' + (c.sessions / chanMax) * 100 + '%"></div></div>' +
-              '<div class="v">' + fmtNum(c.sessions) + '</div></div>'
+              '<div class="v">' + fmtNum(c.sessions) + '</div>' + cmpCell(c.delta) + '</div>'
           ).join('')
         : '<div class="ww-empty">No traffic yet in this range.</div>';
 
@@ -293,16 +462,31 @@ export default {
         ? data.topPages.map((p) =>
             '<div class="bar-row"><div class="k" title="' + esc(p.path) + '">' + esc(p.path) + '</div>' +
               '<div class="track"><div class="fill" style="width:' + (p.views / pageMax) * 100 + '%"></div></div>' +
-              '<div class="v">' + fmtNum(p.views) + '</div></div>'
+              '<div class="v">' + fmtNum(p.views) + '</div>' + cmpCell(p.delta) + '</div>'
           ).join('')
         : '<div class="ww-empty">No page views yet in this range.</div>';
 
+      const d = data.deltas || {};
+      // The prior figure sits next to the percentage on purpose. "Up 40%"
+      // means one thing off a base of 2,000 and nothing at all off a base
+      // of 5, and the percentage alone does not say which you are looking at.
+      function kpi(label, value, delta) {
+        const pill = delta
+          ? '<div class="ww-delta">' +
+              '<span class="pill ' + deltaClass(delta) + '">' + esc(deltaText(delta)) + '</span>' +
+              '<span class="was">was ' + fmtNum(delta.prior) + '</span>' +
+            '</div>'
+          : '';
+        return '<div class="ww-kpi"><div class="lbl">' + esc(label) + '</div>' +
+          '<div class="val">' + fmtNum(value) + '</div>' + pill + '</div>';
+      }
+
       body.innerHTML = `
         <div class="ww-kpis">
-          <div class="ww-kpi"><div class="lbl">Visitors</div><div class="val">${fmtNum(t.activeUsers)}</div></div>
-          <div class="ww-kpi"><div class="lbl">New visitors</div><div class="val">${fmtNum(t.newUsers)}</div></div>
-          <div class="ww-kpi"><div class="lbl">Sessions</div><div class="val">${fmtNum(t.sessions)}</div></div>
-          <div class="ww-kpi"><div class="lbl">Page views</div><div class="val">${fmtNum(t.pageViews)}</div></div>
+          ${kpi('Visitors', t.activeUsers, d.activeUsers)}
+          ${kpi('New visitors', t.newUsers, d.newUsers)}
+          ${kpi('Sessions', t.sessions, d.sessions)}
+          ${kpi('Page views', t.pageViews, d.pageViews)}
         </div>
         <div class="ww-grid">
           <div>
@@ -332,10 +516,12 @@ export default {
               '<div class="info"><div class="name">' + esc(s.label) + '</div>' +
                 '<div class="meta">' + esc(s.domain || 'no domain set') + ' · property ' + esc(s.propertyId) + '</div></div>' +
               '<div class="actions">' +
+                '<button data-act="check">Check</button>' +
                 '<button data-act="edit">Edit</button>' +
                 '<button data-act="remove" class="danger">Remove</button>' +
               '</div>' +
-            '</div>'
+            '</div>' +
+            '<div class="ww-check" data-check-for="' + esc(s.id) + '" hidden></div>'
           ).join('')
         : '<div class="ww-empty">No sites added yet.</div>';
 
@@ -356,9 +542,59 @@ export default {
                 or the dashboard will show an access error for it.</div>
             </div>
             <button class="save-btn" id="wwFSave">Save site</button>
+            <button class="ghost-btn" id="wwFCheck">Test connection</button>
+            <div class="ww-check" id="wwFCheckResult" hidden></div>
           </div>
         </div>
       `;
+
+      // Ask GA4 whether one property id actually works, and say which of the
+      // three ways it can fail this is. Without this the only way to find out
+      // a property was never granted access is to save it, switch to its
+      // dashboard tab, and read an error there.
+      async function runCheck(propertyId, target) {
+        if (!target) return;
+        target.hidden = false;
+        target.className = 'ww-check busy';
+        target.textContent = 'Checking with Google…';
+        try {
+          const r = await ctx.api.get(ENDPOINTS.wwSites, { check: propertyId });
+          target.className = 'ww-check ' + (r.ok ? 'ok' : 'bad');
+          let html = esc(r.message || (r.ok ? 'Connected.' : 'Could not connect.'));
+          if (r.ok && r.timeZone) {
+            html += ' Property timezone ' + esc(r.timeZone) + '.';
+          }
+          if (!r.ok && r.status === 'no-access' && r.serviceAccount) {
+            html += '<span class="who">' + esc(r.serviceAccount) + '</span>';
+          }
+          target.innerHTML = html;
+        } catch (e) {
+          target.className = 'ww-check bad';
+          target.textContent = 'Check failed: ' + (e && e.message ? e.message : 'unknown error');
+        }
+      }
+
+      body.querySelectorAll('.ww-siterow button[data-act="check"]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          const row = btn.closest('.ww-siterow');
+          const id = row.dataset.id;
+          const site = ctx.sites.find((s) => s.id === id);
+          if (!site) return;
+          runCheck(site.propertyId, body.querySelector('[data-check-for="' + CSS.escape(id) + '"]'));
+        });
+      });
+
+      $('#wwFCheck').addEventListener('click', () => {
+        const propertyId = $('#wwFPropertyId').value.trim();
+        const target = $('#wwFCheckResult');
+        if (!propertyId) {
+          target.hidden = false;
+          target.className = 'ww-check bad';
+          target.textContent = 'Enter a GA4 property ID first.';
+          return;
+        }
+        runCheck(propertyId, target);
+      });
 
       body.querySelectorAll('.ww-siterow button[data-act="remove"]').forEach((btn) => {
         btn.addEventListener('click', async () => {
@@ -412,6 +648,14 @@ export default {
       if (!btn) return;
       ctx.days = parseInt(btn.dataset.days, 10);
       root.querySelectorAll('#wwRange button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+      loadStats(false);
+    });
+
+    $('#wwCompare').addEventListener('click', (e) => {
+      const btn = e.target.closest('button[data-cmp]');
+      if (!btn) return;
+      ctx.compare = btn.dataset.cmp;
+      root.querySelectorAll('#wwCompare button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
       loadStats(false);
     });
 
