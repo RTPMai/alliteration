@@ -4,12 +4,21 @@
 // names and lead times to show a due date or a health colour, so gating the
 // read would just break the dashboard for AMs.
 //
-// Writes are admin/superuser only, the same gate WebsiteWidget's Manage Sites
-// uses and for the same reason: changing a vendor's lead time changes what
-// counts as late for the whole team, not one person's preference.
+// WRITES ARE SPLIT, changed Aug 2026.
+//
+// CREATE is open to anyone who can raise a purchase order. Adding "SanMar,
+// orders@sanmar.com" while you are mid-order is data entry, and forcing a
+// trip to another tab to do it is how people either give up or pick the
+// wrong vendor because it was already in the list. The quick-add form on the
+// order screen posts here.
+//
+// CHANGE and REMOVE stay admin/superuser, the same gate WebsiteWidget's
+// Manage Sites uses and for the same reason: editing a lead time changes
+// what counts as late for the whole team, and the blacklist is a warning
+// other people rely on. Neither is a personal preference.
 
 import { requireAuth } from "../../lib/session.js";
-import { isAdminSession } from "../../lib/promopro/access.js";
+import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
 import { validateVendor, blacklistJustSet } from "../../lib/promopro/vendors.js";
 import { withStats } from "../../lib/promopro/vendor-stats.js";
 import { getVendors, saveVendors, listPos } from "../../lib/promopro/store.js";
@@ -43,15 +52,22 @@ export default async function handler(req, res) {
       return res.status(200).json({ vendors: withStats(vendors, pos) });
     }
 
-    if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
-
     if (req.method === "POST") {
+      if (!(await canEditSession(sess))) {
+        return res.status(403).json({ error: "You do not have access to raise purchase orders, so you cannot add a vendor." });
+      }
       const body = parseBody(req);
       const check = validateVendor(body, null);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
       const vendors = await getVendors();
       const vendor = { ...check.vendor, id: newId() };
+      // Blacklisting is an admin act even at creation. Otherwise the quick-add
+      // form becomes a way to put a warning in front of the whole team.
+      if (vendor.blacklisted && !isAdmin) {
+        vendor.blacklisted = false;
+        vendor.blacklistReason = "";
+      }
       if (vendor.blacklisted) {
         vendor.blacklistedAt = new Date().toISOString();
         vendor.blacklistedBy = String(sess.username || "").toLowerCase();
@@ -60,6 +76,8 @@ export default async function handler(req, res) {
       await saveVendors(vendors);
       return res.status(200).json({ ok: true, vendor, vendors });
     }
+
+    if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
 
     if (req.method === "PATCH") {
       const body = parseBody(req);
