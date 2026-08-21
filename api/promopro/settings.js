@@ -84,6 +84,23 @@ export default async function handler(req, res) {
       const candidates = candidatesFrom(employees);
       if (isAdmin) settings.candidates = candidates;
 
+      // The role names the edit-roles picker offers. Sent only to admins,
+      // since it is the shell's role list and nobody else can change it here
+      // anyway. Read live rather than stored, so a role added in shell
+      // Settings shows up without a deploy.
+      if (isAdmin) {
+        try {
+          const { getRoles } = await import("../../lib/users.js");
+          const roles = await getRoles();
+          settings.roleChoices = Object.values(roles || {})
+            .map((r) => ({ name: String(r.name || "").toLowerCase(), label: r.label || r.name }))
+            .filter((r) => r.name);
+        } catch (e) {
+          console.error("promopro/settings could not read the role list:", e && e.message);
+          settings.roleChoices = [];
+        }
+      }
+
       // Counts, always, admin or not. An empty picker has several very
       // different causes (nobody on the roster, everybody inactive, nobody
       // with an email, or the caller not being treated as an admin) and they
