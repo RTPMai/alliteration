@@ -1,3 +1,4 @@
+// test/promopro.test.cjs
 /**
  * PromoPro tests.
  *
@@ -348,9 +349,22 @@ t.test('art uploads get an unguessable URL', () => {
     'a predictable blob path would make every PO art file enumerable');
 });
 
-t.test('removing art does not yank the file from a vendor mid-job', () => {
-  t.assert(/does not delete the blob/i.test(artRoute),
-    'the reasoning for keeping the blob should stay documented');
+t.test('artwork is stored private, not public', () => {
+  // CHANGED Aug 2026. This test used to assert the opposite, that the blob
+  // was deliberately left behind on delete, which was the honest description
+  // of the public-URL model: there was no way to revoke a forwarded link, so
+  // pulling the file was worse than leaving it. Private blobs plus signed
+  // links removed that trade, so the old reasoning no longer holds and the
+  // test that pinned it was updated rather than deleted.
+  t.assert(/access:\s*"private"/.test(artRoute),
+    'a public blob URL is permanent and unrevokable once forwarded');
+  t.assert(!/access:\s*"public"/.test(artRoute),
+    'no upload path may fall back to a public blob');
+});
+
+t.test('deleting art really deletes the file', () => {
+  t.assert(/\bdel\(/.test(artRoute),
+    'detaching a file while its URL keeps working is not deleting it');
 });
 
 t.test('the UPS account number is not committed to source', () => {
