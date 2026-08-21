@@ -39,12 +39,21 @@ export default async function handler(req, res) {
     const settings = withSettingDefaults(storedSettings);
     const vendor = vendors.find((v) => v.id === po.vendorId) || null;
 
+    // The printed copy is for us, and whoever holds the paper is already
+    // inside the building, so it links to the staff route rather than
+    // burning a signed vendor link into a PDF that outlives its expiry.
+    const artUrls = {};
+    (Array.isArray(po.art) ? po.art : []).forEach((a) => {
+      if (a && a.id) artUrls[a.id] = `/api/promopro/art-file?poId=${encodeURIComponent(po.id)}&id=${encodeURIComponent(a.id)}`;
+    });
+
     const html = renderPrintPage(po, vendor, {
       brand: {
         name: settings.brandName || "P&M Apparel",
         address: settings.defaultShipTo || "",
         phone: settings.brandPhone || "",
       },
+      artUrls,
     });
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
