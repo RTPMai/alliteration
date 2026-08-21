@@ -143,6 +143,8 @@ export default {
       background: var(--accent); border-color: var(--accent); color: var(--on-accent);
     }
 
+    .ww-range button[data-busy="1"] { opacity: .55; cursor: default; }
+
     .ww-sitetabs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; }
 
     .ww-compare { display: flex; gap: 6px; }
@@ -307,6 +309,9 @@ export default {
             <button data-cmp="none" aria-pressed="true">No compare</button>
             <button data-cmp="previous">vs previous</button>
             <button data-cmp="year">vs last year</button>
+          </div>
+          <div class="ww-range">
+            <button id="wwRefresh" type="button" title="Ignore the 10 minute cache and pull from GA4 now">Refresh</button>
           </div>
         </div>
       </div>
@@ -739,6 +744,30 @@ export default {
       ctx.compare = btn.dataset.cmp;
       root.querySelectorAll('#wwCompare button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
       loadStats(false);
+    });
+
+    // The cache holds a shaped GA4 pull for ten minutes, keyed per site, range
+    // and compare mode. That is right nearly all the time, and wrong in one
+    // specific case: a site's property id has just been corrected, so the
+    // stored copy is an answer to a question that is no longer being asked.
+    // Before this button there was no way out of that from the screen. The
+    // API already honoured fresh=1 and loadStats already took the flag; there
+    // was simply nothing that passed true.
+    $('#wwRefresh').addEventListener('click', async (e) => {
+      const btn = e.currentTarget;
+      if (btn.dataset.busy === '1') return;   // a second click would race the first
+      btn.dataset.busy = '1';
+      const label = btn.textContent;
+      btn.textContent = 'Refreshing…';
+      try {
+        await loadStats(true);
+      } finally {
+        // Restore in a finally: a failed pull that leaves the button stuck on
+        // "Refreshing…" reads as a hung app rather than a failed request, and
+        // the error itself is already reported in the dashboard body.
+        btn.dataset.busy = '';
+        btn.textContent = label;
+      }
     });
 
     $('#wwSiteTabs').addEventListener('click', (e) => {
