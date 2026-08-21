@@ -336,8 +336,11 @@ import('../lib/marketmachine/schema.js').then((m) => {
 
     const tokens = read('css/tokens.css');
     t.assert(/data-app="marketmachine"/.test(tokens), 'the token block is missing');
-    t.assert(/PROVISIONAL/.test(tokens.slice(tokens.indexOf('MarketMachine'), tokens.indexOf('data-app="marketmachine"'))),
-      'the accent is a placeholder and must say so until the logo lineup confirms it');
+       const mmBlock = tokens.slice(tokens.indexOf('data-app="marketmachine"'));
+    t.assert(/--accent:\s*#6E1E2B/.test(mmBlock.slice(0, mmBlock.indexOf('}'))),
+      'the MarketMachine accent must be the decided maroon #6E1E2B');
+    t.assert(/accent:\s*'#6E1E2B'/.test(block),
+      'the registry accent must match tokens.css, not lag behind it');
   });
 
   t.test('hand-synced app id lists include the new app', () => {
