@@ -1,3 +1,4 @@
+// test/auth-live.test.cjs
 /**
  * Live auth surface tests.
  *
@@ -76,7 +77,10 @@ t.test('every API endpoint authenticates or is public by documented design', () 
     'JOTFORM_WEBHOOK_TOKEN', 'ADMIN_KEY', 'PUBLIC BY DESIGN',
     // MailMe's provider webhook. Not public: it is secret-checked with
     // safeEqual and fails closed when the secret is unset.
-    'MAILME_WEBHOOK_SECRET'
+    'MAILME_WEBHOOK_SECRET',
+    // PromoPro's inbound-mail webhook, on the same footing as MailMe's:
+    // secret-checked with safeEqual, fails closed when unset.
+    'PROMOPRO_INBOUND_SECRET'
   ];
   const offenders = [];
   const scan = (dir) => {
