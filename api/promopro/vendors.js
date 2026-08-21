@@ -10,7 +10,8 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession } from "../../lib/promopro/access.js";
-import { validateVendor } from "../../lib/promopro/vendors.js";
+import { validateVendor, blacklistJustSet } from "../../lib/promopro/vendors.js";
+import { withStats } from "../../lib/promopro/vendor-stats.js";
 import { getVendors, saveVendors, listPos } from "../../lib/promopro/store.js";
 
 function parseBody(req) {
@@ -34,8 +35,12 @@ export default async function handler(req, res) {
     const isAdmin = await isAdminSession(sess);
 
     if (req.method === "GET") {
-      const vendors = await getVendors();
-      return res.status(200).json({ vendors });
+      // Stats are computed from the purchase orders on every read rather
+      // than stored on the vendor. A stored figure would be a second copy of
+      // something the POs already say, and it would be wrong the moment a
+      // date got corrected. See lib/promopro/vendor-stats.js.
+      const [vendors, pos] = await Promise.all([getVendors(), listPos()]);
+      return res.status(200).json({ vendors: withStats(vendors, pos) });
     }
 
     if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
@@ -47,6 +52,10 @@ export default async function handler(req, res) {
 
       const vendors = await getVendors();
       const vendor = { ...check.vendor, id: newId() };
+      if (vendor.blacklisted) {
+        vendor.blacklistedAt = new Date().toISOString();
+        vendor.blacklistedBy = String(sess.username || "").toLowerCase();
+      }
       vendors.push(vendor);
       await saveVendors(vendors);
       return res.status(200).json({ ok: true, vendor, vendors });
@@ -64,7 +73,15 @@ export default async function handler(req, res) {
       const check = validateVendor(body, vendors[i]);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
-      vendors[i] = { ...check.vendor, id };
+      const next = { ...check.vendor, id };
+      // Who blacklisted a vendor and when is the part that stops the flag
+      // becoming folklore. Only stamped on the transition, so an unrelated
+      // edit does not reset the original date.
+      if (blacklistJustSet(vendors[i], next)) {
+        next.blacklistedAt = new Date().toISOString();
+        next.blacklistedBy = String(sess.username || "").toLowerCase();
+      }
+      vendors[i] = next;
       await saveVendors(vendors);
       return res.status(200).json({ ok: true, vendor: vendors[i], vendors });
     }
