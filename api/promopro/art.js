@@ -8,27 +8,24 @@
 // posts it. Kept identical on purpose so there is one upload pattern in this
 // codebase rather than three.
 //
-// HOW THE VENDOR OPENS IT, AND WHAT THAT COSTS
-// The vendor is not signed in and never will be, so the file has to be
-// reachable without a login. Blob URLs are public but carry a random suffix,
-// which makes them unguessable: the same protection model already accepted
-// for BackBone's emailed briefs (api/b.js) and ShopStock's QR scan endpoint.
-// It is not the same as access control. Anyone who is forwarded the link can
-// open it, and DELETE here removes the file from the PO but does not revoke a
-// link somebody already has. For customer logos going to a supplier that is
-// the normal trade. If a specific job ever needs artwork that must not leak,
-// it should not go through this route.
+// HOW THE VENDOR OPENS IT
+// CHANGED Aug 2026. Files are stored PRIVATE and are unreachable by URL. The
+// vendor gets a signed link through api/promopro/art-file.js instead, which
+// carries the PO, the file, an expiry and the PO's artRev counter. See
+// lib/promopro/art-token.js for why.
 //
-// Blob's forced `Content-Disposition: attachment` is a feature here rather
-// than the problem it was for api/b.js: a vendor wants the file downloaded,
-// not rendered in a tab.
+// What that fixes, versus the public-blob-with-a-random-suffix model this
+// replaces: a forwarded link now expires, revoking every link for an order
+// is one counter bump, and DELETE genuinely deletes rather than merely
+// detaching a file whose URL keeps working forever.
 //
 // Env: BLOB_READ_WRITE_TOKEN, already set.
 
-import { put } from "@vercel/blob";
+import { put, del } from "@vercel/blob";
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
-import { getPo, updatePo } from "../../lib/promopro/store.js";
+import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
+import { artSigningAvailable } from "../../lib/promopro/art-token.js";
 
 const MAX_BYTES = 25 * 1024 * 1024;  // 25 MB. Vendor-ready art runs bigger than an intake reference.
 const MAX_FILES = 12;
@@ -92,7 +89,8 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    if (!(await canEditSession(sess))) {
+    const settings = await getSettings();
+    if (!(await canEditSession(sess, settings))) {
       return res.status(403).json({ error: "Read-only access" });
     }
 
@@ -112,16 +110,29 @@ export default async function handler(req, res) {
       const parsed = parseDataUrl(body.data_url, body.filename);
       if (parsed.error) return res.status(400).json({ error: parsed.error });
 
+      // Refuse rather than fall back to a public upload. A file the app
+      // believes is protected and is not is worse than an upload that failed
+      // loudly.
+      if (!artSigningAvailable()) {
+        return res.status(500).json({
+          error: "SESSION_SECRET is not set on this deployment, so artwork links cannot be signed. Nothing was uploaded.",
+        });
+      }
+
       const name = safeFilename(body.filename);
       const key = `promopro/art/${poId}/${name}`;
       const blob = await put(key, Buffer.from(parsed.base64, "base64"), {
-        access: "public",
+        access: "private",
         contentType: parsed.mediaType,
-        addRandomSuffix: true,   // this is what makes the URL unguessable
+        addRandomSuffix: true,
       });
 
       const entry = {
-        url: blob.url,
+        // A stable id of our own, because the link the vendor holds must not
+        // change when the blob does, and because a URL is a bad primary key.
+        id: `af_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+        pathname: blob.pathname,
+        url: blob.url,           // kept for the signed-in view, not emailed
         filename: name,
         contentType: parsed.mediaType,
         bytes: parsed.bytes,
@@ -135,22 +146,52 @@ export default async function handler(req, res) {
 
     if (req.method === "DELETE") {
       const poId = String((req.query && req.query.poId) || "");
+      const id = String((req.query && req.query.id) || "");
       const url = String((req.query && req.query.url) || "");
-      if (!poId || !url) return res.status(400).json({ error: "poId and url are required" });
+      if (!poId || (!id && !url)) return res.status(400).json({ error: "poId and id are required" });
 
       const po = await getPo(poId);
       if (!po) return res.status(404).json({ error: "Purchase order not found" });
 
-      const art = (Array.isArray(po.art) ? po.art : []).filter((a) => a.url !== url);
-      // Deliberately does not delete the blob itself. A vendor may already be
-      // working from that link, and pulling the file out from under them mid
-      // job causes a worse problem than an orphaned file costs. Removing it
-      // here removes it from the PO and from any future email.
+      const all = Array.isArray(po.art) ? po.art : [];
+      const going = all.filter((a) => (id ? a.id === id : a.url === url));
+      const art = all.filter((a) => !(id ? a.id === id : a.url === url));
+
+      // The blob really goes now. Under the old public model this had to be
+      // left behind, because a vendor might be working from the link and
+      // there was no way to give them a new one. With signed links there is:
+      // the file is gone, the link 404s with a message, and somebody reissues.
+      await Promise.all(going.map(async (a) => {
+        if (!a.url) return;
+        try {
+          await del(a.url);
+        } catch (e) {
+          // An orphaned blob is untidy; a delete that half worked and then
+          // threw would leave the PO still pointing at a file that is gone.
+          console.error("[promopro] could not remove blob", a.url, e && e.message);
+        }
+      }));
+
       const saved = await updatePo(poId, { art });
       return res.status(200).json({ ok: true, art: saved.art });
     }
 
-    res.setHeader("Allow", "POST, DELETE");
+    // Kill every link ever issued for this order in one write. Used when a
+    // link has been forwarded somewhere it should not have been.
+    if (req.method === "PATCH") {
+      const body = parseBody(req);
+      const poId = String(body.poId || "");
+      if (!poId) return res.status(400).json({ error: "poId is required" });
+      if (body.revoke !== true) return res.status(400).json({ error: "nothing to do" });
+
+      const po = await getPo(poId);
+      if (!po) return res.status(404).json({ error: "Purchase order not found" });
+
+      const saved = await updatePo(poId, { artRev: (Number(po.artRev) || 0) + 1 });
+      return res.status(200).json({ ok: true, artRev: saved.artRev });
+    }
+
+    res.setHeader("Allow", "POST, PATCH, DELETE");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (e) {
     console.error("promopro/art route error:", e);
