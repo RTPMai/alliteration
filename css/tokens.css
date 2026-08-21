@@ -332,9 +332,9 @@ body[data-app="stitchsense"] {
    went blue -> red -> the exact logo red precisely because that check was
    skipped the first time. */
 body[data-app="marketmachine"] {
-  --accent:      #6D28D9;
-  --accent-deep: #571FAE;
-  --accent-tint: #F1ECFC;
+  --accent:      #6E1E2B;
+  --accent-deep: #55161F;
+  --accent-tint: #F6EBED;
 }
 
 /* ==========================================================================
