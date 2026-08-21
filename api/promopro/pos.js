@@ -19,6 +19,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
 import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
+import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
@@ -52,7 +53,11 @@ export default async function handler(req, res) {
   }
 
   try {
-    const [isAdmin, canEdit] = await Promise.all([isAdminSession(sess), canEditSession(sess)]);
+    const settingsForGate = await getSettings();
+    const [isAdmin, canEdit] = await Promise.all([
+      isAdminSession(sess),
+      canEditSession(sess, settingsForGate),
+    ]);
 
     if (req.method === "GET") {
       const id = req.query && req.query.id;
@@ -73,6 +78,22 @@ export default async function handler(req, res) {
       const amIds = effectiveAccountManagerIds(settings, employees);
       const check = validateNew(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
+
+      // A blacklisted vendor is refused once, with the reason, and allowed
+      // through only when the caller comes back having said yes to that
+      // specific warning. Enforced HERE and not only in the browser: the
+      // confirmation is the record that somebody made the decision, and a
+      // check that only exists on screen is not a check.
+      const chosenVendor = vendors.find((v) => v.id === check.record.vendorId) || null;
+      if (chosenVendor && chosenVendor.blacklisted === true && body.confirmBlacklist !== true) {
+        return res.status(409).json({
+          error: blacklistWarning(chosenVendor),
+          blacklisted: true,
+          vendorId: chosenVendor.id,
+          vendorName: chosenVendor.name,
+          reason: chosenVendor.blacklistReason || "",
+        });
+      }
 
       const createdAt = new Date().toISOString();
       const year = yearPrefix(createdAt);
@@ -103,7 +124,20 @@ export default async function handler(req, res) {
         trackingNumber: "",
         carrier: "",
         decorateBufferDays: Number(body.decorateBufferDays) || 0,
-        history: [{ at: createdAt, by: String(sess.username || "").toLowerCase(), what: "created" }],
+        receipts: [],
+        history: [
+          { at: createdAt, by: String(sess.username || "").toLowerCase(), what: "created" },
+          // The override is part of the order's own record, not a log line
+          // somewhere else, so the next person to open this PO can see that
+          // ordering from a blacklisted vendor was a decision somebody made.
+          ...(chosenVendor && chosenVendor.blacklisted === true
+            ? [{
+                at: createdAt,
+                by: String(sess.username || "").toLowerCase(),
+                what: `raised against blacklisted vendor ${chosenVendor.name}`,
+              }]
+            : []),
+        ],
       };
 
       const saved = await savePo(record);
