@@ -19,6 +19,7 @@ const schema = await import('../lib/promopro/schema.js');
 const chase = await import('../lib/promopro/chase.js');
 const artToken = await import('../lib/promopro/art-token.js');
 const inbound = await import('../api/promopro/inbound.js');
+const doc = await import('../lib/promopro/document.js');
 
 // The harness has no deepEqual; arrays compare fine as joined strings and
 // the failure message stays readable.
@@ -474,6 +475,51 @@ t.test('capture cannot be switched on without somewhere for mail to land', () =>
   t.assert(!schema.validateSettings({ captureReplies: true, captureDomain: '' }).ok,
     'a Reply-To pointing at nothing loses vendor replies outright');
   t.assert(schema.validateSettings({ captureReplies: true, captureDomain: 'po.pmapparel.com' }).ok);
+});
+
+/* ------------------------------------------------------------------ *
+ * THE LOGO ON THE PURCHASE ORDER
+ * ------------------------------------------------------------------ */
+
+t.test('the emailed order carries the logo, sized for Outlook', () => {
+  const html = doc.renderPoHtml(
+    { poNumber: '26-1', createdAt: '2026-08-21', lines: [{ description: 'Mug', qty: 1, unitCost: 2 }] },
+    { name: 'Acme' },
+    { brand: { name: 'P&M Apparel' }, logoUrl: 'https://example.com/logo.png' });
+  t.assert(html.includes('src="https://example.com/logo.png"'), 'the mark should be in the header');
+  t.assert(/width="92"/.test(html) && /height="92"/.test(html),
+    'Outlook ignores CSS sizing on images and would draw it at full size');
+});
+
+t.test('the brand name is printed as well as shown, for blocked images', () => {
+  const html = doc.renderPoHtml(
+    { poNumber: '26-1', createdAt: '2026-08-21', lines: [] },
+    { name: 'Acme' },
+    { brand: { name: 'P&M Apparel' }, logoUrl: 'https://example.com/logo.png' });
+  t.assert(/alt="P&amp;M Apparel"/.test(html), 'a blocked image should still say who this is from');
+  t.assert(html.includes('>P&amp;M Apparel<'),
+    'the name must also be real text: plenty of corporate inboxes block images by default');
+});
+
+t.test('no logo configured renders no image tag at all', () => {
+  const html = doc.renderPoHtml(
+    { poNumber: '26-1', createdAt: '2026-08-21', lines: [] },
+    { name: 'Acme' },
+    { brand: { name: 'P&M Apparel' }, logoUrl: '' });
+  t.assert(!/<img/.test(html), 'an empty setting should mean no logo, not a broken image');
+});
+
+t.test('an off-site logo is refused', () => {
+  // An image loaded from somewhere we do not control is a tracking pixel in
+  // our outgoing mail, and a link that can rot without us noticing.
+  t.assert(!schema.validateSettings({ logoUrl: 'http://elsewhere.example/x.png' }).ok);
+  t.assert(schema.validateSettings({ logoUrl: '/assets/brand/pm-apparel-logo.png' }).ok);
+  t.assert(schema.validateSettings({ logoUrl: 'https://pmapparel.com/logo.png' }).ok);
+});
+
+t.test('clearing the logo is respected, absence falls back to the default', () => {
+  t.equal(schema.withSettingDefaults({ logoUrl: '' }).logoUrl, '', 'empty means no logo');
+  t.equal(schema.withSettingDefaults({}).logoUrl, '/assets/brand/pm-apparel-logo.png');
 });
 
 /* ------------------------------------------------------------------ *
