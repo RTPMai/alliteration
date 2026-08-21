@@ -393,6 +393,43 @@ t.test('a vendor URL points at the art-file route and carries a token', () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * CANCEL AND DELETE
+ * ------------------------------------------------------------------ */
+
+t.test('cancelling takes a PO out of the pipeline whatever stage it was in', () => {
+  const shipped = { id: 'p1', shippedAt: '2026-08-01', lines: [] };
+  t.equal(schema.currentStage(shipped), 'shipped');
+  t.equal(schema.currentStage({ ...shipped, cancelledAt: '2026-08-05' }), 'cancelled');
+});
+
+t.test('reinstating clears the cancellation rather than storing a blank string', () => {
+  const r = schema.validatePatch({ cancelledAt: null }, null, null);
+  t.assert(r.ok, (r.errors || []).join('; '));
+  t.equal(r.patch.cancelledAt, null);
+  t.equal(schema.currentStage({ shippedAt: '2026-08-01', cancelledAt: null }), 'shipped',
+    'a reinstated order goes back to the stage its dates say it is in');
+});
+
+t.test('a cancelled order is never chased', () => {
+  const list = chase.chaseList(
+    [{ id: 'p1', poNumber: '26-1', vendorId: 'v1', accountManager: 'e1',
+       lines: [{ description: 'Mug', qty: 1, unitCost: 1 }],
+       submittedAt: '2026-01-01', cancelledAt: '2026-02-01' }],
+    vendorList, chaseSettings, '2026-08-20');
+  t.equal(list.length, 0);
+});
+
+t.test('a cancelled order does not count against the vendor as a failure', () => {
+  const vendor = { id: 'v1', name: 'Acme', leadDays: 10 };
+  const s = statsLib.vendorStats(vendor, [
+    po({ submittedAt: '2026-01-01', cancelledAt: '2026-01-03' }),
+  ]);
+  t.equal(s.cancelled, 1);
+  t.equal(s.completed, 0);
+  t.equal(s.onTimeSample, 0, 'an order nobody ever shipped says nothing about their timeliness');
+});
+
+/* ------------------------------------------------------------------ *
  * VENDOR REPLIES
  * ------------------------------------------------------------------ */
 

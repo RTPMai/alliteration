@@ -88,10 +88,40 @@ t.test('adding a vendor is one card, not a chain of prompts', () => {
   // A lead time is a judgement call. You cannot make it well when you can
   // only see one question at a time and cannot go back and change an
   // earlier answer.
-  t.assert(!/window\.prompt|window\.alert/.test(app),
-    'vendor entry should be a form card, not browser prompts');
+  //
+  // NARROWED Aug 2026. This used to forbid window.prompt anywhere in the
+  // file, which was a fine proxy while nothing else used one. The typed
+  // confirmation on Delete is a deliberate exception: it is friction on the
+  // one action with nothing behind it, not a data-entry step. So the rule is
+  // now what it always meant, no prompts in vendor entry, plus an explicit
+  // cap of one prompt in the whole file so a second cannot creep in unnoticed.
+  t.assert(!/window\.alert/.test(app), 'nothing here should need an alert');
+  const prompts = (app.match(/window\.prompt/g) || []).length;
+  t.equal(prompts, 1, 'the only prompt should be the typed delete confirmation');
+  const deleteHandler = app.slice(app.indexOf("t.id === 'ppDeletePo'"));
+  t.assert(deleteHandler.indexOf('window.prompt') !== -1 && deleteHandler.indexOf('window.prompt') < 600,
+    'the prompt that exists should be the delete confirmation, not something in vendor entry');
+
   ['ppVenName', 'ppVenEmail', 'ppVenLead', 'ppVenTerms', 'ppVenPrepay', 'ppVenNotes']
     .forEach((f) => t.assert(app.includes(f), 'the vendor card is missing the ' + f + ' field'));
+  ['ppQName', 'ppQEmail', 'ppQLead', 'ppQTerms']
+    .forEach((f) => t.assert(app.includes(f), 'the quick-add card is missing the ' + f + ' field'));
+});
+
+t.test('quick-add is reachable from the vendor picker, not just the Vendors tab', () => {
+  t.assert(/data-newvendor/.test(app),
+    'a vendor that is not on the list must be addable without leaving the order');
+  t.assert(/openQuickVendor/.test(app), 'the quick-add card should have a way to open');
+});
+
+t.test('quick-add does not rebuild the half-finished order underneath it', () => {
+  // loadAll() + renderAll() here would wipe the lines somebody has typed.
+  // The route hands back the new list, so the state is updated from that.
+  const fn = app.slice(app.indexOf('async function saveQuickVendor'));
+  const body = fn.slice(0, fn.indexOf('\n    }'));
+  t.assert(!/loadAll\(\)/.test(body),
+    'reloading everything mid-order would throw away what has been typed');
+  t.assert(/st\.vendors = res\.vendors/.test(body), 'the new list should come off the response');
 });
 
 t.test('the vendor card asks two numbers, not six', () => {
@@ -365,6 +395,33 @@ t.test('artwork is stored private, not public', () => {
 t.test('deleting art really deletes the file', () => {
   t.assert(/\bdel\(/.test(artRoute),
     'detaching a file while its URL keeps working is not deleting it');
+});
+
+t.test('adding a vendor is open to PO editors, changing one is not', () => {
+  // The split that makes quick-add possible: creating "SanMar,
+  // orders@sanmar.com" mid-order is data entry, but editing a lead time
+  // changes what counts as late for the whole team.
+  const post = vendorsRoute.indexOf('req.method === "POST"');
+  const gate = vendorsRoute.indexOf('Admin access required');
+  t.assert(post !== -1 && gate !== -1, 'both branches should exist');
+  t.assert(post < gate, 'the admin gate must sit AFTER create, or quick-add 403s');
+  t.assert(/canEditSession/.test(vendorsRoute), 'create still has to check something');
+});
+
+t.test('a non-admin cannot create a pre-blacklisted vendor', () => {
+  t.assert(/blacklisted && !isAdmin/.test(vendorsRoute),
+    'otherwise quick-add becomes a way to put a warning in front of the whole team');
+});
+
+t.test('deleting a purchase order stays admin only', () => {
+  const del = vendorsRoute.indexOf('req.method === "DELETE"');
+  const gate = vendorsRoute.indexOf('Admin access required');
+  t.assert(gate !== -1 && gate < del, 'delete must sit behind the admin gate');
+});
+
+t.test('the app hides delete once an order has been emailed', () => {
+  t.assert(/isAdmin && !po\.lastSentAt/.test(app),
+    'deleting the only record of a document a vendor holds cannot be walked back');
 });
 
 t.test('the UPS account number is not committed to source', () => {
