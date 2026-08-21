@@ -1,3 +1,4 @@
+// js/api.js
 /**
  * alliteration. — THE SEAM
  *
@@ -272,6 +273,8 @@ export const ENDPOINTS = {
   ppSettings:      '/api/promopro/settings',
   ppArt:           '/api/promopro/art',
   ppSend:          '/api/promopro/send',
+  ppReceive:       '/api/promopro/receive',
+  ppArtFile:       '/api/promopro/art-file',
   ppPrint:         '/api/promopro/print',
 
   // ---- StitchSense ----
@@ -530,6 +533,8 @@ const MOCK_DATA = {
   [ENDPOINTS.ppSettings]: () => ({ settings: { chaseAfterDays: 3, alwaysCc: [], accountManagers: [] } }),
   [ENDPOINTS.ppArt]: () => ({ art: [] }),
   [ENDPOINTS.ppSend]: () => ({ error: 'Sending is not available in sample mode.' }),
+  [ENDPOINTS.ppReceive]: () => ({ error: 'Receiving is not available in sample mode.' }),
+  [ENDPOINTS.ppArtFile]: () => ({ error: 'Artwork is not available in sample mode.' }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
