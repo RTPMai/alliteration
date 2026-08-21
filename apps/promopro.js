@@ -1,3 +1,4 @@
+// apps/promopro.js
 /**
  * PromoPro — purchase orders to vendors, and where each one stands.
  *
@@ -25,7 +26,7 @@
 import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
-  withSettingDefaults, ccListFor, parseEmailList
+  withSettingDefaults, ccListFor, parseEmailList, receiptSummary
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 
@@ -97,6 +98,7 @@ export default {
     .pp-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
     .pp-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: var(--accent-tint); color: var(--accent-deep); }
+    .pp-pill.bad { background: var(--danger-tint); color: var(--danger-dk); }
 
     /* ---- forms ---- */
     .pp-form { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 20px; margin-bottom: 20px; }
@@ -464,6 +466,11 @@ export default {
           // always a real vendor, never whatever text was typed.
           '<div class="pp-field"><label>Vendor</label>' +
             '<input id="ppVendorSearch" autocomplete="off" placeholder="Start typing a vendor name" value="' + esc(pickedVendorName) + '">' +
+            (pickedVendor && pickedVendor.blacklisted === true
+              ? '<div class="pp-notice" style="margin-top:6px"><strong>' + esc(pickedVendor.name) + ' is blacklisted.</strong> ' +
+                esc(pickedVendor.blacklistReason || 'No reason was recorded.') +
+                ' You will be asked to confirm before this order is created.</div>'
+              : '') +
             '<input type="hidden" id="ppVendor" value="' + esc(st.draftVendorId || '') + '">' +
             '<div id="ppVendorResults"></div>' +
           '</div>' +
@@ -732,11 +739,14 @@ export default {
     function artListHtml(po) {
       const art = Array.isArray(po.art) ? po.art : [];
       if (!art.length) return '<div class="pp-hint">Nothing attached yet.</div>';
+      // Staff open files through the same route the vendor uses, but by id
+      // with a session rather than with a signed token. One way in means one
+      // place where "can this person have this file" is decided.
       return '<div class="pp-artgrid">' + art.map((a) =>
         '<div class="pp-artrow">' +
-          '<a href="' + esc(a.url) + '" target="_blank" rel="noopener">' + esc(a.filename) + '</a>' +
+          '<a href="' + esc(ENDPOINTS.ppArtFile + '?poId=' + encodeURIComponent(po.id) + '&id=' + encodeURIComponent(a.id || '')) + '" target="_blank" rel="noopener">' + esc(a.filename) + '</a>' +
           '<span class="sz">' + esc(fileSize(a.bytes)) + '</span>' +
-          (canEdit ? '<button class="pp-btn ghost" data-rmart="' + esc(a.url) + '">Remove</button>' : '') +
+          (canEdit ? '<button class="pp-btn ghost" data-rmart="' + esc(a.id || '') + '">Remove</button>' : '') +
         '</div>'
       ).join('') + '</div>';
     }
@@ -794,6 +804,89 @@ export default {
       }
     }
 
+    /* ---------------- receiving ---------------- */
+
+    /**
+     * Book goods in, line by line.
+     *
+     * Deliberately additive: the boxes are "how many arrived today", not
+     * "the total is now". Recording the second delivery must not require
+     * knowing what the first one was, and the running total is the app's job
+     * to keep, not the receiver's.
+     */
+    function receivingHtml(po) {
+      const sum = receiptSummary(po);
+      const receipts = Array.isArray(po.receipts) ? po.receipts : [];
+
+      const banner = sum.complete
+        ? '<div class="pp-hint">All ' + sum.ordered + ' received.</div>'
+        : sum.partial
+          ? '<div class="pp-notice"><strong>Partly received.</strong> ' + sum.received + ' of ' + sum.ordered +
+            ' in, ' + sum.outstanding + ' still outstanding on ' + sum.short.length +
+            (sum.short.length === 1 ? ' line' : ' lines') + '.</div>'
+          : '<div class="pp-hint">Nothing booked in yet.</div>';
+
+      const log = receipts.length
+        ? '<div class="pp-hint" style="margin-top:8px">' + receipts.map((r) =>
+            esc(r.date) + ': ' + r.lines.map((l) => (l.qty > 0 ? '+' : '') + l.qty).join(', ') +
+            (r.by ? ' by ' + esc(r.by) : '') +
+            (r.note ? ' (' + esc(r.note) + ')' : '')
+          ).join('<br>') + '</div>'
+        : '';
+
+      if (!canEdit || sum.complete) return '<div class="pp-sect">Receiving</div>' + banner + log;
+
+      return '<div class="pp-sect">Receiving</div>' + banner +
+        '<table class="pp-table"><thead><tr><th>Line</th><th class="num">Ordered</th>' +
+        '<th class="num">Already in</th><th class="num">Arrived now</th></tr></thead><tbody>' +
+        (po.lines || []).map((l, i) => {
+          const got = Number(l.receivedQty) || 0;
+          const short = Math.max(0, (Number(l.qty) || 0) - got);
+          return '<tr><td>' + esc(l.description) + (l.itemNumber ? ' <span class="pp-hint">' + esc(l.itemNumber) + '</span>' : '') + '</td>' +
+            '<td class="num">' + esc(l.qty) + '</td>' +
+            '<td class="num">' + esc(got) + '</td>' +
+            '<td class="num"><input type="number" step="1" style="width:90px;text-align:right" ' +
+              'data-recvline="' + i + '" placeholder="' + (short ? esc(short) : '0') + '"></td></tr>';
+        }).join('') + '</tbody></table>' +
+        '<div class="pp-row" style="margin-top:8px">' +
+          '<div class="pp-field"><label>Date received</label><input type="date" id="ppRecvDate" value="' + esc(today()) + '"></div>' +
+          '<div class="pp-field"><label>Note</label><input id="ppRecvNote" placeholder="Short 24, vendor says Friday"></div>' +
+        '</div>' +
+        '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +
+          '<button class="pp-btn" id="ppReceive">Book in</button>' +
+          '<button class="pp-btn ghost" id="ppReceiveAll">Everything outstanding arrived</button>' +
+        '</div>' +
+        '<div class="pp-hint" style="margin-top:6px">A negative number corrects a miscount. The order is marked received on its own once nothing is short.</div>' +
+        '<div class="pp-err" id="ppRecvErr" hidden></div>' + log;
+    }
+
+    async function postReceipt(entries) {
+      const err = $('#ppRecvErr');
+      if (err) err.hidden = true;
+      if (!entries.length) {
+        if (err) { err.textContent = 'Nothing was entered to receive.'; err.hidden = false; }
+        return;
+      }
+      try {
+        const res = await ctx.api.post(ENDPOINTS.ppReceive, {
+          poId: st.openPoId,
+          entries,
+          date: $('#ppRecvDate') ? $('#ppRecvDate').value : today(),
+          note: $('#ppRecvNote') ? $('#ppRecvNote').value : '',
+        });
+        if (res && res.error) {
+          if (err) { err.textContent = res.error; err.hidden = false; }
+          return;
+        }
+        await loadAll();
+        renderAll();
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
+      } catch (e) {
+        if (err) { err.textContent = e.message || 'Could not record that.'; err.hidden = false; }
+      }
+    }
+
     /* ---------------- detail ---------------- */
 
     function renderDetail(po) {
@@ -832,17 +925,26 @@ export default {
           '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
         '</div>' +
 
-        '<table class="pp-table"><thead><tr><th>Item #</th><th>Description</th><th>Detail</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
-          (po.lines || []).map((l) =>
-            '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
+        '<table class="pp-table"><thead><tr><th>Item #</th><th>Description</th><th>Detail</th>' +
+          '<th class="num">Qty</th><th class="num">In</th><th class="num">Short</th>' +
+          '<th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
+          (po.lines || []).map((l) => {
+            const got = Number(l.receivedQty) || 0;
+            const short = Math.max(0, (Number(l.qty) || 0) - got);
+            return '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
             '<td>' + esc(l.description) +
               (l.imprint ? '<div class="pp-hint">' + esc(l.imprint) + '</div>' : '') +
             '</td><td>' + esc(l.detail || '') + '</td>' +
-            '<td class="num">' + esc(l.qty) + '</td><td class="num">' + money(l.unitCost) + '</td>' +
-            '<td class="num">' + money(lineTotal(l)) + '</td></tr>'
-          ).join('') +
-          '<tr><td colspan="5" class="num"><strong>Total</strong></td><td class="num"><strong>' + money(poTotal(po)) + '</strong></td></tr>' +
+            '<td class="num">' + esc(l.qty) + '</td>' +
+            '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
+            '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '\u2013') + '</td>' +
+            '<td class="num">' + money(l.unitCost) + '</td>' +
+            '<td class="num">' + money(lineTotal(l)) + '</td></tr>';
+          }).join('') +
+          '<tr><td colspan="7" class="num"><strong>Total</strong></td><td class="num"><strong>' + money(poTotal(po)) + '</strong></td></tr>' +
         '</tbody></table>' +
+
+        receivingHtml(po) +
 
         (po.shipTo || po.shippingInstructions
           ? '<div class="pp-sect">Shipping</div>' +
@@ -853,8 +955,8 @@ export default {
 
         '<div class="pp-sect">Artwork for the vendor</div>' +
         '<div class="pp-hint" style="margin-bottom:8px">' +
-          'Anyone with the link can open these without signing in, which is how the vendor gets them. ' +
-          'Treat the links as shareable.' +
+          'The vendor gets a signed link that expires. Withdrawing links kills every one already sent for this order, ' +
+          'which is what to do if a link went somewhere it should not have.' +
         '</div>' +
         '<div id="ppArtList">' + artListHtml(po) + '</div>' +
         (canEdit
@@ -862,6 +964,7 @@ export default {
               '<input type="file" id="ppArtFile" multiple style="display:none" ' +
                 'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
               '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
+              ((po.art || []).length ? '<button class="pp-btn ghost" id="ppArtRevoke" style="margin-left:6px">Withdraw sent links</button>' : '') +
               '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
             '</div>'
           : '') +
@@ -929,6 +1032,36 @@ export default {
           '</div>' +
         '</div>' +
 
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Our rating</label>' +
+            '<select id="ppVenRating">' +
+              '<option value=""' + (v.rating ? '' : ' selected') + '>Not rated</option>' +
+              [1, 2, 3, 4, 5].map((n) =>
+                '<option value="' + n + '"' + (Number(v.rating) === n ? ' selected' : '') + '>' +
+                  n + ' \u2013 ' + ['Avoid', 'Poor', 'Fine', 'Good', 'Excellent'][n - 1] +
+                '</option>'
+              ).join('') +
+            '</select>' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:4px">Your judgement of them. The scorecard next to it is computed from the orders themselves, and the two are allowed to disagree.</div>' +
+          '</div>' +
+          '<div class="pp-field"><label>Blacklist</label>' +
+            '<select id="ppVenBlack">' +
+              '<option value="no"' + (v.blacklisted ? '' : ' selected') + '>No, fine to order from</option>' +
+              '<option value="yes"' + (v.blacklisted ? ' selected' : '') + '>Yes, warn before ordering</option>' +
+            '</select>' +
+          '</div>' +
+        '</div>' +
+
+        '<div class="pp-field" id="ppVenBlackWrap"' + (v.blacklisted ? '' : ' hidden') + '>' +
+          '<label>Why are they blacklisted</label>' +
+          '<input id="ppVenBlackWhy" value="' + esc(v.blackListReason || v.blacklistReason || '') + '" placeholder="Shipped the wrong garment twice and would not credit it">' +
+          '<div style="font-size:11px;color:var(--muted);margin-top:4px">Required. In six months this sentence is the only thing standing between somebody and the same mistake.</div>' +
+          (v.blacklistedAt
+            ? '<div style="font-size:11px;color:var(--muted);margin-top:4px">Blacklisted ' + esc(String(v.blacklistedAt).slice(0, 10)) +
+              (v.blacklistedBy ? ' by ' + esc(v.blacklistedBy) : '') + '.</div>'
+            : '') +
+        '</div>' +
+
         '<div class="pp-field"><label>Notes</label><textarea id="ppVenNotes" placeholder="Minimums, rep name, quirks worth remembering">' + esc(v.notes || '') + '</textarea></div>' +
 
         (isEdit
@@ -954,7 +1087,12 @@ export default {
 
       const id = $('#ppVenId').value;
       const respRaw = $('#ppVenResponse').value;
+      const ratingRaw = $('#ppVenRating') ? $('#ppVenRating').value : '';
+      const blacklisted = $('#ppVenBlack') ? $('#ppVenBlack').value === 'yes' : false;
       const payload = {
+        rating: ratingRaw === '' ? null : Number(ratingRaw),
+        blacklisted,
+        blacklistReason: $('#ppVenBlackWhy') ? $('#ppVenBlackWhy').value : '',
         name: $('#ppVenName').value,
         email: $('#ppVenEmail').value,
         ccEmail: $('#ppVenCc').value,
@@ -989,13 +1127,39 @@ export default {
         body.innerHTML = '<div class="pp-empty">No vendors yet. Add the suppliers you order promo from, with how long each one usually takes.</div>';
         return;
       }
-      body.innerHTML = '<table class="pp-table"><thead><tr>' +
-        '<th>Vendor</th><th>Email</th><th>Terms</th><th class="num">Lead days</th><th>Prepay</th><th>Open POs</th>' + (isAdmin ? '<th></th>' : '') +
+      // Blacklisted first, deliberately. They are the rows somebody needs to
+      // see, and burying them at the bottom of an alphabetical list is how a
+      // warning gets missed.
+      const sorted = st.vendors.slice().sort((a, b) => {
+        if ((a.blacklisted === true) !== (b.blacklisted === true)) return a.blacklisted ? -1 : 1;
+        return String(a.name || '').localeCompare(String(b.name || ''));
+      });
+
+      const blackCount = sorted.filter((v) => v.blacklisted === true).length;
+
+      body.innerHTML =
+        (blackCount
+          ? '<div class="pp-notice" style="margin-bottom:12px"><strong>' + blackCount +
+            (blackCount === 1 ? ' vendor is' : ' vendors are') + ' blacklisted.</strong> ' +
+            'Raising or sending an order to one asks for a confirmation first.</div>'
+          : '') +
+        '<table class="pp-table"><thead><tr>' +
+        '<th>Vendor</th><th>Rating</th><th>Scorecard</th><th>Email</th><th>Terms</th>' +
+        '<th class="num">Lead days</th><th>Prepay</th><th>Open POs</th>' + (isAdmin ? '<th></th>' : '') +
         '</tr></thead><tbody>' +
-        st.vendors.map((v) => {
+        sorted.map((v) => {
           const openCount = st.pos.filter((p) => p.vendorId === v.id && !['closed', 'cancelled', 'received'].includes(currentStage(p))).length;
-          return '<tr' + (v.active === false ? ' style="opacity:.5"' : '') + '>' +
-            '<td><strong>' + esc(v.name) + '</strong>' + (v.active === false ? ' <span class="pp-pill">Inactive</span>' : '') + '</td>' +
+          const dim = v.active === false && v.blacklisted !== true;
+          return '<tr' + (dim ? ' style="opacity:.5"' : '') + '>' +
+            '<td><strong>' + esc(v.name) + '</strong>' +
+              (v.blacklisted === true ? ' <span class="pp-pill bad">Blacklisted</span>' : '') +
+              (v.active === false ? ' <span class="pp-pill">Inactive</span>' : '') +
+              (v.blacklisted === true && v.blacklistReason
+                ? '<div class="pp-hint" style="font-size:12px">' + esc(v.blacklistReason) + '</div>'
+                : '') +
+            '</td>' +
+            '<td>' + ratingCell(v) + '</td>' +
+            '<td>' + scoreCell(v.stats) + '</td>' +
             '<td>' + esc(v.email || '') + '</td>' +
             '<td>' + esc(v.terms || '') + '</td>' +
             '<td class="num">' + esc(v.leadDays) + '</td>' +
@@ -1007,6 +1171,30 @@ export default {
               : '') +
           '</tr>';
         }).join('') + '</tbody></table>';
+    }
+
+    /** The hand-set 1 to 5, or plainly nothing. */
+    function ratingCell(v) {
+      const n = Number(v && v.rating);
+      if (!Number.isFinite(n) || n < 1) return '<span class="pp-hint">Not rated</span>';
+      return '<span title="' + esc(n) + ' of 5">' + '\u2605'.repeat(n) + '<span style="opacity:.25">' + '\u2605'.repeat(5 - n) + '</span></span>';
+    }
+
+    /**
+     * The computed record. Says "not enough history" rather than showing a
+     * score built on one or two orders, because a number on screen gets used
+     * to make a buying decision whether or not it deserves to be.
+     */
+    function scoreCell(stats) {
+      if (!stats) return '<span class="pp-hint">\u2013</span>';
+      if (stats.score === null) {
+        return '<span class="pp-hint">' + esc(stats.scoreBasis || 'no history yet') + '</span>';
+      }
+      const bits = [];
+      if (stats.onTimeRate !== null) bits.push(stats.onTimeRate + '% on time');
+      if (stats.avgResponseDays !== null) bits.push('replies in ' + stats.avgResponseDays + 'd');
+      return '<strong>' + stats.score + '</strong><span class="pp-hint" style="font-size:12px">' +
+        esc(bits.join(', ')) + ' across ' + stats.completed + ' finished</span>';
     }
 
     function renderSettings() {
@@ -1120,10 +1308,77 @@ export default {
           '<div class="pp-row">' +
             '<div class="pp-field"><label>Days of vendor silence before a PO goes amber</label>' +
               '<input id="ppChase" type="number" min="1" value="' + esc(S.chaseAfterDays) + '"' + (isAdmin ? '' : ' disabled') + '></div>' +
+            '<div class="pp-field"><label>Morning digest to</label>' +
+              '<input id="ppDigestTo" value="' + esc((S.chaseDigestTo || []).join(', ')) + '" placeholder="Blank means nobody" ' + (isAdmin ? '' : 'disabled') + '>' +
+              '<div class="pp-hint">On top of Notifications, not instead of them. Nothing is sent on a clean morning.</div>' +
+            '</div>' +
           '</div>' +
           '<div class="pp-hint">' +
+            'Every weekday morning, any order that has gone amber or red raises one item on the account manager\u2019s Notifications list. ' +
+            'It is updated in place rather than re-posted daily, and closes itself when the order recovers. ' +
             'This applies only where we are waiting on the vendor. Steps that are ours, like approving art and sending payment, do not raise a vendor alarm. ' +
             'A single supplier who is reliably slower can override this on their own card.' +
+          '</div>' +
+
+          '<div class="pp-sect">Who can raise and edit purchase orders</div>' +
+          '<div class="pp-hint" style="margin-bottom:10px">' +
+            'Reading stays open to everyone, so an account manager can always answer \u201cwhere is my order\u201d without asking. ' +
+            'This is about who can create, change and send them. Superusers always can. ' +
+            'Tick nothing and it falls back to whoever the shell already lets edit, which is how it behaved before this list existed.' +
+          '</div>' +
+          (isAdmin
+            ? (Array.isArray(S.roleChoices) && S.roleChoices.length
+                ? '<div class="pp-amgrid">' + S.roleChoices.map((r) =>
+                    '<label class="pp-amrow"><input type="checkbox" data-editrole="' + esc(r.name) + '"' +
+                      ((S.editRoles || []).includes(r.name) ? ' checked' : '') + '>' +
+                    '<span><span class="nm">' + esc(r.label || r.name) + '</span>' +
+                    '<span class="em">' + esc(r.name) + '</span></span></label>'
+                  ).join('') + '</div>'
+                : '<div class="pp-notice">The shell role list could not be read, so this cannot be changed right now.</div>')
+            : '<div style="font-size:13px">' +
+                ((S.editRoles || []).length ? esc((S.editRoles || []).join(', ')) : 'Anyone with edit access in the shell.') +
+              '</div>') +
+
+          '<div class="pp-sect">Promo categories</div>' +
+          '<div class="pp-hint" style="margin-bottom:10px">' +
+            'Which Printavo line-item categories count as promo. A lookup then shows just those imprints instead of the whole job. ' +
+            'Leave it empty and every imprint is offered, which is safer than guessing wrong and hiding the one you wanted. ' +
+            'The \u201cRemember as promo\u201d button on a lookup adds to this list too.' +
+          '</div>' +
+          '<div class="pp-field" style="margin-bottom:12px">' +
+            '<textarea id="ppPromoCats" placeholder="one per line, or comma separated"' + (isAdmin ? '' : ' disabled') + '>' +
+              esc((S.promoCategories || []).join('\n')) +
+            '</textarea>' +
+          '</div>' +
+
+          '<div class="pp-sect">Vendor replies</div>' +
+          '<div class="pp-hint" style="margin-bottom:10px">' +
+            'With this on, a vendor hitting Reply lands on the order itself: the message is logged against the PO, the silence clock stops, ' +
+            'and it is forwarded to the account manager so a person still sees it. The stage is never changed automatically, because ' +
+            '\u201cgot it, we will confirm Monday\u201d and \u201cconfirmed\u201d look identical to a parser. ' +
+            'Leave it off until the MX record exists, or vendor replies go nowhere.' +
+          '</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Capture vendor replies</label>' +
+              '<select id="ppCapture"' + (isAdmin ? '' : ' disabled') + '>' +
+                '<option value="no"' + (S.captureReplies ? '' : ' selected') + '>Off, replies go straight to the account manager</option>' +
+                '<option value="yes"' + (S.captureReplies ? ' selected' : '') + '>On</option>' +
+              '</select></div>' +
+            '<div class="pp-field"><label>Capture domain</label>' +
+              '<input id="ppCaptureDomain" value="' + esc(S.captureDomain || '') + '" placeholder="po.pmapparel.com"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">A subdomain, never pmapparel.com itself, or all your normal email routes to Resend.</div>' +
+            '</div>' +
+            '<div class="pp-field"><label>Unmatched replies go to</label>' +
+              '<input id="ppReplyFallback" value="' + esc(S.replyFallbackTo || '') + '" placeholder="po@pmapparel.com"' + (isAdmin ? '' : ' disabled') + '>' +
+            '</div>' +
+          '</div>' +
+
+          '<div class="pp-sect">Artwork links</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Days a vendor\u2019s artwork link stays good</label>' +
+              '<input id="ppArtDays" type="number" min="1" value="' + esc(S.artLinkDays || 90) + '"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">Files are private. A link that expires can be reissued by sending the order again, and an order\u2019s links can be withdrawn from its own screen.</div>' +
+            '</div>' +
           '</div>' +
 
           (isAdmin ? '<div style="margin-top:16px"><button class="pp-btn" id="ppSaveSettings">Save settings</button></div>' : '') +
@@ -1170,6 +1425,28 @@ export default {
       // non-admin view has no checkboxes, and posting an empty array would
       // wipe everyone.
       if (root.querySelector('[data-amid]')) payload.accountManagerIds = accountManagerIds;
+
+      // Same rule for every admin-only field below: absent from the payload
+      // when it was not rendered, rather than sent as a blank that clears
+      // what an admin set.
+      if ($('#ppDigestTo')) payload.chaseDigestTo = parseEmailList($('#ppDigestTo').value);
+      if ($('#ppArtDays')) payload.artLinkDays = Number($('#ppArtDays').value) || 90;
+      if ($('#ppCapture')) {
+        payload.captureReplies = $('#ppCapture').value === 'yes';
+        payload.captureDomain = $('#ppCaptureDomain') ? $('#ppCaptureDomain').value : '';
+        payload.replyFallbackTo = $('#ppReplyFallback') ? $('#ppReplyFallback').value : '';
+      }
+      if ($('#ppPromoCats')) {
+        payload.promoCategories = String($('#ppPromoCats').value || '')
+          .split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+      }
+      if (root.querySelector('[data-editrole]')) {
+        const editRoles = [];
+        root.querySelectorAll('[data-editrole]').forEach((el) => {
+          if (el.checked) editRoles.push(el.dataset.editrole);
+        });
+        payload.editRoles = editRoles;
+      }
 
       try {
         const res = await ctx.api.request(ENDPOINTS.ppSettings, { method: 'PATCH', body: JSON.stringify(payload) });
@@ -1280,6 +1557,31 @@ export default {
       if (t.id === 'ppSave') { await saveNew(); return; }
       if (t.id === 'ppSaveDetail') { await saveDetail(); return; }
 
+      if (t.id === 'ppReceive' || t.id === 'ppReceiveAll') {
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (!po) return;
+        const entries = [];
+        if (t.id === 'ppReceiveAll') {
+          // "Everything outstanding arrived" fills in the shortfall per line
+          // rather than stamping a single received date, so the line counts
+          // stay true and a later correction still has something to work
+          // against.
+          (po.lines || []).forEach((l, i) => {
+            const short = Math.max(0, (Number(l.qty) || 0) - (Number(l.receivedQty) || 0));
+            if (short > 0) entries.push({ index: i, qty: short });
+          });
+        } else {
+          root.querySelectorAll('[data-recvline]').forEach((el) => {
+            const qty = Number(el.value);
+            if (!Number.isFinite(qty) || qty === 0) return;
+            entries.push({ index: Number(el.dataset.recvline), qty });
+          });
+        }
+        t.disabled = true;
+        await postReceipt(entries);
+        return;
+      }
+
       if (t.id === 'ppPrint') {
         // A new tab, not a fetch: the browser's own print dialog is what
         // turns this into a PDF.
@@ -1295,7 +1597,18 @@ export default {
         if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
         t.disabled = true;
         try {
-          const res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
+          let res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
+          // Asked again at send time, not just at creation: a vendor can be
+          // blacklisted AFTER the order was raised, which is the case most
+          // worth catching.
+          if (res && res.blacklisted === true) {
+            if (!confirmBlacklisted(res)) {
+              if (msg) msg.textContent = res.error + ' Nothing was sent.';
+              t.disabled = false;
+              return;
+            }
+            res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest, confirmBlacklist: true });
+          }
           if (res && res.error) {
             if (msg) msg.textContent = res.error;
             t.disabled = false;
@@ -1332,14 +1645,30 @@ export default {
       }
 
       if (t.dataset && t.dataset.rmart) {
+        if (!window.confirm('Delete this file? Any link the vendor already has stops working.')) return;
         await ctx.api.request(
-          ENDPOINTS.ppArt + '?poId=' + encodeURIComponent(st.openPoId) + '&url=' + encodeURIComponent(t.dataset.rmart),
+          ENDPOINTS.ppArt + '?poId=' + encodeURIComponent(st.openPoId) + '&id=' + encodeURIComponent(t.dataset.rmart),
           { method: 'DELETE' }
         );
         await loadAll();
         renderAll();
         const po = st.pos.find((p) => p.id === st.openPoId);
         if (po) renderDetail(po);
+        return;
+      }
+
+      if (t.id === 'ppArtRevoke') {
+        if (!window.confirm('Withdraw every artwork link already sent for this order? The files stay attached. You can send the order again to issue fresh links.')) return;
+        const status = $('#ppArtStatus');
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppArt, {
+            method: 'PATCH',
+            body: JSON.stringify({ poId: st.openPoId, revoke: true }),
+          });
+          if (status) status.textContent = (res && res.error) ? res.error : 'Links withdrawn. Send the order again to issue new ones.';
+        } catch (e) {
+          if (status) status.textContent = e.message || 'Could not withdraw the links.';
+        }
         return;
       }
 
@@ -1383,8 +1712,13 @@ export default {
         box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendor matches that.</div>';
         return;
       }
+      // Blacklisted vendors stay IN the list and are marked, rather than
+      // being hidden. Hiding one turns "we do not order from them, and here
+      // is why" into "that vendor seems to be missing", and somebody adds
+      // them again as a duplicate.
       box.innerHTML = '<div class="pp-search-results">' + matches.slice(0, 12).map((v) =>
         '<button data-vendorpick="' + esc(v.id) + '"><strong>' + esc(v.name) + '</strong>' +
+        (v.blacklisted === true ? ' <span class="pp-pill bad">Blacklisted</span>' : '') +
         (v.leadDays != null ? ' <span style="color:var(--muted)">' + esc(v.leadDays) + ' day lead</span>' : '') +
         '</button>'
       ).join('') + '</div>';
@@ -1491,10 +1825,34 @@ export default {
       }
     });
 
-    async function saveNew() {
+    /**
+     * The blacklist stop.
+     *
+     * The server refuses with 409 and the reason, and this asks the question
+     * rather than the browser deciding on its own. That ordering matters: the
+     * warning text comes from the vendor record on the server, so it cannot
+     * drift out of date in a page somebody left open, and the refusal still
+     * happens for anything that never goes through this screen.
+     *
+     * Returns true when the caller should retry with confirmBlacklist set.
+     */
+    function confirmBlacklisted(res) {
+      if (!res || res.blacklisted !== true) return false;
+      const reason = res.reason
+        ? '\n\nReason on file: ' + res.reason
+        : '\n\nNo reason was recorded, which is worth fixing on the vendor card.';
+      return window.confirm(
+        'You are ordering from ' + (res.vendorName || 'a blacklisted vendor') + ', which is blacklisted.' +
+        reason +
+        '\n\nGo ahead anyway? This gets recorded on the order.'
+      );
+    }
+
+    async function saveNew(confirmBlacklist) {
       const err = $('#ppFormErr');
       err.hidden = true;
       const payload = {
+        confirmBlacklist: confirmBlacklist === true,
         vendorId: $('#ppVendor').value,
         accountManager: $('#ppAm').value,
         neededBy: $('#ppNeededBy').value || null,
@@ -1518,6 +1876,12 @@ export default {
       };
       try {
         const res = await ctx.api.post(ENDPOINTS.ppPos, payload);
+        if (res && res.blacklisted === true && !payload.confirmBlacklist) {
+          if (confirmBlacklisted(res)) return saveNew(true);
+          err.textContent = res.error + ' Nothing was created.';
+          err.hidden = false;
+          return;
+        }
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
 
         // The PO exists now, so the staged files finally have something to
