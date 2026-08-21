@@ -53,6 +53,10 @@ export default async function handler(req, res) {
         address: settings.defaultShipTo || "",
         phone: settings.brandPhone || "",
       },
+      // Relative is right here: the print page is served from our own domain,
+      // so the browser resolves it correctly and the printed sheet carries
+      // the same mark the vendor's emailed copy does.
+      logoUrl: settings.logoUrl || "",
       artUrls,
     });
 

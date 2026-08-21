@@ -167,9 +167,16 @@ export default async function handler(req, res) {
     });
 
     const days = linkDays(settings);
+    // Absolute, always. A relative src in an email resolves against the mail
+    // client's own domain and shows a broken image in every inbox.
+    const logoUrl = settings.logoUrl
+      ? (/^https:\/\//.test(settings.logoUrl) ? settings.logoUrl : base + settings.logoUrl)
+      : "";
+
     const opts = {
       brand,
       sender: sender || {},
+      logoUrl,
       artUrls,
       artExpiryNote: Object.keys(artUrls).length
         ? `Links work for ${days} days; reply for a fresh one after that.`
