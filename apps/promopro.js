@@ -1491,6 +1491,20 @@ export default {
             '</div>' +
           '</div>' +
 
+          '<div class="pp-sect">Logo on the purchase order</div>' +
+          '<div class="pp-row">' +
+            '<div class="pp-field"><label>Logo</label>' +
+              '<input id="ppLogoUrl" value="' + esc(S.logoUrl === undefined ? '' : S.logoUrl) + '" placeholder="/assets/brand/pm-apparel-logo.png"' + (isAdmin ? '' : ' disabled') + '>' +
+              '<div class="pp-hint">Shown on the emailed order and the printed copy. Clear it for no logo. ' +
+                'A PO going out as Flyover Con or Iowa On Demand can point at its own file here.</div>' +
+            '</div>' +
+            (S.logoUrl
+              ? '<div class="pp-field"><label>Preview</label>' +
+                  '<img src="' + esc(S.logoUrl) + '" alt="" style="width:64px;height:64px;display:block">' +
+                '</div>'
+              : '') +
+          '</div>' +
+
           '<div class="pp-sect">Artwork links</div>' +
           '<div class="pp-row">' +
             '<div class="pp-field"><label>Days a vendor\u2019s artwork link stays good</label>' +
@@ -1549,6 +1563,7 @@ export default {
       // what an admin set.
       if ($('#ppDigestTo')) payload.chaseDigestTo = parseEmailList($('#ppDigestTo').value);
       if ($('#ppArtDays')) payload.artLinkDays = Number($('#ppArtDays').value) || 90;
+      if ($('#ppLogoUrl')) payload.logoUrl = $('#ppLogoUrl').value.trim();
       if ($('#ppCapture')) {
         payload.captureReplies = $('#ppCapture').value === 'yes';
         payload.captureDomain = $('#ppCaptureDomain') ? $('#ppCaptureDomain').value : '';
