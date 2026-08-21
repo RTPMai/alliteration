@@ -17,6 +17,10 @@
     {
       "path": "/api/mailme/cron-send",
       "schedule": "*/15 * * * *"
+    },
+    {
+      "path": "/api/promopro/cron-chase",
+      "schedule": "30 13 * * 1-5"
     }
   ],
   "headers": [
