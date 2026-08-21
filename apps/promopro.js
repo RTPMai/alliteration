@@ -100,6 +100,22 @@ export default {
     .pp-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: var(--accent-tint); color: var(--accent-deep); }
     .pp-pill.bad { background: var(--danger-tint); color: var(--danger-dk); }
 
+    .pp-addvendor { color: var(--accent); font-weight: 700; }
+
+    /* Quick-add sits over the order form rather than replacing it: the half
+       finished purchase order underneath must still be there afterwards. */
+    .pp-modal-back {
+      position: fixed; inset: 0; background: rgba(0,0,0,.35);
+      display: flex; align-items: flex-start; justify-content: center;
+      padding: 8vh 16px; z-index: 60;
+    }
+    .pp-modal {
+      background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+      width: 100%; max-width: 620px; padding: 20px 22px 22px; box-shadow: var(--shadow-pop);
+      max-height: 80vh; overflow: auto;
+    }
+    .pp-modal h2 { font-size: 18px; font-weight: 800; margin-bottom: 2px; }
+
     /* ---- forms ---- */
     .pp-form { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 20px; margin-bottom: 20px; }
     .pp-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 12px; }
@@ -984,6 +1000,36 @@ export default {
 
         (canEdit ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
         '<div class="pp-err" id="ppDetailErr" hidden></div>' +
+
+        // Two different things, kept apart on purpose.
+        //
+        // CANCEL is for an order that was real and stopped being real. The
+        // vendor may already have it. The record survives, drops out of the
+        // pipeline and stops being chased, and the vendor scorecard counts it
+        // as cancelled rather than as a completed order, so calling one off
+        // does not drag their numbers down.
+        //
+        // DELETE is for a mistake: typed wrong, never sent. Admin only, and
+        // hidden entirely once the order has been emailed, because deleting
+        // the only record of a document a vendor is working from is the one
+        // thing here that cannot be walked back.
+        (canEdit
+          ? '<div class="pp-sect">This order</div>' +
+            '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+              (po.cancelledAt
+                ? '<button class="pp-btn ghost" id="ppUncancel">Reinstate this order</button>' +
+                  '<span class="pp-hint">Cancelled ' + esc(String(po.cancelledAt).slice(0, 10)) + '.</span>'
+                : '<button class="pp-btn ghost" id="ppCancelPo">Cancel this order</button>') +
+              (isAdmin && !po.lastSentAt
+                ? '<button class="pp-btn ghost" id="ppDeletePo">Delete, raised in error</button>'
+                : '') +
+            '</div>' +
+            '<div class="pp-hint" style="margin-top:6px">' +
+              (po.lastSentAt
+                ? 'This order has been emailed, so it can be cancelled but not deleted. The record of what the vendor received stays.'
+                : 'Cancelling keeps the record and stops the chasing. Deleting removes it entirely, which is only offered because this one has never been sent.') +
+            '</div>'
+          : '') +
       '</div>';
 
       wrap.hidden = false;
@@ -1116,6 +1162,78 @@ export default {
       } catch (e) {
         err.textContent = e.message || 'Could not save the vendor.';
         err.hidden = false;
+      }
+    }
+
+    /* ---------------- quick add a vendor ---------------- */
+
+    /**
+     * The minimum needed to send this vendor an order, and nothing else.
+     *
+     * Deliberately shorter than the full card on the Vendors tab. Somebody
+     * halfway through a purchase order does not know, and should not be
+     * stopped to decide, whether this supplier is reliably slower to reply
+     * than the rest. Name and order email are the two the PO genuinely
+     * cannot go out without; the rest can be filled in later by whoever
+     * maintains the vendor list.
+     */
+    function openQuickVendor(prefillName) {
+      const back = document.createElement('div');
+      back.className = 'pp-modal-back';
+      back.id = 'ppQuickBack';
+      back.innerHTML = '<div class="pp-modal">' +
+        '<h2>Add a vendor</h2>' +
+        '<div class="pp-hint" style="margin-bottom:14px">Just enough to send them this order. Lead time and the rest can be filled in on the Vendors tab later.</div>' +
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Vendor name</label><input id="ppQName" value="' + esc(prefillName || '') + '" placeholder="SanMar"></div>' +
+          '<div class="pp-field"><label>Order email</label><input id="ppQEmail" type="email" placeholder="orders@vendor.com"></div>' +
+        '</div>' +
+        '<div class="pp-row">' +
+          '<div class="pp-field"><label>Lead days, order to our dock</label><input id="ppQLead" type="number" min="0" value="10">' +
+            '<div style="font-size:11px;color:var(--muted);margin-top:4px">A rough guess is fine and can be corrected. Left at ten it just means ten.</div>' +
+          '</div>' +
+          '<div class="pp-field"><label>Payment terms</label><input id="ppQTerms" placeholder="Net 30"></div>' +
+        '</div>' +
+        '<div style="margin-top:16px;display:flex;gap:8px">' +
+          '<button class="pp-btn" id="ppQSave">Add and use</button>' +
+          '<button class="pp-btn ghost" id="ppQCancel">Cancel</button>' +
+        '</div>' +
+        '<div class="pp-err" id="ppQErr" hidden></div>' +
+      '</div>';
+      root.appendChild(back);
+      const name = $('#ppQName');
+      if (name) { name.focus(); name.select(); }
+    }
+
+    function closeQuickVendor() {
+      const back = $('#ppQuickBack');
+      if (back) back.remove();
+    }
+
+    async function saveQuickVendor() {
+      const err = $('#ppQErr');
+      if (err) err.hidden = true;
+      const payload = {
+        name: $('#ppQName').value,
+        email: $('#ppQEmail').value,
+        leadDays: Number($('#ppQLead').value) || 0,
+        terms: $('#ppQTerms').value,
+      };
+      if (!String(payload.name || '').trim()) {
+        if (err) { err.textContent = 'A vendor needs a name.'; err.hidden = false; }
+        return;
+      }
+      try {
+        const res = await ctx.api.post(ENDPOINTS.ppVendors, payload);
+        if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
+        // Take the list straight off the response rather than re-reading
+        // everything: the order form underneath is half filled in and a full
+        // reload would rebuild it.
+        if (Array.isArray(res.vendors)) st.vendors = res.vendors;
+        closeQuickVendor();
+        if (res.vendor && res.vendor.id) pickVendor(res.vendor.id);
+      } catch (e) {
+        if (err) { err.textContent = e.message || 'Could not add the vendor.'; err.hidden = false; }
       }
     }
 
@@ -1492,6 +1610,13 @@ export default {
         return;
       }
 
+      if (t.dataset && t.dataset.newvendor !== undefined) {
+        openQuickVendor(t.dataset.newvendor);
+        return;
+      }
+      if (t.id === 'ppQSave') { await saveQuickVendor(); return; }
+      if (t.id === 'ppQCancel') { closeQuickVendor(); return; }
+
       if (t.id === 'ppCancel') { $('#ppFormWrap').hidden = true; return; }
       if (t.id === 'ppCloseDetail') { $('#ppDetailWrap').hidden = true; st.openPoId = null; return; }
       if (t.id === 'ppClearPick') {
@@ -1556,6 +1681,50 @@ export default {
 
       if (t.id === 'ppSave') { await saveNew(); return; }
       if (t.id === 'ppSaveDetail') { await saveDetail(); return; }
+
+      if (t.id === 'ppCancelPo' || t.id === 'ppUncancel') {
+        const undo = t.id === 'ppUncancel';
+        if (!undo && !window.confirm('Cancel this purchase order? It stays on the record and stops being chased. Let the vendor know separately if they already have it.')) return;
+        const err = $('#ppDetailErr');
+        if (err) err.hidden = true;
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppPos, {
+            method: 'PATCH',
+            body: JSON.stringify({ id: st.openPoId, cancelledAt: undo ? null : today() }),
+          });
+          if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
+          await loadAll();
+          renderAll();
+          const po = st.pos.find((p) => p.id === st.openPoId);
+          if (po) renderDetail(po);
+        } catch (e) {
+          if (err) { err.textContent = e.message || 'Could not change that.'; err.hidden = false; }
+        }
+        return;
+      }
+
+      if (t.id === 'ppDeletePo') {
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        // Typing the number is deliberate friction. This is the one action in
+        // the app with nothing behind it.
+        const typed = window.prompt(
+          'This deletes the purchase order and its history for good. There is no undo.\n\n' +
+          'Type the PO number to confirm: ' + ((po && po.poNumber) || ''));
+        if (!typed || typed.trim() !== String((po && po.poNumber) || '').trim()) return;
+        const err = $('#ppDetailErr');
+        if (err) err.hidden = true;
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppPos + '?id=' + encodeURIComponent(st.openPoId), { method: 'DELETE' });
+          if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
+          $('#ppDetailWrap').hidden = true;
+          st.openPoId = null;
+          await loadAll();
+          renderAll();
+        } catch (e) {
+          if (err) { err.textContent = e.message || 'Could not delete it.'; err.hidden = false; }
+        }
+        return;
+      }
 
       if (t.id === 'ppReceive' || t.id === 'ppReceiveAll') {
         const po = st.pos.find((p) => p.id === st.openPoId);
@@ -1704,12 +1873,24 @@ export default {
         ? active.filter((v) => v.name.toLowerCase().includes(q))
         : active;
 
+      // Adding a vendor mid-order is data entry, not administration. Sending
+      // somebody to another tab to do it is how they either abandon the order
+      // or pick a near-enough vendor that was already in the list, which is
+      // worse than the typing it saved.
+      const addRow = (label) => canEdit
+        ? '<button data-newvendor="' + esc(q ? term : '') + '" class="pp-addvendor">+ ' + esc(label) + '</button>'
+        : '<div style="padding:8px;font-size:12px;color:var(--muted)">Not on the list. Ask an account manager to add them.</div>';
+
       if (!active.length) {
-        box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendors yet. Add one on the Vendors tab.</div>';
+        box.innerHTML = '<div class="pp-search-results">' +
+          '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendors yet.</div>' +
+          addRow(q ? 'Add ' + term : 'Add a vendor') + '</div>';
         return;
       }
       if (!matches.length) {
-        box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendor matches that.</div>';
+        box.innerHTML = '<div class="pp-search-results">' +
+          '<div style="padding:8px;font-size:12px;color:var(--muted)">No vendor matches that.</div>' +
+          addRow(q ? 'Add ' + term + ' as a new vendor' : 'Add a vendor') + '</div>';
         return;
       }
       // Blacklisted vendors stay IN the list and are marked, rather than
@@ -1721,7 +1902,11 @@ export default {
         (v.blacklisted === true ? ' <span class="pp-pill bad">Blacklisted</span>' : '') +
         (v.leadDays != null ? ' <span style="color:var(--muted)">' + esc(v.leadDays) + ' day lead</span>' : '') +
         '</button>'
-      ).join('') + '</div>';
+      ).join('') +
+      // Offered even when something matched: "Sanmar" partially matching
+      // "SanMar Canada" must not stop you adding the one you meant.
+      (q && canEdit ? '<button data-newvendor="' + esc(term) + '" class="pp-addvendor">+ Add ' + esc(term) + ' as a new vendor</button>' : '') +
+      '</div>';
     }
 
     function pickVendor(id) {
