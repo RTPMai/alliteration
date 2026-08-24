@@ -1,6 +1,3 @@
-// PUT IN: apps/givinggauge.js (REPLACES the current one)
-// (this banner line is for verification only, delete it after checking the path)
-
 /**
  * GivingGauge — donation and sponsorship scoring.
  *
@@ -732,7 +729,7 @@ export default {
       var body;
       if (!a.found) {
         body = '<ul class="facts">' +
-          '<li><b>Status</b><span class="flag">No record in Apparelytics. Not a current client.</span></li>' +
+          '<li><b>Status</b><span class="flag">No record on the BackBone roster. Not a current client.</span></li>' +
           '<li><b>They said</b><span>' + esc(sr.claim || 'Not answered') + '</span></li>' +
           '<li><b>Contact</b><span>' + esc(row.meta.request.contactName) + ' &middot; ' +
             esc(row.meta.request.email) + '</span></li>' +
