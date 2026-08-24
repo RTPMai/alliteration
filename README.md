@@ -222,7 +222,8 @@ The form cannot answer everything the engine scores. Two things are left unset
 on purpose:
 
 - **The account is unmatched.** Relationship and spend are 46 of 100 points and
-  score zero until someone matches the org to Apparelytics. The submitter ticking
+  score zero until someone matches the org to a customer on the BackBone roster.
+  The submitter ticking
   "current customer" is a claim, not a match.
 - **Mission fit and org type are unclassified.** The engine defaults mission to
   general civic benefit and says so in its reason text.
