@@ -3912,7 +3912,7 @@ export async function start(ctx) {
     if (isNaN(n)) return null;
     return n >= 501 ? 5 : n >= 201 ? 4 : n >= 51 ? 3 : n >= 11 ? 2 : 1;
   }
-  // median_gap_days comes from Apparelytics' reorder-cadence report (mean/median days between
+  // median_gap_days is computed by the Printavo sync from each customer's invoice dates (median days between
   // consecutive orders). A gap of 0 usually means multiple invoices landed on the same day for a
   // customer with very few total orders (a data artifact, not real high-frequency ordering), so we
   // treat that as unavailable rather than silently scoring it 5-star.
@@ -4192,7 +4192,7 @@ export async function start(ctx) {
     if (scoreBasis === "ytd") {
       note.textContent = hasYearData
         ? "Scoring on " + new Date().getFullYear() + " revenue, invoices, and avg invoice so far this year. Star bands are scaled down for the partial year so tiers stay comparable to all-time. Clients with no orders yet this year score 1★ on those criteria."
-        : "No per-year data on these records yet — YTD can't be computed. Ask Claude to include revenue_by_year / invoices_by_year on the next Apparelytics refresh.";
+        : "No per-year data on these records yet — YTD can't be computed. Run the 'Reconcile roster from Printavo' button in Settings to build the per-year figures.";
     } else {
       note.textContent = "";
     }
@@ -4321,7 +4321,7 @@ export async function start(ctx) {
   // ---- Dashboard (Layer 3): portfolio health, AM workload, alerts ----
   // Alert thresholds are simple and visible on purpose (not tuned/hidden) so they're easy to argue
   // with and adjust. "Re-engagement candidate" reuses the days_since + revenue fields already on the
-  // roster rather than requiring a separate Apparelytics dormant pull.
+  // roster rather than requiring a separate dormant-account pull.
   const DASH_THRESHOLDS = {
     atRiskDaysSince: 90,        // high-tier client gone quiet this long -> at-risk
     reengageDaysSince: 180,     // fully dormant this long -> re-engagement candidate
@@ -4422,7 +4422,7 @@ export async function start(ctx) {
     }).join("");
     const note = $id("dashYearNote");
     if (years.length === 0) {
-      note.textContent = "No per-year data yet — figures below are all-time totals. Ask Claude to include revenue_by_year on the next Apparelytics refresh to enable this filter.";
+      note.textContent = "No per-year data yet — figures below are all-time totals. Run the 'Reconcile roster from Printavo' button in Settings to build the per-year figures and enable this filter.";
     } else {
       note.textContent = "";
     }
@@ -6243,47 +6243,6 @@ export async function start(ctx) {
       render();
     } catch (e) {
       $id("saveStatus").textContent = "Save failed, try again";
-    }
-  }
-
-  async function handleImport() {
-    const box = $id("importBox");
-    const errEl = $id("importErr");
-    errEl.innerHTML = "";
-    let parsed;
-    try {
-      parsed = JSON.parse(box.value);
-    } catch (e) {
-      errEl.innerHTML = '<div class="err">That is not valid JSON.</div>';
-      return;
-    }
-    if (!Array.isArray(parsed)) {
-      errEl.innerHTML = '<div class="err">Expected a JSON array of customer records.</div>';
-      return;
-    }
-    const required = ["customer_id", "company_name", "invoice_count", "last_invoice_date", "total_revenue"];
-    for (let i = 0; i < parsed.length; i++) {
-      for (let j = 0; j < required.length; j++) {
-        if (!(required[j] in parsed[i])) {
-          errEl.innerHTML = '<div class="err">Missing field "' + required[j] + '" on one or more records.</div>';
-          return;
-        }
-      }
-    }
-    try {
-      // Preserve promoted-prospect records (is_prospect: true) — they won't appear in a
-      // fresh Apparelytics pull until they actually transact in Printavo. A plain
-      // `state.synced = parsed` here would silently wipe them on every refresh.
-      const prospects = state.synced.filter(function(c) { return c.is_prospect; });
-      const merged = parsed.concat(prospects);
-      await saveSynced(merged);
-      state.synced = merged;
-      state.lastSynced = new Date().toISOString();
-      box.value = "";
-      render();
-      $one('[data-page="roster"]').click();
-    } catch (e) {
-      errEl.innerHTML = '<div class="err">Import saved locally but failed to sync to the server.</div>';
     }
   }
 
@@ -10173,7 +10132,6 @@ export async function start(ctx) {
     if (e.target.id === "detailOverlay") closeDetail();
   });
   $id("saveEnrichBtn").addEventListener("click", handleSaveEnrichment);
-  $id("importBtn").addEventListener("click", handleImport);
   $id("resetBtn").addEventListener("click", handleReset);
   $id("reconcileBtn").addEventListener("click", handleReconcile);
   loadMarketingInitiatives();
