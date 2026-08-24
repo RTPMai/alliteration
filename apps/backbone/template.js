@@ -11,7 +11,7 @@
  *     managing them from inside one app would imply that app owns them.
  *
  * KEPT in Settings, because they are BackBone's own data operations and belong
- * to it: the Apparelytics import, the Printavo sync, distance calculation, and
+ * to it: the Printavo sync, distance calculation, and
  * the reset-to-seed.
  */
 
@@ -372,27 +372,14 @@ export default `
     <!-- Users and Roles used to live here. Accounts are SHELL-level now (one
          login covers every app), so they moved to the shell's Settings screen.
          Managing them from inside BackBone would imply BackBone owns them. -->
-<div class="card" style="margin-bottom:16px">
-      <div class="card-hd"><h3>Refresh from Apparelytics</h3></div>
-      <div class="card-bd">
-        <div class="help">
-          Ask Claude to pull current customer data from Apparelytics and give you a JSON array
-          with <code>customer_id, company_name, invoice_count, last_invoice_date, total_revenue</code>
-          for each record. Paste it below. This replaces synced fields only — enrichment fields
-          you've entered are never touched by this.
-          <br/><br/>
-          Optional 6th field: <code>median_gap_days</code> &mdash; ask Claude to also run Apparelytics'
-          reorder-cadence report and include it. When present, the Order Frequency criterion on the
-          Scorecard tab computes automatically from real order history instead of needing a manual
-          estimate. Caveat: for customers with very few orders clustered on the same day (or long-dormant
-          accounts with only a couple of orders ever), this can read as artificially high-frequency —
-          worth a manual sanity check on any account you know is inactive.
-        </div>
-        <div id="importErr"></div>
-        <textarea class="import-textarea" id="importBox" placeholder='[{"customer_id":"123","company_name":"Acme","invoice_count":10,"last_invoice_date":"2026-06-01","total_revenue":5000}]'></textarea>
-        <button class="btn btn-green" id="importBtn">Import</button>
-      </div>
-    </div>
+    <!-- The "Refresh from Apparelytics" paste-import card was removed in Aug
+         2026. The Printavo sync computes invoice_count, total_revenue,
+         last_invoice_date, median_gap_days, revenue_by_year and
+         invoices_by_year itself, so the paste was redundant. It was also
+         destructive: handleImport() replaced the whole roster with whatever
+         was pasted, so a five-field paste stripped the per-year and cadence
+         fields the sync had built. "Reconcile roster from Printavo" below is
+         the supported way to rebuild the roster. -->
     <!-- Reorder timing moved here from MailMe in Aug 2026. "When is a customer
          late to reorder" is a fact about the customer, not about email, so it
          belongs where the roster and the order history live. MailMe still
@@ -501,7 +488,7 @@ export default `
       </div>
     </div>
     <div class="modal-bd">
-      <div class="section-lbl">Synced from Apparelytics</div>
+      <div class="section-lbl">Synced from Printavo</div>
       <div class="synced-grid" id="syncedGrid"></div>
 
       <div id="detailInquiries" style="display:none"></div>
