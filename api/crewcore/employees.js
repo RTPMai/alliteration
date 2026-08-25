@@ -166,7 +166,7 @@ export default async function handler(req, res) {
       const existing = await getEmployee(id);
       if (!existing) return res.status(404).json({ error: "Employee not found" });
 
-      const { ok, errors, record } = validateEmployee(body, { partial: true });
+      const { ok, errors, record } = validateEmployee(body, { partial: true, id });
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
 
       if (record.username !== undefined) {
