@@ -34,7 +34,7 @@ import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
-import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions } from "../../lib/promopro/blob-token.js";
+import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
 // whether a file that used to be fine still is.
@@ -454,6 +454,19 @@ async function diagnose(req, res, sess) {
       "Vercel has never called back to confirm an upload",
       "we ask it to call " + callbackUrlFor(req) +
         ". If uploads succeed but nothing attaches, that address is the thing to check."
+    );
+
+    // Named separately because the error storage gives for this is about
+    // access levels and does not mention that the wrong STORE is in use.
+    add(
+      usingSharedStore()
+        ? "artwork would go to the shared store"
+        : "artwork has its own store (" + artStoreSource() + ")",
+      !usingSharedStore(),
+      "artwork would be written to the shared store, which is public",
+      "the shared store cannot hold private files, and it cannot be made private because " +
+        "BackBone's emailed briefs are public URLs already in people's inboxes. Create a " +
+        "private Blob store, connect it to this project with the prefix PROMOPRO, and redeploy."
     );
 
     const failed = checks.filter((c) => !c.ok);
