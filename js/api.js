@@ -275,6 +275,7 @@ export const ENDPOINTS = {
   ppSend:          '/api/promopro/send',
   ppReceive:       '/api/promopro/receive',
   ppArtFile:       '/api/promopro/art-file',
+  ppArtUpload:     '/api/promopro/art-upload',
   ppPrint:         '/api/promopro/print',
 
   // ---- StitchSense ----
@@ -535,6 +536,7 @@ const MOCK_DATA = {
   [ENDPOINTS.ppSend]: () => ({ error: 'Sending is not available in sample mode.' }),
   [ENDPOINTS.ppReceive]: () => ({ error: 'Receiving is not available in sample mode.' }),
   [ENDPOINTS.ppArtFile]: () => ({ error: 'Artwork is not available in sample mode.' }),
+  [ENDPOINTS.ppArtUpload]: () => ({ error: 'Artwork is not available in sample mode.' }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
