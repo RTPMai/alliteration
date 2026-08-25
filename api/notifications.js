@@ -48,6 +48,66 @@ import {
   listNotificationSummaries, countSummaries, canCountFromIndex,
 } from "../lib/notifications/store.js";
 import { KEYS, readKey, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
+import { listEmployees } from "../lib/crewcore/store.js";
+
+// Who reports to the caller, for the "My team" tab (Ryan's ask, Aug 25 2026).
+//
+// The org chart lives in CrewCore (employee.reports_to holds a manager's
+// employee id) rather than being re-entered here, so there is one answer to
+// "who works for whom" and it is edited in the HR app where that belongs.
+//
+// This exposes no new data. A team-visibility notification is already
+// readable by every signed-in user; the tab is a lens over what the person
+// can already see, so the only thing resolved here is WHOSE items to gather,
+// not whether they may be read. Private items are filtered out by hidden()
+// in the handler regardless, and nothing from the employee record beyond a
+// username and a display name ever leaves this function — no rate, no notes.
+//
+// Three outcomes:
+//   reports -> the caller has direct reports recorded; that is the team.
+//   all     -> no reports recorded, but the caller's role already sees all
+//              data (admin/superuser). The whole shop is their team, which
+//              is what a small business means by it anyway.
+//   none    -> neither. The tab does not appear.
+async function resolveTeam(sess, me, isAdmin) {
+  let employees = [];
+  try {
+    employees = await listEmployees();
+  } catch (e) {
+    // CrewCore not reachable is not a reason to break Notifications. Fall
+    // back to the role answer rather than 500ing a screen that works.
+    employees = [];
+  }
+
+  const mine = employees.find((e) => String(e.username || "").toLowerCase() === me) || null;
+  const reports = mine
+    ? employees.filter((e) =>
+        e.reports_to && String(e.reports_to) === String(mine.id) &&
+        e.username && e.status !== "terminated")
+    : [];
+
+  if (reports.length) {
+    return {
+      scope: "reports",
+      team: reports.map((e) => ({
+        username: String(e.username).toLowerCase(),
+        name: e.name || e.username,
+      })),
+    };
+  }
+
+  if (isAdmin) {
+    const users = await listUsers();
+    return {
+      scope: "all",
+      team: users
+        .filter((u) => String(u.username).toLowerCase() !== me)
+        .map((u) => ({ username: String(u.username).toLowerCase(), name: u.name })),
+    };
+  }
+
+  return { scope: "none", team: [] };
+}
 
 // Backs the "link to a record" picker on manual notifications (Ryan's ask,
 // Aug 2026): search BackBone's own data by company name and hand back just
@@ -201,6 +261,15 @@ export default async function handler(req, res) {
         return res.status(200).json({
           people: users.map((u) => ({ username: u.username, name: u.name })),
         });
+      }
+
+      // Team membership for the "My team" tab. Same access level as the
+      // people picker above: any signed-in user may ask, and the answer for
+      // most of them is an empty team, which is how the tab knows to hide
+      // itself rather than the front end guessing from a role name.
+      if (req.query && req.query.team === "1") {
+        const { scope, team } = await resolveTeam(sess, me, await callerIsAdmin(sess));
+        return res.status(200).json({ scope, team });
       }
 
       // Link picker data for the create/edit form. ?linkSearch=lead|inquiry|client
