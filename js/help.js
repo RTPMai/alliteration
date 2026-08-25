@@ -10,6 +10,18 @@
 //
 // Colors are tokens only. No hex here; css/tokens.css owns theming.
 //
+// STACKING. z-index 90 puts the bubble above ordinary app content but below
+// every real dialog: GivingGauge and TravelTrack drawers (110/120), the
+// mobile rail (150), the shell header (200), and the full-screen modals in
+// CrewCore, MailMe and MarketMachine (400). A modal should cover a help
+// button, not the other way round.
+//
+// Two known overlaps, both cosmetic. PromoPro's modal is z-index 60, so the
+// bubble floats over it; that number also puts PromoPro's modal under the
+// shell header, which looks like a pre-existing bug in PromoPro rather than
+// something to work around here. And ShopStock's toast is bottom right at
+// z-index 300, so it lands on the bubble for the couple of seconds it shows.
+//
 // Talks to the server through js/api.js, the seam, same as everything else.
 
 import { ENDPOINTS, post } from './api.js';
@@ -24,7 +36,7 @@ const CSS = `
   width:48px;height:48px;border-radius:50%;border:none;
   background:var(--accent);color:var(--on-accent);
   font-family:inherit;font-size:20px;font-weight:700;line-height:1;
-  cursor:pointer;box-shadow:var(--shadow-card);z-index:60;
+  cursor:pointer;box-shadow:var(--shadow-card);z-index:90;
   display:flex;align-items:center;justify-content:center;
 }
 .help-fab:hover{background:var(--accent-deep)}
@@ -34,7 +46,7 @@ const CSS = `
   position:fixed;right:18px;bottom:calc(76px + env(safe-area-inset-bottom,0px));
   width:min(380px, calc(100vw - 36px));max-height:min(560px, calc(100vh - 140px));
   background:var(--card);border:1px solid var(--line);border-radius:var(--radius);
-  box-shadow:var(--shadow-card);z-index:60;display:flex;flex-direction:column;
+  box-shadow:var(--shadow-card);z-index:90;display:flex;flex-direction:column;
 }
 .help-panel[hidden]{display:none}
 .help-hd{
