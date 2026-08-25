@@ -57,13 +57,24 @@ export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(200).end();
 
-  if (req.method !== "POST") {
-    res.setHeader("Allow", "POST");
+  if (req.method !== "POST" && req.method !== "GET") {
+    res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Method not allowed" });
   }
 
   const sess = requireAuth(req, res);
   if (!sess) return;
+
+  // GET is a readiness check, not part of the upload.
+  //
+  // The upload library reports every failure as "Failed to retrieve the
+  // client token", whatever actually went wrong, so the specific reason this
+  // route returned never reaches the person looking at the screen. This
+  // walks the same steps in order and reports which one fails, in plain
+  // words. Same idea as MailMe's webhook heartbeat, and for the same reason:
+  // a subsystem that can only say "it did not work" costs an afternoon every
+  // time it breaks.
+  if (req.method === "GET") return diagnose(req, res, sess);
 
   try {
     const settings = await getSettings();
@@ -158,5 +169,76 @@ export default async function handler(req, res) {
     // 400 rather than 500: nearly everything that reaches here is a rejected
     // upload (too big, wrong type, PO full) and the browser shows the message.
     return res.status(400).json({ error: e.message });
+  }
+}
+
+/**
+ * Walk the upload preconditions in order and report the first thing missing.
+ * Read-only apart from one tiny test file, which is deleted immediately.
+ */
+async function diagnose(req, res, sess) {
+  const checks = [];
+  const add = (name, ok, detail) => checks.push({ name, ok, detail: detail || "" });
+
+  try {
+    const settings = await getSettings();
+    const canEdit = await canEditSession(sess, settings);
+    add("you can edit purchase orders", canEdit,
+      canEdit ? "" : "your role is not on the edit list in Settings");
+
+    add("SESSION_SECRET is set", artSigningAvailable(),
+      artSigningAvailable() ? "" : "artwork links cannot be signed without it");
+
+    const hasBlobToken = typeof process.env.BLOB_READ_WRITE_TOKEN === "string"
+      && process.env.BLOB_READ_WRITE_TOKEN.length > 0;
+    add("BLOB_READ_WRITE_TOKEN is set", hasBlobToken,
+      hasBlobToken ? "" : "add it in Vercel, then redeploy");
+
+    // The one that cannot be checked by looking: does this blob store
+    // actually accept a PRIVATE file? Private blobs are a newer feature, and
+    // a store that predates them fails here rather than at any of the steps
+    // above. A 20-byte file, written and removed.
+    if (hasBlobToken) {
+      try {
+        const { put, del } = await import("@vercel/blob");
+        const probe = await put(`promopro/_diag/${Date.now()}.txt`, "readiness probe", {
+          access: "private",
+          contentType: "text/plain",
+          addRandomSuffix: true,
+        });
+        add("the blob store accepts private files", true);
+        try { await del(probe.url); } catch (e) { /* a stray 20-byte file is harmless */ }
+      } catch (e) {
+        add("the blob store accepts private files", false, (e && e.message) || String(e));
+      }
+    }
+
+    // And the step the browser actually hits first.
+    if (hasBlobToken) {
+      try {
+        const { generateClientTokenFromReadWriteToken } = await import("@vercel/blob/client");
+        await generateClientTokenFromReadWriteToken({
+          token: process.env.BLOB_READ_WRITE_TOKEN,
+          pathname: "promopro/_diag/probe.txt",
+          access: "private",
+          maximumSizeInBytes: MAX_ART_BYTES,
+          validUntil: Date.now() + 60000,
+        });
+        add("an upload token can be minted", true);
+      } catch (e) {
+        add("an upload token can be minted", false, (e && e.message) || String(e));
+      }
+    }
+
+    const failed = checks.filter((c) => !c.ok);
+    return res.status(200).json({
+      ok: failed.length === 0,
+      summary: failed.length === 0
+        ? "Everything artwork uploads need is in place."
+        : "First problem: " + failed[0].name + (failed[0].detail ? " (" + failed[0].detail + ")" : ""),
+      checks,
+    });
+  } catch (e) {
+    return res.status(200).json({ ok: false, summary: "The check itself failed: " + e.message, checks });
   }
 }
