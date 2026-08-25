@@ -778,12 +778,30 @@ export default {
      * should not lose the ones that already worked. Which is also why a
      * failure carries on to the next file instead of stopping the run.
      */
+    // The real ceiling, and why it is checked HERE rather than only on the
+    // server. An upload travels as base64 inside a JSON request, and Vercel
+    // refuses any request body over 4.5 MB with a bare 413 before our own
+    // code runs. Base64 inflates a file by about a third, so anything over
+    // roughly 3.3 MB never reaches the friendly error the server would have
+    // given. Checking in the browser is the only place a person can be told
+    // what actually went wrong.
+    const ART_MAX_BYTES = 3 * 1024 * 1024;
+
     async function uploadArtTo(poId, files, onProgress) {
       const list = Array.from(files || []);
       const failed = [];
 
       for (let i = 0; i < list.length; i++) {
         const f = list[i];
+
+        if (f.size > ART_MAX_BYTES) {
+          failed.push(
+            f.name + ' is ' + (f.size / 1048576).toFixed(1) + ' MB. The limit is 3 MB, ' +
+            'so send a compressed copy or put a link to the full-size art in the notes.'
+          );
+          continue;
+        }
+
         if (onProgress) onProgress('Uploading ' + (i + 1) + ' of ' + list.length + ': ' + f.name);
         try {
           const dataUrl = await new Promise((resolve, reject) => {
@@ -980,6 +998,7 @@ export default {
               '<input type="file" id="ppArtFile" multiple style="display:none" ' +
                 'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
               '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
+              '<span class="pp-hint" style="margin-left:8px">3 MB per file</span>' +
               ((po.art || []).length ? '<button class="pp-btn ghost" id="ppArtRevoke" style="margin-left:6px">Withdraw sent links</button>' : '') +
               '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
             '</div>'
