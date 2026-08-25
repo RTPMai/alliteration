@@ -652,6 +652,44 @@ t.test('the blob token is found under a prefixed name too', async () => {
   }
 });
 
+t.test('both blob connection styles are supported', () => {
+  // Live on Aug 25: the store was connected the newer way, with BLOB_STORE_ID
+  // and a per-request OIDC token and NO read-write token anywhere.
+  // handleUpload() cannot work in that setup; handleUploadPresigned() plus
+  // issueSignedToken() works in either.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/handleUpload\b/.test(route), 'the read-write token path should remain');
+  t.assert(/handleUploadPresigned/.test(route), 'the OIDC path is what this deployment needs');
+  t.assert(/issueSignedToken/.test(route), 'which mints its token differently');
+  t.assert(/BLOB_STORE_ID/.test(route), 'and is detected by the store id');
+});
+
+t.test('both paths attach the file the same way', () => {
+  // Two upload flows must not become two ways of recording an attachment.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const calls = (route.match(/onUploadCompleted: recordUpload/g) || []).length;
+  t.equal(calls, 2, 'both flows should share one completion handler');
+  t.equal((route.match(/async function recordUpload/g) || []).length, 1,
+    'and there should be exactly one of it');
+});
+
+t.test('the browser is told which flow to use rather than guessing', () => {
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/flow === "1"/.test(route), 'the server should answer which flow applies');
+  const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
+  t.assert(/flow=1/.test(app), 'and the app should ask');
+  t.assert(/mod\.uploadPresigned/.test(app) && /mod\.upload\b/.test(app),
+    'the app needs both calls available to pick between');
+});
+
+t.test('a token is only passed when one exists', () => {
+  // Passing token: undefined stops the SDK falling back to its OIDC path,
+  // which turns a working deployment into a broken one.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/\.\.\.\(blobToken\(\) \? \{ token: blobToken\(\) \} : \{\}\)/.test(route),
+    'the token should be spread in conditionally, not always passed');
+});
+
 t.test('the diagnostic reports variable names, never values', () => {
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
   const diag = route.slice(route.indexOf('async function diagnose'));
