@@ -268,6 +268,7 @@ export default {
       imprintLocked: false,  // selection confirmed, picker collapsed
       poSuffix: '',          // what goes after the invoice number
       stagedArt: [],         // files chosen before the PO exists yet
+      artJustUploaded: null, // PO id whose upload has not been confirmed attached
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -858,15 +859,55 @@ export default {
     }
 
     /** Attach to the PO currently open on the detail screen. */
+    /**
+     * THE FILE IS ATTACHED BY VERCEL CALLING US BACK, not by the browser.
+     *
+     * upload() resolves as soon as the bytes have landed, which is a moment
+     * BEFORE the callback that records the file against the purchase order.
+     * Reading once, straight away, shows the order as it was, and the screen
+     * says "Nothing attached yet" about a file that is on its way.
+     *
+     * Shared by BOTH upload paths. It used to live only in the one on the
+     * order screen, so creating an order with artwork attached looked like
+     * the artwork had been dropped, and sending straight afterwards could
+     * genuinely email a vendor a purchase order with no art on it.
+     *
+     * Bounded on purpose: a few quick tries, then give up and say so rather
+     * than spinning. The file is not lost either way.
+     */
+    async function waitForArt(poId, expected, set) {
+      if (set) set('Attaching...');
+      for (let attempt = 0; attempt < 8; attempt++) {
+        await loadAll();
+        const po = st.pos.find((p) => p.id === poId);
+        if (po && (po.art || []).length >= expected) { if (set) set(''); return true; }
+        await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+      }
+      if (set) set('');
+      return false;
+    }
+
     async function uploadArt(files) {
       const status = $('#ppArtStatus');
       const set = (msg) => { if (status) status.textContent = msg; };
+      const before = ((st.pos.find((p) => p.id === st.openPoId) || {}).art || []).length;
+      const expected = before + Array.from(files || []).length;
       const failed = await uploadArtTo(st.openPoId, files, set);
+
+      if (failed.length < Array.from(files || []).length) {
+        st.artJustUploaded = st.openPoId;
+        await waitForArt(st.openPoId, expected, set);
+      }
 
       await loadAll();
       renderAll();
       const po = st.pos.find((p) => p.id === st.openPoId);
       if (po) renderDetail(po);
+
+      const landed = ((st.pos.find((p) => p.id === st.openPoId) || {}).art || []).length;
+      if (!failed.length && landed < expected) {
+        set('Uploaded, but it has not shown up on the order yet. Reload in a moment.');
+      }
 
       if (failed.length) {
         const s2 = $('#ppArtStatus');
@@ -1847,6 +1888,20 @@ export default {
         if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
         t.disabled = true;
         try {
+          // Re-read before sending. Artwork is attached by a callback that
+          // lands a moment after the upload finishes, so a PO sent within
+          // seconds of attaching could otherwise go to the vendor with the
+          // art missing and nothing to show it had happened.
+          await loadAll();
+          const fresh = st.pos.find((p) => p.id === st.openPoId);
+          const staged = fresh && Array.isArray(fresh.art) ? fresh.art.length : 0;
+          if (!staged && st.artJustUploaded === st.openPoId) {
+            if (!window.confirm('The artwork you just uploaded has not been recorded on this order yet. Send anyway, without it?')) {
+              t.disabled = false;
+              return;
+            }
+          }
+
           let res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
           // Asked again at send time, not just at creation: a vendor can be
           // blacklisted AFTER the order was raised, which is the case most
@@ -2157,12 +2212,27 @@ export default {
         const newId = res && res.po && res.po.id;
         let artProblem = '';
         if (newId && st.stagedArt.length) {
-          const failed = await uploadArtTo(newId, st.stagedArt);
+          const setCreateStatus = (msg) => {
+            if (!msg) { err.hidden = true; return; }
+            err.textContent = msg;
+            err.hidden = false;
+          };
+          const count = st.stagedArt.length;
+          const failed = await uploadArtTo(newId, st.stagedArt, setCreateStatus);
           if (failed.length) {
             artProblem = ' The order was created, but ' + failed.length +
               ' file' + (failed.length === 1 ? '' : 's') + ' did not upload: ' + failed.join(', ') +
               '. Open the order to try again.';
+          } else {
+            // Wait for the attachment before closing the form, or the order
+            // opens showing no artwork and somebody sends it that way.
+            const landed = await waitForArt(newId, count, setCreateStatus);
+            if (!landed) {
+              artProblem = ' The order was created and the files uploaded, but they have not ' +
+                'shown up on it yet. Open the order in a moment to check before sending.';
+            }
           }
+          setCreateStatus('');
         }
 
         st.picked = null;
