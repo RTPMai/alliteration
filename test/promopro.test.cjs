@@ -30,6 +30,9 @@ const vendorsRoute = read('api/promopro/vendors.js');
 const printavoRoute = read('api/promopro/printavo.js');
 const settingsRoute = readSoft('api/promopro/settings.js');
 const artRoute = readSoft('api/promopro/art.js');
+// Uploads moved out of art.js in Aug 2026, so the checks about how a file
+// gets INTO the store now read the route that issues the upload token.
+const artUploadRoute = readSoft('api/promopro/art-upload.js');
 const sendRoute = readSoft('api/promopro/send.js');
 const printRoute = readSoft('api/promopro/print.js');
 const doc = readSoft('lib/promopro/document.js');
@@ -365,17 +368,21 @@ t.test('a roster with no emails says so, rather than showing silent grey rows', 
     'the all-unselectable case needs its own explanation');
 });
 
-t.test('art upload is size-capped before the file is decoded', () => {
-  // Checking after Buffer.from() would mean allocating the oversized file
-  // first, which is the thing the cap exists to avoid.
-  const capIdx = artRoute.indexOf('MAX_BYTES');
-  const bufIdx = artRoute.indexOf('Buffer.from');
-  t.assert(capIdx !== -1 && bufIdx !== -1 && capIdx < bufIdx,
-    'the size check must come before decoding');
+t.test('the size cap rides on the upload token, not on our own decoding', () => {
+  // REWRITTEN Aug 2026. This used to check that MAX_BYTES was read before
+  // Buffer.from(), which mattered while the file was decoded inside a
+  // function. The file no longer passes through one: the cap is now a
+  // property of the token the browser is given, enforced by storage itself,
+  // so an oversized file is refused before a byte is sent rather than after
+  // it has been received and allocated.
+  t.assert(artUploadRoute.includes('maximumSizeInBytes'),
+    'the token must carry a size limit');
+  t.assert(!artRoute.includes('Buffer.from'),
+    'art.js should no longer decode uploads at all');
 });
 
-t.test('art uploads get an unguessable URL', () => {
-  t.assert(artRoute.includes('addRandomSuffix: true'),
+t.test('art uploads still get an unguessable path', () => {
+  t.assert(artUploadRoute.includes('addRandomSuffix: true'),
     'a predictable blob path would make every PO art file enumerable');
 });
 
@@ -386,10 +393,12 @@ t.test('artwork is stored private, not public', () => {
   // pulling the file was worse than leaving it. Private blobs plus signed
   // links removed that trade, so the old reasoning no longer holds and the
   // test that pinned it was updated rather than deleted.
-  t.assert(/access:\s*"private"/.test(artRoute),
+  t.assert(/access:\s*"private"/.test(artUploadRoute),
     'a public blob URL is permanent and unrevokable once forwarded');
-  t.assert(!/access:\s*"public"/.test(artRoute),
+  t.assert(!/access:\s*"public"/.test(artUploadRoute),
     'no upload path may fall back to a public blob');
+  t.assert(!/access:\s*"public"/.test(artRoute),
+    'nor may anything left in art.js');
 });
 
 t.test('deleting art really deletes the file', () => {

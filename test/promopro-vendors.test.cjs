@@ -560,34 +560,52 @@ t.test('the two failures give different messages', () => {
  * ARTWORK SIZE
  * ------------------------------------------------------------------ */
 
-t.test('the advertised limit is one that can actually be reached', () => {
-  // The live failure: the server said 25 MB, Vercel refuses any request body
-  // over 4.5 MB with a bare 413 before our code runs, and base64 inflates a
-  // file by a third. So the friendly message could never fire and a 3.5 MB
-  // PDF died with a raw platform error.
-  const art = require('fs').readFileSync('api/promopro/art.js', 'utf8');
-  const m = /const MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(art);
-  t.assert(m, 'the cap should still be declared in megabytes');
-  const mb = Number(m[1]);
-  t.assert(mb * 1.34 < 4.5,
-    'the cap plus base64 inflation has to fit inside a 4.5 MB request, got ' + mb + ' MB');
-});
-
-t.test('the browser refuses an oversized file before sending it', () => {
+t.test('artwork does not travel through a function any more', () => {
+  // The live failure: a 3.5 MB PDF died with a bare 413. Vercel refuses any
+  // request body over 4.5 MB, base64 inflates a file by a third, and the app
+  // was advertising 25 MB. QuickBooks, which this replaces, takes 20 MB.
   const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
-  t.assert(/ART_MAX_BYTES/.test(app), 'the check has to exist client-side');
   const fn = app.slice(app.indexOf('async function uploadArtTo'));
-  const guard = fn.slice(0, fn.indexOf('readAsDataURL'));
-  t.assert(/f\.size > ART_MAX_BYTES/.test(guard),
-    'the size check must come BEFORE the file is read and sent, or the 413 happens anyway');
+  const body = fn.slice(0, fn.indexOf('\n    }'));
+  t.assert(!/readAsDataURL/.test(body),
+    'base64 through our own API is the thing that capped out at 3.3 MB');
+  t.assert(/handleUploadUrl/.test(body), 'the browser should upload straight to storage');
 });
 
-t.test('the two limits agree', () => {
-  const art = require('fs').readFileSync('api/promopro/art.js', 'utf8');
+t.test('the browser and the token route agree on 20 MB', () => {
   const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
-  const server = /const MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(art)[1];
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
   const client = /const ART_MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(app)[1];
-  t.equal(client, server, 'a client cap looser than the server cap just moves the confusing error');
+  const server = /MAX_ART_BYTES = (\d+) \* 1024 \* 1024/.exec(route)[1];
+  t.equal(client, '20', 'the limit should match what QuickBooks accepted');
+  t.equal(client, server, 'a looser client cap just moves the confusing error later');
+});
+
+t.test('the upload token is issued only to somebody allowed to edit', () => {
+  // The browser gained the ability to send bytes, not to decide anything.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/requireAuth/.test(route), 'the token route must require a session');
+  t.assert(/canEditSession/.test(route), 'and edit permission');
+  const before = route.indexOf('onBeforeGenerateToken');
+  t.assert(route.indexOf('canEditSession') < before,
+    'permission has to be checked BEFORE a token is minted, not inside the callback');
+});
+
+t.test('the token is scoped, and the file stays private', () => {
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/maximumSizeInBytes/.test(route), 'the size cap belongs on the token');
+  t.assert(/allowedContentTypes/.test(route), 'so does the type restriction');
+  t.assert(/access:\s*"private"/.test(route),
+    'a public blob is permanent and unrevokable once forwarded');
+});
+
+t.test('the PO is recorded from the server callback, not the browser', () => {
+  // A client that could name its own blob could attach a file nobody checked.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const done = route.slice(route.indexOf('onUploadCompleted'));
+  t.assert(/updatePo/.test(done), 'the attachment should be written server-side');
+  t.assert(/art\.some\(/.test(done),
+    'the callback can be retried, so a repeat must not create a duplicate');
 });
 
 /* ------------------------------------------------------------------ *
