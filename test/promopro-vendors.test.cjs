@@ -523,6 +523,40 @@ t.test('clearing the logo is respected, absence falls back to the default', () =
 });
 
 /* ------------------------------------------------------------------ *
+ * THE SENDING DOMAIN CHECK
+ *
+ * Both of these are regressions caught live on Aug 21, on the first real
+ * attempt to send a purchase order.
+ * ------------------------------------------------------------------ */
+
+t.test('a domain typed with capitals still matches', () => {
+  // The live failure: the from-address was someone@PMApparel.com, Resend
+  // stores pmapparel.com, the comparison was ===, and a verified domain was
+  // reported as never added.
+  const rc = require('fs').readFileSync('lib/mailme/resend-client.js', 'utf8');
+  t.assert(/toLowerCase\(\)/.test(rc), 'the domain comparison must be case-insensitive');
+  t.assert(!/x\.name === domainName/.test(rc), 'the exact-match comparison is back');
+});
+
+t.test('could not check is not treated as not verified', () => {
+  // The worse half. listDomains() returns [] for a missing key, an outage
+  // and an empty account alike, so a Resend blip looked exactly like an
+  // unverified domain and blocked the send with a message that was untrue.
+  const send = require('fs').readFileSync('api/promopro/send.js', 'utf8');
+  t.assert(/domainStatusChecked/.test(send), 'the send gate should use the version that can say it did not know');
+  t.assert(/check\.reachable/.test(send), 'unreachable has to be its own branch');
+  const unreachable = send.slice(send.indexOf('!check.reachable'), send.indexOf('!check.found'));
+  t.assert(!/problems\.push/.test(unreachable),
+    'an unreachable provider must not block the send');
+});
+
+t.test('the two failures give different messages', () => {
+  const send = require('fs').readFileSync('api/promopro/send.js', 'utf8');
+  t.assert(/has not been added to Resend/.test(send), 'never added should say so');
+  t.assert(/rather than verified/.test(send), 'added but pending is a different fix');
+});
+
+/* ------------------------------------------------------------------ *
  * SETTINGS
  * ------------------------------------------------------------------ */
 
