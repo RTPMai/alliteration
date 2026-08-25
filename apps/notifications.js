@@ -9,9 +9,26 @@
  * a header-dropdown panel — Ryan preferred the full page. The header bell
  * (js/shell.js) still shows the open-count badge and navigates here.
  *
- * Two views, both driven off one fetch:
+ * Three views, all driven off one fetch:
  *   inbox -> notifications ASSIGNED TO the signed-in user
  *   sent  -> notifications CREATED BY the signed-in user
+ *   team  -> notifications assigned to the signed-in user's DIRECT REPORTS
+ *            (Ryan's ask, Aug 25 2026). Membership comes from CrewCore's
+ *            reports_to field, resolved server-side by api/notifications.js
+ *            ?team=1, so the org chart has one home instead of two. The tab
+ *            hides itself when the answer is an empty team, which means a
+ *            manager gets it by having reports recorded, not by being
+ *            granted anything. It exposes nothing new either: a team-
+ *            visibility notification is already readable by everyone signed
+ *            in, and private items stay creator-only here as everywhere.
+ *
+ * A filter bar sits under the tabs (same ask): search, app, type, due date,
+ * status, and a person picker that appears only when more than one person's
+ * work is on screen. The rules themselves live in lib/notifications/filters.js
+ * as pure functions so the tests can call them rather than grep for them.
+ * Active filters highlight, the count line says "showing 3 of 40", and an
+ * empty list caused by a filter says so instead of looking like an empty
+ * inbox.
  *
  * The create form's App and Type pickers are the same multi-select
  * toggle-pill pattern as Settings' role editor (.app-toggle there, .nt-toggle
@@ -43,6 +60,10 @@
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
 import { TYPES, GENERAL_APP, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES } from '../lib/notifications/schema.js';
+import {
+  DUE_FILTERS, STATUS_FILTERS, EMPTY_FILTERS,
+  applyFilters, activeFilterCount, teamPool, todayLocalISO,
+} from '../lib/notifications/filters.js';
 
 // Where a link opens, per type: { app, view }. "client" has no top-level
 // BackBone view of its own — the roster lives inside the dashboard page as
@@ -277,7 +298,27 @@ export default {
   .nt-hist-msg{color:var(--ink);margin-top:2px;font-style:italic}
 
   .nt-empty{padding:32px 20px;text-align:center;color:var(--muted);font-size:13px}
-  .nt-showdone{font-size:12px;color:var(--muted);margin:10px 0 4px;display:flex;align-items:center;gap:6px;cursor:pointer}
+  .nt-empty .nt-btn{margin-top:12px}
+
+  /* Filter bar. One row that wraps, not a collapsible panel: a filter you
+     cannot see is a filter you forget is on, and "where did my list go" is
+     the failure this whole feature exists to avoid. */
+  .nt-filters{display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+  .nt-filters input,.nt-filters select{
+    border:1px solid var(--line);border-radius:var(--radius-sm);
+    padding:6px 9px;font-family:inherit;font-size:12.5px;color:var(--ink);
+    background:var(--card);
+  }
+  .nt-filters input:focus,.nt-filters select:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint);
+  }
+  .nt-filters .nt-search{flex:1;min-width:170px}
+  .nt-filters select{max-width:170px}
+  .nt-filters select.on,.nt-filters input.on{
+    border-color:var(--accent);background:var(--accent-tint);color:var(--accent-deep);font-weight:600;
+  }
+  .nt-count{font-size:11.5px;color:var(--faint);margin:0 0 10px}
+  @media (max-width:640px){ .nt-filters select{max-width:none;flex:1;min-width:120px} }
 
   @media (max-width:640px){ .nt-reassign{flex-direction:column;align-items:stretch} }
   `,
@@ -297,13 +338,14 @@ export default {
       <div class="nt-tabs">
         <button class="nt-tab" data-tab="inbox">Assigned to me<span class="ct" id="ntInboxCt"></span></button>
         <button class="nt-tab" data-tab="sent">I assigned<span class="ct" id="ntSentCt"></span></button>
+        <button class="nt-tab" data-tab="team" id="ntTeamTab" style="display:none">My team<span class="ct" id="ntTeamCt"></span></button>
       </div>
+
+      <div class="nt-filters" id="ntFilters"></div>
+      <div class="nt-count" id="ntCount"></div>
 
       <div id="ntForm" style="display:none"></div>
       <div id="ntList"><div class="nt-empty">Loading…</div></div>
-      <label class="nt-showdone" id="ntShowDoneWrap" style="display:none">
-        <input type="checkbox" id="ntShowDone"> Show completed
-      </label>
     </div>
   `,
 
@@ -314,7 +356,15 @@ export default {
     let all = [];
     let people = [];
     let tab = 'inbox';
-    let showDone = false;
+    // One filter set, shared by all three tabs on purpose: switching tabs to
+    // check something and coming back to a list that quietly re-filtered
+    // itself is worse than carrying the filter across, and the bar shows
+    // what is on either way.
+    let filters = { ...EMPTY_FILTERS };
+    // { scope: 'reports' | 'all' | 'none', team: [{username, name}] } —
+    // resolved server-side from CrewCore's org chart, see api/notifications.js.
+    let teamInfo = { scope: 'none', team: [] };
+    const today = todayLocalISO();
     let formTypes = new Set();
     let formApps = new Set();
     // Per-card UI state that should NOT reset on every re-render: which
@@ -344,27 +394,121 @@ export default {
 
     async function load() {
       try {
-        const [notesRes, peopleRes] = await Promise.all([
+        const [notesRes, peopleRes, teamRes] = await Promise.all([
           ctx.api.get(ENDPOINTS.notifications),
-          people.length ? Promise.resolve({ people }) : ctx.api.get(ENDPOINTS.notifications, { people: '1' })
+          people.length ? Promise.resolve({ people }) : ctx.api.get(ENDPOINTS.notifications, { people: '1' }),
+          // A team lookup that fails must not take the whole screen with
+          // it: the two original tabs work without it.
+          teamInfo.scope !== 'none'
+            ? Promise.resolve(teamInfo)
+            : ctx.api.get(ENDPOINTS.notifications, { team: '1' }).catch(() => ({ scope: 'none', team: [] }))
         ]);
         all = notesRes.notifications || [];
         people = peopleRes.people || people;
+        teamInfo = { scope: teamRes.scope || 'none', team: teamRes.team || [] };
+        if (tab === 'team' && !canSeeTeam()) tab = 'inbox';
         renderTabs();
+        renderFilters();
         renderList();
       } catch (e) {
         $('#ntList').innerHTML = '<div class="nt-empty">Could not load notifications: ' + esc(e.message) + '</div>';
       }
     }
 
+    // The tab appears when there is actually a team behind it. Nobody has to
+    // be granted anything: record who reports to whom in CrewCore and the
+    // tab shows up for that manager on their next load.
+    function canSeeTeam() {
+      return teamInfo.scope !== 'none' && teamInfo.team.length > 0;
+    }
+
+    // The unfiltered pool for the current tab. Filters are applied on top of
+    // this, so "3 of 40" always means three of the forty on THIS tab.
+    function poolFor(which) {
+      if (which === 'sent') return all.filter((n) => n.createdBy === me);
+      if (which === 'team') return teamPool(all, teamInfo.team, me);
+      return all.filter((n) => n.assignedTo === me);
+    }
+
     function renderTabs() {
-      const inboxOpen = all.filter((n) => n.assignedTo === me && n.status === 'open').length;
-      const sentOpen = all.filter((n) => n.createdBy === me && n.status === 'open').length;
+      const openIn = (list) => list.filter((n) => n.status === 'open').length;
+      const inboxOpen = openIn(poolFor('inbox'));
+      const sentOpen = openIn(poolFor('sent'));
       $('#ntInboxCt').textContent = inboxOpen ? ' (' + inboxOpen + ')' : '';
       $('#ntSentCt').textContent = sentOpen ? ' (' + sentOpen + ')' : '';
+
+      const teamTab = $('#ntTeamTab');
+      if (canSeeTeam()) {
+        const teamOpen = openIn(poolFor('team'));
+        teamTab.style.display = '';
+        $('#ntTeamCt').textContent = teamOpen ? ' (' + teamOpen + ')' : '';
+      } else {
+        teamTab.style.display = 'none';
+      }
+
       root.querySelectorAll('.nt-tab').forEach((b) => {
         b.classList.toggle('active', b.dataset.tab === tab);
       });
+    }
+
+    // ---- Filter bar (Ryan's ask, Aug 25 2026) -------------------------------
+    // Rebuilt from `filters` on every render rather than mutated in place, so
+    // the controls can never disagree with the list they are filtering.
+
+    function optionsHtml(items, selected, allLabel) {
+      return '<option value="">' + esc(allLabel) + '</option>' +
+        items.map((it) => '<option value="' + esc(it.value) + '"' +
+          (it.value === selected ? ' selected' : '') + '>' + esc(it.label) + '</option>').join('');
+    }
+
+    function renderFilters() {
+      // Only offer people who actually appear on this tab. An assignee
+      // dropdown listing the whole company on a tab holding four people's
+      // work is a list of dead ends.
+      const pool = poolFor(tab);
+      const whoSeen = [];
+      pool.forEach((n) => {
+        const u = String(n.assignedTo || '').toLowerCase();
+        if (u && u !== me && !whoSeen.some((p) => p.value === u)) {
+          whoSeen.push({ value: u, label: n.assignedToName || u });
+        }
+      });
+      whoSeen.sort((a, b) => a.label.localeCompare(b.label));
+
+      const on = (v, dflt) => (v !== (dflt === undefined ? '' : dflt) ? ' class="on"' : '');
+
+      $('#ntFilters').innerHTML =
+        '<input class="nt-search' + (filters.q ? ' on' : '') + '" id="ntQ" type="search" ' +
+          'placeholder="Search title, person, or linked record" value="' + esc(filters.q) + '">' +
+        '<select id="ntApp"' + on(filters.appId) + '>' +
+          optionsHtml(APP_OPTIONS.map((a) => ({ value: a.id, label: a.name })), filters.appId, 'All apps') +
+        '</select>' +
+        '<select id="ntType"' + on(filters.type) + '>' +
+          optionsHtml(TYPES.map((t) => ({ value: t.value, label: t.label })), filters.type, 'All types') +
+        '</select>' +
+        '<select id="ntDue"' + on(filters.due, 'any') + '>' +
+          DUE_FILTERS.map((d) => '<option value="' + esc(d.value) + '"' +
+            (d.value === filters.due ? ' selected' : '') + '>' + esc(d.label) + '</option>').join('') +
+        '</select>' +
+        '<select id="ntStatus"' + on(filters.status, 'open') + '>' +
+          STATUS_FILTERS.map((s) => '<option value="' + esc(s.value) + '"' +
+            (s.value === filters.status ? ' selected' : '') + '>' + esc(s.label) + '</option>').join('') +
+        '</select>' +
+        (whoSeen.length > 1
+          ? '<select id="ntPerson"' + on(filters.person) + '>' +
+              optionsHtml(whoSeen, filters.person, 'Everyone') +
+            '</select>'
+          : '');
+    }
+
+    // Set a filter from one of the dropdowns: rebuild the bar (so the "this
+    // one is on" highlight is right) and the list. The search box does NOT
+    // come through here — see the input handler, which leaves the bar alone
+    // so the caret does not jump on every keystroke.
+    function setFilter(key, value) {
+      filters[key] = value;
+      renderFilters();
+      renderList();
     }
 
     function typePillClass(t) {
@@ -524,9 +668,15 @@ export default {
     function cardHtml(n) {
       const app0 = appMeta((n.appIds || [])[0]);
       const done = n.status === 'done';
-      const who = tab === 'inbox'
-        ? 'From ' + esc(n.createdByName || n.createdBy)
-        : 'To ' + esc(n.assignedToName || n.assignedTo);
+      // The team tab is the one place both halves matter: a manager needs to
+      // know whose plate it is on AND who put it there, since the answer to
+      // "why is this stuck" is often the second name.
+      const who = tab === 'team'
+        ? 'To ' + esc(n.assignedToName || n.assignedTo) +
+          ' \u00b7 from ' + esc(n.createdByName || n.createdBy)
+        : tab === 'inbox'
+          ? 'From ' + esc(n.createdByName || n.createdBy)
+          : 'To ' + esc(n.assignedToName || n.assignedTo);
       const due = n.dueDate ? ' \u00b7 ' + esc(fmtDue(n.dueDate)) : '';
       const completed = done && n.doneByName ? ' \u00b7 Completed by ' + esc(n.doneByName) : '';
       const appPills = (n.appIds || []).map((id) => {
@@ -573,24 +723,43 @@ export default {
         '</div>';
     }
 
-    function renderList() {
-      const mine = tab === 'inbox'
-        ? all.filter((n) => n.assignedTo === me)
-        : all.filter((n) => n.createdBy === me);
+    // Empty is not one state. "You have nothing" and "your filters hid
+    // everything" need different words and different exits, or the second
+    // one gets read as the first and somebody concludes the list is broken.
+    function emptyHtml(poolSize, activeCount) {
+      if (poolSize && activeCount) {
+        return '<div class="nt-empty">Nothing here matches the filters you have on.' +
+          '<div><button class="nt-btn small" id="ntClearEmpty">Clear filters</button></div>' +
+        '</div>';
+      }
+      const msg = tab === 'inbox'
+        ? 'Nothing assigned to you right now.'
+        : tab === 'sent'
+          ? 'You have not assigned anything yet.'
+          : 'Nothing on your team\u2019s plates right now.';
+      return '<div class="nt-empty">' + msg + '</div>';
+    }
 
-      const visible = mine.filter((n) => showDone || n.status !== 'done');
-      $('#ntShowDoneWrap').style.display = mine.some((n) => n.status === 'done') ? 'flex' : 'none';
+    function renderList() {
+      const pool = poolFor(tab);
+      const visible = applyFilters(pool, filters, { today });
+      const active = activeFilterCount(filters);
+
+      // Says why the list is the length it is, and carries the way out of a
+      // filter that is hiding more than it meant to.
+      $('#ntCount').innerHTML = pool.length
+        ? esc('Showing ' + visible.length + ' of ' + pool.length) +
+          (active
+            ? ' \u00b7 <button class="nt-btn small" id="ntClear">Clear filters (' + active + ')</button>'
+            : '')
+        : '';
 
       if (!visible.length) {
-        $('#ntList').innerHTML = '<div class="nt-empty">' +
-          (tab === 'inbox' ? 'Nothing assigned to you right now.' : 'You have not assigned anything yet.') +
-        '</div>';
+        $('#ntList').innerHTML = emptyHtml(pool.length, active);
         return;
       }
 
-      $('#ntList').innerHTML = visible
-        .sort((a, b) => (a.status === b.status ? 0 : a.status === 'done' ? 1 : -1))
-        .map(cardHtml).join('');
+      $('#ntList').innerHTML = visible.map(cardHtml).join('');
     }
 
     function fillWhoSelect() {
@@ -650,8 +819,13 @@ export default {
     root.querySelectorAll('.nt-tab').forEach((b) => {
       b.addEventListener('click', () => {
         tab = b.dataset.tab;
+        // The person filter is the one filter tied to the tab it was set on:
+        // "only Margo's" carried onto a tab Margo never appears on shows an
+        // empty list for a reason nobody can see. Everything else carries.
+        filters.person = '';
         ctx.go(tab);
         renderTabs();
+        renderFilters();
         renderList();
       });
     });
@@ -660,6 +834,15 @@ export default {
     // pickers, and every card, including ones re-rendered after a reload. ----
 
     root.addEventListener('click', async (e) => {
+      // Both clear buttons (the one in the count line and the one inside the
+      // "your filters hid everything" empty state) do the same thing.
+      if (e.target.id === 'ntClear' || e.target.id === 'ntClearEmpty') {
+        filters = { ...EMPTY_FILTERS };
+        renderFilters();
+        renderList();
+        return;
+      }
+
       const linkOpen = e.target.closest('[data-link-open]');
       if (linkOpen) {
         const route = LINK_ROUTE[linkOpen.dataset.linkType];
@@ -831,7 +1014,20 @@ export default {
       }
     });
 
+    let searchTimer = null;
+
     root.addEventListener('input', (e) => {
+      // The filter search box deliberately does NOT rebuild the filter bar:
+      // replacing the input you are typing into loses the caret on every
+      // keystroke. It updates its own highlight and re-renders the list only.
+      if (e.target.id === 'ntQ') {
+        const v = e.target.value;
+        e.target.classList.toggle('on', !!v.trim());
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => { filters.q = v.trim(); renderList(); }, 180);
+        return;
+      }
+
       const search = e.target.closest('[data-link-search]');
       if (!search) return;
       const scope = search.dataset.linkSearch;
@@ -844,9 +1040,12 @@ export default {
     });
 
     root.addEventListener('change', async (e) => {
-      if (e.target.id === 'ntShowDone') {
-        showDone = e.target.checked;
-        renderList();
+      const FILTER_IDS = {
+        ntApp: 'appId', ntType: 'type', ntDue: 'due',
+        ntStatus: 'status', ntPerson: 'person',
+      };
+      if (FILTER_IDS[e.target.id]) {
+        setFilter(FILTER_IDS[e.target.id], e.target.value);
         return;
       }
 
@@ -875,13 +1074,20 @@ export default {
 
     // Exposed so showView() (called by the shell on every route change,
     // including the very first one) can switch tabs without re-mounting.
-    this._setTab = (v) => { tab = v; renderTabs(); renderList(); };
+    // A URL asking for /notifications/team from somebody with no team lands
+    // on the inbox rather than an empty screen with no explanation.
+    this._setTab = (v) => {
+      tab = (v === 'team' && canSeeTeam()) ? 'team' : (v === 'sent' ? 'sent' : 'inbox');
+      renderTabs();
+      renderFilters();
+      renderList();
+    };
 
     await load();
-    this._setTab(ctx.defaultView === 'sent' ? 'sent' : 'inbox');
+    this._setTab(ctx.defaultView || 'inbox');
   },
 
   showView(view) {
-    if (this._setTab) this._setTab(view === 'sent' ? 'sent' : 'inbox');
+    if (this._setTab) this._setTab(view);
   }
 };
