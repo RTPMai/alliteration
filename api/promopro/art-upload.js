@@ -32,7 +32,7 @@ import { handleUpload, handleUploadPresigned } from "@vercel/blob/client";
 import { issueSignedToken } from "@vercel/blob";
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
-import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
+import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
 import { blobToken, blobTokenSource, blobTokenCandidates } from "../../lib/promopro/blob-token.js";
 
@@ -48,6 +48,26 @@ const ALLOWED_TYPES = [
   "application/octet-stream",
 ];
 
+/**
+ * WHERE VERCEL SHOULD CALL BACK when an upload finishes.
+ *
+ * Set explicitly, because the SDK's own guess is fragile and fails quietly.
+ * It only works out a callback URL from VERCEL_PROJECT_PRODUCTION_URL (or
+ * the preview equivalents), and if that variable is not exposed to the
+ * deployment it returns nothing, logs a console warning nobody reads, and
+ * simply never asks for a callback. The upload then succeeds and the file is
+ * never recorded, which is exactly what happened here: the bytes landed, the
+ * purchase order never heard about it.
+ *
+ * The host on the incoming request is not a guess. It is the deployment the
+ * browser is actually talking to.
+ */
+function callbackUrlFor(req) {
+  const base = (process.env.PROMOPRO_PUBLIC_URL || `https://${(req.headers && req.headers.host) || ""}`)
+    .replace(/\/+$/, "");
+  return `${base}/api/promopro/art-upload`;
+}
+
 function safeFilename(name) {
   return String(name || "artwork")
     .replace(/[^A-Za-z0-9._-]+/g, "-")
@@ -62,6 +82,52 @@ export default async function handler(req, res) {
   if (req.method !== "POST" && req.method !== "GET") {
     res.setHeader("Allow", "GET, POST");
     return res.status(405).json({ error: "Method not allowed" });
+  }
+
+  // THE COMPLETION CALLBACK HAS NO SESSION, AND MUST NOT NEED ONE.
+  //
+  // This route is called by two different callers. The browser asks for an
+  // upload token, carrying your cookie. Then, once the bytes have landed,
+  // VERCEL calls back server-to-server to say so, and that request has no
+  // cookie and never will.
+  //
+  // requireAuth used to run before everything, so the callback got a 401 and
+  // the file was never attached to the purchase order. The upload itself
+  // worked, which is why it looked like the upload had worked and the
+  // attachment had silently vanished.
+  //
+  // That call is NOT unauthenticated. It is signed, and the SDK verifies the
+  // signature before invoking onUploadCompleted: Ed25519 against
+  // BLOB_WEBHOOK_PUBLIC_KEY on the presigned path, the store's own key on
+  // the other. An unsigned or wrongly signed callback is refused there. What
+  // it cannot have is a session, because no person is involved.
+  let earlyBody = req.body;
+  if (typeof earlyBody === "string") {
+    try { earlyBody = JSON.parse(earlyBody); } catch (e) { earlyBody = {}; }
+  }
+  const isCompletionCallback = req.method === "POST"
+    && earlyBody && earlyBody.type === "blob.upload-completed";
+
+  if (isCompletionCallback) {
+    // A heartbeat, before anything can throw. Same idea as MailMe's webhook
+    // heartbeat: without it there is no way to tell "Vercel never called us"
+    // apart from "Vercel called and we rejected it", and those have
+    // completely different fixes.
+    try {
+      await saveSettings({ _artCallbackLastAt: new Date().toISOString() });
+    } catch (e) { /* a missing heartbeat must never fail the callback itself */ }
+
+    try {
+      const result = blobToken()
+        ? await handleUpload({ token: blobToken(), request: req, body: earlyBody, onBeforeGenerateToken: rejectTokenRequest, onUploadCompleted: recordUpload })
+        : await handleUploadPresigned({ request: req, body: earlyBody, getSignedToken: rejectTokenRequest, onUploadCompleted: recordUpload });
+      return res.status(200).json(result);
+    } catch (e) {
+      // A bad signature lands here. Logged loudly: it is either a
+      // misconfiguration or somebody poking at the endpoint.
+      console.error("promopro/art-upload completion callback rejected:", e && e.message);
+      return res.status(400).json({ error: e.message });
+    }
   }
 
   const sess = requireAuth(req, res);
@@ -153,6 +219,7 @@ export default async function handler(req, res) {
           maximumSizeInBytes: MAX_ART_BYTES,
           addRandomSuffix: true,
           access: "private",
+          callbackUrl: callbackUrlFor(req),
           // Carried through to onUploadCompleted, which runs later and in a
           // different request with no session of its own.
           tokenPayload: JSON.stringify({
@@ -175,6 +242,15 @@ export default async function handler(req, res) {
     // upload (too big, wrong type, PO full) and the browser shows the message.
     return res.status(400).json({ error: e.message });
   }
+}
+
+/**
+ * Never called on the completion path: a callback that somehow asked for a
+ * new token would be doing something it has no business doing, and this
+ * makes that a refusal rather than an accident.
+ */
+async function rejectTokenRequest() {
+  throw new Error("This callback cannot request an upload token");
 }
 
 /**
@@ -217,6 +293,7 @@ async function presignedFlow(req, body, sess, settings) {
         urlOptions: {
           access: "private",
           addRandomSuffix: true,
+          callbackUrl: callbackUrlFor(req),
           tokenPayload: JSON.stringify({
             poId,
             by: String(sess.username || "").toLowerCase(),
@@ -356,6 +433,21 @@ async function diagnose(req, res, sess) {
           "an upload token could not be minted", (e && e.message) || String(e));
       }
     }
+
+    // Not a pass/fail check, just the two facts that matter when a file
+    // uploads and never appears: where we asked Vercel to call back, and
+    // whether it ever has.
+    const settingsForBeat = await getSettings().catch(() => ({}));
+    const lastCallback = settingsForBeat._artCallbackLastAt || null;
+    add(
+      lastCallback
+        ? "an upload callback has been received (last " + lastCallback + ")"
+        : "an upload callback has never been received",
+      Boolean(lastCallback),
+      "Vercel has never called back to confirm an upload",
+      "we ask it to call " + callbackUrlFor(req) +
+        ". If uploads succeed but nothing attaches, that address is the thing to check."
+    );
 
     const failed = checks.filter((c) => !c.ok);
     return res.status(200).json({
