@@ -386,7 +386,7 @@ export const SHELL_APPS = [
     name: 'Notifications',
     role: 'Assigned tasks, needs, hand offs',
     accent: '#3E4C59',
-    views: [['inbox', 'Assigned to me'], ['sent', 'I assigned']],
+    views: [['inbox', 'Assigned to me'], ['sent', 'I assigned'], ['team', 'My team']],
     defaultView: 'inbox',
     // Not adminOnly: every signed-in employee uses this to assign and track
     // work across apps. See js/registry.js canAccess(): shell screens with
