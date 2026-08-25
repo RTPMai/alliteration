@@ -89,6 +89,9 @@ const LIVE_PREFIXES = [
   // Site Work: api/sitework.js is deployed. Superuser-only, gated in the
   // route itself, not merely hidden from the rail.
   '/api/sitework',
+  // Help bot: api/help.js is deployed. Shell-level, explanations only, no
+  // access to business data.
+  '/api/help',
   // WebsiteWidget: api/websitewidget/{stats,sites}.js are deployed. Both
   // live under the folder (no flat api/websitewidget.js) because Vercel
   // treats a same-named file and folder as a route conflict once the .js
@@ -261,6 +264,9 @@ export const ENDPOINTS = {
 
   // ---- Site Work (superuser-only section, not an app) ----
   sitework:        '/api/sitework',
+
+  // ---- Help bot (shell-level, bottom-right bubble) ----
+  help:            '/api/help',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',
