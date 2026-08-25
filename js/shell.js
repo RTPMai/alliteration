@@ -17,6 +17,7 @@ import { APPS, SHELL_APPS, SITE_APPS, getApp, canAccess, allowedViews, firstAllo
 import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
+import { initHelp } from './help.js';
 
 const HUB = 'hub';
 
@@ -105,6 +106,19 @@ export async function boot() {
 
   renderAvatar();
   initBell();
+
+  // The help bubble, bottom right, on every screen. It reads the CURRENT app
+  // and view at ask time rather than being handed them once, so an answer to
+  // "how is this calculated" is about whatever is actually on screen.
+  initHelp(() => {
+    const a = getApp(state.app);
+    return {
+      app: state.app,
+      view: state.view,
+      appName: a ? a.name : null,
+      viewName: a && state.view ? viewLabel(a, state.view) : null,
+    };
+  });
 
   const start = router.start();
   router.onRoute((route) => { handleRoute(route); refreshBell(); });
