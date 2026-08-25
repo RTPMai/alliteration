@@ -615,6 +615,17 @@ t.test('a failed upload can say which step broke', () => {
     'the app should ask for the real reason when it sees the opaque message');
 });
 
+t.test('a failed check reads as a problem, not as the thing it wanted', () => {
+  // Live on Aug 25: the first real diagnostic said "First problem:
+  // BLOB_READ_WRITE_TOKEN is set", which states the opposite of what
+  // happened. A check name and a failure message are different sentences.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/problem/.test(route), 'each check needs its own failure phrasing');
+  t.assert(!/"First problem: " \+ failed\[0\]\.name/.test(route),
+    'reporting a failure by its check name is what caused the confusing message');
+  t.assert(/is NOT set/.test(route), 'the negative case should be stated negatively');
+});
+
 t.test('the readiness probe cleans up after itself', () => {
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
   const diag = route.slice(route.indexOf('async function diagnose'));
