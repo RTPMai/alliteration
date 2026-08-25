@@ -768,6 +768,43 @@ t.test('a token is only passed when one exists', async () => {
   }
 });
 
+t.test('the store id is found under the name Vercel actually creates', async () => {
+  // Live on Aug 25: connecting a store with the prefix PROMOPRO produced
+  // PROMOPRO_STORE_ID, not PROMOPRO_BLOB_STORE_ID. Only the default
+  // connection is called BLOB_STORE_ID. Guessing the convention from the
+  // default's name was wrong.
+  const bt = await import('../lib/promopro/blob-token.js');
+  const saved = { ...process.env };
+  try {
+    Object.keys(process.env).forEach((k) => { if (/STORE_ID/.test(k)) delete process.env[k]; });
+    process.env.BLOB_STORE_ID = 'store_public_shared';
+    process.env.PROMOPRO_STORE_ID = 'store_private_art';
+    t.equal(bt.artStoreId(), 'store_private_art', 'the prefixed store must win');
+    t.equal(bt.artStoreSource(), 'PROMOPRO_STORE_ID');
+    t.equal(bt.usingSharedStore(), false);
+  } finally {
+    Object.keys(process.env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+  }
+});
+
+t.test('the shared public store is the last resort, never a preference', async () => {
+  const bt = await import('../lib/promopro/blob-token.js');
+  const saved = { ...process.env };
+  try {
+    Object.keys(process.env).forEach((k) => { if (/STORE_ID/.test(k)) delete process.env[k]; });
+    process.env.BLOB_STORE_ID = 'store_public_shared';
+    t.equal(bt.usingSharedStore(), true, 'with nothing else set it is all there is');
+
+    process.env.SOMETHING_ELSE_STORE_ID = 'store_other';
+    t.equal(bt.artStoreId(), 'store_other',
+      'any dedicated store beats the shared public one');
+  } finally {
+    Object.keys(process.env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+  }
+});
+
 t.test('artwork can live in a store of its own', async () => {
   // Live on Aug 25: public and private are a property of the STORE. The
   // shared store is public and has to stay public, because BackBone's
