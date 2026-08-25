@@ -178,21 +178,29 @@ export default async function handler(req, res) {
  */
 async function diagnose(req, res, sess) {
   const checks = [];
-  const add = (name, ok, detail) => checks.push({ name, ok, detail: detail || "" });
+  // Each check carries BOTH phrasings: what it is called when it passes, and
+  // what the PROBLEM is when it does not. Reporting a failure by its check
+  // name produces "First problem: BLOB_READ_WRITE_TOKEN is set", which reads
+  // as the opposite of what happened.
+  const add = (name, ok, problem, detail) =>
+    checks.push({ name, ok, problem: problem || name, detail: detail || "" });
 
   try {
     const settings = await getSettings();
     const canEdit = await canEditSession(sess, settings);
     add("you can edit purchase orders", canEdit,
-      canEdit ? "" : "your role is not on the edit list in Settings");
+      "you do not have permission to edit purchase orders",
+      canEdit ? "" : "your role is not on the edit list in PromoPro Settings");
 
     add("SESSION_SECRET is set", artSigningAvailable(),
-      artSigningAvailable() ? "" : "artwork links cannot be signed without it");
+      "SESSION_SECRET is NOT set on this deployment",
+      "artwork links cannot be signed without it");
 
     const hasBlobToken = typeof process.env.BLOB_READ_WRITE_TOKEN === "string"
       && process.env.BLOB_READ_WRITE_TOKEN.length > 0;
     add("BLOB_READ_WRITE_TOKEN is set", hasBlobToken,
-      hasBlobToken ? "" : "add it in Vercel, then redeploy");
+      "BLOB_READ_WRITE_TOKEN is NOT set on this deployment",
+      "connect a Blob store to this project in Vercel under Storage, which creates the variable, then redeploy");
 
     // The one that cannot be checked by looking: does this blob store
     // actually accept a PRIVATE file? Private blobs are a newer feature, and
@@ -209,7 +217,8 @@ async function diagnose(req, res, sess) {
         add("the blob store accepts private files", true);
         try { await del(probe.url); } catch (e) { /* a stray 20-byte file is harmless */ }
       } catch (e) {
-        add("the blob store accepts private files", false, (e && e.message) || String(e));
+        add("the blob store accepts private files", false,
+          "the blob store refused a private file", (e && e.message) || String(e));
       }
     }
 
@@ -226,7 +235,8 @@ async function diagnose(req, res, sess) {
         });
         add("an upload token can be minted", true);
       } catch (e) {
-        add("an upload token can be minted", false, (e && e.message) || String(e));
+        add("an upload token can be minted", false,
+          "an upload token could not be minted", (e && e.message) || String(e));
       }
     }
 
@@ -235,7 +245,7 @@ async function diagnose(req, res, sess) {
       ok: failed.length === 0,
       summary: failed.length === 0
         ? "Everything artwork uploads need is in place."
-        : "First problem: " + failed[0].name + (failed[0].detail ? " (" + failed[0].detail + ")" : ""),
+        : failed[0].problem + (failed[0].detail ? ". " + failed[0].detail + "." : "."),
       checks,
     });
   } catch (e) {
