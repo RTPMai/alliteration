@@ -21,6 +21,7 @@
 // Env: BLOB_READ_WRITE_TOKEN, already set.
 
 import { del } from "@vercel/blob";
+import { artBlobOptions } from "../../lib/promopro/blob-token.js";
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
@@ -77,7 +78,7 @@ export default async function handler(req, res) {
       await Promise.all(going.map(async (a) => {
         if (!a.url) return;
         try {
-          await del(a.url);
+          await del(a.url, artBlobOptions());
         } catch (e) {
           // An orphaned blob is untidy; a delete that half worked and then
           // threw would leave the PO still pointing at a file that is gone.
