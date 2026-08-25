@@ -268,7 +268,6 @@ export default {
       imprintLocked: false,  // selection confirmed, picker collapsed
       poSuffix: '',          // what goes after the invoice number
       stagedArt: [],         // files chosen before the PO exists yet
-      artJustUploaded: null, // PO id whose upload has not been confirmed attached
       picked: null,        // the chosen Printavo invoice, if any
       openPoId: null,
       searchTimer: null,
@@ -838,7 +837,12 @@ export default {
 
         try {
           const upload = await getUploader();
-          await upload(f.name, f, {
+          // The destination folder is fixed by the purchase order, and the
+          // server refuses to sign a token for anywhere else. That is what
+          // lets us report the finished upload ourselves a moment later
+          // instead of waiting to be told.
+          const pathname = 'promopro/art/' + poId + '/' + f.name;
+          const result = await upload(pathname, f, {
             access: 'private',
             handleUploadUrl: ENDPOINTS.ppArtUpload,
             clientPayload: JSON.stringify({ poId, filename: f.name }),
@@ -849,6 +853,21 @@ export default {
               if (onProgress) onProgress('Uploading ' + label + f.name + ' ' + Math.round(percentage) + '%');
             },
           });
+
+          // Record it now rather than waiting for Vercel to call the server
+          // back. The server checks with storage that the file is really
+          // there before believing any of this.
+          try {
+            await ctx.api.post(ENDPOINTS.ppArtUpload, {
+              attach: true,
+              poId,
+              pathname: (result && result.pathname) || pathname,
+              filename: f.name,
+            });
+          } catch (e) {
+            // Not a failure: the callback will attach it a moment later.
+            // Left to the waiting loop, which is now the rare path.
+          }
         } catch (e) {
           failed.push(f.name + ' (' + (e.message || 'upload failed') + ')');
         }
@@ -895,7 +914,6 @@ export default {
       const failed = await uploadArtTo(st.openPoId, files, set);
 
       if (failed.length < Array.from(files || []).length) {
-        st.artJustUploaded = st.openPoId;
         await waitForArt(st.openPoId, expected, set);
       }
 
@@ -1888,20 +1906,14 @@ export default {
         if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
         t.disabled = true;
         try {
-          // Re-read before sending. Artwork is attached by a callback that
-          // lands a moment after the upload finishes, so a PO sent within
-          // seconds of attaching could otherwise go to the vendor with the
-          // art missing and nothing to show it had happened.
-          await loadAll();
-          const fresh = st.pos.find((p) => p.id === st.openPoId);
-          const staged = fresh && Array.isArray(fresh.art) ? fresh.art.length : 0;
-          if (!staged && st.artJustUploaded === st.openPoId) {
-            if (!window.confirm('The artwork you just uploaded has not been recorded on this order yet. Send anyway, without it?')) {
-              t.disabled = false;
-              return;
-            }
-          }
-
+          // No check here any more, and deliberately none.
+          //
+          // This used to re-read the order and, if the artwork had not been
+          // recorded yet, ask whether to send without it. That was a
+          // question nobody should ever be asked: the file was uploaded, so
+          // obviously it belongs on the email. The send route now asks
+          // STORAGE what artwork exists rather than trusting the record, so
+          // the race it was guarding against cannot happen.
           let res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
           // Asked again at send time, not just at creation: a vendor can be
           // blacklisted AFTER the order was raised, which is the case most
