@@ -33,6 +33,7 @@ import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
+import { blobToken, blobTokenSource, blobTokenCandidates } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
 // whether a file that used to be fine still is.
@@ -92,7 +93,17 @@ export default async function handler(req, res) {
     let body = req.body;
     if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
 
+    // Passed explicitly rather than left to the SDK's own lookup, which only
+    // knows the name BLOB_READ_WRITE_TOKEN. See lib/promopro/blob-token.js.
+    const token = blobToken();
+    if (!token) {
+      return res.status(500).json({
+        error: "No Blob read-write token is available on this deployment. Open /api/promopro/art-upload while signed in for the details.",
+      });
+    }
+
     const result = await handleUpload({
+      token,
       request: req,
       body,
 
@@ -196,11 +207,18 @@ async function diagnose(req, res, sess) {
       "SESSION_SECRET is NOT set on this deployment",
       "artwork links cannot be signed without it");
 
-    const hasBlobToken = typeof process.env.BLOB_READ_WRITE_TOKEN === "string"
-      && process.env.BLOB_READ_WRITE_TOKEN.length > 0;
-    add("BLOB_READ_WRITE_TOKEN is set", hasBlobToken,
-      "BLOB_READ_WRITE_TOKEN is NOT set on this deployment",
-      "connect a Blob store to this project in Vercel under Storage, which creates the variable, then redeploy");
+    const source = blobTokenSource();
+    const hasBlobToken = source !== null;
+    add(
+      "a Blob read-write token is available" + (source ? " (from " + source + ")" : ""),
+      hasBlobToken,
+      "no Blob read-write token is available on this deployment",
+      // Names only, never values. A readiness check that prints a credential
+      // is worse than the fault it exists to explain.
+      "blob-related variables present: " +
+        (blobTokenCandidates().join(", ") || "none at all") +
+        ". Connect a Blob store to this project in Vercel under Storage, then redeploy."
+    );
 
     // The one that cannot be checked by looking: does this blob store
     // actually accept a PRIVATE file? Private blobs are a newer feature, and
@@ -210,6 +228,7 @@ async function diagnose(req, res, sess) {
       try {
         const { put, del } = await import("@vercel/blob");
         const probe = await put(`promopro/_diag/${Date.now()}.txt`, "readiness probe", {
+          token: blobToken(),
           access: "private",
           contentType: "text/plain",
           addRandomSuffix: true,
@@ -227,7 +246,7 @@ async function diagnose(req, res, sess) {
       try {
         const { generateClientTokenFromReadWriteToken } = await import("@vercel/blob/client");
         await generateClientTokenFromReadWriteToken({
-          token: process.env.BLOB_READ_WRITE_TOKEN,
+          token: blobToken(),
           pathname: "promopro/_diag/probe.txt",
           access: "private",
           maximumSizeInBytes: MAX_ART_BYTES,
