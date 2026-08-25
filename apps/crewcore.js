@@ -1,4 +1,3 @@
-// PUT IN: apps/crewcore.js (REPLACES the current one)
 /**
  * CrewCore — employee management for the whole team.
  *
@@ -659,6 +658,15 @@ export default {
           <div><label>Department</label>
             <select id="fDept">${DEPARTMENTS.map((d) => `<option value="${esc(d)}" ${emp && emp.department === d ? 'selected' : ''}>${esc(d)}</option>`).join('')}</select>
           </div>
+          <div><label>Reports to</label>
+            <select id="fReportsTo">
+              <option value="">Nobody</option>
+              ${(this._employees || [])
+                .filter((x) => !emp || x.id !== emp.id)
+                .map((x) => `<option value="${esc(x.id)}" ${emp && emp.reports_to === x.id ? 'selected' : ''}>${esc(x.name)}</option>`)
+                .join('')}
+            </select>
+          </div>
           <div><label>Title</label><input id="fTitle" value="${esc(emp ? emp.title : '')}"></div>
           <div><label>Start date</label><input id="fStart" type="date" value="${esc(emp ? emp.start_date : '')}"></div>
           <div><label>Status</label>
@@ -728,6 +736,9 @@ export default {
       const payload = {
         name: $('#fName').value,
         department: $('#fDept').value,
+        // Empty means nobody, which is a real answer (the owner reports to
+        // no one), so this is sent as null rather than left off the payload.
+        reports_to: $('#fReportsTo').value || null,
         title: $('#fTitle').value,
         start_date: $('#fStart').value,
         status: $('#fStatus').value,
