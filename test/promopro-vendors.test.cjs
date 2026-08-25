@@ -667,10 +667,71 @@ t.test('both blob connection styles are supported', () => {
 t.test('both paths attach the file the same way', () => {
   // Two upload flows must not become two ways of recording an attachment.
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  // Four references now: the two token-issuing flows, and the two branches
+  // that handle Vercel's completion callback.
   const calls = (route.match(/onUploadCompleted: recordUpload/g) || []).length;
-  t.equal(calls, 2, 'both flows should share one completion handler');
+  t.equal(calls, 4, 'every flow should share the one completion handler');
   t.equal((route.match(/async function recordUpload/g) || []).length, 1,
     'and there should be exactly one of it');
+});
+
+t.test('the completion callback is not blocked by the login check', () => {
+  // Live on Aug 25: the upload worked and the file never attached, because
+  // requireAuth ran before everything and Vercel's server-to-server callback
+  // has no session cookie. It got a 401 and the attachment was lost.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const cb = route.indexOf('isCompletionCallback');
+  const auth = route.indexOf('const sess = requireAuth');
+  t.assert(cb !== -1 && auth !== -1, 'both branches should exist');
+  t.assert(cb < auth, 'the callback has to be handled BEFORE the session check');
+});
+
+t.test('the callback is still verified, just not by a cookie', () => {
+  // Letting it past requireAuth must not mean letting it past everything.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const branch = route.slice(route.indexOf('if (isCompletionCallback)'), route.indexOf('const sess = requireAuth'));
+  t.assert(/handleUploadPresigned|handleUpload/.test(branch),
+    'the SDK verifies the signature before it calls onUploadCompleted');
+  t.assert(/rejectTokenRequest/.test(branch),
+    'a callback must not be able to mint itself a new upload token');
+  t.assert(/catch/.test(branch), 'a bad signature should be refused, not thrown to the client raw');
+});
+
+t.test('the screen waits for the attachment rather than declaring it missing', () => {
+  // upload() resolves when the bytes land, which is BEFORE the callback that
+  // records the file. Reading once shows the order as it was.
+  const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
+  const fn = app.slice(app.indexOf('async function uploadArt(files)'));
+  const body = fn.slice(0, fn.indexOf('\n    }'));
+  t.assert(/attempt < \d+/.test(body), 'it should retry a bounded number of times');
+  t.assert(/has not shown up on the order yet/.test(body),
+    'and say so plainly if it still has not landed, rather than claiming nothing was attached');
+});
+
+t.test('the callback address is set explicitly, not guessed by the SDK', () => {
+  // Live on Aug 25, second attempt: the upload succeeded and the file still
+  // never attached. The SDK works out a callback URL only from
+  // VERCEL_PROJECT_PRODUCTION_URL, and when that is not exposed it returns
+  // nothing, logs a warning nobody reads, and never asks for a callback at
+  // all. Silence, not an error.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/function callbackUrlFor/.test(route), 'we should compute it ourselves');
+  t.assert(/headers && req\.headers\.host/.test(route),
+    'the request host is the deployment actually in use, not a guess');
+  const uses = (route.match(/callbackUrl: callbackUrlFor\(req\)/g) || []).length;
+  t.equal(uses, 2, 'both upload flows need it');
+});
+
+t.test('a heartbeat records whether a callback ever arrived', () => {
+  // Without it, "Vercel never called us" and "Vercel called and we rejected
+  // it" look identical, and they need completely different fixes.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/_artCallbackLastAt/.test(route), 'the arrival should be recorded');
+  const branch = route.slice(route.indexOf('if (isCompletionCallback)'), route.indexOf('const sess = requireAuth'));
+  const beat = branch.indexOf('_artCallbackLastAt');
+  const work = branch.indexOf('handleUploadPresigned');
+  t.assert(beat !== -1 && beat < work,
+    'record the arrival BEFORE anything that can throw, or a rejected callback looks like no callback');
 });
 
 t.test('the browser is told which flow to use rather than guessing', () => {
