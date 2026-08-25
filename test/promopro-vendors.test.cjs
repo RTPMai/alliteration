@@ -557,6 +557,40 @@ t.test('the two failures give different messages', () => {
 });
 
 /* ------------------------------------------------------------------ *
+ * ARTWORK SIZE
+ * ------------------------------------------------------------------ */
+
+t.test('the advertised limit is one that can actually be reached', () => {
+  // The live failure: the server said 25 MB, Vercel refuses any request body
+  // over 4.5 MB with a bare 413 before our code runs, and base64 inflates a
+  // file by a third. So the friendly message could never fire and a 3.5 MB
+  // PDF died with a raw platform error.
+  const art = require('fs').readFileSync('api/promopro/art.js', 'utf8');
+  const m = /const MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(art);
+  t.assert(m, 'the cap should still be declared in megabytes');
+  const mb = Number(m[1]);
+  t.assert(mb * 1.34 < 4.5,
+    'the cap plus base64 inflation has to fit inside a 4.5 MB request, got ' + mb + ' MB');
+});
+
+t.test('the browser refuses an oversized file before sending it', () => {
+  const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
+  t.assert(/ART_MAX_BYTES/.test(app), 'the check has to exist client-side');
+  const fn = app.slice(app.indexOf('async function uploadArtTo'));
+  const guard = fn.slice(0, fn.indexOf('readAsDataURL'));
+  t.assert(/f\.size > ART_MAX_BYTES/.test(guard),
+    'the size check must come BEFORE the file is read and sent, or the 413 happens anyway');
+});
+
+t.test('the two limits agree', () => {
+  const art = require('fs').readFileSync('api/promopro/art.js', 'utf8');
+  const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
+  const server = /const MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(art)[1];
+  const client = /const ART_MAX_BYTES = (\d+) \* 1024 \* 1024/.exec(app)[1];
+  t.equal(client, server, 'a client cap looser than the server cap just moves the confusing error');
+});
+
+/* ------------------------------------------------------------------ *
  * SETTINGS
  * ------------------------------------------------------------------ */
 
