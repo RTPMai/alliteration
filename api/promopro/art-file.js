@@ -20,7 +20,8 @@
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
-import { head } from "@vercel/blob";
+import { get } from "@vercel/blob";
+import { artBlobOptions } from "../../lib/promopro/blob-token.js";
 import { getSession } from "../../lib/session.js";
 import { getPo } from "../../lib/promopro/store.js";
 import { readArtToken } from "../../lib/promopro/art-token.js";
@@ -114,17 +115,20 @@ async function stream(res, po, fileId) {
     });
   }
 
-  // Private blobs are fetched with the store token attached, which is why
-  // this has to be proxied rather than redirected: a redirect would send the
-  // browser to a URL it cannot read.
-  const meta = await head(file.url);
-  const upstream = await fetch(meta.downloadUrl || file.url);
-  if (!upstream.ok) {
-    console.error("[promopro] blob fetch failed", upstream.status, file.url);
+  // A PRIVATE blob cannot be fetched by URL, by anybody, including us. It
+  // has to be read through the SDK with the store's credentials attached,
+  // which is also why this is proxied rather than redirected: a redirect
+  // would send the vendor's browser to a URL it cannot read.
+  const result = await get(file.pathname || file.url, {
+    ...artBlobOptions(),
+    access: "private",
+  });
+  if (!result || !result.stream) {
+    console.error("[promopro] blob read returned nothing for", file.pathname || file.url);
     return fail(res, 502, { title: "The file could not be read.", body: "Please try again in a moment." });
   }
 
-  const buf = Buffer.from(await upstream.arrayBuffer());
+  const buf = Buffer.from(await new Response(result.stream).arrayBuffer());
   res.setHeader("Content-Type", file.contentType || "application/octet-stream");
   res.setHeader("Content-Length", String(buf.length));
   // A vendor wants the file on their machine, not rendered in a tab.
