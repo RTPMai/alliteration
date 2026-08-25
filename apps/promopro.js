@@ -801,8 +801,19 @@ export default {
     let blobUploader = null;
     async function getUploader() {
       if (!blobUploader) {
+        // WHICH upload call applies depends on how the Blob store is
+        // connected, and only the server can tell. A store with a
+        // read-write token uses upload(); one connected the newer way, with
+        // a per-request OIDC token and a store id, uses uploadPresigned().
+        // Asking is one small request and removes the guess.
+        let flow = 'presigned';
+        try {
+          const r = await ctx.api.get(ENDPOINTS.ppArtUpload + '?flow=1');
+          if (r && r.flow) flow = r.flow;
+        } catch (e) { /* fall through to the default and let the error be the real one */ }
+
         const mod = await import('../vendor/blob-client.js');
-        blobUploader = mod.upload;
+        blobUploader = flow === 'token' ? mod.upload : mod.uploadPresigned;
       }
       return blobUploader;
     }
