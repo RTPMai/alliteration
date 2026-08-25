@@ -68,12 +68,15 @@ t.test('it does not reach for Node globals at load time', () => {
   t.equal(threw, null, threw ? 'the bundle threw on load: ' + threw.message : '');
 });
 
-t.test('it exports upload, and only upload', () => {
+t.test('it exports the two upload functions and nothing else', () => {
+  // Both are needed because which one applies depends on how the Blob store
+  // is connected: a read-write token uses upload(), an OIDC-connected store
+  // uses uploadPresigned(). Anything beyond these two is more third-party
+  // code reachable than we asked for.
   const m = /export\s*\{([^}]*)\}/.exec(src);
   t.assert(m, 'there should be an export statement');
-  const names = m[1].split(',').map((x) => x.trim().split(/\s+as\s+/).pop()).filter(Boolean);
-  t.equal(names.join(','), 'upload',
-    'a wider surface means more third-party code reachable than we asked for');
+  const names = m[1].split(',').map((x) => x.trim().split(/\s+as\s+/).pop()).filter(Boolean).sort();
+  t.equal(names.join(','), 'upload,uploadPresigned', 'got ' + names.join(','));
 });
 
 t.test('the app loads it lazily, not on every page view', () => {
