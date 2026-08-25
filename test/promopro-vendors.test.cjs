@@ -743,12 +743,67 @@ t.test('the browser is told which flow to use rather than guessing', () => {
     'the app needs both calls available to pick between');
 });
 
-t.test('a token is only passed when one exists', () => {
+t.test('a token is only passed when one exists', async () => {
   // Passing token: undefined stops the SDK falling back to its OIDC path,
-  // which turns a working deployment into a broken one.
-  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
-  t.assert(/\.\.\.\(blobToken\(\) \? \{ token: blobToken\(\) \} : \{\}\)/.test(route),
-    'the token should be spread in conditionally, not always passed');
+  // which turns a working deployment into a broken one. Checked by CALLING
+  // the helper rather than grepping for a spelling: the logic moved into
+  // artBlobOptions() and the old grep would have gone green on a file that
+  // no longer contained it either way.
+  const bt = await import('../lib/promopro/blob-token.js');
+  const saved = { ...process.env };
+  try {
+    Object.keys(process.env).forEach((k) => {
+      if (/READ_WRITE_TOKEN|BLOB_STORE_ID/.test(k)) delete process.env[k];
+    });
+    process.env.BLOB_STORE_ID = 'store_x';
+    const oidc = bt.artBlobOptions();
+    t.assert(!('token' in oidc), 'no token key at all when there is no token');
+    t.equal(oidc.storeId, 'store_x');
+
+    process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_rw_T';
+    t.equal(bt.artBlobOptions().token, 'vercel_blob_rw_T', 'and it is passed when there is one');
+  } finally {
+    Object.keys(process.env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+  }
+});
+
+t.test('artwork can live in a store of its own', async () => {
+  // Live on Aug 25: public and private are a property of the STORE. The
+  // shared store is public and has to stay public, because BackBone's
+  // emailed briefs are plain public URLs already in people's inboxes.
+  const bt = await import('../lib/promopro/blob-token.js');
+  const saved = { ...process.env };
+  try {
+    Object.keys(process.env).forEach((k) => {
+      if (/BLOB_STORE_ID/.test(k)) delete process.env[k];
+    });
+    process.env.BLOB_STORE_ID = 'store_shared_public';
+    t.equal(bt.artStoreId(), 'store_shared_public', 'the default store when nothing else is set');
+
+    process.env.PROMOPRO_BLOB_STORE_ID = 'store_private_art';
+    t.equal(bt.artStoreId(), 'store_private_art', 'an explicit artwork store wins');
+    t.equal(bt.artStoreSource(), 'PROMOPRO_BLOB_STORE_ID');
+  } finally {
+    Object.keys(process.env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+  }
+});
+
+t.test('every artwork blob call targets the same store', () => {
+  // Uploading to one store and reading from another produces a file that
+  // exists and cannot be opened.
+  const fs = require('fs');
+  ['api/promopro/art-upload.js', 'api/promopro/art-file.js', 'api/promopro/art.js'].forEach((f) => {
+    t.assert(/artBlobOptions/.test(fs.readFileSync(f, 'utf8')), f + ' should use the shared options');
+  });
+});
+
+t.test('private files are read through the SDK, not fetched by URL', () => {
+  // A private blob cannot be fetched by URL by anybody, us included.
+  const route = require('fs').readFileSync('api/promopro/art-file.js', 'utf8');
+  t.assert(/access: "private"/.test(route), 'the read has to declare private access');
+  t.assert(!/downloadUrl/.test(route), 'fetching the download URL is the public-blob pattern');
 });
 
 t.test('the diagnostic reports variable names, never values', () => {
@@ -762,7 +817,7 @@ t.test('the diagnostic reports variable names, never values', () => {
 t.test('the readiness probe cleans up after itself', () => {
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
   const diag = route.slice(route.indexOf('async function diagnose'));
-  t.assert(/del\(probe\.url\)/.test(diag),
+  t.assert(/del\(probe\.url,/.test(diag),
     'a diagnostic that leaves files behind becomes its own problem');
 });
 
