@@ -778,14 +778,34 @@ export default {
      * should not lose the ones that already worked. Which is also why a
      * failure carries on to the next file instead of stopping the run.
      */
-    // The real ceiling, and why it is checked HERE rather than only on the
-    // server. An upload travels as base64 inside a JSON request, and Vercel
-    // refuses any request body over 4.5 MB with a bare 413 before our own
-    // code runs. Base64 inflates a file by about a third, so anything over
-    // roughly 3.3 MB never reaches the friendly error the server would have
-    // given. Checking in the browser is the only place a person can be told
-    // what actually went wrong.
-    const ART_MAX_BYTES = 3 * 1024 * 1024;
+    // 20 MB, matching what QuickBooks accepted, so nobody has to think about
+    // whether a file that used to be fine still is.
+    const ART_MAX_BYTES = 20 * 1024 * 1024;
+
+    /**
+     * Upload artwork STRAIGHT TO STORAGE, not through our own API.
+     *
+     * This is the one place in the app where bytes do not travel through
+     * js/api.js, and it is deliberate. A Vercel function refuses any request
+     * body over 4.5 MB; base64 inflates a file by a third; so the old path
+     * capped out around 3.3 MB and died with a bare 413. The permission
+     * check, the size limit, the allowed types and the destination path all
+     * still come from api/promopro/art-upload.js, which issues a token good
+     * for exactly one file. The browser gained the ability to send bytes,
+     * not the ability to decide anything.
+     *
+     * The library is loaded on FIRST USE rather than at module load, so the
+     * 100 KB of vendored code costs nothing to anybody who never attaches a
+     * file, which is most people most days.
+     */
+    let blobUploader = null;
+    async function getUploader() {
+      if (!blobUploader) {
+        const mod = await import('../vendor/blob-client.js');
+        blobUploader = mod.upload;
+      }
+      return blobUploader;
+    }
 
     async function uploadArtTo(poId, files, onProgress) {
       const list = Array.from(files || []);
@@ -793,25 +813,30 @@ export default {
 
       for (let i = 0; i < list.length; i++) {
         const f = list[i];
+        const label = list.length > 1 ? (i + 1) + ' of ' + list.length + ': ' : '';
 
         if (f.size > ART_MAX_BYTES) {
           failed.push(
-            f.name + ' is ' + (f.size / 1048576).toFixed(1) + ' MB. The limit is 3 MB, ' +
-            'so send a compressed copy or put a link to the full-size art in the notes.'
+            f.name + ' is ' + (f.size / 1048576).toFixed(1) + ' MB, over the 20 MB limit.'
           );
           continue;
         }
 
-        if (onProgress) onProgress('Uploading ' + (i + 1) + ' of ' + list.length + ': ' + f.name);
+        if (onProgress) onProgress('Uploading ' + label + f.name);
+
         try {
-          const dataUrl = await new Promise((resolve, reject) => {
-            const r = new FileReader();
-            r.onload = () => resolve(r.result);
-            r.onerror = () => reject(new Error('could not be read'));
-            r.readAsDataURL(f);
+          const upload = await getUploader();
+          await upload(f.name, f, {
+            access: 'private',
+            handleUploadUrl: ENDPOINTS.ppArtUpload,
+            clientPayload: JSON.stringify({ poId, filename: f.name }),
+            // A big file goes up in parts, so one bad moment on the shop
+            // wifi retries a part instead of the whole thing.
+            multipart: f.size > 5 * 1024 * 1024,
+            onUploadProgress: ({ percentage }) => {
+              if (onProgress) onProgress('Uploading ' + label + f.name + ' ' + Math.round(percentage) + '%');
+            },
           });
-          const res = await ctx.api.post(ENDPOINTS.ppArt, { poId, data_url: dataUrl, filename: f.name });
-          if (res && res.error) failed.push(f.name + ' (' + res.error + ')');
         } catch (e) {
           failed.push(f.name + ' (' + (e.message || 'upload failed') + ')');
         }
@@ -998,7 +1023,7 @@ export default {
               '<input type="file" id="ppArtFile" multiple style="display:none" ' +
                 'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
               '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
-              '<span class="pp-hint" style="margin-left:8px">3 MB per file</span>' +
+              '<span class="pp-hint" style="margin-left:8px">Up to 20 MB per file</span>' +
               ((po.art || []).length ? '<button class="pp-btn ghost" id="ppArtRevoke" style="margin-left:6px">Withdraw sent links</button>' : '') +
               '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
             '</div>'
