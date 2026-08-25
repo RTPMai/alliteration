@@ -30,6 +30,7 @@ import { renderEmailHtml, renderEmailText } from "../../lib/promopro/document.js
 import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme/resend-client.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { artUrlFor, linkDays } from "../../lib/promopro/art-token.js";
+import { buildAttachments } from "../../lib/promopro/attachments.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 
@@ -174,8 +175,13 @@ export default async function handler(req, res) {
     // fresh ones rather than reusing whatever was in the last email, so a
     // resend after an expiry just works.
     const base = (process.env.PROMOPRO_PUBLIC_URL || `https://${req.headers.host || ""}`).replace(/\/+$/, "");
+    // Artwork rides IN the message. Anything too big for one email, or that
+    // storage could not hand back, falls through to a signed link rather
+    // than being dropped, and the email says which is which.
+    const built = await buildAttachments(po.art);
+
     const artUrls = {};
-    (Array.isArray(po.art) ? po.art : []).forEach((a) => {
+    built.linked.forEach((a) => {
       if (a && a.id) artUrls[a.id] = base + artUrlFor(po, a, settings);
     });
 
@@ -191,6 +197,8 @@ export default async function handler(req, res) {
       sender: sender || {},
       logoUrl,
       artUrls,
+      attached: built.attachments.map((a) => a.filename),
+      artReasons: built.reasons,
       artExpiryNote: Object.keys(artUrls).length
         ? `Links work for ${days} days; reply for a fresh one after that.`
         : "",
@@ -203,6 +211,7 @@ export default async function handler(req, res) {
       from: `${brand.name} <${fromAddress}>`,
       to,
       subject,
+      ...(built.attachments.length ? { attachments: built.attachments } : {}),
       html: renderEmailHtml(po, vendor, opts),
       text: renderEmailText(po, vendor, opts),
       // A vendor hitting Reply must reach a person, not a no-reply address.
