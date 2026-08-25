@@ -27,7 +27,7 @@ import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getVendors, getSettings } from "../../lib/promopro/store.js";
 import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail } from "../../lib/promopro/schema.js";
 import { renderEmailHtml, renderEmailText } from "../../lib/promopro/document.js";
-import { resendConfigured, sendOne, domainStatus } from "../../lib/mailme/resend-client.js";
+import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme/resend-client.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { artUrlFor, linkDays } from "../../lib/promopro/art-token.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
@@ -113,12 +113,25 @@ export default async function handler(req, res) {
     // Checked only when there is a from-address to check, so a missing
     // address reports as one problem rather than two.
     if (looksLikeEmail(fromAddress)) {
-      const domain = fromAddress.split("@")[1];
-      const status = await domainStatus(domain);
-      if (!status || status.status !== "verified") {
+      // Domain names are case-insensitive, and Resend stores them lower
+      // cased. Comparing what somebody typed, capitals and all, against that
+      // list reported a perfectly verified domain as missing.
+      const domain = fromAddress.split("@")[1].trim().toLowerCase();
+      const check = await domainStatusChecked(domain);
+
+      if (!check.reachable) {
+        // COULD NOT CHECK is not the same as NOT VERIFIED, and must not be
+        // treated as it. Blocking a purchase order because Resend had a bad
+        // minute, with a message saying the domain is unverified, sends
+        // somebody off to debug DNS that was never broken. Let it through:
+        // if the domain really is unverified, Resend refuses the send itself
+        // and the real error comes back.
+        console.warn("[promopro] could not verify the sending domain:", check.reason);
+      } else if (!check.found) {
+        problems.push(`${domain} has not been added to Resend, so this would not be delivered`);
+      } else if (check.status !== "verified") {
         problems.push(
-          `${domain} is not verified in Resend right now (${status ? status.status : "not added to Resend"}), ` +
-          "so this would not be delivered"
+          `${domain} shows as "${check.status}" in Resend rather than verified, so this would not be delivered`
         );
       }
     }
