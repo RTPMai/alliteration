@@ -599,6 +599,29 @@ t.test('the token is scoped, and the file stays private', () => {
     'a public blob is permanent and unrevokable once forwarded');
 });
 
+t.test('a failed upload can say which step broke', () => {
+  // The library reports every failure as "Failed to retrieve the client
+  // token" regardless of cause, so without this a real problem (no blob
+  // token, a store that will not take private files) is indistinguishable
+  // from any other and costs an afternoon.
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  t.assert(/req\.method === "GET"/.test(route), 'there should be a readiness check');
+  t.assert(/BLOB_READ_WRITE_TOKEN/.test(route), 'it should check the blob token');
+  t.assert(/accepts private files/.test(route),
+    'and actually try a private write, which is the one thing looking cannot tell you');
+
+  const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
+  t.assert(/client token/i.test(app) && /ppArtUpload/.test(app),
+    'the app should ask for the real reason when it sees the opaque message');
+});
+
+t.test('the readiness probe cleans up after itself', () => {
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const diag = route.slice(route.indexOf('async function diagnose'));
+  t.assert(/del\(probe\.url\)/.test(diag),
+    'a diagnostic that leaves files behind becomes its own problem');
+});
+
 t.test('the PO is recorded from the server callback, not the browser', () => {
   // A client that could name its own blob could attach a file nobody checked.
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
