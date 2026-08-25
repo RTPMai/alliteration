@@ -28,7 +28,8 @@
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
-import { handleUpload } from "@vercel/blob/client";
+import { handleUpload, handleUploadPresigned } from "@vercel/blob/client";
+import { issueSignedToken } from "@vercel/blob";
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
@@ -75,7 +76,16 @@ export default async function handler(req, res) {
   // words. Same idea as MailMe's webhook heartbeat, and for the same reason:
   // a subsystem that can only say "it did not work" costs an afternoon every
   // time it breaks.
-  if (req.method === "GET") return diagnose(req, res, sess);
+  if (req.method === "GET") {
+    // ?flow=1 answers the one question the browser needs before it starts:
+    // which of the two upload calls applies here. The browser cannot work
+    // that out for itself, and guessing wrong fails with an error that names
+    // no cause.
+    if (req.query && req.query.flow === "1") {
+      return res.status(200).json({ flow: blobToken() ? "token" : "presigned" });
+    }
+    return diagnose(req, res, sess);
+  }
 
   try {
     const settings = await getSettings();
@@ -93,13 +103,27 @@ export default async function handler(req, res) {
     let body = req.body;
     if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
 
-    // Passed explicitly rather than left to the SDK's own lookup, which only
-    // knows the name BLOB_READ_WRITE_TOKEN. See lib/promopro/blob-token.js.
+    // TWO WAYS A BLOB STORE CAN BE CONNECTED, and this project uses the
+    // newer one.
+    //
+    // The older way puts a long-lived BLOB_READ_WRITE_TOKEN in the
+    // environment. The newer way, which is how `backbone-briefs` is wired,
+    // uses a short-lived OIDC token the platform injects per request plus
+    // BLOB_STORE_ID, and there is no read-write token anywhere. Vercel's
+    // own docs lead with the read-write flow, which is why the first two
+    // attempts at this failed.
+    //
+    // handleUpload() needs a read-write token and cannot work here.
+    // handleUploadPresigned() + issueSignedToken() take either, because
+    // issueSignedToken explicitly supports OIDC with BLOB_STORE_ID.
+    //
+    // Both paths are kept: if a read-write token ever appears (a store
+    // reconnected the old way, or a second store added) the code should not
+    // need editing again.
     const token = blobToken();
+
     if (!token) {
-      return res.status(500).json({
-        error: "No Blob read-write token is available on this deployment. Open /api/promopro/art-upload while signed in for the details.",
-      });
+      return res.status(200).json(await presignedFlow(req, body, sess, settings));
     }
 
     const result = await handleUpload({
@@ -139,39 +163,9 @@ export default async function handler(req, res) {
         };
       },
 
-      onUploadCompleted: async ({ blob, tokenPayload }) => {
-        // Called by Vercel server-to-server once the bytes have landed. This
-        // is where the file is recorded against the PO, rather than trusting
-        // the browser to come back and say so: a client that could name its
-        // own blob could attach a file nobody checked.
-        let meta = {};
-        try { meta = tokenPayload ? JSON.parse(tokenPayload) : {}; } catch (e) { meta = {}; }
-
-        const poId = String(meta.poId || "");
-        if (!poId) return;
-
-        const po = await getPo(poId);
-        if (!po) return;
-
-        const art = Array.isArray(po.art) ? po.art : [];
-
-        // The callback can be retried, so adding the same blob twice has to
-        // be a no-op rather than a duplicate row.
-        if (art.some((a) => a.url === blob.url)) return;
-
-        await updatePo(poId, {
-          art: art.concat([{
-            id: `af_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-            pathname: blob.pathname,
-            url: blob.url,
-            filename: meta.filename || blob.pathname.split("/").pop(),
-            contentType: blob.contentType || "application/octet-stream",
-            bytes: Number(blob.size) || 0,
-            uploadedBy: meta.by || "",
-            uploadedAt: new Date().toISOString(),
-          }]),
-        });
-      },
+      // Shared with the presigned path so the two cannot drift into
+      // attaching files differently.
+      onUploadCompleted: recordUpload,
     });
 
     return res.status(200).json(result);
@@ -181,6 +175,92 @@ export default async function handler(req, res) {
     // upload (too big, wrong type, PO full) and the browser shows the message.
     return res.status(400).json({ error: e.message });
   }
+}
+
+/**
+ * The OIDC path. Same decisions as onBeforeGenerateToken above, expressed as
+ * a short-lived signed token rather than a client token.
+ */
+async function presignedFlow(req, body, sess, settings) {
+  return handleUploadPresigned({
+    request: req,
+    body,
+
+    getSignedToken: async (pathname, clientPayload) => {
+      let payload = {};
+      try { payload = clientPayload ? JSON.parse(clientPayload) : {}; } catch (e) { payload = {}; }
+
+      const poId = String(payload.poId || "");
+      if (!poId) throw new Error("poId is required");
+
+      const po = await getPo(poId);
+      if (!po) throw new Error("Purchase order not found");
+
+      const art = Array.isArray(po.art) ? po.art : [];
+      if (art.length >= MAX_FILES) {
+        throw new Error(`A purchase order can hold ${MAX_FILES} art files.`);
+      }
+
+      // The same limits as the other path, carried on the token rather than
+      // enforced by us: storage refuses an oversized or wrong-typed file
+      // before a byte of it is accepted.
+      const signed = await issueSignedToken({
+        pathname,
+        operations: ["put"],
+        allowedContentTypes: ALLOWED_TYPES,
+        maximumSizeInBytes: MAX_ART_BYTES,
+        validUntil: Date.now() + 60 * 60 * 1000,
+      });
+
+      return {
+        token: signed,
+        urlOptions: {
+          access: "private",
+          addRandomSuffix: true,
+          tokenPayload: JSON.stringify({
+            poId,
+            by: String(sess.username || "").toLowerCase(),
+            filename: safeFilename(payload.filename || pathname),
+          }),
+        },
+      };
+    },
+
+    onUploadCompleted: recordUpload,
+  });
+}
+
+/**
+ * Record a finished upload against its purchase order. Shared by both flows
+ * so the two paths cannot drift into attaching files differently.
+ */
+async function recordUpload({ blob, tokenPayload }) {
+  let meta = {};
+  try { meta = tokenPayload ? JSON.parse(tokenPayload) : {}; } catch (e) { meta = {}; }
+
+  const poId = String(meta.poId || "");
+  if (!poId) return;
+
+  const po = await getPo(poId);
+  if (!po) return;
+
+  const art = Array.isArray(po.art) ? po.art : [];
+  // The callback can be retried, so adding the same blob twice has to be a
+  // no-op rather than a duplicate row.
+  if (art.some((a) => a.url === blob.url)) return;
+
+  await updatePo(poId, {
+    art: art.concat([{
+      id: `af_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
+      pathname: blob.pathname,
+      url: blob.url,
+      filename: meta.filename || String(blob.pathname || "").split("/").pop(),
+      contentType: blob.contentType || "application/octet-stream",
+      bytes: Number(blob.size) || 0,
+      uploadedBy: meta.by || "",
+      uploadedAt: new Date().toISOString(),
+    }]),
+  });
 }
 
 /**
@@ -207,18 +287,23 @@ async function diagnose(req, res, sess) {
       "SESSION_SECRET is NOT set on this deployment",
       "artwork links cannot be signed without it");
 
+    // Either connection style is fine. What is NOT fine is neither.
     const source = blobTokenSource();
-    const hasBlobToken = source !== null;
+    const hasStoreId = typeof process.env.BLOB_STORE_ID === "string" && process.env.BLOB_STORE_ID.length > 0;
+    const connected = source !== null || hasStoreId;
     add(
-      "a Blob read-write token is available" + (source ? " (from " + source + ")" : ""),
-      hasBlobToken,
-      "no Blob read-write token is available on this deployment",
+      source
+        ? "the blob store is connected (read-write token from " + source + ")"
+        : "the blob store is connected (store id, OIDC)",
+      connected,
+      "no blob store is connected to this deployment",
       // Names only, never values. A readiness check that prints a credential
       // is worse than the fault it exists to explain.
       "blob-related variables present: " +
         (blobTokenCandidates().join(", ") || "none at all") +
         ". Connect a Blob store to this project in Vercel under Storage, then redeploy."
     );
+    const hasBlobToken = connected;
 
     // The one that cannot be checked by looking: does this blob store
     // actually accept a PRIVATE file? Private blobs are a newer feature, and
@@ -228,7 +313,9 @@ async function diagnose(req, res, sess) {
       try {
         const { put, del } = await import("@vercel/blob");
         const probe = await put(`promopro/_diag/${Date.now()}.txt`, "readiness probe", {
-          token: blobToken(),
+          // Only pass a token when there is one. Passing undefined here
+          // would stop the SDK falling back to its OIDC path.
+          ...(blobToken() ? { token: blobToken() } : {}),
           access: "private",
           contentType: "text/plain",
           addRandomSuffix: true,
@@ -244,14 +331,25 @@ async function diagnose(req, res, sess) {
     // And the step the browser actually hits first.
     if (hasBlobToken) {
       try {
-        const { generateClientTokenFromReadWriteToken } = await import("@vercel/blob/client");
-        await generateClientTokenFromReadWriteToken({
-          token: blobToken(),
-          pathname: "promopro/_diag/probe.txt",
-          access: "private",
-          maximumSizeInBytes: MAX_ART_BYTES,
-          validUntil: Date.now() + 60000,
-        });
+        if (blobToken()) {
+          const { generateClientTokenFromReadWriteToken } = await import("@vercel/blob/client");
+          await generateClientTokenFromReadWriteToken({
+            token: blobToken(),
+            pathname: "promopro/_diag/probe.txt",
+            access: "private",
+            maximumSizeInBytes: MAX_ART_BYTES,
+            validUntil: Date.now() + 60000,
+          });
+        } else {
+          // The OIDC path uses a signed token instead, so probe THAT rather
+          // than a call that can never work on this deployment.
+          await issueSignedToken({
+            pathname: "promopro/_diag/probe.txt",
+            operations: ["put"],
+            maximumSizeInBytes: MAX_ART_BYTES,
+            validUntil: Date.now() + 60000,
+          });
+        }
         add("an upload token can be minted", true);
       } catch (e) {
         add("an upload token can be minted", false,
