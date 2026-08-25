@@ -860,6 +860,17 @@ export default {
       if (failed.length) {
         const s2 = $('#ppArtStatus');
         if (s2) s2.textContent = 'Did not upload: ' + failed.join(', ');
+
+        // The upload library reports every failure as "Failed to retrieve
+        // the client token", whatever actually went wrong, so ask the server
+        // which step is broken and say that instead of leaving somebody with
+        // a message that names no cause.
+        if (failed.some((m) => /client token/i.test(m))) {
+          try {
+            const d = await ctx.api.get(ENDPOINTS.ppArtUpload);
+            if (d && d.summary && s2) s2.textContent = 'Did not upload. ' + d.summary;
+          } catch (e) { /* leave the original message rather than replacing it with a worse one */ }
+        }
       }
     }
 
