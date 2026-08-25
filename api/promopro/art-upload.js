@@ -34,7 +34,7 @@ import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
-import { blobToken, blobTokenSource, blobTokenCandidates } from "../../lib/promopro/blob-token.js";
+import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
 // whether a file that used to be fine still is.
@@ -281,6 +281,7 @@ async function presignedFlow(req, body, sess, settings) {
       // enforced by us: storage refuses an oversized or wrong-typed file
       // before a byte of it is accepted.
       const signed = await issueSignedToken({
+        ...artBlobOptions(),
         pathname,
         operations: ["put"],
         allowedContentTypes: ALLOWED_TYPES,
@@ -371,7 +372,7 @@ async function diagnose(req, res, sess) {
     add(
       source
         ? "the blob store is connected (read-write token from " + source + ")"
-        : "the blob store is connected (store id, OIDC)",
+        : "the blob store is connected (store id from " + (artStoreSource() || "nowhere") + ", OIDC)",
       connected,
       "no blob store is connected to this deployment",
       // Names only, never values. A readiness check that prints a credential
@@ -390,18 +391,23 @@ async function diagnose(req, res, sess) {
       try {
         const { put, del } = await import("@vercel/blob");
         const probe = await put(`promopro/_diag/${Date.now()}.txt`, "readiness probe", {
-          // Only pass a token when there is one. Passing undefined here
-          // would stop the SDK falling back to its OIDC path.
-          ...(blobToken() ? { token: blobToken() } : {}),
+          // Store and token together. A token is only included when one
+          // exists: passing undefined stops the SDK falling back to OIDC.
+          ...artBlobOptions(),
           access: "private",
           contentType: "text/plain",
           addRandomSuffix: true,
         });
         add("the blob store accepts private files", true);
-        try { await del(probe.url); } catch (e) { /* a stray 20-byte file is harmless */ }
+        try { await del(probe.url, artBlobOptions()); } catch (e) { /* a stray 20-byte file is harmless */ }
       } catch (e) {
         add("the blob store accepts private files", false,
-          "the blob store refused a private file", (e && e.message) || String(e));
+          "the blob store refused a private file",
+          ((e && e.message) || String(e)) +
+          " Public and private are a property of the STORE, not the file. Artwork needs its own " +
+          "PRIVATE store: create one in Vercel under Storage, connect it to this project, and set " +
+          "PROMOPRO_BLOB_STORE_ID to its id. The existing store is in use by BackBone's emailed " +
+          "briefs and must stay public.");
       }
     }
 
@@ -421,6 +427,7 @@ async function diagnose(req, res, sess) {
           // The OIDC path uses a signed token instead, so probe THAT rather
           // than a call that can never work on this deployment.
           await issueSignedToken({
+            ...artBlobOptions(),
             pathname: "promopro/_diag/probe.txt",
             operations: ["put"],
             maximumSizeInBytes: MAX_ART_BYTES,
