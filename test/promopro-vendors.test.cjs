@@ -838,16 +838,44 @@ t.test('BOTH upload paths wait, not just the one on the order screen', () => {
     'the create path must wait before closing the form');
 });
 
-t.test('sending re-reads first, so art cannot be missed by seconds', () => {
-  // The worse version of the same bug: a PO sent moments after attaching
-  // artwork would reach the vendor without it, and nothing would show that
-  // it had happened.
+t.test('sending asks storage what artwork exists, not the record', () => {
+  // REPLACED Aug 25. The first version of this re-read the order and, when
+  // the artwork had not been recorded yet, asked whether to send without it.
+  // That is a question nobody should ever be asked: the file was uploaded,
+  // so it belongs on the email. Listing the order's own folder removes the
+  // race instead of prompting about it.
+  const route = require('fs').readFileSync('api/promopro/send.js', 'utf8');
+  t.assert(/reconcileArt\(po\.id, po\)/.test(route),
+    'the send should list what is actually in storage');
+
   const app = require('fs').readFileSync('apps/promopro.js', 'utf8');
-  const send = app.slice(app.indexOf("ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest }") - 1500);
-  const body = send.slice(0, 1600);
-  t.assert(/await loadAll\(\)/.test(body), 'it should re-read the order before sending');
-  t.assert(/Send anyway, without it\?/.test(body),
-    'and ask rather than quietly sending a PO with the artwork missing');
+  t.assert(!/Send anyway, without it/.test(app), 'the prompt should be gone');
+  t.assert(!/artJustUploaded/.test(app), 'and the state it needed with it');
+});
+
+t.test('reconciling finds files the record missed', async () => {
+  const rec = await import('../lib/promopro/art-reconcile.js');
+  t.equal(rec.artPrefix('po1'), 'promopro/art/po1/',
+    'the folder must match what the upload route signs tokens for');
+});
+
+t.test('a listing failure falls back to the record rather than failing the send', async () => {
+  // Losing the ability to double-check must not cost you the ability to send
+  // a purchase order.
+  const rec = await import('../lib/promopro/art-reconcile.js');
+  const existing = [{ id: 'a', pathname: 'promopro/art/po1/a.pdf', filename: 'a.pdf' }];
+  const out = await rec.reconcileArt('po1', { art: existing });
+  // No blob credentials in the test environment, so the list throws.
+  t.equal(out.listed, false, 'it should report that it could not check');
+  t.equal(out.art.length, 1, 'and still return what the order already had');
+  t.equal(out.added.length, 0);
+});
+
+t.test('the send repairs the record but does not fail on a write error', () => {
+  const route = require('fs').readFileSync('api/promopro/send.js', 'utf8');
+  const block = route.slice(route.indexOf('reconciled.added.length'), route.indexOf('const built'));
+  t.assert(/try \{/.test(block) && /catch/.test(block),
+    'a failed repair write must not stop the email going out');
 });
 
 t.test('the callback address is set explicitly, not guessed by the SDK', () => {
