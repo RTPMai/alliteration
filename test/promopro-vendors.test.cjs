@@ -626,6 +626,40 @@ t.test('a failed check reads as a problem, not as the thing it wanted', () => {
   t.assert(/is NOT set/.test(route), 'the negative case should be stated negatively');
 });
 
+t.test('the blob token is found under a prefixed name too', async () => {
+  // Live on Aug 25: the store `backbone-briefs` was connected to the project
+  // and working, but the SDK only looks for BLOB_READ_WRITE_TOKEN, and a
+  // store connected under its own name produces
+  // BACKBONE_BRIEFS_READ_WRITE_TOKEN instead. Connected, present, invisible.
+  const bt = await import('../lib/promopro/blob-token.js');
+  const saved = { ...process.env };
+  try {
+    Object.keys(process.env).forEach((k) => {
+      if (/READ_WRITE_TOKEN|BLOB/.test(k)) delete process.env[k];
+    });
+    t.equal(bt.blobToken(), null, 'nothing set should mean nothing found');
+
+    process.env.BACKBONE_BRIEFS_READ_WRITE_TOKEN = 'vercel_blob_rw_TEST';
+    t.equal(bt.blobToken(), 'vercel_blob_rw_TEST', 'a prefixed name should be found');
+    t.equal(bt.blobTokenSource(), 'BACKBONE_BRIEFS_READ_WRITE_TOKEN');
+
+    process.env.BLOB_READ_WRITE_TOKEN = 'vercel_blob_rw_STANDARD';
+    t.equal(bt.blobTokenSource(), 'BLOB_READ_WRITE_TOKEN',
+      'the standard name should win when both exist');
+  } finally {
+    Object.keys(process.env).forEach((k) => { delete process.env[k]; });
+    Object.assign(process.env, saved);
+  }
+});
+
+t.test('the diagnostic reports variable names, never values', () => {
+  const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
+  const diag = route.slice(route.indexOf('async function diagnose'));
+  t.assert(/blobTokenCandidates/.test(diag), 'it should list what IS present');
+  t.assert(!/process\.env\[[^\]]*\]\s*\)/.test(diag),
+    'a readiness check that prints a credential is worse than the fault it explains');
+});
+
 t.test('the readiness probe cleans up after itself', () => {
   const route = require('fs').readFileSync('api/promopro/art-upload.js', 'utf8');
   const diag = route.slice(route.indexOf('async function diagnose'));
