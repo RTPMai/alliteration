@@ -31,6 +31,7 @@ import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { artUrlFor, linkDays } from "../../lib/promopro/art-token.js";
 import { buildAttachments } from "../../lib/promopro/attachments.js";
+import { reconcileArt } from "../../lib/promopro/art-reconcile.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 
@@ -175,10 +176,29 @@ export default async function handler(req, res) {
     // fresh ones rather than reusing whatever was in the last email, so a
     // resend after an expiry just works.
     const base = (process.env.PROMOPRO_PUBLIC_URL || `https://${req.headers.host || ""}`).replace(/\/+$/, "");
+    // WHAT ARTWORK EXISTS IS ASKED OF STORAGE, NOT OF THE RECORD.
+    //
+    // A file uploaded seconds ago may not have been written to the order
+    // yet. Reading the order would then send a vendor a purchase order with
+    // the artwork missing, which is the one thing this must not do. Listing
+    // the order's own folder answers the question directly.
+    const reconciled = await reconcileArt(po.id, po);
+
+    // Repair the record while we are here, so the screen agrees with the
+    // email. A failure to save must not stop the send: the attachment list
+    // is already correct either way.
+    if (reconciled.added.length) {
+      try {
+        await updatePo(po.id, { art: reconciled.art });
+      } catch (e) {
+        console.error("[promopro] could not save reconciled artwork:", e && e.message);
+      }
+    }
+
     // Artwork rides IN the message. Anything too big for one email, or that
     // storage could not hand back, falls through to a signed link rather
     // than being dropped, and the email says which is which.
-    const built = await buildAttachments(po.art);
+    const built = await buildAttachments(reconciled.art);
 
     const artUrls = {};
     built.linked.forEach((a) => {
