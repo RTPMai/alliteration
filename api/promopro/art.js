@@ -27,7 +27,23 @@ import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
 
-const MAX_BYTES = 25 * 1024 * 1024;  // 25 MB. Vendor-ready art runs bigger than an intake reference.
+// THE REAL CEILING, corrected Aug 2026 after a live 413.
+//
+// This said 25 MB, which was a number nobody could reach. A Vercel function
+// caps the REQUEST BODY at 4.5 MB and rejects anything larger with a bare
+// 413 before this file runs at all, so the friendly "that file is 26.2 MB"
+// message could never fire. The upload is sent as base64, which inflates a
+// file by about a third, so the true limit is roughly 3.3 MB of actual file.
+//
+// 3 MB, checked in the browser BEFORE the request is made, so somebody gets
+// a sentence explaining the problem instead of a raw platform error.
+//
+// This is a stopgap. The proper fix is uploading straight from the browser
+// to blob storage, which skips the function and its body limit entirely.
+// Manual chunking through this route is not an option: Blob requires every
+// part of a multipart upload to be at least 5 MB, which is larger than the
+// whole request Vercel will accept.
+const MAX_BYTES = 3 * 1024 * 1024;
 const MAX_FILES = 12;
 
 const DATA_URL_RE = /^data:([A-Za-z0-9.+-]+\/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=]+)$/;
@@ -68,7 +84,10 @@ function parseDataUrl(dataUrl, filename) {
   // Buffer, so an oversized upload is rejected rather than decoded first.
   const bytes = Math.floor(base64.length * 3 / 4) - (base64.endsWith("==") ? 2 : base64.endsWith("=") ? 1 : 0);
   if (bytes > MAX_BYTES) {
-    return { error: `That file is ${(bytes / 1048576).toFixed(1)} MB. The limit is 25 MB.` };
+    return {
+      error: `That file is ${(bytes / 1048576).toFixed(1)} MB. The limit is 3 MB, because of how the upload has to travel. ` +
+             `Send the vendor a compressed copy, or put the full-size art on a link in the notes.`,
+    };
   }
 
   return { mediaType, base64, bytes };
