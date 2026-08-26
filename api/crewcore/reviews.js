@@ -1,7 +1,7 @@
 // api/crewcore/reviews.js — one-on-one review history.
 //
-// GET    -> data_scope "all": every review (optionally ?employee_id=).
-//           data_scope "own": just the caller's own review history, read
+// GET    -> admin (superuser or the admin role): every review (optionally
+//           ?employee_id=). Everyone else: just their own history, read
 //           only. Nobody self-serve ever sees another employee's reviews.
 // POST/PATCH/DELETE -> admin-scope only. An employee can read their reviews
 //           but never write one, including about themselves.
@@ -9,8 +9,8 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
-import { validateReview } from "../../lib/crewcore/schema.js";
+import { getUser } from "../../lib/users.js";
+import { validateReview, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import {
   listReviews, getReview, saveReview, updateReview, deleteReview, getEmployeeByUsername,
 } from "../../lib/crewcore/store.js";
@@ -23,8 +23,10 @@ function parseBody(req) {
 
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
-  return { isAdmin: (role && role.data_scope === "all") || (user && user.superuser === true) };
+  return { isAdmin: isCrewCoreAdmin({
+    superuser: user && user.superuser,
+    roleName: user ? user.role : sess.role,
+  }) };
 }
 
 export default async function handler(req, res) {
