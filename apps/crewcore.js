@@ -1,4 +1,3 @@
-// PUT IN: apps/crewcore.js
 /**
  * CrewCore — employee management for the whole team.
  *
@@ -38,7 +37,7 @@ import { ENDPOINTS } from '../js/api.js';
 // The stipend year math is shared with the API route and the store so a
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
-import { spendsFor, stipendBalance, stipendYears } from '../lib/crewcore/schema.js';
+import { spendsFor, stipendBalance, stipendYears, spendLabel } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -885,14 +884,12 @@ export default {
    * inside a person's own detail, where the name is already the heading.
    */
   _stipendRow(s, showName) {
-    const primary = showName ? this._employeeName(s.employee_id) : s.category;
-    const bits = [fmtDate(s.date)];
-    if (showName) bits.push(s.category);
-    if (s.description) bits.push(s.description);
+    const { title, parts } = spendLabel(s, showName ? this._employeeName(s.employee_id) : null);
+    const bits = [fmtDate(s.date)].concat(parts);
     return `
       <div class="cc-row" data-id="${esc(s.id)}">
         <div>
-          <div class="who">${esc(primary)}</div>
+          <div class="who">${esc(title)}</div>
           <div class="meta">${bits.map((b) => esc(b)).join(' · ')}</div>
         </div>
         <div class="cc-rowacts">
@@ -1031,15 +1028,18 @@ export default {
       <div class="cc-section">
         <h2>Your purchases, ${year}</h2>
         <div class="cc-list">
-          ${rows.length ? rows.map((s) => `
+          ${rows.length ? rows.map((s) => {
+            const { title, parts } = spendLabel(s, null);
+            const bits = [fmtDate(s.date)].concat(parts);
+            return `
             <div class="cc-row">
               <div>
-                <div class="who">${esc(s.category)}</div>
-                <div class="meta">${fmtDate(s.date)}${s.description ? ' · ' + esc(s.description) : ''}</div>
+                <div class="who">${esc(title)}</div>
+                <div class="meta">${bits.map((b) => esc(b)).join(' · ')}</div>
               </div>
               <span class="meta">${fmtMoney(s.amount)}</span>
             </div>
-          `).join('') : `<div class="cc-empty">Nothing logged in ${year}.</div>`}
+          `; }).join('') : `<div class="cc-empty">Nothing logged in ${year}.</div>`}
         </div>
       </div>
     `;
