@@ -37,7 +37,7 @@ import { ENDPOINTS } from '../js/api.js';
 // The stipend year math is shared with the API route and the store so a
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
-import { spendsFor, stipendBalance, stipendYears, spendLabel } from '../lib/crewcore/schema.js';
+import { spendsFor, stipendBalance, stipendYears, spendLabel, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -361,7 +361,15 @@ export default {
   async mount(ctx) {
     this._root = ctx.root;
     this._ctx = ctx;
-    const isAdmin = !!(ctx.perms && (ctx.perms.data_scope === 'all' || ctx.perms.superuser));
+    // Superuser flag or the protected admin role, NOT data_scope. A new role
+    // created in Settings defaults to data_scope "all", which used to make any
+    // custom role a full CrewCore admin the moment CrewCore was ticked for it.
+    // See isCrewCoreAdmin() in lib/crewcore/schema.js. The server enforces the
+    // same rule; this only decides what gets drawn.
+    const isAdmin = isCrewCoreAdmin({
+      superuser: ctx.perms && ctx.perms.superuser,
+      roleName: ctx.perms && ctx.perms.role,
+    });
     this._isAdmin = isAdmin;
 
     // Employees list (admin) or own record (self-serve) — same endpoint,
