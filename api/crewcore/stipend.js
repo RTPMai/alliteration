@@ -1,7 +1,7 @@
 // api/crewcore/stipend.js — apparel stipend spend log and balances.
 //
-// GET    -> data_scope "all": every spend entry (optionally ?employee_id=).
-//           data_scope "own": just the caller's own spend log, plus a
+// GET    -> admin (superuser or the admin role): every spend entry
+//           (optionally ?employee_id=). Everyone else: their own log, plus a
 //           computed balance for ?year= (defaults to the current year).
 //           The stipend re-ups every Jan 1, so a balance only means anything
 //           against a stated year. Callers may look back at closed years;
@@ -20,8 +20,8 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
-import { validateStipendSpend, stipendBalance, spendsFor } from "../../lib/crewcore/schema.js";
+import { getUser } from "../../lib/users.js";
+import { validateStipendSpend, stipendBalance, spendsFor, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import {
   listStipendSpends, getStipendSpend, saveStipendSpend, deleteStipendSpend,
   getEmployeeByUsername,
@@ -46,8 +46,10 @@ function parseYear(raw) {
 
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
-  return { isAdmin: (role && role.data_scope === "all") || (user && user.superuser === true) };
+  return { isAdmin: isCrewCoreAdmin({
+    superuser: user && user.superuser,
+    roleName: user ? user.role : sess.role,
+  }) };
 }
 
 export default async function handler(req, res) {
