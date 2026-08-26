@@ -27,15 +27,17 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
+import { getUser } from "../../lib/users.js";
 import { HANDBOOK_SECTIONS, HANDBOOK_UPDATED } from "../../lib/crewcore/handbook-content.js";
-import { validateHandbookAck } from "../../lib/crewcore/schema.js";
+import { validateHandbookAck, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { getEmployeeByUsername, updateEmployee } from "../../lib/crewcore/store.js";
 
 async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
-  return (role && role.data_scope === "all") || (user && user.superuser === true);
+  return isCrewCoreAdmin({
+    superuser: user && user.superuser,
+    roleName: user ? user.role : sess.role,
+  });
 }
 
 export default async function handler(req, res) {
