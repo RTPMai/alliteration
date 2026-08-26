@@ -1,9 +1,10 @@
 // api/crewcore/employees.js — employee roster CRUD, scoped by role.
 //
-// GET    -> data_scope "all": every employee. data_scope "own": just the
+// GET    -> admin (superuser or the admin role): every employee.
+//           everyone else: just the
 //           caller's own record (via their linked username), with
 //           ADMIN_ONLY_FIELDS stripped even for that own record.
-// POST   -> create an employee. Admin-scope only (data_scope "all" + can_edit
+// POST   -> create an employee. Admin only (see isCrewCoreAdmin; can_edit
 //           is not required here — CrewCore write access is admin/superuser
 //           by design, not gated on the generic can_edit flag other apps use,
 //           since a record here is pay and review data, not a lead or trip).
@@ -13,8 +14,8 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
-import { validateEmployee, stripAdminFields, stripSecrets } from "../../lib/crewcore/schema.js";
+import { getUser } from "../../lib/users.js";
+import { validateEmployee, stripAdminFields, stripSecrets, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { validatePin } from "../../lib/crewcore/timeclock.js";
 import { hashPassword } from "../../lib/users.js";
 import {
@@ -83,11 +84,13 @@ function parseBody(req) {
 
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
   return {
-    // Superusers always get the admin view, same convention canAccess() uses
-    // in js/registry.js for stub-app visibility.
-    isAdmin: (role && role.data_scope === "all") || (user && user.superuser === true),
+    // Superuser flag or the protected admin role. Deliberately NOT data_scope:
+    // see isCrewCoreAdmin() in lib/crewcore/schema.js for why.
+    isAdmin: isCrewCoreAdmin({
+      superuser: user && user.superuser,
+      roleName: user ? user.role : sess.role,
+    }),
   };
 }
 
