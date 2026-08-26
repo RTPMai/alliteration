@@ -2,28 +2,46 @@
 //
 // GET    -> data_scope "all": every spend entry (optionally ?employee_id=).
 //           data_scope "own": just the caller's own spend log, plus a
-//           computed balance (allotment minus this year's spend).
+//           computed balance for ?year= (defaults to the current year).
+//           The stipend re-ups every Jan 1, so a balance only means anything
+//           against a stated year. Callers may look back at closed years;
+//           the log itself is returned whole and filtered by the screen.
 // POST   -> log a spend entry. Admin-scope only — a self-serve employee can
 //           see their own balance but cannot add or edit entries themselves;
 //           this mirrors how the physical purchase actually happens (an
 //           admin or bookkeeper records what was bought against the
 //           allotment, not the employee self-reporting).
+// PATCH  -> correct an existing entry (admin-scope only). Partial: only the
+//           fields sent are changed. A wrong amount or a mistyped date is a
+//           correction, not a reason to delete and re-key the purchase, so
+//           the entry keeps its id and its original created_at.
 // DELETE -> admin-scope only.
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
 import { getUser, getRole } from "../../lib/users.js";
-import { validateStipendSpend } from "../../lib/crewcore/schema.js";
+import { validateStipendSpend, stipendBalance, spendsFor } from "../../lib/crewcore/schema.js";
 import {
   listStipendSpends, getStipendSpend, saveStipendSpend, deleteStipendSpend,
-  usedStipendThisYear, getEmployeeByUsername,
+  getEmployeeByUsername,
 } from "../../lib/crewcore/store.js";
 
 function parseBody(req) {
   let b = req.body;
   if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
   return b && typeof b === "object" ? b : {};
+}
+
+/**
+ * A year for balance math. Anything unparseable falls back to the current
+ * year rather than erroring: a bad query string should not cost the caller
+ * their whole stipend screen.
+ */
+function parseYear(raw) {
+  const n = parseInt(raw, 10);
+  if (!Number.isFinite(n) || n < 2000 || n > 2100) return new Date().getFullYear();
+  return n;
 }
 
 async function callerScope(sess) {
@@ -54,16 +72,9 @@ export default async function handler(req, res) {
       if (!own) return res.status(200).json({ spends: [], balance: null });
 
       const all = await listStipendSpends();
-      const mine = all.filter((s) => s.employee_id === own.id);
-      const year = new Date().getFullYear();
-      const used = await usedStipendThisYear(own.id, year);
-      const allotted = own.apparel_stipend || 0;
-      const balance = {
-        year,
-        allotted,
-        used: Math.round(used * 100) / 100,
-        remaining: Math.round(Math.max(0, allotted - used) * 100) / 100,
-      };
+      const mine = spendsFor(all, own.id, null);
+      const year = parseYear(req.query && req.query.year);
+      const balance = stipendBalance(own.apparel_stipend, mine, year);
       return res.status(200).json({ spends: mine, balance });
     }
 
@@ -84,6 +95,33 @@ export default async function handler(req, res) {
       return res.status(201).json({ ok: true, spend });
     }
 
+    if (req.method === "PATCH" || req.method === "PUT") {
+      const body = parseBody(req);
+      const id = (req.query && req.query.id) || body.id;
+      if (!id) return res.status(400).json({ error: "Missing spend id" });
+
+      const existing = await getStipendSpend(id);
+      if (!existing) return res.status(404).json({ error: "Spend entry not found" });
+
+      const { ok, errors, record } = validateStipendSpend(body, { partial: true });
+      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
+
+      // Merge onto the stored entry so untouched fields survive, and pin the
+      // identity fields so a body cannot re-point an entry at a different id.
+      const merged = {
+        ...existing,
+        ...record,
+        id: existing.id,
+        created_at: existing.created_at,
+        logged_by: existing.logged_by,
+        updated_at: new Date().toISOString(),
+        updated_by: sess.username,
+      };
+
+      const spend = await saveStipendSpend(merged);
+      return res.status(200).json({ ok: true, spend });
+    }
+
     if (req.method === "DELETE") {
       const id = (req.query && req.query.id) || parseBody(req).id;
       if (!id) return res.status(400).json({ error: "Missing spend id" });
@@ -93,7 +131,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, deleted: id });
     }
 
-    res.setHeader("Allow", "GET, POST, DELETE");
+    res.setHeader("Allow", "GET, POST, PATCH, PUT, DELETE");
     return res.status(405).json({ error: "Method not allowed" });
   } catch (e) {
     console.error("crewcore/stipend route error:", e);
