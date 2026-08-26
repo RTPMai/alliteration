@@ -5,7 +5,7 @@
 // exporting for payroll.
 //
 // SCOPE, same split as the rest of CrewCore:
-//   data_scope "all" or superuser -> the whole team, plus every write.
+//   admin (superuser or the admin role) -> the whole team, plus every write.
 //   anyone else                   -> their OWN timecard, read only. An
 //                                    employee can check their own hours,
 //                                    which is the honest version of "the
@@ -19,7 +19,8 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
+import { getUser } from "../../lib/users.js";
+import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import {
   validateShiftEdit, weekKeyFor, weekDates, localParts, localToday,
   summarizeWeek, shiftHours, SHOP_TIMEZONE,
@@ -37,9 +38,11 @@ function parseBody(req) {
 
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
   return {
-    isAdmin: (role && role.data_scope === "all") || (user && user.superuser === true),
+    isAdmin: isCrewCoreAdmin({
+      superuser: user && user.superuser,
+      roleName: user ? user.role : sess.role,
+    }),
     username: sess.username,
   };
 }
