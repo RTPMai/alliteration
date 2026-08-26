@@ -1,3 +1,4 @@
+// PUT IN: apps/crewcore.js
 /**
  * CrewCore — employee management for the whole team.
  *
@@ -34,6 +35,10 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
+// The stipend year math is shared with the API route and the store so a
+// balance is never computed twice in two places. lib/crewcore/schema.js has
+// no imports of its own, so it is safe to pull into the browser.
+import { spendsFor, stipendBalance, stipendYears } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -93,6 +98,12 @@ export default {
   .cc-card h3{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
   .cc-card .big{font-size:26px;font-weight:800;letter-spacing:-.01em}
   .cc-card .note{font-size:12px;color:var(--muted);margin-top:4px}
+  .cc-card.tap{cursor:pointer;transition:border-color .12s ease,transform .12s ease}
+  .cc-card.tap:hover{border-color:var(--accent);transform:translateY(-1px)}
+  .cc-card .cardhd{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .cc-card .cardhd h3{margin-bottom:0}
+  .cc-back{display:flex;align-items:center;gap:10px;margin-bottom:16px}
+  .cc-rowacts{display:flex;align-items:center;gap:8px;flex-shrink:0}
 
   .cc-section{margin-bottom:26px}
   .cc-section h2{font-size:15px;font-weight:700;margin-bottom:10px}
@@ -119,6 +130,7 @@ export default {
   .cc-table tr.clickable:hover{background:var(--line-soft)}
 
   .cc-toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px;align-items:center}
+  .cc-toolbar .lbl{font-size:12px;color:var(--muted);font-weight:600}
   .cc-search{
     flex:1 1 200px;border:1px solid var(--line);border-radius:var(--radius-sm);
     padding:8px 12px;font-size:13px;font-family:inherit;background:var(--card);color:var(--ink);
@@ -361,6 +373,10 @@ export default {
 
     this._stipendSpends = [];
     this._stipendBalance = null;
+    // The stipend re-ups every Jan 1, so every figure on that screen is
+    // scoped to a year. Default to the one we are standing in.
+    this._stipendYear = new Date().getFullYear();
+    this._stipendDetailId = null;
     this._reviews = [];
     this._handbook = null;
 
@@ -377,7 +393,10 @@ export default {
   },
 
   async _loadStipend() {
-    const payload = await this._ctx.api.get(ENDPOINTS.ccStipend);
+    // The year matters to the server only for the self-serve balance; an
+    // admin gets the whole log and the screen does its own filtering, so a
+    // year change never costs an admin a round trip.
+    const payload = await this._ctx.api.get(ENDPOINTS.ccStipend, { year: this._stipendYear });
     this._stipendSpends = payload.spends || [];
     this._stipendBalance = payload.balance || null;
   },
@@ -477,13 +496,14 @@ export default {
     if (view === 'stipend') {
       title.textContent = 'Stipend.';
       sub.textContent = isAdmin ? 'Apparel allotments and spend across the team.' : 'Your apparel allotment and spend.';
+      // Entering the view from the rail always lands on the grid. Coming in
+      // from the rail while a person's detail is open should be a way out of
+      // it, not a no-op. In-place refreshes go through _refreshStipend(),
+      // which deliberately keeps whoever is open.
+      this._stipendDetailId = null;
       await this._loadStipend();
-      if (isAdmin) {
-        actions.innerHTML = `<button class="cc-btn" id="ccLogSpendBtn">Log a purchase</button>`;
-        const btn = $('#ccLogSpendBtn');
-        if (btn) btn.onclick = () => this._openStipendForm();
-      }
       body.innerHTML = this._renderStipend();
+      this._syncStipendActions();
       this._wireStipend();
       return;
     }
@@ -814,63 +834,188 @@ export default {
   },
 
   /* ---------------- Stipend ---------------- */
+  //
+  // Two surfaces. The grid shows one card per person for the selected year;
+  // clicking a card opens that person's detail, which carries their own spend
+  // log. showView('stipend') always lands on the grid, so the rail is always a
+  // way back out. _refreshStipend() keeps whichever surface you are on, so
+  // correcting an entry re-renders in place instead of throwing you to the top.
+  //
+  // Everything here is scoped to a calendar year because the allotment re-ups
+  // every Jan 1. A balance with no year attached does not mean anything.
+
+  /**
+   * Years worth offering in the picker: every year that actually has an
+   * entry, plus the current one so a fresh January is selectable before
+   * anybody has logged anything into it.
+   */
+  _stipendYears() {
+    return stipendYears(this._stipendSpends);
+  },
+
+  /** Entries for one person (or everyone, if id is falsy) in one year. */
+  _spendsFor(employeeId, year) {
+    return spendsFor(this._stipendSpends, employeeId, year);
+  },
+
+  /** Allotment, applied and remaining for one person in one year. */
+  _balanceFor(employee, year) {
+    return stipendBalance(employee.apparel_stipend, this._spendsFor(employee.id, null), year);
+  },
+
+  _employeeName(id) {
+    const e = (this._employees || []).find((x) => x.id === id);
+    return e ? e.name : id;
+  },
+
+  _stipendYearPicker() {
+    const years = this._stipendYears();
+    return `
+      <div class="cc-toolbar">
+        <span class="lbl">Stipend year</span>
+        <select class="cc-filt" id="ccStipYear">
+          ${years.map((y) => `<option value="${y}"${y === this._stipendYear ? ' selected' : ''}>${y}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  },
+
+  /**
+   * One line in a spend log. `showName` is on for the all-team log and off
+   * inside a person's own detail, where the name is already the heading.
+   */
+  _stipendRow(s, showName) {
+    const primary = showName ? this._employeeName(s.employee_id) : s.category;
+    const bits = [fmtDate(s.date)];
+    if (showName) bits.push(s.category);
+    if (s.description) bits.push(s.description);
+    return `
+      <div class="cc-row" data-id="${esc(s.id)}">
+        <div>
+          <div class="who">${esc(primary)}</div>
+          <div class="meta">${bits.map((b) => esc(b)).join(' · ')}</div>
+        </div>
+        <div class="cc-rowacts">
+          <span class="meta">${fmtMoney(s.amount)}</span>
+          <button class="cc-btn sm ghost" data-act="edit">Edit</button>
+          <button class="cc-btn sm ghost" data-act="delete">Remove</button>
+        </div>
+      </div>
+    `;
+  },
+
+  _stipendLog(rows, showName, emptyMsg) {
+    return `
+      <div class="cc-list">
+        ${rows.length
+          ? rows.map((s) => this._stipendRow(s, showName)).join('')
+          : `<div class="cc-empty">${esc(emptyMsg)}</div>`}
+      </div>
+    `;
+  },
 
   _renderStipend() {
-    const isAdmin = this._isAdmin;
-    const nameFor = (id) => {
-      const e = this._employees.find((x) => x.id === id);
-      return e ? e.name : id;
-    };
+    if (!this._isAdmin) return this._renderStipendSelf();
+    if (this._stipendDetailId) return this._renderStipendDetail();
+    return this._renderStipendGrid();
+  },
 
-    if (isAdmin) {
-      if (!this._employees.length) {
-        return `<div class="cc-empty">No employees on the roster yet.</div>`;
-      }
-      return `
-        <div class="cc-grid">
-          ${this._employees.map((e) => {
-            const spent = this._stipendSpends
-              .filter((s) => s.employee_id === e.id)
-              .filter((s) => String(s.date || '').slice(0, 4) === String(new Date().getFullYear()))
-              .reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-            const allotted = Number(e.apparel_stipend) || 0;
-            const pct = allotted > 0 ? Math.min(100, Math.round((spent / allotted) * 100)) : 0;
-            return `
-              <div class="cc-card">
-                <h3>${esc(e.name)}</h3>
-                <div class="big">${fmtMoney(Math.max(0, allotted - spent))}</div>
-                <div class="note">of ${fmtMoney(allotted)} remaining</div>
-                <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-        <div class="cc-section">
-          <h2>Spend log</h2>
-          <div class="cc-list">
-            ${this._stipendSpends.length ? this._stipendSpends.map((s) => `
-              <div class="cc-row" data-id="${esc(s.id)}">
-                <div>
-                  <div class="who">${esc(nameFor(s.employee_id))}</div>
-                  <div class="meta">${fmtDate(s.date)} · ${esc(s.category)}${s.description ? ' · ' + esc(s.description) : ''}</div>
-                </div>
-                <div>
-                  <span class="meta">${fmtMoney(s.amount)}</span>
-                  <button class="cc-btn sm ghost" data-act="delete">Remove</button>
-                </div>
-              </div>
-            `).join('') : `<div class="cc-empty">Nothing logged yet.</div>`}
-          </div>
-        </div>
-      `;
+  _renderStipendGrid() {
+    const year = this._stipendYear;
+
+    if (!this._employees.length) {
+      return `<div class="cc-empty">No employees on the roster yet.</div>`;
     }
 
-    const bal = this._stipendBalance;
-    const pct = bal && bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+    const cards = this._employees.map((e) => {
+      const bal = this._balanceFor(e, year);
+      const count = this._spendsFor(e.id, year).length;
+      const pct = bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+      return `
+        <div class="cc-card tap" data-emp="${esc(e.id)}" role="button" tabindex="0">
+          <div class="cardhd"><h3>${esc(e.name)}</h3></div>
+          <div class="big">${fmtMoney(bal.remaining)}</div>
+          <div class="note">of ${fmtMoney(bal.allotted)} remaining${bal.over ? ' · over by ' + fmtMoney(bal.over) : ''}</div>
+          <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+          <div class="note">${count} ${count === 1 ? 'purchase' : 'purchases'} in ${year}</div>
+        </div>
+      `;
+    }).join('');
+
+    const all = this._spendsFor(null, year);
+
     return `
+      ${this._stipendYearPicker()}
+      <div class="cc-grid">${cards}</div>
+      <div class="cc-section">
+        <h2>Spend log, everyone, ${year}</h2>
+        ${this._stipendLog(all, true, 'Nothing logged in ' + year + '.')}
+      </div>
+    `;
+  },
+
+  _renderStipendDetail() {
+    const year = this._stipendYear;
+    const emp = this._employees.find((e) => e.id === this._stipendDetailId);
+    if (!emp) {
+      // The person went away underneath us (deleted, or the roster reloaded
+      // without them). Fall back rather than render a blank card.
+      this._stipendDetailId = null;
+      return this._renderStipendGrid();
+    }
+
+    const rows = this._spendsFor(emp.id, year);
+    const bal = this._balanceFor(emp, year);
+    const pct = bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+    const initials = String(emp.name || '?').trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+
+    return `
+      <div class="cc-back">
+        <button class="cc-btn sm ghost" id="ccStipBack">Back to everyone</button>
+      </div>
+      <div class="cc-profile-hd">
+        <div class="cc-avatar">${esc(initials)}</div>
+        <div>
+          <h2>${esc(emp.name)}</h2>
+          <div class="sub">${esc([emp.title, emp.department].filter(Boolean).join(' · ')) || 'Apparel stipend'}</div>
+        </div>
+      </div>
+      ${this._stipendYearPicker()}
       <div class="cc-grid">
         <div class="cc-card">
-          <h3>Allotted (${bal ? bal.year : ''})</h3>
+          <h3>Allotted (${year})</h3>
+          <div class="big">${fmtMoney(bal.allotted)}</div>
+        </div>
+        <div class="cc-card">
+          <h3>Applied</h3>
+          <div class="big">${fmtMoney(bal.used)}</div>
+          <div class="note">${rows.length} ${rows.length === 1 ? 'purchase' : 'purchases'}</div>
+        </div>
+        <div class="cc-card">
+          <h3>Remaining</h3>
+          <div class="big">${fmtMoney(bal.remaining)}</div>
+          <div class="note">${bal.over ? 'over by ' + fmtMoney(bal.over) : 'of ' + fmtMoney(bal.allotted)}</div>
+          <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+        </div>
+      </div>
+      <div class="cc-section">
+        <h2>Spend log, ${year}</h2>
+        ${this._stipendLog(rows, false, 'Nothing logged against ' + emp.name + ' in ' + year + '.')}
+      </div>
+    `;
+  },
+
+  _renderStipendSelf() {
+    const year = this._stipendYear;
+    const bal = this._stipendBalance;
+    const rows = this._spendsFor(this._own ? this._own.id : null, year);
+    const pct = bal && bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+
+    return `
+      ${this._stipendYearPicker()}
+      <div class="cc-grid">
+        <div class="cc-card">
+          <h3>Allotted (${bal ? bal.year : year})</h3>
           <div class="big">${bal ? fmtMoney(bal.allotted) : '—'}</div>
         </div>
         <div class="cc-card">
@@ -884,9 +1029,9 @@ export default {
         </div>
       </div>
       <div class="cc-section">
-        <h2>Your purchases</h2>
+        <h2>Your purchases, ${year}</h2>
         <div class="cc-list">
-          ${this._stipendSpends.length ? this._stipendSpends.map((s) => `
+          ${rows.length ? rows.map((s) => `
             <div class="cc-row">
               <div>
                 <div class="who">${esc(s.category)}</div>
@@ -894,24 +1039,89 @@ export default {
               </div>
               <span class="meta">${fmtMoney(s.amount)}</span>
             </div>
-          `).join('') : `<div class="cc-empty">Nothing logged yet.</div>`}
+          `).join('') : `<div class="cc-empty">Nothing logged in ${year}.</div>`}
         </div>
       </div>
     `;
   },
 
+  /**
+   * Sets the header button. In a person's detail it pre-selects them, so
+   * logging three shirts for one person is not three trips through a
+   * dropdown.
+   */
+  _syncStipendActions() {
+    const actions = this._root.querySelector('#ccHdActions');
+    if (!actions) return;
+    if (!this._isAdmin) { actions.innerHTML = ''; return; }
+    const emp = this._stipendDetailId
+      ? this._employees.find((e) => e.id === this._stipendDetailId)
+      : null;
+    actions.innerHTML = `<button class="cc-btn" id="ccLogSpendBtn">${emp ? 'Log a purchase for ' + esc(emp.name.split(' ')[0]) : 'Log a purchase'}</button>`;
+    const btn = actions.querySelector('#ccLogSpendBtn');
+    if (btn) btn.onclick = () => this._openStipendForm(null, this._stipendDetailId);
+  },
+
+  /**
+   * Re-reads the log and repaints the current surface, keeping the year and
+   * the open person. Used after any add, edit or delete.
+   */
+  async _refreshStipend() {
+    await this._loadStipend();
+    const body = this._root.querySelector('#ccBody');
+    body.innerHTML = this._renderStipend();
+    this._syncStipendActions();
+    this._wireStipend();
+  },
+
   _wireStipend() {
-    if (!this._isAdmin) return;
     const root = this._root;
     const body = root.querySelector('#ccBody');
+
+    const yearSel = body.querySelector('#ccStipYear');
+    if (yearSel) {
+      yearSel.onchange = async () => {
+        this._stipendYear = parseInt(yearSel.value, 10) || new Date().getFullYear();
+        await this._refreshStipend();
+      };
+    }
+
+    if (!this._isAdmin) return;
+
+    const back = body.querySelector('#ccStipBack');
+    if (back) {
+      back.onclick = () => {
+        this._stipendDetailId = null;
+        this._refreshStipend();
+      };
+    }
+
+    body.querySelectorAll('.cc-card.tap').forEach((card) => {
+      const open = () => {
+        this._stipendDetailId = card.dataset.emp;
+        this._refreshStipend();
+      };
+      card.onclick = open;
+      card.onkeydown = (ev) => {
+        if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
+      };
+    });
+
+    body.querySelectorAll('button[data-act="edit"]').forEach((btn) => {
+      btn.onclick = () => {
+        const id = btn.closest('.cc-row').dataset.id;
+        const spend = this._stipendSpends.find((s) => s.id === id);
+        if (spend) this._openStipendForm(spend);
+      };
+    });
+
     body.querySelectorAll('button[data-act="delete"]').forEach((btn) => {
       btn.onclick = async () => {
-        const row = btn.closest('.cc-row');
-        const id = row.dataset.id;
+        const id = btn.closest('.cc-row').dataset.id;
         if (!confirm('Remove this spend entry?')) return;
         try {
           await this._ctx.api.request(ENDPOINTS.ccStipend + '?id=' + encodeURIComponent(id), { method: 'DELETE' });
-          this.showView('stipend');
+          await this._refreshStipend();
         } catch (e) {
           alert(e.message || 'Could not remove the entry.');
         }
@@ -919,23 +1129,33 @@ export default {
     });
   },
 
-  _openStipendForm() {
+  /**
+   * One form for both jobs. `spend` set means edit (PATCH, keeps the id and
+   * the original created_at); `presetEmp` pre-selects a person when adding
+   * from inside their detail.
+   */
+  _openStipendForm(spend, presetEmp) {
+    const editing = !!spend;
     const root = this._root;
     const body = root.querySelector('#ccBody');
+    const existing = body.querySelector('.cc-form');
+    if (existing) existing.parentElement.remove();
+
+    const selectedEmp = editing ? spend.employee_id : (presetEmp || '');
     const wrap = document.createElement('div');
     wrap.innerHTML = `
       <div class="cc-form">
-        <h3>Log a purchase</h3>
+        <h3>${editing ? 'Edit purchase' : 'Log a purchase'}</h3>
         <div class="cc-form-grid">
           <div class="full"><label>Employee</label>
-            <select id="fEmp">${this._employees.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</select>
+            <select id="fEmp">${this._employees.map((e) => `<option value="${esc(e.id)}"${e.id === selectedEmp ? ' selected' : ''}>${esc(e.name)}</option>`).join('')}</select>
           </div>
-          <div><label>Date</label><input id="fDate" type="date"></div>
-          <div><label>Amount</label><input id="fAmount" type="number" step="0.01"></div>
+          <div><label>Date</label><input id="fDate" type="date" value="${editing ? esc(String(spend.date || '').slice(0, 10)) : ''}"></div>
+          <div><label>Amount</label><input id="fAmount" type="number" step="0.01" value="${editing && spend.amount != null ? esc(String(spend.amount)) : ''}"></div>
           <div><label>Category</label>
-            <select id="fCategory">${STIPEND_CATEGORIES.map((c) => `<option value="${c}">${c}</option>`).join('')}</select>
+            <select id="fCategory">${STIPEND_CATEGORIES.map((c) => `<option value="${c}"${editing && spend.category === c ? ' selected' : ''}>${c}</option>`).join('')}</select>
           </div>
-          <div class="full"><label>Description</label><input id="fDescription" placeholder="e.g. branded quarter-zip"></div>
+          <div class="full"><label>Description</label><input id="fDescription" placeholder="e.g. branded quarter-zip" value="${editing ? esc(spend.description || '') : ''}"></div>
         </div>
         <div class="cc-err" id="fErr" hidden></div>
         <div class="cc-form-actions">
@@ -958,9 +1178,17 @@ export default {
         description: $('#fDescription').value
       };
       try {
-        await this._ctx.api.request(ENDPOINTS.ccStipend, { method: 'POST', body: payload });
+        if (editing) {
+          await this._ctx.api.request(ENDPOINTS.ccStipend + '?id=' + encodeURIComponent(spend.id), { method: 'PATCH', body: payload });
+        } else {
+          await this._ctx.api.request(ENDPOINTS.ccStipend, { method: 'POST', body: payload });
+        }
         wrap.remove();
-        this.showView('stipend');
+        // Jump the year to wherever the entry actually landed, so saving a
+        // December purchase in January does not look like it vanished.
+        const y = parseInt(String(payload.date || '').slice(0, 4), 10);
+        if (Number.isFinite(y)) this._stipendYear = y;
+        await this._refreshStipend();
       } catch (e) {
         err.hidden = false; err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
       }
