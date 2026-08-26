@@ -1,4 +1,3 @@
-// PUT IN: test/crewcore-stipend.test.cjs
 /**
  * CrewCore stipend: year scoping and corrections.
  *
@@ -29,6 +28,7 @@ const ROOT = path.join(__dirname, '..');
 import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
   const {
     validateStipendSpend, spendYear, spendsFor, stipendBalance, stipendYears,
+    spendLabel,
   } = schema;
 
   // A small fixture standing in for two people across two stipend years.
@@ -153,6 +153,64 @@ import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
     const sorted = years.slice().sort((a, b) => b - a);
     t.equal(JSON.stringify(years), JSON.stringify(sorted), 'newest first');
     t.equal(new Set(years).size, years.length, 'no repeats despite four entries');
+  });
+
+  /* ---- row labelling -------------------------------------------------- */
+
+  t.test('the description is the heading, not the category', () => {
+    // "apparel" is a two-value bucket and every row says it. What somebody
+    // actually bought is the thing worth reading down a log.
+    const { title, parts } = spendLabel(
+      { category: 'apparel', description: 'SanMar Fall 2026' }, null
+    );
+    t.equal(title, 'SanMar Fall 2026', 'the purchase leads');
+    t.equal(JSON.stringify(parts), JSON.stringify(['apparel']), 'the bucket drops to the second line');
+  });
+
+  t.test('with no description the category takes the heading rather than leaving it blank', () => {
+    const { title, parts } = spendLabel({ category: 'apparel', description: '' }, null);
+    t.equal(title, 'apparel', 'falls back to the category');
+    t.equal(parts.length, 0, 'and is not then repeated underneath itself');
+  });
+
+  t.test('a whitespace-only description counts as no description', () => {
+    const { title } = spendLabel({ category: 'other', description: '   ' }, null);
+    t.equal(title, 'other', 'spaces should not win the heading and render as blank');
+  });
+
+  t.test('an entry with neither still has a heading', () => {
+    t.equal(spendLabel({}, null).title, 'Purchase', 'never render an empty heading');
+    t.equal(spendLabel(null, null).title, 'Purchase', 'a null entry should not throw');
+  });
+
+  t.test('on the all-team log the person is the heading and both details follow', () => {
+    // Scanning across people, the name has to lead; the description is still
+    // first among the details because it is the informative one.
+    const { title, parts } = spendLabel(
+      { category: 'apparel', description: 'SanMar Fall 2026' }, 'Alexis Davis'
+    );
+    t.equal(title, 'Alexis Davis', 'the person leads on the team log');
+    t.equal(JSON.stringify(parts), JSON.stringify(['SanMar Fall 2026', 'apparel']),
+      'description before category');
+  });
+
+  t.test('the team log drops a missing description instead of printing a gap', () => {
+    const { parts } = spendLabel({ category: 'apparel' }, 'Alexis Davis');
+    t.equal(JSON.stringify(parts), JSON.stringify(['apparel']), 'no empty separator');
+  });
+
+  t.test('the heading is never blank for any combination of missing fields', () => {
+    const cases = [
+      { category: 'apparel', description: 'x' },
+      { category: 'apparel' },
+      { description: 'x' },
+      {},
+      { category: '', description: '' },
+    ];
+    cases.forEach((c) => {
+      const { title } = spendLabel(c, null);
+      t.assert(String(title).trim().length > 0, 'blank heading for ' + JSON.stringify(c));
+    });
   });
 
   /* ---- corrections (what PATCH depends on) ---------------------------- */
