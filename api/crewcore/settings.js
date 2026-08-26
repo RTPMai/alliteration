@@ -1,8 +1,8 @@
 // api/crewcore/settings.js — shop-wide CrewCore settings (admin only).
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
-import { validateSettings } from "../../lib/crewcore/schema.js";
+import { getUser } from "../../lib/users.js";
+import { validateSettings, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { getSettings, saveSettings } from "../../lib/crewcore/store.js";
 
 function parseBody(req) {
@@ -20,8 +20,10 @@ export default async function handler(req, res) {
 
   try {
     const user = sess.username ? await getUser(sess.username) : null;
-    const role = await getRole(user ? user.role : sess.role);
-    const isAdmin = (role && role.data_scope === "all") || (user && user.superuser === true);
+    const isAdmin = isCrewCoreAdmin({
+      superuser: user && user.superuser,
+      roleName: user ? user.role : sess.role,
+    });
 
     if (req.method === "GET") {
       const settings = await getSettings();
