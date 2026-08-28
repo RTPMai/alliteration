@@ -16,21 +16,38 @@
  * itself sourced from the real Employee_Handbook.docx.
  *
  * SELF-SERVE, decided Aug 3 2026: an "employee" role (data_scope "own") can
- * see their own roster entry (minus hourly rate and admin notes), their own
+ * see their own record (minus hourly rate and admin notes), their own
  * stipend allotment and spend history, their own review history read-only,
  * and the full Handbook (open to everyone with CrewCore access, not scoped).
- * Everyone else with the app granted (data_scope "all", or any superuser
- * account) gets the full admin views. The split is enforced server-side in
- * api/crewcore/*.js — this file adapts what it RENDERS based on ctx.perms,
- * but never trusts the client to be the actual gate.
+ * Everyone else with the app granted (the admin role, or any account with
+ * the elevated Admin flag) gets the full admin views. The split is enforced
+ * server-side in api/crewcore/*.js — this file adapts what it RENDERS based
+ * on ctx.perms, but never trusts the client to be the actual gate.
  *
- * Six views: Dashboard (admin only; anniversaries + headline numbers —
- * self-serve callers land on Roster instead, see showView), Roster (admin:
- * full list + add/edit; self-serve: your own profile card), Stipend (both:
- * your allotment, spend log, and remaining balance; admin also logs new
- * spend entries for anyone), Reviews (admin: full history + add; self-serve:
- * read-only own history), Handbook (everyone; read-only), Settings
- * (admin only; hidden from self-serve rails by lib/users.js's per-view tabs).
+ * THREE CHANGES, Aug 28 2026, all Ryan's calls:
+ *
+ *   1. ROSTER IS ADMIN-ONLY. It lists the whole team; that is not a screen
+ *      everyone with a login should open. The self-serve profile card that
+ *      used to be the employee's version of Roster moved to the DASHBOARD,
+ *      which now has an employee half: their profile plus their own stipend
+ *      balance, hours this pay week, next review and handbook status. An
+ *      employee asking for 'roster' is sent there rather than shown a wall.
+ *   2. TIME CLOCK is only for people who punch. permsFor() in lib/users.js
+ *      strips the grant for anyone whose record has clock_enabled false, and
+ *      _canClock() below is the guard behind that.
+ *   3. REVIEWS OPEN. A row is a click into the whole review — summary,
+ *      strengths, growth areas, dates. An admin can edit or delete from
+ *      there; an employee reads their own and can do neither.
+ *
+ * Seven views: Dashboard (admin: anniversaries + headline numbers;
+ * self-serve: your profile and where you stand), Roster (admin only; full
+ * list + add/edit), Time Clock (admin: whole team, correctable; self-serve:
+ * your own hours, read-only, and only if you punch), Stipend (both: your
+ * allotment, spend log, and remaining balance; admin also logs new spend
+ * entries for anyone), Reviews (admin: full history + add/edit/delete;
+ * self-serve: read-only own history), Handbook (everyone; read-only),
+ * Settings (admin only; hidden from self-serve rails by lib/users.js's
+ * per-view tabs).
  */
 
 import { ENDPOINTS } from '../js/api.js';
@@ -130,6 +147,28 @@ export default {
   .cc-row .who{font-weight:600;font-size:13.5px}
   .cc-row .meta{font-size:12px;color:var(--muted)}
   .cc-empty{padding:30px;text-align:center;color:var(--muted);font-size:13px}
+
+  /* A row that opens something. Matches .cc-table tr.clickable so a list and
+     a table read the same way. */
+  .cc-row.tap{cursor:pointer;transition:background .12s ease}
+  .cc-row.tap:hover{background:var(--line-soft)}
+  .cc-chev{color:var(--muted);font-size:18px;line-height:1}
+
+  /* One line of a review's summary in the list. The whole thing is on the
+     detail screen; the list is for finding the right one. */
+  .cc-clamp{
+    display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;
+    overflow:hidden;max-width:640px;
+  }
+
+  /* Written-up text, line breaks intact. */
+  .cc-prose{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:14px 16px;font-size:13.5px;line-height:1.6;white-space:pre-wrap;max-width:760px;
+  }
+
+  .cc-btn.ghost.danger{color:var(--danger);border-color:var(--danger-tint)}
+  .cc-btn.ghost.danger:hover{border-color:var(--danger)}
 
   .chip{display:inline-flex;align-items:center;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600;background:var(--line-soft);color:var(--ink)}
   .chip.terminated{background:var(--danger-tint);color:var(--danger)}
@@ -400,7 +439,13 @@ export default {
     this._stipendYear = new Date().getFullYear();
     this._stipendDetailId = null;
     this._reviews = [];
+    // Which review is open, if any. Reviews are a list until a row is
+    // clicked; the same key drives the admin and the self-serve detail.
+    this._reviewDetailId = null;
     this._handbook = null;
+    // Figures for the self-serve Dashboard, each loaded independently so one
+    // failing fetch costs one card rather than the whole screen.
+    this._selfCards = null;
 
     // Self-serve callers with a linked employee record need to know their
     // acknowledgment status up front, before routing to any view — that's
@@ -464,36 +509,60 @@ export default {
       view = 'handbook';
     }
 
-    // Self-serve callers have no meaningful admin Dashboard — send them to
-    // their own Roster/profile view instead of an empty screen.
-    if (!isAdmin && view === 'dashboard') {
-      view = 'roster';
+    // ROSTER IS ADMIN-ONLY (Aug 2026). A self-serve caller reaching it — a
+    // bookmark, a stored last-view, a hand-typed hash — goes to the
+    // Dashboard, which is where their own profile card lives now. A redirect
+    // rather than a locked screen: there is nothing here they are missing
+    // out on, the thing they wanted is one view over.
+    if (!isAdmin && view === 'roster') {
+      view = 'dashboard';
     }
 
     if (view === 'dashboard') {
       title.textContent = 'Dashboard.';
-      sub.textContent = 'Anniversaries and headline numbers.';
-      body.innerHTML = this._renderDashboard();
+      if (isAdmin) {
+        sub.textContent = 'Anniversaries and headline numbers.';
+        body.innerHTML = this._renderDashboard();
+        return;
+      }
+      sub.textContent = 'Your profile and where you stand.';
+      await this._loadSelfDashboard();
+      body.innerHTML = this._renderDashboardSelf();
+      this._wireDashboardSelf();
       return;
     }
 
     if (view === 'roster') {
       title.textContent = 'Roster.';
-      if (isAdmin) {
-        sub.textContent = this._employees.length + ' ' + (this._employees.length === 1 ? 'person' : 'people');
-        actions.innerHTML = `<button class="cc-btn" id="ccAddBtn">Add employee</button>`;
-        const addBtn = $('#ccAddBtn');
-        if (addBtn) addBtn.onclick = () => this._openEmployeeForm(null);
-        body.innerHTML = this._renderRosterAdmin();
-        this._wireRosterAdmin();
-      } else {
-        sub.textContent = 'Your profile.';
-        body.innerHTML = this._renderProfileSelf();
+      if (!isAdmin) {
+        // Not reachable through the rail (the employee role has no
+        // crewcore:roster grant) and the redirect above catches the rest.
+        // Kept as the same belt-and-braces guard every other admin view has.
+        sub.textContent = '';
+        body.innerHTML = `<div class="cc-locked"><h2>Admin access required</h2>
+          <p>The roster is the whole team's records. Your own profile is on the Dashboard.</p></div>`;
+        return;
       }
+      sub.textContent = this._employees.length + ' ' + (this._employees.length === 1 ? 'person' : 'people');
+      actions.innerHTML = `<button class="cc-btn" id="ccAddBtn">Add employee</button>`;
+      const addBtn = $('#ccAddBtn');
+      if (addBtn) addBtn.onclick = () => this._openEmployeeForm(null);
+      body.innerHTML = this._renderRosterAdmin();
+      this._wireRosterAdmin();
       return;
     }
 
     if (view === 'timeclock') {
+      // Only for people who punch. permsFor() keeps the tab out of a
+      // salaried employee's rail; this is the guard behind that, for a
+      // stored view key or a typed hash.
+      if (!isAdmin && !this._canClock()) {
+        title.textContent = 'Time Clock.';
+        sub.textContent = '';
+        body.innerHTML = `<div class="cc-locked"><h2>Nothing to show here</h2>
+          <p>You're not set up to clock in and out, so there are no hours on file for you.</p></div>`;
+        return;
+      }
       title.textContent = 'Time Clock.';
       sub.textContent = isAdmin ? 'Hours by employee and pay week.' : 'Your hours.';
       if (!this._tcWeek) this._tcWeek = '';   // '' means "whatever week today is in"
@@ -533,6 +602,10 @@ export default {
     if (view === 'reviews') {
       title.textContent = 'Reviews.';
       sub.textContent = isAdmin ? 'One-on-one review history for the team.' : 'Your review history.';
+      // Coming in from the rail always lands on the list, the same rule the
+      // stipend detail follows. In-place refreshes go through
+      // _refreshReviews(), which keeps whichever review is open.
+      this._reviewDetailId = null;
       await this._loadReviews();
       if (isAdmin) {
         actions.innerHTML = `<button class="cc-btn" id="ccAddReviewBtn">Log a review</button>`;
@@ -540,6 +613,7 @@ export default {
         if (btn) btn.onclick = () => this._openReviewForm();
       }
       body.innerHTML = this._renderReviews();
+      this._wireReviews();
       return;
     }
 
@@ -618,6 +692,153 @@ export default {
         </div>
       </div>
     `;
+  },
+
+  /* ---------------- Dashboard (self-serve) ----------------
+   *
+   * What an employee lands on since Roster went admin-only. The profile card
+   * is the same one that used to BE their Roster view, so nothing they could
+   * see before was taken away — it moved, and picked up the three numbers
+   * they otherwise had to open three tabs to find.
+   */
+
+  /**
+   * Does this person punch a clock? clock_enabled defaults ON for a new
+   * record (see lib/crewcore/schema.js), so anything but an explicit false
+   * counts. An unlinked caller has no record and therefore no hours.
+   */
+  _canClock() {
+    return !!(this._own && this._own.clock_enabled !== false);
+  },
+
+  /**
+   * Four independent fetches, each in its own try. A dashboard is the worst
+   * place for an all-or-nothing load: one endpoint having a bad day would
+   * otherwise blank the screen an employee opens the app on, with no clue
+   * which of four things broke. A failed card is simply not drawn.
+   */
+  async _loadSelfDashboard() {
+    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null };
+    this._selfCards = cards;
+    if (!this._own) return;
+
+    try {
+      await this._loadStipend();
+      cards.stipend = this._stipendBalance;
+    } catch (e) { console.error('CrewCore dashboard: stipend', e); }
+
+    if (this._canClock()) {
+      try {
+        if (!this._tcWeek) this._tcWeek = '';
+        await this._loadTimecards();
+        const row = ((this._tc && this._tc.rows) || [])[0];
+        if (row && row.summary) {
+          cards.hours = Number(row.summary.total_hours) || 0;
+          cards.overtime = Number(row.summary.overtime_hours) || 0;
+        }
+      } catch (e) { console.error('CrewCore dashboard: timecards', e); }
+    }
+
+    try {
+      await this._loadReviews();
+      const byDate = this._reviews.slice()
+        .sort((a, b) => String(b.review_date || '').localeCompare(String(a.review_date || '')));
+      cards.lastReview = byDate[0] || null;
+      // The SOONEST date still ahead of today, not the newest review's date:
+      // a review logged last week can name a date further out than one
+      // logged a month ago, and the next thing on the calendar is the
+      // question this card answers.
+      const today = new Date().toISOString().slice(0, 10);
+      cards.nextReview = this._reviews
+        .map((r) => r.next_review_date)
+        .filter((d) => d && d >= today)
+        .sort()[0] || null;
+    } catch (e) { console.error('CrewCore dashboard: reviews', e); }
+
+    try {
+      await this._loadHandbook();
+      cards.handbook = this._handbook;
+    } catch (e) { console.error('CrewCore dashboard: handbook', e); }
+  },
+
+  _renderDashboardSelf() {
+    // No linked employee record: the "ask an admin to link you" screen is
+    // the whole dashboard, same as it used to be the whole Roster view.
+    if (!this._own) return this._renderProfileSelf();
+
+    const c = this._selfCards || {};
+    const bal = c.stipend;
+    const ann = daysUntilAnniversary(this._own.start_date);
+    const cards = [];
+
+    if (bal) {
+      const pct = bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+      const over = isOverStipend(bal);
+      cards.push(`
+        <div class="cc-card tap${over ? ' over' : ''}" data-go="stipend">
+          ${over ? `<span class="cc-flag" title="Over the allotment">!</span>` : ''}
+          <h3>Stipend left</h3>
+          <div class="big">${fmtMoney(bal.remaining)}</div>
+          <div class="note${over ? ' over' : ''}">${bal.allotted > 0
+            ? (bal.over ? 'over by ' + fmtMoney(bal.over) : 'of ' + fmtMoney(bal.allotted) + ' in ' + bal.year)
+            : 'no stipend set'}</div>
+          <div class="cc-balance-bar${over ? ' over' : ''}"><div class="fill" style="width:${pct}%"></div></div>
+        </div>`);
+    }
+
+    if (this._canClock() && c.hours !== null && c.hours !== undefined) {
+      cards.push(`
+        <div class="cc-card tap" data-go="timeclock">
+          <h3>Hours this week</h3>
+          <div class="big">${c.hours.toFixed(2)}</div>
+          <div class="note">${c.overtime ? c.overtime.toFixed(2) + ' of it overtime' : esc(this._tcWeekLabel())}</div>
+        </div>`);
+    }
+
+    cards.push(`
+      <div class="cc-card tap" data-go="reviews">
+        <h3>Next review</h3>
+        <div class="big">${c.nextReview ? fmtDate(c.nextReview) : '—'}</div>
+        <div class="note">${c.lastReview
+          ? 'last one ' + fmtDate(c.lastReview.review_date)
+          : 'nothing on the calendar'}</div>
+      </div>`);
+
+    if (c.handbook) {
+      const ok = c.handbook.acknowledged === true;
+      cards.push(`
+        <div class="cc-card tap" data-go="handbook">
+          <h3>Handbook</h3>
+          <div class="big">${ok ? 'Agreed' : 'Unread'}</div>
+          <div class="note">${ok ? 'version of ' + esc(c.handbook.updated || '') : 'needs your agreement'}</div>
+        </div>`);
+    }
+
+    return `
+      ${this._renderProfileSelf()}
+      <div class="cc-grid" id="ccSelfCards" style="margin-top:22px">${cards.join('')}</div>
+      ${ann ? `<p style="font-size:12.5px;color:var(--muted)">
+        ${ann.days === 0
+          ? `Today is ${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M. Thank you.`
+          : `${ann.years + 1} ${ann.years + 1 === 1 ? 'year' : 'years'} at P&amp;M in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
+      </p>` : ''}
+    `;
+  },
+
+  _wireDashboardSelf() {
+    const grid = this._root.querySelector('#ccSelfCards');
+    if (!grid) return;
+    // Each card is a shortcut to the view it summarises. ctx.go() routes
+    // through the shell rather than calling showView() directly, so the rail
+    // highlight and the URL hash stay in step — clicking a card and clicking
+    // the rail have to land in the same place.
+    grid.querySelectorAll('[data-go]').forEach((card) => {
+      card.onclick = () => {
+        const view = card.dataset.go;
+        if (this._ctx && typeof this._ctx.go === 'function') this._ctx.go(view);
+        else this.showView(view);
+      };
+    });
   },
 
   /* ---------------- Roster: admin list ---------------- */
@@ -1236,47 +1457,190 @@ export default {
 
   /* ---------------- Reviews ---------------- */
 
+  /**
+   * A list until a row is clicked, then the whole review. Same split the
+   * stipend view uses (_stipendDetailId), and for the same reason: a review
+   * is four paragraphs of writing, and a list that showed all of it would be
+   * unreadable at ten reviews while a list that showed none of it was
+   * useless. Which one is drawn is _reviewDetailId, and nothing else.
+   */
   _renderReviews() {
+    if (this._reviewDetailId) return this._renderReviewDetail();
+    return this._renderReviewList();
+  },
+
+  _nameForEmployee(id) {
+    const e = this._employees.find((x) => x.id === id);
+    if (e) return e.name;
+    // A self-serve caller has no roster to look names up in, and every
+    // review they can see is their own anyway.
+    if (this._own && this._own.id === id) return this._own.name;
+    return id;
+  },
+
+  _renderReviewList() {
     const isAdmin = this._isAdmin;
-    const nameFor = (id) => {
-      const e = this._employees.find((x) => x.id === id);
-      return e ? e.name : id;
-    };
     if (!this._reviews.length) {
       return `<div class="cc-empty">No reviews logged yet.</div>`;
     }
+    // Newest first. The API returns them in index order, which is the order
+    // they happened to be written, and nobody reads a review history oldest
+    // first.
+    const rows = this._reviews.slice()
+      .sort((a, b) => String(b.review_date || '').localeCompare(String(a.review_date || '')));
+
     return `
       <div class="cc-list">
-        ${this._reviews.map((r) => `
-          <div class="cc-row">
+        ${rows.map((r) => `
+          <div class="cc-row tap" data-review="${esc(r.id)}">
             <div>
-              ${isAdmin ? `<div class="who">${esc(nameFor(r.employee_id))}</div>` : ''}
+              ${isAdmin ? `<div class="who">${esc(this._nameForEmployee(r.employee_id))}</div>` : ''}
               <div class="meta">${fmtDate(r.review_date)} · with ${esc(r.reviewer_name)}</div>
-              ${r.summary ? `<div class="meta" style="margin-top:4px">${esc(r.summary)}</div>` : ''}
+              ${r.summary ? `<div class="meta cc-clamp" style="margin-top:4px">${esc(r.summary)}</div>` : ''}
             </div>
+            <div class="cc-rowacts"><span class="cc-chev">›</span></div>
           </div>
         `).join('')}
       </div>
     `;
   },
 
-  _openReviewForm() {
+  _renderReviewDetail() {
+    const r = this._reviews.find((x) => x.id === this._reviewDetailId);
+    if (!r) {
+      // Deleted, or the list reloaded without it. Fall back to the list
+      // rather than render an empty shell.
+      this._reviewDetailId = null;
+      return this._renderReviewList();
+    }
+    const isAdmin = this._isAdmin;
+    // A written block keeps its line breaks (cc-prose is white-space:
+    // pre-wrap). A review is written in paragraphs and bullet-ish lines, and
+    // flattening them into one run of text loses the shape of what was said.
+    const block = (label, value) => (String(value || '').trim()
+      ? `<div class="cc-section">
+           <h2>${esc(label)}</h2>
+           <div class="cc-prose">${esc(value)}</div>
+         </div>`
+      : '');
+
+    return `
+      <div class="cc-back">
+        <button class="cc-btn sm ghost" id="ccRevBack">Back to reviews</button>
+        <span class="grow" style="flex:1"></span>
+        ${isAdmin ? `
+          <button class="cc-btn sm ghost" id="ccRevEdit">Edit</button>
+          <button class="cc-btn sm ghost danger" id="ccRevDelete">Delete</button>` : ''}
+      </div>
+
+      <div class="cc-profile-hd">
+        <div class="cc-avatar">${esc(String(this._nameForEmployee(r.employee_id) || '?')
+          .trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</div>
+        <div>
+          <h2>${esc(this._nameForEmployee(r.employee_id))}</h2>
+          <div class="sub">One-on-one, ${esc(fmtDate(r.review_date))}</div>
+        </div>
+      </div>
+
+      <div class="cc-field-grid" style="margin-bottom:24px">
+        <div class="cc-field"><label>Review date</label><div class="v">${fmtDate(r.review_date) || '—'}</div></div>
+        <div class="cc-field"><label>Reviewer</label><div class="v">${esc(r.reviewer_name || '—')}</div></div>
+        <div class="cc-field"><label>Next review</label><div class="v">${r.next_review_date ? fmtDate(r.next_review_date) : '—'}</div></div>
+        <div class="cc-field"><label>Logged</label><div class="v">${r.created_at ? fmtDate(String(r.created_at).slice(0, 10)) : '—'}</div></div>
+      </div>
+
+      ${block('Summary', r.summary)}
+      ${block('Strengths', r.strengths)}
+      ${block('Growth areas', r.growth_areas)}
+      ${!String(r.summary || '').trim() && !String(r.strengths || '').trim() && !String(r.growth_areas || '').trim()
+        ? `<div class="cc-empty">Nothing was written up on this one.</div>` : ''}
+      ${isAdmin ? '' : `<p style="font-size:12.5px;color:var(--muted)">
+        This is your copy to read. Corrections go through whoever ran the review.</p>`}
+    `;
+  },
+
+  _wireReviews() {
+    const root = this._root;
+    if (!root) return;
+
+    // List: a row opens the review. No refetch — the list already holds
+    // every field the detail draws.
+    root.querySelectorAll('[data-review]').forEach((row) => {
+      row.onclick = () => {
+        this._reviewDetailId = row.dataset.review;
+        this._paintReviews();
+      };
+    });
+
+    const back = root.querySelector('#ccRevBack');
+    if (back) back.onclick = () => { this._reviewDetailId = null; this._paintReviews(); };
+
+    const edit = root.querySelector('#ccRevEdit');
+    if (edit) edit.onclick = () => {
+      const r = this._reviews.find((x) => x.id === this._reviewDetailId);
+      if (r) this._openReviewForm(r);
+    };
+
+    const del = root.querySelector('#ccRevDelete');
+    if (del) del.onclick = async () => {
+      const r = this._reviews.find((x) => x.id === this._reviewDetailId);
+      if (!r) return;
+      if (!confirm('Delete this review of ' + this._nameForEmployee(r.employee_id) +
+        ' from ' + fmtDate(r.review_date) + '? This cannot be undone.')) return;
+      try {
+        await this._ctx.api.request(ENDPOINTS.ccReviews + '?id=' + encodeURIComponent(r.id), { method: 'DELETE' });
+        this._reviewDetailId = null;
+        await this._refreshReviews();
+      } catch (e) {
+        alert((e.body && e.body.error) || e.message || 'Could not delete that review.');
+      }
+    };
+  },
+
+  /** Redraw the reviews body from what is already loaded. */
+  _paintReviews() {
+    const body = this._root.querySelector('#ccBody');
+    if (!body) return;
+    body.innerHTML = this._renderReviews();
+    this._wireReviews();
+  },
+
+  /** Refetch, then redraw — keeping whichever review is open. */
+  async _refreshReviews() {
+    await this._loadReviews();
+    this._paintReviews();
+  },
+
+  /**
+   * Log a new review, or edit one that exists. Same form either way: the
+   * fields are identical, and two near-copies of a seven-field form is how
+   * an edit screen quietly loses a field the add screen gained.
+   *
+   * On edit the employee cannot be changed. Moving a review from one
+   * person's file to another's is not a correction, it is two operations
+   * (delete, re-log) and should look like it.
+   */
+  _openReviewForm(review) {
+    const editing = !!(review && review.id);
     const root = this._root;
     const body = root.querySelector('#ccBody');
     const wrap = document.createElement('div');
+    const val = (k) => esc((review && review[k]) || '');
     wrap.innerHTML = `
       <div class="cc-form">
-        <h3>Log a review</h3>
+        <h3>${editing ? 'Edit review' : 'Log a review'}</h3>
         <div class="cc-form-grid">
           <div class="full"><label>Employee</label>
-            <select id="fEmp">${this._employees.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</select>
+            ${editing
+              ? `<input value="${esc(this._nameForEmployee(review.employee_id))}" disabled>`
+              : `<select id="fEmp">${this._employees.map((e) => `<option value="${esc(e.id)}">${esc(e.name)}</option>`).join('')}</select>`}
           </div>
-          <div><label>Review date</label><input id="fDate" type="date"></div>
-          <div><label>Reviewer</label><input id="fReviewer" value="${esc(this._ctx.user ? this._ctx.user.name : '')}"></div>
-          <div class="full"><label>Summary</label><textarea id="fSummary" rows="2"></textarea></div>
-          <div><label>Strengths</label><textarea id="fStrengths" rows="2"></textarea></div>
-          <div><label>Growth areas</label><textarea id="fGrowth" rows="2"></textarea></div>
-          <div><label>Next review date</label><input id="fNext" type="date"></div>
+          <div><label>Review date</label><input id="fDate" type="date" value="${val('review_date')}"></div>
+          <div><label>Reviewer</label><input id="fReviewer" value="${editing ? val('reviewer_name') : esc(this._ctx.user ? this._ctx.user.name : '')}"></div>
+          <div class="full"><label>Summary</label><textarea id="fSummary" rows="3">${val('summary')}</textarea></div>
+          <div><label>Strengths</label><textarea id="fStrengths" rows="3">${val('strengths')}</textarea></div>
+          <div><label>Growth areas</label><textarea id="fGrowth" rows="3">${val('growth_areas')}</textarea></div>
+          <div><label>Next review date</label><input id="fNext" type="date" value="${val('next_review_date')}"></div>
         </div>
         <div class="cc-err" id="fErr" hidden></div>
         <div class="cc-form-actions">
@@ -1292,7 +1656,7 @@ export default {
     $('#fCancel').onclick = () => wrap.remove();
     $('#fSubmit').onclick = async () => {
       const payload = {
-        employee_id: $('#fEmp').value,
+        employee_id: editing ? review.employee_id : $('#fEmp').value,
         review_date: $('#fDate').value,
         reviewer_name: $('#fReviewer').value,
         summary: $('#fSummary').value,
@@ -1301,9 +1665,18 @@ export default {
         next_review_date: $('#fNext').value
       };
       try {
-        await this._ctx.api.request(ENDPOINTS.ccReviews, { method: 'POST', body: payload });
-        wrap.remove();
-        this.showView('reviews');
+        if (editing) {
+          await this._ctx.api.request(ENDPOINTS.ccReviews + '?id=' + encodeURIComponent(review.id), { method: 'PATCH', body: payload });
+          wrap.remove();
+          // Stay on the review that was just edited, so the change is
+          // visible where it was made rather than back on a list.
+          this._reviewDetailId = review.id;
+          await this._refreshReviews();
+        } else {
+          await this._ctx.api.request(ENDPOINTS.ccReviews, { method: 'POST', body: payload });
+          wrap.remove();
+          this.showView('reviews');
+        }
       } catch (e) {
         err.hidden = false; err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
       }

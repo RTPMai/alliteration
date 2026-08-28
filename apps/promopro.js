@@ -1792,7 +1792,7 @@ export default {
         let why;
         if (rc.adminView === false) {
           why = 'Your account is not being treated as an administrator, so the roster was not sent. ' +
-            'Check your role and superuser flag in the shell Settings.';
+            'Check your role and Admin flag in the shell Settings.';
         } else if (!rc.total) {
           why = 'CrewCore has no employee records at all.';
         } else {
@@ -1891,7 +1891,7 @@ export default {
           '<div class="pp-sect">Who can raise and edit purchase orders</div>' +
           '<div class="pp-hint" style="margin-bottom:10px">' +
             'Reading stays open to everyone, so an account manager can always answer \u201cwhere is my order\u201d without asking. ' +
-            'This is about who can create, change and send them. Superusers always can. ' +
+            'This is about who can create, change and send them. Admins always can. ' +
             'Tick nothing and it falls back to whoever the shell already lets edit, which is how it behaved before this list existed.' +
           '</div>' +
           (isAdmin

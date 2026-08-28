@@ -273,7 +273,12 @@ export default {
 
       $('#userList').innerHTML =
         '<table class="u-table"><thead><tr>' +
-          '<th>Person</th><th>Role</th><th>Superuser</th><th>Last signed in</th><th></th>' +
+          // "Admin", not "Superuser" — Ryan's call, Aug 2026. This column is
+          // the per-account elevated flag; the protected role beside it is
+          // labelled "Full access" in lib/users.js so the two things on one
+          // row don't both read as Admin. The stored field is still
+          // `superuser` everywhere in code.
+          '<th>Person</th><th>Role</th><th>Admin</th><th>Last signed in</th><th></th>' +
         '</tr></thead><tbody>' +
         users.map((u) => {
           const role = roles[u.role] || {};
@@ -301,7 +306,7 @@ export default {
             // it only changes what stub placeholders you can see, nothing
             // about sign-in access, so there is no lockout risk.
             '<td>' +
-              '<label class="su-toggle" title="Sees not-yet-built apps in the rail (CrewCore, MailMe, etc.)">' +
+              '<label class="su-toggle" title="Admin: sees every app in the rail, including Site Work and anything not yet built">' +
                 '<input type="checkbox" data-superuser-user="' + esc(u.username) + '"' +
                   (u.superuser ? ' checked' : '') + '>' +
               '</label>' +
