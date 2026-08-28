@@ -99,6 +99,59 @@ async function check(name, fn) {
     t.assert(/Admin access required/.test(roster), 'and say so rather than render an empty table');
   });
 
+  await check('a role with CrewCore ticked and no tabs list is still narrowed', async () => {
+    // THE BUG AMANDA FOUND, Aug 28 2026. Only the "employee" role ships a
+    // tabs list, and "no tabs recorded" used to mean "every view". So an
+    // office account on its own role opened CrewCore to a rail with Roster,
+    // Time Clock and Settings on it. The server was answering correctly the
+    // whole time — she saw her own record — but the rail offered the team.
+    kv.set(P + 'roles', JSON.stringify({
+      office: { name: 'office', label: 'Office', apps: ['backbone', 'crewcore'], data_scope: 'all', can_edit: true },
+    }));
+    kv.set(P + 'users', JSON.stringify({
+      amanda: { username: 'amanda', name: 'Amanda', role: 'office' },
+    }));
+    kv.set(CC + ':employee_index', JSON.stringify(['EMP-00009']));
+    kv.set(CC + ':employee:EMP-00009', JSON.stringify({
+      id: 'EMP-00009', name: 'Amanda', username: 'amanda', clock_enabled: false,
+    }));
+
+    const perms = await permsFor('amanda');
+    t.assert(perms.tabs.includes('crewcore'), 'she still has the app itself');
+    t.assert(!perms.tabs.includes('crewcore:roster'), 'but not the roster');
+    t.assert(!perms.tabs.includes('crewcore:settings'), 'and not CrewCore settings');
+    t.assert(!perms.tabs.includes('crewcore:timeclock'), 'and not the time clock — she does not punch');
+    t.assert(perms.tabs.includes('crewcore:dashboard') && perms.tabs.includes('crewcore:stipend'),
+      'the self-serve views are granted explicitly rather than left to a fallback');
+    t.assert(perms.tabs.includes('backbone'),
+      'a ceiling on ONE app must not touch her access to any other');
+
+    seed([
+      { id: 'EMP-00001', name: 'Sasha', username: 'sasha', clock_enabled: true },
+      { id: 'EMP-00002', name: 'Dana', username: 'dana', clock_enabled: false },
+    ]);
+  });
+
+  await check('the same ceiling holds in the rail, not just in the perms', async () => {
+    // Second gate: a session issued before this deploy carries the old wide
+    // tabs, and the rail is drawn from whatever it was handed.
+    const reg = await import(path.join(ROOT, 'js/registry.js'));
+    const wide = { role: 'office', superuser: false, tabs: ['crewcore'] };
+    const views = reg.allowedViews(wide, 'crewcore');
+    t.assert(!views.includes('roster'), 'the rail must not draw Roster for a non-admin');
+    t.assert(!views.includes('settings'), 'nor CrewCore Settings');
+    t.assert(views.includes('dashboard'), 'the self-serve views still have to be reachable');
+
+    const admin = { role: 'admin', superuser: false, tabs: ['crewcore'] };
+    t.assert(reg.allowedViews(admin, 'crewcore').includes('roster'),
+      'the admin role keeps every view');
+    const flagged = { role: 'am', superuser: true, tabs: ['crewcore'] };
+    t.assert(reg.allowedViews(flagged, 'crewcore').includes('roster'),
+      'so does an account with the Admin flag');
+    t.assert(reg.allowedViews(wide, 'shopstock').length > 1,
+      'no other app changed: the ceiling is CrewCore-only');
+  });
+
   /* ---- 2. the time clock ------------------------------------------------ */
 
   await check('somebody who punches keeps the Time Clock grant', async () => {
@@ -269,6 +322,17 @@ async function check(name, fn) {
     const tries = (fn.match(/try \{/g) || []).length;
     t.assert(tries >= 3,
       'each fetch on the dashboard has to fail on its own, or one bad endpoint costs the whole landing screen');
+  });
+
+  t.test('the anniversary line names the anniversary they are actually reaching', () => {
+    // Both dashboards printed `years + 1` and aged everybody by a year:
+    // Amanda, who started Feb 14 2022, was told she had six years coming up
+    // in Aug 2026. daysUntilAnniversary already returns the milestone.
+    const src = read('apps/crewcore.js');
+    t.assert(!/ann\.years \+ 1/.test(src),
+      'years already IS the milestone being reached — adding one overstates it');
+    t.assert(/\$\{ann\.years\} \$\{ann\.years === 1 \? 'year' : 'years'\} at P&amp;M/.test(src),
+      'the self-serve line must print the figure as returned');
   });
 
   t.test('the hours card is only drawn for somebody who punches', () => {
