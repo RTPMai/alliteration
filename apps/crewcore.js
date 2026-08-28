@@ -37,7 +37,7 @@ import { ENDPOINTS } from '../js/api.js';
 // The stipend year math is shared with the API route and the store so a
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
-import { spendsFor, stipendBalance, stipendYears, spendLabel, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -93,7 +93,7 @@ export default {
   .cc-btn:disabled{opacity:.5;cursor:not-allowed}
 
   .cc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-bottom:22px}
-  .cc-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:16px 18px}
+  .cc-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:16px 18px;position:relative}
   .cc-card h3{font-size:12.5px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:8px}
   .cc-card .big{font-size:26px;font-weight:800;letter-spacing:-.01em}
   .cc-card .note{font-size:12px;color:var(--muted);margin-top:4px}
@@ -101,6 +101,20 @@ export default {
   .cc-card.tap:hover{border-color:var(--accent);transform:translateY(-1px)}
   .cc-card .cardhd{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
   .cc-card .cardhd h3{margin-bottom:0}
+
+  /* Over the stipend. The card keeps its normal frame and picks up one red
+     mark in the top right, so a grid of people reads at a glance and the
+     flag is the only red thing on it. The card gets room on the right so a
+     long name runs into the padding instead of under the mark. */
+  .cc-card.over{padding-right:44px}
+  .cc-flag{
+    position:absolute;top:12px;right:12px;
+    width:20px;height:20px;border-radius:50%;
+    display:inline-grid;place-items:center;
+    background:var(--danger);color:var(--on-accent);
+    font-size:13px;font-weight:800;line-height:1;
+  }
+  .cc-card .note.over{color:var(--danger);font-weight:600}
   .cc-back{display:flex;align-items:center;gap:10px;margin-bottom:16px}
   .cc-rowacts{display:flex;align-items:center;gap:8px;flex-shrink:0}
 
@@ -171,6 +185,7 @@ export default {
     height:8px;border-radius:99px;background:var(--line-soft);overflow:hidden;margin-top:6px;
   }
   .cc-balance-bar .fill{height:100%;background:var(--accent);border-radius:99px}
+  .cc-balance-bar.over .fill{background:var(--danger)}
 
   .cc-hb-cover{
     text-align:center;padding:36px 20px 30px;margin-bottom:28px;
@@ -875,6 +890,19 @@ export default {
     return e ? e.name : id;
   },
 
+  /**
+   * The red mark for a person who has gone past their allotment. Returns an
+   * empty string when they have not, so a caller can drop it into any card
+   * without a conditional of its own. The hover title carries the amount,
+   * because a bare exclamation point says something is wrong without saying
+   * what.
+   */
+  _overFlag(bal, year) {
+    if (!isOverStipend(bal)) return '';
+    const msg = 'Over the ' + (bal.year || year) + ' stipend by ' + fmtMoney(bal.over);
+    return `<span class="cc-flag" title="${esc(msg)}" role="img" aria-label="${esc(msg)}">!</span>`;
+  },
+
   _stipendYearPicker() {
     const years = this._stipendYears();
     return `
@@ -936,12 +964,16 @@ export default {
       const bal = this._balanceFor(e, year);
       const count = this._spendsFor(e.id, year).length;
       const pct = bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
+      const over = isOverStipend(bal);
       return `
-        <div class="cc-card tap" data-emp="${esc(e.id)}" role="button" tabindex="0">
+        <div class="cc-card tap${over ? ' over' : ''}" data-emp="${esc(e.id)}" role="button" tabindex="0">
+          ${this._overFlag(bal, year)}
           <div class="cardhd"><h3>${esc(e.name)}</h3></div>
           <div class="big">${fmtMoney(bal.remaining)}</div>
-          <div class="note">of ${fmtMoney(bal.allotted)} remaining${bal.over ? ' · over by ' + fmtMoney(bal.over) : ''}</div>
-          <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+          <div class="note${over ? ' over' : ''}">${bal.allotted > 0
+            ? 'of ' + fmtMoney(bal.allotted) + ' remaining' + (bal.over ? ' · over by ' + fmtMoney(bal.over) : '')
+            : 'no stipend set'}</div>
+          <div class="cc-balance-bar${over ? ' over' : ''}"><div class="fill" style="width:${pct}%"></div></div>
           <div class="note">${count} ${count === 1 ? 'purchase' : 'purchases'} in ${year}</div>
         </div>
       `;
@@ -996,11 +1028,14 @@ export default {
           <div class="big">${fmtMoney(bal.used)}</div>
           <div class="note">${rows.length} ${rows.length === 1 ? 'purchase' : 'purchases'}</div>
         </div>
-        <div class="cc-card">
+        <div class="cc-card${isOverStipend(bal) ? ' over' : ''}">
+          ${this._overFlag(bal, year)}
           <h3>Remaining</h3>
           <div class="big">${fmtMoney(bal.remaining)}</div>
-          <div class="note">${bal.over ? 'over by ' + fmtMoney(bal.over) : 'of ' + fmtMoney(bal.allotted)}</div>
-          <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+          <div class="note${isOverStipend(bal) ? ' over' : ''}">${bal.allotted > 0
+            ? (bal.over ? 'over by ' + fmtMoney(bal.over) : 'of ' + fmtMoney(bal.allotted))
+            : 'no stipend set'}</div>
+          <div class="cc-balance-bar${isOverStipend(bal) ? ' over' : ''}"><div class="fill" style="width:${pct}%"></div></div>
         </div>
       </div>
       <div class="cc-section">
@@ -1027,10 +1062,12 @@ export default {
           <h3>Used</h3>
           <div class="big">${bal ? fmtMoney(bal.used) : '—'}</div>
         </div>
-        <div class="cc-card">
+        <div class="cc-card${isOverStipend(bal) ? ' over' : ''}">
+          ${this._overFlag(bal, year)}
           <h3>Remaining</h3>
           <div class="big">${bal ? fmtMoney(bal.remaining) : '—'}</div>
-          ${bal ? `<div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>` : ''}
+          ${isOverStipend(bal) ? `<div class="note over">over by ${fmtMoney(bal.over)}</div>` : ''}
+          ${bal ? `<div class="cc-balance-bar${isOverStipend(bal) ? ' over' : ''}"><div class="fill" style="width:${pct}%"></div></div>` : ''}
         </div>
       </div>
       <div class="cc-section">
