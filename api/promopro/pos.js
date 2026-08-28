@@ -18,7 +18,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
-import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
+import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
 import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
@@ -240,6 +240,14 @@ export default async function handler(req, res) {
       const check = validatePatch(body, vendors.map((v) => v.id), amIds);
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
 
+      // Closed looks after itself. Every step ticked closes the order, dated
+      // by the last step rather than by today, and unticking one reopens it.
+      // Doing this HERE rather than on the screen means it is true however
+      // the dates got set: a tick, a back-fill, a receipt booking in the last
+      // of a short delivery.
+      const closing = closedPatch({ ...existing, ...check.patch });
+      Object.assign(check.patch, closing);
+
       // History records the STAGE change, not every keystroke. A note edit is
       // not interesting; a PO moving from confirmed to shipped is.
       const before = currentStage(existing);
@@ -261,9 +269,39 @@ export default async function handler(req, res) {
       if (!isAdmin) return res.status(403).json({ error: "Admin access required" });
       const id = req.query && req.query.id;
       if (!id) return res.status(400).json({ error: "id is required" });
+
+      // DELETING A SENT ORDER IS ALLOWED, AND IT TAKES THE NUMBER TO DO IT.
+      //
+      // It used to be refused outright once a PO had been emailed, on the
+      // grounds that it is a document an outside party may be working from.
+      // That reasoning is right about the risk and wrong about who decides:
+      // a PO sent to the wrong vendor is a mis-send, and the record of it is
+      // noise that outlives the mistake.
+      //
+      // So the guard is not a refusal, it is deliberateness. The caller has
+      // to send back the exact PO number, which a mis-click cannot produce.
+      // Cancel remains the softer option, and the one to use when the vendor
+      // really did get an order that needs calling off.
+      const doomed = await getPo(String(id));
+      if (!doomed) return res.status(404).json({ error: "Not found" });
+
+      if (doomed.lastSentAt) {
+        const typed = String((req.query && req.query.confirmNumber) || "").trim();
+        if (typed !== String(doomed.poNumber || "").trim()) {
+          return res.status(409).json({
+            error: `${doomed.poNumber} was emailed to a vendor on ${String(doomed.lastSentAt).slice(0, 10)}. ` +
+              "Deleting removes our only record of what they were sent. Confirm by typing the PO number, " +
+              "or cancel the order instead, which keeps the record and tells them.",
+            confirmNumberRequired: true,
+            poNumber: doomed.poNumber,
+            sentTo: doomed.sentTo || "",
+          });
+        }
+      }
+
       const gone = await deletePo(String(id));
       if (!gone) return res.status(404).json({ error: "Not found" });
-      return res.status(200).json({ ok: true });
+      return res.status(200).json({ ok: true, poNumber: doomed.poNumber });
     }
 
     res.setHeader("Allow", "GET, POST, PATCH, DELETE");
