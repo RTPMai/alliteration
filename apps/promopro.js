@@ -26,7 +26,7 @@
 import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
-  withSettingDefaults, ccListFor, parseEmailList, receiptSummary
+  withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 
@@ -54,6 +54,13 @@ export default {
     .pp-btn.ghost { background: var(--card); border-color: var(--line); color: var(--muted); }
     .pp-btn.ghost:hover { color: var(--ink); }
     .pp-btn:disabled { opacity: .5; cursor: default; }
+
+    /* A number that is also a way to get to that order. Reads as text, not as
+       a control, because it sits inside a sentence. */
+    .pp-linkish {
+      background: none; border: 0; padding: 0; font: inherit; color: var(--accent);
+      font-weight: 700; cursor: pointer; text-decoration: underline;
+    }
 
     .pp-filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 18px; }
     .pp-filters button {
@@ -269,6 +276,8 @@ export default {
       poSuffix: '',          // what goes after the invoice number
       stagedArt: [],         // files chosen before the PO exists yet
       picked: null,        // the chosen Printavo invoice, if any
+      reorderOf: null,     // { id, poNumber, artCount } when copying an order
+      prefill: {},         // what the form opens with, when it is a reorder
       openPoId: null,
       searchTimer: null,
     };
@@ -442,16 +451,47 @@ export default {
       '</tr>';
     }
 
+    /**
+     * What the form opens with.
+     *
+     * Empty for a new order, filled from the order being copied for a
+     * reorder. One reader, so the form itself never has to know which of the
+     * two it is drawing.
+     */
+    function pf(key, fallback) {
+      const v = st.prefill ? st.prefill[key] : undefined;
+      return (v === undefined || v === null || v === '') ? fallback : v;
+    }
+
     function renderForm() {
       const wrap = $('#ppFormWrap');
       const pickedVendor = vendorById(st.draftVendorId);
       const pickedVendorName = pickedVendor ? pickedVendor.name : '';
+      const chosenAm = pf('accountManager', '');
       const amOpts = st.settings.accountManagers
-        .map((a) => '<option value="' + esc(a.id) + '">' + esc(a.name) + '</option>').join('');
+        .map((a) => '<option value="' + esc(a.id) + '"' + (a.id === chosenAm ? ' selected' : '') + '>' +
+          esc(a.name) + '</option>').join('');
 
       const total = st.draftLines.reduce((a, l) => a + lineTotal(l), 0);
 
       wrap.innerHTML = '<div class="pp-form">' +
+        // A reorder looks exactly like the create form on purpose, because it
+        // IS one: everything can still be changed before anything is saved.
+        // What it needs to say is where the contents came from, and that the
+        // one thing NOT carried over is the number.
+        (st.reorderOf
+          ? '<div class="pp-notice">' +
+              '<strong>Reorder of ' + esc(st.reorderOf.poNumber || 'an earlier order') + '.</strong> ' +
+              'Lines, vendor, shipping and notes were copied and can all be changed here. ' +
+              (st.reorderOf.artCount
+                ? 'The ' + esc(st.reorderOf.artCount) + ' art file' + (st.reorderOf.artCount === 1 ? '' : 's') +
+                  ' will be copied onto the new order when you create it. '
+                : '') +
+              'It gets its own number: find the new Printavo job below, or leave the search empty ' +
+              'and it takes the next manual number for the year.' +
+              ' <button class="pp-btn ghost" id="ppClearReorder">Start blank instead</button>' +
+            '</div>'
+          : '') +
         (st.vendors.length ? '' : '<div class="pp-notice">No vendors yet. Add one on the Vendors tab first, since a purchase order has to go to somebody.</div>') +
         (st.settings.accountManagers.length ? '' : '<div class="pp-notice">No account managers set up yet. Add them in Settings, since every purchase order needs an owner and they get copied on the vendor email.</div>') +
 
@@ -492,8 +532,10 @@ export default {
           '</div>' +
           '<div class="pp-field"><label>Account manager (required)</label><select id="ppAm">' +
             '<option value="">Choose an account manager</option>' + amOpts + '</select></div>' +
+          // Needed by is deliberately NOT carried over from a reorder: the old
+          // date is in the past and a due date nobody set is worse than none.
           '<div class="pp-field"><label>Needed by</label><input id="ppNeededBy" type="date" value="' + esc((st.picked && st.picked.dueDate) || '') + '"></div>' +
-          '<div class="pp-field"><label>Decorating buffer (days)</label><input id="ppBuffer" type="number" min="0" value="0"></div>' +
+          '<div class="pp-field"><label>Decorating buffer (days)</label><input id="ppBuffer" type="number" min="0" value="' + esc(pf('decorateBufferDays', 0)) + '"></div>' +
         '</div>' +
 
         // Shown before sending, not after. Who gets copied on an email to an
@@ -511,17 +553,22 @@ export default {
 
         '<div class="pp-row" style="margin-top:14px">' +
           '<div class="pp-field"><label>Ship to</label>' +
-            '<input id="ppShipTo" value="' + esc(st.settings.defaultShipTo || '') + '" placeholder="Our shop, or drop ship address">' +
+            '<input id="ppShipTo" value="' + esc(pf('shipTo', st.settings.defaultShipTo || '')) + '" placeholder="Our shop, or drop ship address">' +
             '<div class="pp-hint">Prefilled from Settings. Change it for a drop ship.</div>' +
           '</div>' +
           '<div class="pp-field"><label>Shipping instructions</label>' +
-            '<input id="ppShipVia" value="' + esc(st.settings.shippingInstructions || '') + '" placeholder="Set a default in Settings">' +
+            '<input id="ppShipVia" value="' + esc(pf('shippingInstructions', st.settings.shippingInstructions || '')) + '" placeholder="Set a default in Settings">' +
           '</div>' +
         '</div>' +
-        '<div class="pp-field"><label>Notes to the vendor</label><textarea id="ppNotes"></textarea></div>' +
+        '<div class="pp-field"><label>Notes to the vendor</label><textarea id="ppNotes">' + esc(pf('notes', '')) + '</textarea></div>' +
 
         '<div class="pp-sect">Artwork for the vendor</div>' +
         '<div class="pp-hint" style="margin-bottom:8px">' +
+          (st.reorderOf && st.reorderOf.artCount
+            ? 'The ' + esc(st.reorderOf.artCount) + ' file' + (st.reorderOf.artCount === 1 ? '' : 's') +
+              ' already on ' + esc(st.reorderOf.poNumber || 'that order') +
+              ' will be copied across. Anything you add here goes on as well. '
+            : '') +
           'Optional now, and you can always add more later from the order itself. ' +
           'Anyone with the link can open these without signing in, which is how the vendor gets them.' +
         '</div>' +
@@ -533,7 +580,7 @@ export default {
         '</div>' +
 
         '<div style="margin-top:14px;display:flex;gap:8px">' +
-          '<button class="pp-btn" id="ppSave">Create purchase order</button>' +
+          '<button class="pp-btn" id="ppSave">' + (st.reorderOf ? 'Create reorder' : 'Create purchase order') + '</button>' +
           '<button class="pp-btn ghost" id="ppCancel">Cancel</button>' +
         '</div>' +
         '<div class="pp-err" id="ppFormErr" hidden></div>' +
@@ -1047,7 +1094,19 @@ export default {
               ? ' &middot; CC ' + esc(ccListFor(po, v, st.settings).join(', '))
               : '') +
           '</div>' +
-        '</div><button class="pp-btn ghost" id="ppCloseDetail">Close</button></div>' +
+          (po.reorderOf
+            ? '<div class="sub" style="font-size:12px">Reorder of ' +
+                '<button class="pp-linkish" data-po="' + esc(po.reorderOf) + '">' +
+                esc(po.reorderOfNumber || 'an earlier order') + '</button></div>'
+            : '') +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          // Reorder sits here rather than down with cancel and delete: it is
+          // the ordinary thing somebody does with a finished order, not part
+          // of taking one apart.
+          (canEdit ? '<button class="pp-btn ghost" id="ppReorder">Reorder</button>' : '') +
+          '<button class="pp-btn ghost" id="ppCloseDetail">Close</button>' +
+        '</div></div>' +
 
         (h.reasons.length ? '<div class="pp-notice"><strong>Attention.</strong> ' + esc(h.reasons.join('. ')) + '</div>' : '') +
         (orderBy ? '<div class="sub" style="font-size:12px;color:var(--muted)">To hit the due date this needed ordering by ' + esc(orderBy) + '</div>' : '') +
@@ -1440,6 +1499,50 @@ export default {
         esc(bits.join(', ')) + ' across ' + stats.completed + ' finished</span>';
     }
 
+    /**
+     * Whether reply capture is actually working, said in one place.
+     *
+     * This setting is the only one in PromoPro whose failure is completely
+     * invisible: a wrong or empty capture domain means Reply-To quietly falls
+     * back to a person, every PO looks perfectly sent, and no vendor reply is
+     * ever captured. So the screen shows the address that will really be used
+     * and whether anything has ever actually arrived, rather than only what
+     * somebody typed.
+     */
+    function captureStatusHtml(S) {
+      if (!S.captureReplies) return '';
+
+      const domain = String(S.captureDomain || '').trim().replace(/^@+/, '').toLowerCase();
+      // The same reader the send uses, asked about a sample order, so this
+      // line and the real Reply-To can never disagree.
+      const sample = captureState({ poNumber: '26-66608-9' }, S);
+      const heard = S._inboundLastAt || '';
+      const via = S._inboundAuthVia || '';
+
+      if (!sample.address) {
+        return '<div class="pp-notice"><strong>Reply capture is on but cannot work.</strong> ' +
+          (domain
+            ? 'The capture domain reads “' + esc(domain) + '”, which is not a domain name. ' +
+              'It should read like po.pmapparel.com, with no @ and no mailbox on the front. '
+            : 'No capture domain is set. ') +
+          'Until this is fixed, every PO goes out with a person’s address on Reply-To and no reply is captured.</div>';
+      }
+
+      return '<div class="pp-hint" style="margin-top:-4px">' +
+        'Replies come back to <strong>po+&lt;po number&gt;@' + esc(domain) + '</strong>. ' +
+        'Send yourself a test from any order to see the real one. ' +
+        (heard
+          ? 'Last inbound message received ' + esc(String(heard).slice(0, 16).replace('T', ' ')) +
+            (via ? ', authenticated by ' + esc(via) : '') + '.' +
+            (via === 'query string'
+              ? ' The webhook secret is arriving on the URL, where it ends up in logs. ' +
+                'It can move to an x-promopro-secret header on the Resend endpoint, and this line will say so once it has.'
+              : '')
+          : '<strong>Nothing has ever arrived here.</strong> If a vendor has replied since this was switched on, ' +
+            'the Resend inbound webhook is the thing to check.') +
+        '</div>';
+    }
+
     function renderSettings() {
       const S = st.settings;
       const chosen = new Set(S.accountManagerIds || []);
@@ -1615,6 +1718,7 @@ export default {
               '<input id="ppReplyFallback" value="' + esc(S.replyFallbackTo || '') + '" placeholder="po@pmapparel.com"' + (isAdmin ? '' : ' disabled') + '>' +
             '</div>' +
           '</div>' +
+          captureStatusHtml(S) +
 
           '<div class="pp-sect">Logo on the purchase order</div>' +
           '<div class="pp-row">' +
@@ -1741,6 +1845,9 @@ export default {
         st.imprintLocked = false;
         st.poSuffix = '';
         st.draftVendorId = '';
+        st.reorderOf = null;
+        st.prefill = {};
+        st.stagedArt = [];
         st.draftLines = [{ itemNumber: '', description: '', imprint: '', detail: '', qty: 1, unitCost: 0 }];
         renderForm();
         renderCcPreview();
@@ -1757,7 +1864,31 @@ export default {
       if (t.id === 'ppQSave') { await saveQuickVendor(); return; }
       if (t.id === 'ppQCancel') { closeQuickVendor(); return; }
 
-      if (t.id === 'ppCancel') { $('#ppFormWrap').hidden = true; return; }
+      if (t.id === 'ppReorder') {
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) startReorder(po);
+        return;
+      }
+
+      if (t.id === 'ppClearReorder') {
+        // Keep the form open, drop everything that came from the old order.
+        // Somebody who clicked Reorder by mistake should not have to close
+        // the form and find the button again.
+        st.reorderOf = null;
+        st.prefill = {};
+        st.draftVendorId = '';
+        st.draftLines = [{ itemNumber: '', description: '', imprint: '', detail: '', qty: 1, unitCost: 0 }];
+        renderForm();
+        renderCcPreview();
+        return;
+      }
+
+      if (t.id === 'ppCancel') {
+        $('#ppFormWrap').hidden = true;
+        st.reorderOf = null;
+        st.prefill = {};
+        return;
+      }
       if (t.id === 'ppCloseDetail') { $('#ppDetailWrap').hidden = true; st.openPoId = null; return; }
       if (t.id === 'ppClearPick') {
         st.picked = null; st.pickedGroups = []; st.imprintLocked = false;
@@ -1914,13 +2045,18 @@ export default {
           // obviously it belongs on the email. The send route now asks
           // STORAGE what artwork exists rather than trusting the record, so
           // the race it was guarding against cannot happen.
-          let res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
-          // Asked again at send time, not just at creation: a vendor can be
-          // blacklisted AFTER the order was raised, which is the case most
-          // worth catching.
-          if (res && res.blacklisted === true) {
-            if (!confirmBlacklisted(res)) {
-              if (msg) msg.textContent = res.error + ' Nothing was sent.';
+          let res;
+          try {
+            res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
+          } catch (e) {
+            // Asked again at send time, not just at creation: a vendor can be
+            // blacklisted AFTER the order was raised, which is the case most
+            // worth catching. It comes back as a 409, which the seam throws,
+            // so the question has to be asked from here.
+            const asked = refusal(e);
+            if (!asked || asked.blacklisted !== true) throw e;
+            if (!confirmBlacklisted(asked)) {
+              if (msg) msg.textContent = asked.error + ' Nothing was sent.';
               t.disabled = false;
               return;
             }
@@ -1932,7 +2068,14 @@ export default {
             return;
           }
           if (isTest) {
-            if (msg) msg.textContent = 'Test sent to ' + (res.to || []).join(', ');
+            // A test send is how the reply-capture setup gets checked, so it
+            // says where a reply would land. Reading it here beats digging
+            // the Reply-To out of a mail client's headers.
+            if (msg) {
+              msg.textContent = 'Test sent to ' + (res.to || []).join(', ') +
+                (res.replyTo ? '. Replies would go to ' + res.replyTo : '') +
+                (res.warning ? '. ' + res.warning : '');
+            }
             t.disabled = false;
             return;
           }
@@ -1942,7 +2085,11 @@ export default {
           if (po) renderDetail(po);
           const msg2 = $('#ppSendMsg');
           if (msg2) msg2.textContent = 'Sent to ' + (res.to || []).join(', ') +
-            ((res.cc && res.cc.length) ? ', copied to ' + res.cc.join(', ') : '');
+            ((res.cc && res.cc.length) ? ', copied to ' + res.cc.join(', ') : '') +
+            // Never swallowed. Capture switched on but unusable means this
+            // vendor's reply will not be captured, and the send is the only
+            // moment anybody is looking.
+            (res.warning ? '. ' + res.warning : '');
         } catch (e) {
           if (msg) msg.textContent = e.message || 'Could not send.';
           t.disabled = false;
@@ -2181,11 +2328,108 @@ export default {
       );
     }
 
-    async function saveNew(confirmBlacklist) {
+    /**
+     * REORDER: copy an order into the create form.
+     *
+     * Nothing is saved here. The form opens filled in and every field is
+     * still editable, because a reorder is almost never identical: the
+     * quantity changes, or the cost has moved since, and those are exactly
+     * the fields somebody needs to see before a vendor does.
+     *
+     * What is deliberately NOT carried over:
+     *   the PO number      it gets its own, from the new Printavo job or the
+     *                      next manual number for the year
+     *   the Printavo link  that job is finished; this is a different one
+     *   dates, receipts, tracking, history
+     *                      they describe the order that actually happened,
+     *                      and a clock that starts already six days old
+     *                      would report the new order as late on day one
+     *   received quantities
+     *   the needed-by date it is in the past
+     *
+     * Artwork IS carried over, but by the server when the order is created,
+     * not here: the files are copied into the new order's own folder so the
+     * two orders never share one set of bytes.
+     */
+    function startReorder(po) {
+      st.picked = null;
+      st.pickedGroups = [];
+      st.imprintLocked = false;
+      st.poSuffix = '';
+      st.stagedArt = [];
+      st.draftVendorId = po.vendorId || '';
+      st.draftLines = (po.lines || []).map((l) => ({
+        itemNumber: l.itemNumber || '',
+        description: l.description || '',
+        imprint: l.imprint || '',
+        detail: l.detail || '',
+        qty: Number(l.qty) || 0,
+        unitCost: Number(l.unitCost) || 0,
+      }));
+      st.prefill = {
+        accountManager: po.accountManager || '',
+        shipTo: po.shipTo || '',
+        shippingInstructions: po.shippingInstructions || '',
+        notes: po.notes || '',
+        decorateBufferDays: Number(po.decorateBufferDays) || 0,
+      };
+      st.reorderOf = {
+        id: po.id,
+        poNumber: po.poNumber || '',
+        artCount: (po.art || []).length,
+      };
+
+      renderForm();
+      renderCcPreview();
+      $('#ppFormWrap').hidden = false;
+      $('#ppDetailWrap').hidden = true;
+      st.openPoId = null;
+    }
+
+    /**
+     * The same question for a number that already exists.
+     *
+     * Not a rule, a refusal that can be answered: there are real reasons to
+     * raise a second PO against one imprint, and the app does not get to
+     * decide there are not. What it can do is make sure nobody does it by
+     * accident while copying an order.
+     */
+    function confirmDuplicateNumber(res) {
+      if (!res || res.duplicateNumber !== true) return false;
+      return window.confirm(
+        'Purchase order ' + (res.poNumber || 'that number') + ' already exists.' +
+        '\n\nA vendor would receive a second document with a number they already have, ' +
+        'against different quantities.' +
+        '\n\nA reorder normally goes on its own Printavo job, or on none at all, so it gets ' +
+        'its own number.' +
+        '\n\nRaise it with the same number anyway?'
+      );
+    }
+
+    /**
+     * A refusal the caller is allowed to answer.
+     *
+     * The seam turns every non-2xx into a THROWN error carrying the parsed
+     * body, so a 409 that asks a question arrives as an exception and not as
+     * a response. Reading it off the response is why the blacklist warning
+     * used to appear with no question attached: the branch that asked sat on
+     * a path that could not be reached.
+     */
+    function refusal(e) {
+      if (!e || e.status !== 409) return null;
+      return e.body && typeof e.body === 'object' ? e.body : null;
+    }
+
+    async function saveNew(confirms) {
+      const said = confirms || {};
       const err = $('#ppFormErr');
       err.hidden = true;
       const payload = {
-        confirmBlacklist: confirmBlacklist === true,
+        confirmBlacklist: said.blacklist === true,
+        confirmDuplicateNumber: said.duplicateNumber === true,
+        // Set only for a reorder. The server copies the artwork across and
+        // records which order this one came from.
+        reorderOf: st.reorderOf ? st.reorderOf.id : null,
         vendorId: $('#ppVendor').value,
         accountManager: $('#ppAm').value,
         neededBy: $('#ppNeededBy').value || null,
@@ -2208,12 +2452,24 @@ export default {
         } : null,
       };
       try {
-        const res = await ctx.api.post(ENDPOINTS.ppPos, payload);
-        if (res && res.blacklisted === true && !payload.confirmBlacklist) {
-          if (confirmBlacklisted(res)) return saveNew(true);
-          err.textContent = res.error + ' Nothing was created.';
-          err.hidden = false;
-          return;
+        let res;
+        try {
+          res = await ctx.api.post(ENDPOINTS.ppPos, payload);
+        } catch (e) {
+          const asked = refusal(e);
+          if (asked && asked.blacklisted === true && !payload.confirmBlacklist) {
+            if (confirmBlacklisted(asked)) return saveNew({ ...said, blacklist: true });
+            err.textContent = asked.error + ' Nothing was created.';
+            err.hidden = false;
+            return;
+          }
+          if (asked && asked.duplicateNumber === true && !payload.confirmDuplicateNumber) {
+            if (confirmDuplicateNumber(asked)) return saveNew({ ...said, duplicateNumber: true });
+            err.textContent = asked.error + ' Nothing was created.';
+            err.hidden = false;
+            return;
+          }
+          throw e;
         }
         if (res && res.error) { err.textContent = res.error; err.hidden = false; return; }
 
@@ -2222,17 +2478,26 @@ export default {
         // the order is real and correct, and losing it because an upload
         // stalled would be far worse than an order with art still to add.
         const newId = res && res.po && res.po.id;
-        let artProblem = '';
+        // Copying a reorder's artwork happens on the server, so its outcome
+        // arrives with the response. Reported the same way as a failed
+        // upload, and for the same reason: the order is real either way, and
+        // the person needs to know which files to put on it before sending.
+        let artProblem = (res && res.artProblem) ? ' ' + res.artProblem : '';
         if (newId && st.stagedArt.length) {
           const setCreateStatus = (msg) => {
             if (!msg) { err.hidden = true; return; }
             err.textContent = msg;
             err.hidden = false;
           };
-          const count = st.stagedArt.length;
+          // What the order should end up with is what a reorder already
+          // copied ONTO it plus what is being uploaded now. Counting only the
+          // uploads would see the copied files and call it done the moment
+          // the first one landed.
+          const already = Number(res && res.artCopied) || 0;
+          const count = already + st.stagedArt.length;
           const failed = await uploadArtTo(newId, st.stagedArt, setCreateStatus);
           if (failed.length) {
-            artProblem = ' The order was created, but ' + failed.length +
+            artProblem += ' The order was created, but ' + failed.length +
               ' file' + (failed.length === 1 ? '' : 's') + ' did not upload: ' + failed.join(', ') +
               '. Open the order to try again.';
           } else {
@@ -2240,7 +2505,7 @@ export default {
             // opens showing no artwork and somebody sends it that way.
             const landed = await waitForArt(newId, count, setCreateStatus);
             if (!landed) {
-              artProblem = ' The order was created and the files uploaded, but they have not ' +
+              artProblem += ' The order was created and the files uploaded, but they have not ' +
                 'shown up on it yet. Open the order in a moment to check before sending.';
             }
           }
@@ -2254,14 +2519,24 @@ export default {
         st.draftVendorId = '';
         st.draftLines = [];
         st.stagedArt = [];
+        st.reorderOf = null;
+        st.prefill = {};
         $('#ppFormWrap').hidden = true;
         await loadAll();
         renderAll();
 
+        // Open the order that was just created. On a reorder especially, the
+        // next thing anybody does is check the copied artwork and send it,
+        // and hunting for it in the list is a step for no reason.
+        const made = newId ? st.pos.find((p) => p.id === newId) : null;
+        if (made) { st.openPoId = made.id; renderDetail(made); }
+
         if (artProblem) {
-          err.textContent = artProblem.trim();
-          err.hidden = false;
-          $('#ppFormWrap').hidden = false;
+          // On the order rather than on the form when the order is open: the
+          // fix is to attach the missing file, and that button is here.
+          const where = made ? $('#ppDetailErr') : err;
+          if (where) { where.textContent = artProblem.trim(); where.hidden = false; }
+          if (!made) $('#ppFormWrap').hidden = false;
         }
       } catch (e) {
         err.textContent = e.message || 'Could not save.';
