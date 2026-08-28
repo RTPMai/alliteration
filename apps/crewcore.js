@@ -37,10 +37,15 @@ import { ENDPOINTS } from '../js/api.js';
 // The stipend year math is shared with the API route and the store so a
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
-import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, recentSpends, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
+
+// How many purchases a stipend card shows before it says "+4 more". Three
+// keeps the cards in a grid roughly the same height; the rest are one click
+// away in the person's detail, which carries the full log.
+const CARD_LOG_LIMIT = 3;
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -115,6 +120,21 @@ export default {
     font-size:13px;font-weight:800;line-height:1;
   }
   .cc-card .note.over{color:var(--danger);font-weight:600}
+
+  /* The purchases themselves, on the card of the person who made them.
+     Same .cc-row markup as a full log so the Edit and Remove wiring is
+     shared, pulled tighter and stripped of the list's outer frame. */
+  .cc-cardlog{margin-top:12px;border-top:1px solid var(--line);}
+  .cc-row.mini{display:block;padding:8px 0;border-bottom:1px solid var(--line-soft)}
+  .cc-row.mini:last-child{border-bottom:none}
+  .cc-row.mini .l1{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+  .cc-row.mini .l2{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-top:2px}
+  .cc-row.mini .who{font-size:12.5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cc-row.mini .amt{font-size:12.5px;font-weight:600;flex-shrink:0}
+  .cc-row.mini .meta{font-size:11px;color:var(--muted);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .cc-row.mini .cc-rowacts{gap:4px}
+  .cc-row.mini .cc-btn.sm{padding:3px 8px;font-size:11px}
+  .cc-cardmore{padding-top:8px;font-size:11.5px;color:var(--muted);font-weight:600}
   .cc-back{display:flex;align-items:center;gap:10px;margin-bottom:16px}
   .cc-rowacts{display:flex;align-items:center;gap:8px;flex-shrink:0}
 
@@ -937,6 +957,35 @@ export default {
     `;
   },
 
+  /**
+   * One purchase on a person's card. Keeps the .cc-row class and the data-id
+   * the Edit and Remove handlers already look for, so a card line and a line
+   * in a full log are wired by the same code. The name is never shown here:
+   * the card is the name.
+   */
+  _stipendCardRow(s) {
+    const { title, parts } = spendLabel(s, null);
+    const bits = [fmtDate(s.date)].concat(parts);
+    // Two lines rather than the log's one. A card is a third the width of the
+    // page, and what it was and what it cost plus two buttons does not fit
+    // across it without the description getting squeezed to nothing.
+    return `
+      <div class="cc-row mini" data-id="${esc(s.id)}">
+        <div class="l1">
+          <span class="who">${esc(title)}</span>
+          <span class="amt">${fmtMoney(s.amount)}</span>
+        </div>
+        <div class="l2">
+          <span class="meta">${bits.map((b) => esc(b)).join(' · ')}</span>
+          <span class="cc-rowacts">
+            <button class="cc-btn sm ghost" data-act="edit">Edit</button>
+            <button class="cc-btn sm ghost" data-act="delete">Remove</button>
+          </span>
+        </div>
+      </div>
+    `;
+  },
+
   _stipendLog(rows, showName, emptyMsg) {
     return `
       <div class="cc-list">
@@ -962,7 +1011,10 @@ export default {
 
     const cards = this._employees.map((e) => {
       const bal = this._balanceFor(e, year);
-      const count = this._spendsFor(e.id, year).length;
+      const rows = this._spendsFor(e.id, year);
+      const count = rows.length;
+      const recent = recentSpends(rows, CARD_LOG_LIMIT);
+      const hidden = count - recent.length;
       const pct = bal.allotted > 0 ? Math.min(100, Math.round((bal.used / bal.allotted) * 100)) : 0;
       const over = isOverStipend(bal);
       return `
@@ -975,19 +1027,22 @@ export default {
             : 'no stipend set'}</div>
           <div class="cc-balance-bar${over ? ' over' : ''}"><div class="fill" style="width:${pct}%"></div></div>
           <div class="note">${count} ${count === 1 ? 'purchase' : 'purchases'} in ${year}</div>
+          ${count ? `
+          <div class="cc-cardlog">
+            ${recent.map((s) => this._stipendCardRow(s)).join('')}
+            ${hidden > 0 ? `<div class="cc-cardmore">+${hidden} more, open ${esc(e.name.split(' ')[0])}</div>` : ''}
+          </div>` : ''}
         </div>
       `;
     }).join('');
 
-    const all = this._spendsFor(null, year);
-
+    // No all-team log under the grid any more. The purchases sit on the card
+    // of the person who made them, which is the question anybody actually
+    // asks. One combined list meant reading a name on every line to work out
+    // whose shirt it was.
     return `
       ${this._stipendYearPicker()}
       <div class="cc-grid">${cards}</div>
-      <div class="cc-section">
-        <h2>Spend log, everyone, ${year}</h2>
-        ${this._stipendLog(all, true, 'Nothing logged in ' + year + '.')}
-      </div>
     `;
   },
 
@@ -1146,14 +1201,22 @@ export default {
         this._stipendDetailId = card.dataset.emp;
         this._refreshStipend();
       };
-      card.onclick = open;
+      // The card carries Edit and Remove buttons now, so a click has to be
+      // read before it is acted on. Without this, correcting an amount would
+      // also navigate into the person underneath the button.
+      card.onclick = (ev) => {
+        if (ev.target.closest('button')) return;
+        open();
+      };
       card.onkeydown = (ev) => {
+        if (ev.target !== card) return;
         if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(); }
       };
     });
 
     body.querySelectorAll('button[data-act="edit"]').forEach((btn) => {
-      btn.onclick = () => {
+      btn.onclick = (ev) => {
+        ev.stopPropagation();
         const id = btn.closest('.cc-row').dataset.id;
         const spend = this._stipendSpends.find((s) => s.id === id);
         if (spend) this._openStipendForm(spend);
@@ -1161,7 +1224,8 @@ export default {
     });
 
     body.querySelectorAll('button[data-act="delete"]').forEach((btn) => {
-      btn.onclick = async () => {
+      btn.onclick = async (ev) => {
+        ev.stopPropagation();
         const id = btn.closest('.cc-row').dataset.id;
         if (!confirm('Remove this spend entry?')) return;
         try {
