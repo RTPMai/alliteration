@@ -17,6 +17,21 @@
  * BackBone costs nothing until someone opens it.
  */
 
+// The one definition of "is this caller a CrewCore administrator", shared
+// with the server routes and the screen. lib/crewcore/schema.js has no
+// imports of its own, so it is safe to pull into the browser.
+import { isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+
+/**
+ * Views an app shows to somebody who is NOT an administrator of it, used by
+ * allowedViews() as a ceiling rather than as a grant. Only CrewCore needs
+ * this: it is the one app where a role having the app ticked must not mean
+ * "and every screen in it". See the long note in allowedViews().
+ */
+const SELF_SERVE_VIEWS = {
+  crewcore: ['dashboard', 'timeclock', 'stipend', 'reviews', 'handbook'],
+};
+
 export const APPS = [
   {
     id: 'backbone',
@@ -547,9 +562,35 @@ export function allowedViews(perms, appId) {
   if (perms && perms.superuser === true) return keys.slice();
 
   const tabs = (perms && Array.isArray(perms.tabs)) ? perms.tabs : [];
-  const scoped = tabs
+  let scoped = tabs
     .filter((t) => t.startsWith(appId + ':'))
     .map((t) => t.slice(appId.length + 1));
+
+  // CREWCORE IS DENY-BY-DEFAULT PER VIEW, Aug 28 2026.
+  //
+  // "No per-view grants recorded means every view" is a sane default for
+  // most apps and was the wrong one here. A role only has to have CrewCore
+  // ticked and no tabs list — which is every role except the self-serve
+  // "employee" one, including any role created in Settings — for the rail to
+  // hand it Roster, Time Clock and Settings. It did exactly that: an office
+  // account with CrewCore granted got the whole team's roster in her rail,
+  // even though the server correctly answered every request with only her
+  // own record.
+  //
+  // So for CrewCore the fallback is inverted: anyone who is not a CrewCore
+  // admin (see isCrewCoreAdmin — the per-account Admin flag or the protected
+  // admin role, never a role checkbox) is narrowed to the self-serve views,
+  // whatever their role does or does not list. permsFor() does the same on
+  // the server, so this is the second of two gates, not the only one.
+  const selfServe = SELF_SERVE_VIEWS[appId];
+  if (selfServe && !isCrewCoreAdmin({
+    superuser: perms && perms.superuser,
+    roleName: perms && perms.role,
+  })) {
+    scoped = scoped.length
+      ? scoped.filter((v) => selfServe.includes(v))
+      : selfServe.slice();
+  }
 
   // No per-view grants recorded means "all views of an app you can open".
   return scoped.length === 0 ? keys.slice() : keys.filter((v) => scoped.includes(v));
