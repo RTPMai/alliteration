@@ -20,7 +20,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
-import { applyReceipt, receiptSummary } from "../../lib/promopro/schema.js";
+import { applyReceipt, receiptSummary, closedPatch } from "../../lib/promopro/schema.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -77,12 +77,19 @@ export default async function handler(req, res) {
         : `received ${result.receipt.lines.reduce((a, l) => a + l.qty, 0)}, ${summary.outstanding} still outstanding`,
     });
 
-    const saved = await updatePo(poId, {
+    const patch = {
       lines: result.lines,
       receipts,
       receivedAt: result.receivedAt,
       history,
-    });
+    };
+
+    // Booking in the last of a delivery can be the step that finishes the
+    // order, so closed is worked out here too rather than waiting for
+    // somebody to open the order and touch a date.
+    Object.assign(patch, closedPatch({ ...po, ...patch }));
+
+    const saved = await updatePo(poId, patch);
 
     return res.status(200).json({ ok: true, po: saved, summary });
   } catch (e) {
