@@ -162,25 +162,35 @@ export const APPS = [
     role: 'Who does the work',
     blurb: 'Employees, stipends, reviews, handbook.',
     accent: '#C83E73',           // display only (rail dot / app mark); tokens.css owns theming — raspberry, from the Aug 14 2026 logo lineup (was #E1251B red; PromoPro took the red so the two rail dots stay distinguishable)
-    // Real build, Aug 2026. Roster and Reviews render an admin view (roles
-    // with data_scope "all", or any superuser account) and a self-serve "my
-    // profile" view otherwise, from the SAME route — see apps/crewcore.js.
-    // Stipend is where self-serve actually does something: see your own
-    // apparel allotment and spend history. Handbook is read-only and open to
-    // both views — see api/crewcore/handbook.js. Dashboard is admin-only
-    // (anniversaries, headline numbers) and folds into Roster for a
-    // self-serve caller.
+    // Real build, Aug 2026. Reviews renders an admin view (the admin role or
+    // an account with the elevated Admin flag) and a self-serve read-only
+    // view otherwise, from the SAME route — see apps/crewcore.js. Stipend is
+    // where self-serve actually does something: see your own apparel
+    // allotment and spend history. Handbook is read-only and open to both
+    // views — see api/crewcore/handbook.js.
+    //
+    // ROSTER IS ADMIN-ONLY as of Aug 2026 (Ryan's call): it lists the whole
+    // team, so it is not a screen everyone with a login should open. The
+    // self-serve profile card that used to be the employee's version of
+    // Roster now lives on the DASHBOARD, which is what an employee lands on
+    // — their profile plus their own stipend balance, hours this pay week,
+    // next review and handbook status. Dashboard is therefore two different
+    // screens behind one key, the same adaptive pattern the other views use.
     //
     // PTO REMOVED, Aug 2026 (Ryan's call): time off tracking stays in
     // QuickBooks, not duplicated here. The old 'pto' view, and everything
     // behind it, is gone — not hidden, gone. See DEPLOY-NOTES.md.
     //
     // TIME CLOCK added Aug 2026 as a rush replacement for the shop's broken
-    // clock in/out system. Same adaptive pattern as Roster: an admin sees
-    // the whole team's timecards and can correct them, a self-serve
-    // employee sees only their own hours, read only. The PUNCHING itself
-    // does not happen here at all — it happens on /clock, a public page
-    // outside the shell, because most of production has no login.
+    // clock in/out system. An admin sees the whole team's timecards and can
+    // correct them, a self-serve employee sees only their own hours, read
+    // only. The PUNCHING itself does not happen here at all — it happens on
+    // /clock, a public page outside the shell, because most of production
+    // has no login.
+    //
+    // The view is granted only to people who actually punch: permsFor() in
+    // lib/users.js strips "crewcore:timeclock" for any employee whose record
+    // has clock_enabled false, so salaried staff never see the tab.
     views: [
       ['dashboard', 'Dashboard'],
       ['roster', 'Roster'],
