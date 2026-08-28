@@ -116,7 +116,7 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   if (!(await isBuilder(sess))) {
-    return res.status(403).json({ error: "Sample data is superuser only." });
+    return res.status(403).json({ error: "Sample data is admin only." });
   }
 
   const action = String(
