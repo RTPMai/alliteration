@@ -28,7 +28,7 @@ const ROOT = path.join(__dirname, '..');
 import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
   const {
     validateStipendSpend, spendYear, spendsFor, stipendBalance, stipendYears,
-    spendLabel,
+    spendLabel, isOverStipend,
   } = schema;
 
   // A small fixture standing in for two people across two stipend years.
@@ -292,6 +292,65 @@ import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
       validateStipendSpend({ employee_id: 'E1', date: '2026-02-10', amount: 10 }).ok,
       'a complete entry passes'
     );
+  });
+
+  /* ---- the over-stipend flag ------------------------------------------ */
+  //
+  // The red mark on somebody's card comes off this one function, so what
+  // counts as "over" is pinned here rather than being re-decided by each
+  // screen that draws a card.
+
+  t.test('going past the allotment reads as over', () => {
+    const bal = stipendBalance(250, [
+      { employee_id: 'E1', date: '2026-02-10', amount: 290 },
+    ], 2026);
+    t.equal(bal.over, 40, 'the overage is the amount past the line');
+    t.assert(isOverStipend(bal), 'and that flags the card');
+  });
+
+  t.test('spending right up to the allotment is not over', () => {
+    // Exactly zero left is "nothing remaining", not "went past it". A flag
+    // on somebody who spent their stipend correctly would train people to
+    // ignore the flag.
+    const bal = stipendBalance(250, [
+      { employee_id: 'E1', date: '2026-02-10', amount: 250 },
+    ], 2026);
+    t.equal(bal.remaining, 0, 'nothing left');
+    t.equal(isOverStipend(bal), false, 'but not over');
+  });
+
+  t.test('somebody with no allotment set is never flagged', () => {
+    // apparel_stipend is nullable on the employee record, and a null
+    // allotment falls through stipendBalance as 0. Without this guard every
+    // purchase by a person whose stipend has not been entered yet would
+    // light up red, which is a data-entry gap, not an overage.
+    const none = stipendBalance(null, [
+      { employee_id: 'E1', date: '2026-02-10', amount: 60 },
+    ], 2026);
+    t.equal(none.over, 60, 'the math still reports the raw difference');
+    t.equal(isOverStipend(none), false, 'but no allotment means no line to cross');
+    t.equal(isOverStipend(stipendBalance(0, [
+      { employee_id: 'E1', date: '2026-02-10', amount: 60 },
+    ], 2026)), false, 'and an explicit zero behaves the same way');
+  });
+
+  t.test('the flag is scoped to the year on screen', () => {
+    // A blowout in 2025 must not put a red mark on the 2026 card. The
+    // allotment re-ups every Jan 1.
+    const spends = [
+      { employee_id: 'E1', date: '2025-06-01', amount: 400 },
+      { employee_id: 'E1', date: '2026-06-01', amount: 20 },
+    ];
+    t.assert(isOverStipend(stipendBalance(250, spends, 2025)), '2025 is over');
+    t.equal(isOverStipend(stipendBalance(250, spends, 2026)), false, '2026 is clean');
+  });
+
+  t.test('a missing balance does not throw or flag', () => {
+    // The employee's own view renders before its fetch lands, with a null
+    // balance. That has to draw an empty card, not a red one.
+    t.equal(isOverStipend(null), false, 'null is not over');
+    t.equal(isOverStipend(undefined), false, 'undefined is not over');
+    t.equal(isOverStipend({}), false, 'an empty object is not over');
   });
 
   const code = t.report();
