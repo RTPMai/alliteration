@@ -77,6 +77,15 @@ function fmtMoney(n) {
   return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
+/**
+ * Days until the next work anniversary, and WHICH anniversary it is.
+ *
+ * `years` is the milestone being reached on that date, already: somebody who
+ * started Feb 14 2022, asked in Aug 2026, is 169 days from their FIFTH.
+ * Both dashboards used to print `years + 1` and so aged everybody by a year
+ * — Amanda's dashboard said 6 years on the first deploy of the self-serve
+ * screen (Aug 28 2026), which is how the off-by-one was finally spotted.
+ */
 function daysUntilAnniversary(startDate) {
   if (!startDate) return null;
   const start = new Date(startDate + 'T00:00:00');
@@ -686,7 +695,7 @@ export default {
                 <div class="who">${esc(x.e.name)}</div>
                 <div class="meta">${esc(x.e.title || x.e.department || '')}</div>
               </div>
-              <div class="meta">${x.ann.years + 1} ${x.ann.years + 1 === 1 ? 'year' : 'years'} · ${x.ann.days === 0 ? 'today' : x.ann.days + 'd'}</div>
+              <div class="meta">${x.ann.years} ${x.ann.years === 1 ? 'year' : 'years'} · ${x.ann.days === 0 ? 'today' : x.ann.days + 'd'}</div>
             </div>
           `).join('') : `<div class="cc-empty">Nothing in the next 60 days.</div>`}
         </div>
@@ -820,7 +829,7 @@ export default {
       ${ann ? `<p style="font-size:12.5px;color:var(--muted)">
         ${ann.days === 0
           ? `Today is ${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M. Thank you.`
-          : `${ann.years + 1} ${ann.years + 1 === 1 ? 'year' : 'years'} at P&amp;M in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
+          : `${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
       </p>` : ''}
     `;
   },
