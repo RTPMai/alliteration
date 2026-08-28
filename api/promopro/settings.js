@@ -124,7 +124,11 @@ export default async function handler(req, res) {
 
     if (req.method === "PATCH" || req.method === "POST") {
       const body = parseBody(req);
-      const check = validateSettings(body);
+      // The stored settings go in too: a patch has to be judged on what the
+      // settings will BE afterwards. Switching reply capture on in a request
+      // that says nothing about the capture domain used to be accepted with
+      // the domain still empty, and the result of that is invisible.
+      const check = validateSettings(body, await getSettings());
       if (!check.ok) return res.status(400).json({ error: check.errors.join("; "), errors: check.errors });
       const saved = await shape(await saveSettings(check.patch));
       return res.status(200).json({ ok: true, settings: saved });

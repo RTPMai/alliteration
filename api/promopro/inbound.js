@@ -27,13 +27,34 @@
 // subject lines. Anything that cannot be matched is kept as unmatched and
 // forwarded to the fallback address rather than dropped.
 //
-// AUTH. A shared secret in the query string, compared with safeEqual so an
-// unset secret fails closed rather than matching undefined.
+// AUTH. A shared secret, compared with safeEqual so an unset secret fails
+// closed rather than matching undefined.
+//
+// PREFER THE HEADER. `x-promopro-secret` is how this should be called. The
+// query string still works, because that is how the Resend endpoint is
+// configured today and vendor replies must not start bouncing the moment
+// this deploys, but a secret in a URL is a secret in every access log,
+// referrer and screenshot of an address bar. That is exactly how
+// MAILME_WEBHOOK_SECRET got out.
+//
+// WHICH ONE ARRIVED IS RECORDED in Settings (_inboundAuthVia), so after the
+// Resend endpoint is changed, one real reply confirms the switch instead of
+// somebody assuming it worked. Same reason the artwork callback records its
+// outcome: "it is configured" and "it is working" are different claims.
+//
+// The stronger version is Resend's own Svix signature (svix-id /
+// svix-timestamp / svix-signature). It is deliberately NOT implemented here:
+// that signature is computed over the RAW request body, and this platform
+// hands the handler a body that has already been parsed, so a check written
+// here would verify a re-serialized copy and reject perfectly good mail.
+// Bouncing real vendor replies is worse than the exposure it would close.
+// Same open question as MailMe's webhook, and it needs the raw body solved
+// first, not a signature library.
 //
 // ESM handler.
 
 import { safeEqual } from "../../lib/session.js";
-import { listPos, getPo, updatePo, getSettings, getVendors } from "../../lib/promopro/store.js";
+import { listPos, getPo, updatePo, getSettings, saveSettings, getVendors } from "../../lib/promopro/store.js";
 import { withSettingDefaults } from "../../lib/promopro/schema.js";
 import { resendConfigured, sendOne } from "../../lib/mailme/resend-client.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
@@ -55,6 +76,25 @@ export function poNumberFromAddress(address) {
   return m ? m[1].trim() : "";
 }
 
+/**
+ * The purchase order a reply belongs to.
+ *
+ * CASE-INSENSITIVE, both sides, and trimmed. The local part of an address is
+ * case-insensitive in practice: mail servers, autoresponders and mail clients
+ * all rewrite it, and a reply arriving as PO+26-66608-9@ used to fall into
+ * the unmatched pile. From the outside that is indistinguishable from a
+ * vendor who never replied, which is the exact failure this feature exists to
+ * end. Same fix as the domain casing in send.js, same reason.
+ *
+ * Exported and pure, because a silent mismatch here is the whole risk.
+ */
+export function matchPo(pos, poNumber) {
+  const wanted = String(poNumber || "").trim().toLowerCase();
+  if (!wanted) return null;
+  const list = Array.isArray(pos) ? pos : [];
+  return list.find((p) => String((p && p.poNumber) || "").trim().toLowerCase() === wanted) || null;
+}
+
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
   if (req.method === "OPTIONS") return res.status(200).end();
@@ -65,14 +105,36 @@ export default async function handler(req, res) {
   }
 
   const secret = process.env.PROMOPRO_INBOUND_SECRET;
-  const provided = (req.query && req.query.secret) || req.headers["x-promopro-secret"];
+  // Header first. Both are accepted, but the one that arrived is recorded,
+  // and only the header is a secret that stays out of logs.
+  const fromHeader = req.headers && req.headers["x-promopro-secret"];
+  const fromQuery = req.query && req.query.secret;
+  const provided = fromHeader || fromQuery;
   if (!secret || !safeEqual(provided, secret)) {
     return res.status(401).json({ error: "Unauthorized" });
   }
+  const authVia = fromHeader ? "header" : "query string";
 
   try {
     const storedSettings = await getSettings();
     const settings = withSettingDefaults(storedSettings);
+
+    // A heartbeat, before anything that can throw and before the capture
+    // gate. Without it there is no way to tell "Resend never called us" from
+    // "Resend called and capture was switched off", and those have different
+    // fixes. It also records which way the secret arrived, which is how the
+    // move off the query string gets confirmed.
+    try {
+      await saveSettings({
+        _inboundLastAt: new Date().toISOString(),
+        _inboundAuthVia: authVia,
+        // Whether Resend signed this call. Recorded, not enforced: it is the
+        // prerequisite for ever replacing the shared secret with signature
+        // verification, and one real message answers it for good. Enforcing
+        // it needs the raw body first, see the note at the top of this file.
+        _inboundSigned: Boolean(req.headers && req.headers["svix-signature"]),
+      });
+    } catch (e) { /* a missing heartbeat must never cost a vendor reply */ }
 
     // Off until somebody turns it on in Settings, so deploying this route
     // changes nothing until the DNS is actually in place.
@@ -96,7 +158,7 @@ export default async function handler(req, res) {
     const poNumber = to.map(poNumberFromAddress).find(Boolean) || "";
 
     const pos = await listPos();
-    const po = poNumber ? pos.find((p) => String(p.poNumber) === poNumber) : null;
+    const po = matchPo(pos, poNumber);
 
     if (!po) {
       // Unmatched mail is forwarded, never dropped. A reply nobody can find

@@ -20,7 +20,8 @@ import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
 import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
-import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings } from "../../lib/promopro/store.js";
+import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
+import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 
@@ -95,8 +96,46 @@ export default async function handler(req, res) {
         });
       }
 
+      // A REORDER is the same job again. The new purchase order is a real one
+      // in its own right, with its own number, its own dates and its own
+      // clock: what it inherits is the shape of the order and the artwork.
+      // The link back is kept so a file nobody recognizes, or a price nobody
+      // remembers agreeing, can be traced to the order it came from.
+      let source = null;
+      const reorderOf = body.reorderOf ? String(body.reorderOf) : "";
+      if (reorderOf) {
+        source = await getPo(reorderOf);
+        if (!source) {
+          return res.status(404).json({ error: "The order being reordered no longer exists." });
+        }
+      }
+
       const createdAt = new Date().toISOString();
       const year = yearPrefix(createdAt);
+
+      // TWO POs WITH THE SAME NUMBER IS THE ONE THING NUMBERING CANNOT
+      // SURVIVE, and reordering is the easy way to cause it: copy an order,
+      // leave the Printavo job as it was, and the imprint on that job now has
+      // two purchase orders claiming the same name. The vendor gets a
+      // document whose number they already have against different quantities.
+      //
+      // Manual numbers cannot collide (they come from an INCR), so this only
+      // applies to Printavo-derived ones. It is a refusal the caller can
+      // override, not a rule, because there are real reasons to raise a
+      // second PO on one imprint and we do not get to decide there are not.
+      if (check.record.printavo && body.confirmDuplicateNumber !== true) {
+        const wouldBe = numberFor({ year, printavo: check.record.printavo });
+        const clash = (await listPos()).find((p) => p.poNumber && p.poNumber === wouldBe);
+        if (clash) {
+          return res.status(409).json({
+            error: `Purchase order ${wouldBe} already exists, raised ${String(clash.createdAt || "").slice(0, 10)}. ` +
+              `A reorder normally goes on its own Printavo job, or with no job at all, so it gets its own number.`,
+            duplicateNumber: true,
+            poNumber: wouldBe,
+            existingId: clash.id,
+          });
+        }
+      }
 
       // A manual order has no invoice number to build a PO number from, so it
       // draws from a per-year counter instead. Only spend a counter value on
@@ -124,9 +163,23 @@ export default async function handler(req, res) {
         trackingNumber: "",
         carrier: "",
         decorateBufferDays: Number(body.decorateBufferDays) || 0,
+        // Where this one came from, if it came from anywhere. The number is
+        // kept alongside the id because a PO number never moves once it is
+        // assigned, so storing it cannot go stale, and every screen that
+        // wants to say "reorder of 26-66608" would otherwise need a second
+        // read to find out.
+        reorderOf: source ? source.id : null,
+        reorderOfNumber: source ? (source.poNumber || "") : "",
         receipts: [],
         history: [
           { at: createdAt, by: String(sess.username || "").toLowerCase(), what: "created" },
+          ...(source
+            ? [{
+                at: createdAt,
+                by: String(sess.username || "").toLowerCase(),
+                what: `reordered from ${source.poNumber || "an earlier order"}`,
+              }]
+            : []),
           // The override is part of the order's own record, not a log line
           // somewhere else, so the next person to open this PO can see that
           // ordering from a blacklisted vendor was a decision somebody made.
@@ -141,7 +194,37 @@ export default async function handler(req, res) {
       };
 
       const saved = await savePo(record);
-      return res.status(200).json({ ok: true, po: saved, total: poTotal(saved) });
+
+      // The artwork moves last, and it is allowed to fail. The order exists
+      // and is correct; a copy that did not happen is a named file to attach,
+      // not a reason to lose it. Same rule the create form already follows
+      // for a staged upload that stalls.
+      let artResult = { art: [], copied: [], failed: [] };
+      if (source) {
+        try {
+          artResult = await copyArt(source, saved.id, { by: String(sess.username || "").toLowerCase() });
+        } catch (e) {
+          console.error("promopro/pos could not copy artwork for a reorder:", e);
+          artResult = {
+            art: [],
+            copied: [],
+            failed: (source.art || []).map((f) => ({ filename: baseName(f), error: e.message })),
+          };
+        }
+      }
+
+      const withArt = artResult.art.length
+        ? await updatePo(saved.id, { art: artResult.art })
+        : saved;
+
+      return res.status(200).json({
+        ok: true,
+        po: withArt,
+        total: poTotal(withArt),
+        artCopied: artResult.copied.length,
+        artFailed: artResult.failed,
+        artProblem: copyProblem(artResult.failed),
+      });
     }
 
     if (req.method === "PATCH") {

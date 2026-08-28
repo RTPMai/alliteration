@@ -17,15 +17,29 @@
 // already be producing.
 //
 // REPLIES
-// Reply-To is set to the shop's PO inbox with the PO number in the subject,
-// so a vendor hitting Reply reaches a person today. Automatic reply capture,
-// where a confirmation moves the PO to Confirmed on its own, needs an inbound
-// email service and is not wired yet. See the deploy notes.
+// Reply capture IS wired, at the reply_to line below. Switched on in
+// Settings, Reply-To becomes a per-PO address, po+<poNumber>@<capture
+// domain>, which lands on api/promopro/inbound.js: the reply is logged on
+// the order, the silence clock stops, and the message is forwarded to the
+// account manager. Switched off, Reply-To is a person, exactly as before.
+// Never a no-reply address: that is the one thing the QuickBooks version got
+// wrong.
+//
+// A reply never advances a stage. "Got it, we'll confirm Monday" and
+// "confirmed" are the same shape to a parser, so a human clicks the date.
+// The full reasoning lives in inbound.js.
+//
+// CAPTURE ON BUT NOT USABLE IS REPORTED, NOT SWALLOWED.
+// Capture switched on with no capture domain used to fall back to a human
+// address silently, and silently is the problem: the PO arrives, the vendor
+// replies, the reply reaches a person, and nothing ever reaches inbound. It
+// looks identical to everything working. captureState() names it so the send
+// can say so on screen.
 
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getVendors, getSettings } from "../../lib/promopro/store.js";
-import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail } from "../../lib/promopro/schema.js";
+import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail, captureState } from "../../lib/promopro/schema.js";
 import { renderEmailHtml, renderEmailText } from "../../lib/promopro/document.js";
 import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme/resend-client.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
@@ -34,18 +48,6 @@ import { buildAttachments } from "../../lib/promopro/attachments.js";
 import { reconcileArt } from "../../lib/promopro/art-reconcile.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
-
-/**
- * The per-PO capture address, or "" when capture is off. Per-PO rather than
- * one shared inbox so a reply matches exactly, instead of being guessed at
- * from a subject line somebody edited.
- */
-function captureAddress(po, settings) {
-  if (!settings || settings.captureReplies !== true) return "";
-  const domain = String(settings.captureDomain || "").trim().replace(/^@+/, "");
-  if (!domain || !po.poNumber) return "";
-  return `po+${po.poNumber}@${domain}`;
-}
 
 function parseBody(req) {
   let b = req.body;
@@ -227,6 +229,11 @@ export default async function handler(req, res) {
     const subject = (isTest ? "[TEST] " : "") +
       `Purchase Order ${po.poNumber} from ${brand.name}`;
 
+    // Worked out before the message so the same answer goes on Reply-To and
+    // back to the screen. A test send is the intended way to check this:
+    // send one, read the warning, or look at the Reply-To on what arrives.
+    const capture = captureState(po, settings);
+
     const message = {
       from: `${brand.name} <${fromAddress}>`,
       to,
@@ -242,7 +249,7 @@ export default async function handler(req, res) {
       // manager. Off, it goes straight to the person, exactly as before.
       // Never to a no-reply address: that is what the QuickBooks version got
       // wrong.
-      reply_to: captureAddress(po, settings) || settings.replyTo || (sender && sender.email) || fromAddress,
+      reply_to: capture.address || settings.replyTo || (sender && sender.email) || fromAddress,
     };
     if (cc.length) message.cc = cc;
 
@@ -250,7 +257,17 @@ export default async function handler(req, res) {
 
     if (isTest) {
       // Touches no dates and no history: a test is not a send.
-      return res.status(200).json({ ok: true, test: true, to, messageId: result && result.id });
+      return res.status(200).json({
+        ok: true,
+        test: true,
+        to,
+        messageId: result && result.id,
+        // The whole point of a test send: it reports where a reply would go,
+        // so the capture setup can be checked without a vendor involved.
+        replyTo: message.reply_to,
+        captureAddress: capture.address,
+        warning: capture.problem,
+      });
     }
 
     const now = new Date().toISOString();
@@ -273,7 +290,16 @@ export default async function handler(req, res) {
     if (!po.submittedAt) patch.submittedAt = now.slice(0, 10);
 
     const saved = await updatePo(poId, patch);
-    return res.status(200).json({ ok: true, po: saved, to, cc, messageId: result && result.id });
+    return res.status(200).json({
+      ok: true,
+      po: saved,
+      to,
+      cc,
+      messageId: result && result.id,
+      replyTo: message.reply_to,
+      captureAddress: capture.address,
+      warning: capture.problem,
+    });
   } catch (e) {
     console.error("promopro/send route error:", e);
     return res.status(500).json({ error: e.message || "Could not send." });

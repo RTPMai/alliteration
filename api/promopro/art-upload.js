@@ -29,11 +29,12 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { handleUpload, handleUploadPresigned } from "@vercel/blob/client";
-import { issueSignedToken } from "@vercel/blob";
+import { issueSignedToken, head } from "@vercel/blob";
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
+import { artPrefix } from "../../lib/promopro/art-reconcile.js";
 import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
@@ -113,19 +114,32 @@ export default async function handler(req, res) {
     // heartbeat: without it there is no way to tell "Vercel never called us"
     // apart from "Vercel called and we rejected it", and those have
     // completely different fixes.
-    try {
-      await saveSettings({ _artCallbackLastAt: new Date().toISOString() });
-    } catch (e) { /* a missing heartbeat must never fail the callback itself */ }
+    //
+    // It records the OUTCOME as well as the arrival, because "arrived and we
+    // rejected it" and "arrived and the file is attached" are also two
+    // different problems, and the readiness check is the only place anybody
+    // ever looks.
+    const beat = async (outcome) => {
+      try {
+        await saveSettings({
+          _artCallbackLastAt: new Date().toISOString(),
+          _artCallbackLastOutcome: outcome,
+        });
+      } catch (e) { /* a missing heartbeat must never fail the callback itself */ }
+    };
+    await beat("arrived, not yet processed");
 
     try {
       const result = blobToken()
         ? await handleUpload({ token: blobToken(), request: req, body: earlyBody, onBeforeGenerateToken: rejectTokenRequest, onUploadCompleted: recordUpload })
         : await handleUploadPresigned({ request: req, body: earlyBody, getSignedToken: rejectTokenRequest, onUploadCompleted: recordUpload });
+      await beat("attached");
       return res.status(200).json(result);
     } catch (e) {
       // A bad signature lands here. Logged loudly: it is either a
       // misconfiguration or somebody poking at the endpoint.
       console.error("promopro/art-upload completion callback rejected:", e && e.message);
+      await beat("rejected: " + ((e && e.message) || "unknown"));
       return res.status(400).json({ error: e.message });
     }
   }
@@ -168,6 +182,19 @@ export default async function handler(req, res) {
 
     let body = req.body;
     if (typeof body === "string") { try { body = JSON.parse(body); } catch (e) { body = {}; } }
+
+    // THE BROWSER REPORTS ITS OWN FINISHED UPLOAD.
+    //
+    // Vercel's completion callback arrives a second or two after the bytes
+    // land, and the screen used to sit there polling for it. That wait was
+    // the whole delay somebody felt when attaching artwork. The browser
+    // already knows the upload finished, so it says so, and the callback
+    // becomes the backstop rather than the only way a file gets recorded.
+    //
+    // Nothing here is taken on trust: see attachNow.
+    if (body && body.attach === true) {
+      return attachNow(req, res, sess, settings, body);
+    }
 
     // TWO WAYS A BLOB STORE CAN BE CONNECTED, and this project uses the
     // newer one.
@@ -212,6 +239,14 @@ export default async function handler(req, res) {
           throw new Error(`A purchase order can hold ${MAX_FILES} art files.`);
         }
 
+        // The path has to be inside the folder belonging to the order the
+        // caller named. Without this, a signed-in editor could ask for a
+        // token to write anywhere in the artwork store, and the folder would
+        // stop meaning anything.
+        if (!String(pathname || "").startsWith(artPrefix(poId))) {
+          throw new Error("Artwork must be uploaded to its own purchase order's folder.");
+        }
+
         // The token is scoped to this one pathname, so a browser cannot use
         // it to write anywhere else in the store.
         return {
@@ -254,6 +289,72 @@ async function rejectTokenRequest() {
 }
 
 /**
+ * Attach a file the browser has just finished uploading, without waiting for
+ * Vercel to call back.
+ *
+ * WHY THIS IS SAFE, which is the only interesting part.
+ *
+ * The browser is telling us a file exists. It is not being believed. Three
+ * things are checked, and all three have to hold:
+ *
+ *   1. The caller may edit purchase orders. Same gate as every other write.
+ *   2. The path sits inside THIS order's own folder. Only a token we signed
+ *      can write there, and we only ever sign one for the order the caller
+ *      named, so a blob under that prefix could not have come from anywhere
+ *      else.
+ *   3. Storage confirms the file is really there, with its real size and
+ *      type. A browser cannot invent a file by describing one.
+ *
+ * So the browser gained the ability to say "it landed, look", not the
+ * ability to put a row on a purchase order.
+ *
+ * Attaching is shared with the callback path and is idempotent, so whichever
+ * of the two gets there first wins and the other does nothing.
+ */
+async function attachNow(req, res, sess, settings, body) {
+  if (!(await canEditSession(sess, settings))) {
+    return res.status(403).json({ error: "Read-only access" });
+  }
+
+  const poId = String(body.poId || "");
+  const pathname = String(body.pathname || "");
+  if (!poId || !pathname) {
+    return res.status(400).json({ error: "poId and pathname are required" });
+  }
+
+  const po = await getPo(poId);
+  if (!po) return res.status(404).json({ error: "Purchase order not found" });
+
+  // The file must sit in this order's own folder. This is the check that
+  // makes the rest of it safe, so it happens before storage is asked
+  // anything at all.
+  if (!pathname.startsWith(artPrefix(poId))) {
+    return res.status(400).json({ error: "That file does not belong to this purchase order." });
+  }
+
+  let blob = null;
+  try {
+    blob = await head(pathname, artBlobOptions());
+  } catch (e) {
+    // Not an error worth alarming anybody with: the callback will attach it
+    // when it arrives. This path is the fast one, not the only one.
+    return res.status(202).json({ ok: false, pending: true, error: "Storage has not got that file yet." });
+  }
+
+  await recordUpload({
+    blob,
+    tokenPayload: JSON.stringify({
+      poId,
+      by: String(sess.username || "").toLowerCase(),
+      filename: safeFilename(body.filename || pathname),
+    }),
+  });
+
+  const after = await getPo(poId);
+  return res.status(200).json({ ok: true, art: (after && after.art) || [] });
+}
+
+/**
  * The OIDC path. Same decisions as onBeforeGenerateToken above, expressed as
  * a short-lived signed token rather than a client token.
  */
@@ -275,6 +376,13 @@ async function presignedFlow(req, body, sess, settings) {
       const art = Array.isArray(po.art) ? po.art : [];
       if (art.length >= MAX_FILES) {
         throw new Error(`A purchase order can hold ${MAX_FILES} art files.`);
+      }
+
+      // Same folder check as the token path. This is what lets the browser
+      // report its own finished upload: a blob under this prefix could only
+      // have been written by a token we signed for this order.
+      if (!String(pathname || "").startsWith(artPrefix(poId))) {
+        throw new Error("Artwork must be uploaded to its own purchase order's folder.");
       }
 
       // The same limits as the other path, carried on the token rather than
@@ -446,9 +554,11 @@ async function diagnose(req, res, sess) {
     // whether it ever has.
     const settingsForBeat = await getSettings().catch(() => ({}));
     const lastCallback = settingsForBeat._artCallbackLastAt || null;
+    const lastOutcome = settingsForBeat._artCallbackLastOutcome || "";
     add(
       lastCallback
-        ? "an upload callback has been received (last " + lastCallback + ")"
+        ? "an upload callback has been received (last " + lastCallback +
+          (lastOutcome ? ", " + lastOutcome : "") + ")"
         : "an upload callback has never been received",
       Boolean(lastCallback),
       "Vercel has never called back to confirm an upload",
