@@ -84,17 +84,28 @@ export default {
       text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
     }
 
-    /* The steps somebody ticks. A tick stamps today and saves itself. */
-    .pp-ticks { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
-    .pp-tick {
-      display: flex; align-items: center; gap: 7px; cursor: pointer;
-      border: 1px solid var(--line); border-radius: var(--radius-sm);
-      padding: 7px 11px; font-size: 13px; background: var(--card);
+    /* The steps somebody marks off.
+       The CARD IS THE BUTTON. Same footprint as the date boxes it replaced,
+       because that size is what makes the row scannable across the top of an
+       order, and the whole card is the hit target rather than a 15px square
+       somebody has to aim at on a phone in the shop. */
+    .pp-step-btn {
+      width: 100%; text-align: left; font-family: inherit; cursor: pointer;
+      background: var(--card); color: var(--ink);
+      border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px;
     }
-    .pp-tick input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
-    .pp-tick .k { font-weight: 600; }
-    .pp-tick .d { color: var(--muted); font-size: 11px; }
-    .pp-tick.done { border-color: var(--accent); }
+    .pp-step-btn .k {
+      display: block; font-size: 11px; text-transform: uppercase;
+      letter-spacing: .03em; color: var(--muted); font-weight: 700;
+    }
+    .pp-step-btn .v {
+      display: block; margin-top: 5px; padding: 5px 7px; font-size: 12px;
+      border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted);
+    }
+    .pp-step-btn:hover:not(:disabled) { border-color: var(--accent); }
+    .pp-step-btn.done { background: var(--accent-tint); border-color: var(--accent); }
+    .pp-step-btn.done .v { color: var(--ink); font-weight: 700; }
+    .pp-step-btn:disabled { cursor: default; }
 
     /* Two things that belong beside each other, stacking on a narrow
        screen rather than squeezing. */
@@ -1202,15 +1213,18 @@ export default {
      * Friday. It is one click away rather than in everybody's face.
      */
     function progressHtml(po) {
-      const ticks = MANUAL_STAGES.map((s) => {
+      // Each step is one button the size of the box it replaced. Press it and
+      // it stamps today; press it again and it clears. Nothing to aim at
+      // inside the card, and nothing to press afterwards to save it.
+      const ticks = '<div class="pp-trail">' + MANUAL_STAGES.map((s) => {
         const val = po[s.dateField] || '';
-        return '<label class="pp-tick' + (val ? ' done' : '') + '">' +
-          '<input type="checkbox" data-stagetick="' + esc(s.dateField) + '"' +
-            (val ? ' checked' : '') + (canEdit ? '' : ' disabled') + '>' +
+        return '<button class="pp-step-btn' + (val ? ' done' : '') + '" ' +
+          'data-stagetick="' + esc(s.dateField) + '"' + (canEdit ? '' : ' disabled') +
+          ' title="' + (val ? 'Press to clear' : 'Press to mark it done today') + '">' +
           '<span class="k">' + esc(s.label) + '</span>' +
-          '<span class="d">' + (val ? esc(val) : '') + '</span>' +
-        '</label>';
-      }).join('');
+          '<span class="v">' + (val ? esc(val) : (canEdit ? 'Mark done' : '&mdash;')) + '</span>' +
+        '</button>';
+      }).join('') + '</div>';
 
       const facts = [];
       if (po.artSentAt) facts.push('Art went with the order on ' + po.artSentAt);
@@ -1231,7 +1245,7 @@ export default {
           '<div class="pp-hint">Changed dates need Save changes at the bottom. Ticks save on their own.</div>'
         : '';
 
-      return '<div class="pp-ticks">' + ticks + '</div>' +
+      return ticks +
         (facts.length ? '<div class="pp-hint">' + esc(facts.join('. ')) + '.</div>' : '') +
         (canEdit
           ? '<div class="pp-hint"><button class="pp-linkish" id="ppToggleDates">' +
@@ -2215,6 +2229,15 @@ export default {
         return;
       }
 
+      // A STEP SAVES ITSELF. The card is the button: press it and it stamps
+      // today, press it again and it clears. There is no Save to forget,
+      // because the press is the whole action. Anything other than today
+      // goes through Adjust dates.
+      if (t.dataset && t.dataset.stagetick) {
+        await tickStage(t.dataset.stagetick, !t.classList.contains('done'), t);
+        return;
+      }
+
       if (t.id === 'ppToggleDates') {
         st.showDates = !st.showDates;
         const po = st.pos.find((p) => p.id === st.openPoId);
@@ -2435,13 +2458,6 @@ export default {
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
 
-      // A TICK SAVES ITSELF. No Save button to forget, because the tick is
-      // the whole action: ticked means it happened today, unticked means it
-      // did not happen. Anything other than today goes through Adjust dates.
-      if (e.target.dataset && e.target.dataset.stagetick) {
-        tickStage(e.target.dataset.stagetick, e.target.checked, e.target);
-        return;
-      }
       if (e.target.dataset && e.target.dataset.imprint) {
         const gid = e.target.dataset.imprint;
         st.pickedGroups = e.target.checked
@@ -2839,15 +2855,17 @@ export default {
     }
 
     /**
-     * Tick or untick one step, saved immediately.
+     * Mark one step done, or clear it. Saved immediately.
      *
-     * The box is put back the way it was if the save fails, because a tick
-     * that looks saved and is not is the worst of the three possible states:
-     * somebody walks away believing the order is confirmed.
+     * The card is redrawn from what came BACK, never from what was pressed,
+     * because a step that looks saved and is not is the worst of the three
+     * possible states: somebody walks away believing the order is confirmed.
+     * A failure leaves the card exactly as it was and says why.
      */
-    async function tickStage(dateField, on, box) {
+    async function tickStage(dateField, on, card) {
       const err = $('#ppDetailErr');
       if (err) err.hidden = true;
+      if (card) card.disabled = true;
       try {
         const res = await ctx.api.request(ENDPOINTS.ppPos, {
           method: 'PATCH',
@@ -2859,7 +2877,7 @@ export default {
         const po = st.pos.find((p) => p.id === st.openPoId);
         if (po) renderDetail(po);
       } catch (e) {
-        if (box) box.checked = !on;
+        if (card) card.disabled = false;
         if (err) { err.textContent = e.message || 'Could not save that step.'; err.hidden = false; }
       }
     }
