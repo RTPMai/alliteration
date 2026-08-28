@@ -56,7 +56,7 @@
 import { safeEqual } from "../../lib/session.js";
 import { listPos, getPo, updatePo, getSettings, saveSettings, getVendors } from "../../lib/promopro/store.js";
 import { withSettingDefaults } from "../../lib/promopro/schema.js";
-import { resendConfigured, sendOne } from "../../lib/mailme/resend-client.js";
+import { resendConfigured, sendOne, getReceivedEmail, htmlToText } from "../../lib/mailme/resend-client.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 
@@ -153,7 +153,35 @@ export default async function handler(req, res) {
 
     const from = typeof data.from === "string" ? data.from : ((data.from && data.from.address) || "");
     const subject = String(data.subject || "").slice(0, 300);
-    const text = String(data.text || data.html || "").slice(0, 20000);
+
+    // THE WEBHOOK DOES NOT CARRY THE MESSAGE.
+    //
+    // Resend's email.received payload is metadata only: from, to, subject and
+    // a list of attachments. The body has to be fetched afterwards with the
+    // email id. Missing that is why the first captured replies recorded who
+    // wrote and what the subject was, and nothing the vendor actually said,
+    // which is most of the point.
+    //
+    // A body we cannot fetch never costs us the reply: the reply is still
+    // logged, and the reason is recorded on it so the screen can say why it
+    // is empty rather than showing a blank box.
+    const emailId = data.email_id || data.emailId || data.id || "";
+    let text = String(data.text || "");
+    let bodyProblem = "";
+
+    if (!text) {
+      const fetched = await getReceivedEmail(emailId);
+      if (fetched.text) {
+        text = fetched.text;
+      } else if (fetched.html) {
+        text = htmlToText(fetched.html);
+      } else if (data.html) {
+        text = htmlToText(data.html);
+      } else {
+        bodyProblem = fetched.error || "Resend returned no message body for this email.";
+      }
+    }
+    text = text.slice(0, 20000);
 
     const poNumber = to.map(poNumberFromAddress).find(Boolean) || "";
 
@@ -172,7 +200,17 @@ export default async function handler(req, res) {
 
     const at = new Date().toISOString();
     const replies = Array.isArray(po.replies) ? po.replies.slice() : [];
-    replies.push({ at, from, subject, text: text.slice(0, 5000) });
+    replies.push({
+      at,
+      from,
+      subject,
+      text: text.slice(0, 5000),
+      // Only set when the message itself could not be read. The screen shows
+      // this instead of an empty box, because a blank reply reads as a bug
+      // and this says which one.
+      bodyProblem,
+      emailId: String(emailId || ""),
+    });
 
     const history = Array.isArray(po.history) ? po.history.slice() : [];
     history.push({ at, by: "vendor", what: `replied: ${subject || "(no subject)"}` });
@@ -200,7 +238,8 @@ export default async function handler(req, res) {
         `${(vendor && vendor.name) || "The vendor"} replied about purchase order ${po.poNumber}.\n\n` +
         `This has been logged on the order. The stage has NOT been changed: open the order and set the date ` +
         `if this reply means it is confirmed, shipped or anything else.\n\n` +
-        `From: ${from}\n\n${text}`,
+        `From: ${from}\n\n` +
+        (text || `[The message body could not be read: ${bodyProblem} Open the reply in your own mail to see it.]`),
       replyTo: from,
     });
 
