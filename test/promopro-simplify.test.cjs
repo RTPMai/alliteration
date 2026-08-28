@@ -179,13 +179,26 @@ const doc = read('lib/promopro/document.js');
 
   /* ---- the rest of the screen ------------------------------------------ */
 
-  t.test('the steps are ticks that save themselves', () => {
-    t.assert(/data-stagetick/.test(app), 'there should be ticks');
-    t.assert(/function tickStage/.test(app), 'and ticking one should save it');
+  t.test('each step is a button the size of the box it replaced', () => {
+    // The card IS the button. Not a card with a small square in it: the whole
+    // thing is the hit target, which is what makes it usable on a phone in
+    // the shop, and it keeps the footprint that made the row scannable.
+    t.assert(/<button class="pp-step-btn/.test(app), 'the step should be a button');
+    t.assert(/class="pp-trail"/.test(app), 'laid out on the same grid as before');
+    t.assert(/\.pp-step-btn \{[^}]*width: 100%/.test(app), 'filling its cell');
+    t.assert(/\.pp-step-btn \{[^}]*padding: 10px/.test(app), 'at the same size as the old step box');
+    t.assert(!/pp-tick/.test(app), 'the small chip version should be gone');
+  });
+
+  t.test('pressing a step saves it, and a failure leaves it as it was', () => {
+    t.assert(/data-stagetick/.test(app), 'the button carries which step it is');
+    t.assert(/!t\.classList\.contains\('done'\)/.test(app),
+      'pressing a done step should clear it, so the toggle reads off what is on screen');
     const fn = app.slice(app.indexOf('async function tickStage'));
     const body = fn.slice(0, fn.indexOf('\n    }'));
-    t.assert(/box\.checked = !on/.test(body),
-      'a save that failed must put the box back, or somebody walks away believing it is confirmed');
+    t.assert(/card\.disabled = true/.test(body), 'no double press while it saves');
+    t.assert(/card\.disabled = false/.test(body) && /err\.textContent/.test(body),
+      'a save that failed must leave the card alone and say why, or somebody walks away believing it is confirmed');
   });
 
   t.test('back-filling a date is still possible, just not in the way', () => {
