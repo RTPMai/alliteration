@@ -49,7 +49,7 @@ export default async function handler(req, res) {
   // Fail closed, ahead of every branch below, so a new method added later
   // cannot accidentally ship ungated.
   if (!(await isBuilder(sess))) {
-    return res.status(403).json({ error: "Site Work is superuser only" });
+    return res.status(403).json({ error: "Site Work is admin only" });
   }
 
   const me = String(sess.username || "").toLowerCase();

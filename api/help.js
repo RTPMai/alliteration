@@ -70,7 +70,7 @@ export default async function handler(req, res) {
       if (req.query && req.query.log === "1") {
         const user = me ? await getUser(me) : null;
         if (!user || user.superuser !== true) {
-          return res.status(403).json({ error: "Superuser only" });
+          return res.status(403).json({ error: "Admin only" });
         }
         return res.status(200).json({ questions: await listQuestions() });
       }
