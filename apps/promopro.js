@@ -25,7 +25,7 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import {
-  STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
+  STAGES, MANUAL_STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
   repliedSinceSend, replyCount
 } from '../lib/promopro/schema.js';
@@ -59,16 +59,53 @@ export default {
     /* What a vendor said, on the order. Kept plainly readable rather than
        styled like a chat: it is a business record, and the whole message
        matters. */
-    .pp-reply {
-      border: 1px solid var(--line); border-radius: var(--radius-sm);
-      padding: 10px 12px; margin-bottom: 8px; background: var(--card);
-    }
-    .pp-reply-hd { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
-    .pp-reply-hd span { color: var(--muted); font-size: 12px; white-space: nowrap; }
     .pp-reply-body {
       white-space: pre-wrap; font-size: 13px; margin-top: 8px;
-      max-height: 260px; overflow-y: auto;
+      max-height: 300px; overflow-y: auto;
     }
+
+    /* One line that opens. Used for vendor replies and the receipt log:
+       both are things you need in full occasionally and never want in the
+       way. Native details/summary, so it works with no JavaScript at all. */
+    .pp-fold {
+      border: 1px solid var(--line); border-radius: var(--radius-sm);
+      padding: 8px 12px; margin-bottom: 6px; background: var(--card);
+    }
+    .pp-fold > summary {
+      cursor: pointer; font-size: 13px; list-style: none;
+      display: flex; gap: 8px; align-items: baseline;
+    }
+    .pp-fold > summary::-webkit-details-marker { display: none; }
+    .pp-fold > summary::before { content: '▸'; color: var(--muted); font-size: 11px; }
+    .pp-fold[open] > summary::before { content: '▾'; }
+    .pp-fold-when { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .pp-fold-gist {
+      color: var(--muted); font-size: 12px; overflow: hidden;
+      text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+    }
+
+    /* The steps somebody ticks. A tick stamps today and saves itself. */
+    .pp-ticks { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 6px; }
+    .pp-tick {
+      display: flex; align-items: center; gap: 7px; cursor: pointer;
+      border: 1px solid var(--line); border-radius: var(--radius-sm);
+      padding: 7px 11px; font-size: 13px; background: var(--card);
+    }
+    .pp-tick input { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+    .pp-tick .k { font-weight: 600; }
+    .pp-tick .d { color: var(--muted); font-size: 11px; }
+    .pp-tick.done { border-color: var(--accent); }
+
+    /* Two things that belong beside each other, stacking on a narrow
+       screen rather than squeezing. */
+    .pp-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; align-items: start; }
+    @media (max-width: 760px) { .pp-cols { grid-template-columns: 1fr; } }
+
+    /* Booking a delivery in: one row of controls under the lines, not a
+       second copy of the order. */
+    .pp-recv { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0 4px; }
+    .pp-recv input { padding: 7px 10px; font-size: 13px; }
+    .pp-recv input[type=text], .pp-recv input:not([type]) { flex: 1; min-width: 200px; }
 
     /* The vendor has answered since we last wrote. The one thing somebody
        scanning the list is looking for. */
@@ -301,6 +338,7 @@ export default {
       picked: null,        // the chosen Printavo invoice, if any
       reorderOf: null,     // { id, poNumber, artCount } when copying an order
       prefill: {},         // what the form opens with, when it is a reorder
+      showDates: false,    // the back-fill date row, hidden until asked for
       openPoId: null,
       searchTimer: null,
     };
@@ -609,7 +647,11 @@ export default {
         '</div>' +
 
         '<div style="margin-top:14px;display:flex;gap:8px">' +
-          '<button class="pp-btn" id="ppSave">' + (st.reorderOf ? 'Create reorder' : 'Create purchase order') + '</button>' +
+          // Creating and sending is one job, and it was two buttons on two
+          // screens: create, find the order again, open it, press send. The
+          // second step is where orders sat for a day.
+          '<button class="pp-btn" id="ppSaveSend">Create and send to the vendor</button>' +
+          '<button class="pp-btn ghost" id="ppSave">' + (st.reorderOf ? 'Create reorder, do not send' : 'Create without sending') + '</button>' +
           '<button class="pp-btn ghost" id="ppCancel">Cancel</button>' +
         '</div>' +
         '<div class="pp-err" id="ppFormErr" hidden></div>' +
@@ -1030,50 +1072,87 @@ export default {
      * knowing what the first one was, and the running total is the app's job
      * to keep, not the receiver's.
      */
-    function receivingHtml(po) {
+    /**
+     * ONE LIST OF LINES, not two.
+     *
+     * Receiving used to repeat every line underneath the order in a second
+     * table, so a four-line PO showed eight rows saying nearly the same
+     * thing, and the page you had to scroll past to reach the send button was
+     * mostly a copy of the page above it.
+     *
+     * The lines table now carries the receiving box itself. One row per line,
+     * what was ordered, what is in, what is short, and where to type what
+     * turned up. The controls that apply to the whole delivery, the date and
+     * the note, sit under it once rather than per line.
+     */
+    function linesHtml(po) {
       const sum = receiptSummary(po);
       const receipts = Array.isArray(po.receipts) ? po.receipts : [];
+      const booking = canEdit && !sum.complete && (po.lines || []).length > 0;
 
-      const banner = sum.complete
+      const head = '<table class="pp-table"><thead><tr>' +
+        '<th>Item #</th><th>Description</th><th class="num">Qty</th>' +
+        '<th class="num">In</th><th class="num">Short</th>' +
+        '<th class="num">Cost</th><th class="num">Total</th>' +
+        (booking ? '<th class="num">Arrived now</th>' : '') +
+        '</tr></thead><tbody>';
+
+      const rows = (po.lines || []).map((l, i) => {
+        const got = Number(l.receivedQty) || 0;
+        const short = Math.max(0, (Number(l.qty) || 0) - got);
+        return '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
+          '<td>' + esc(l.description) +
+            (l.imprint ? '<div class="pp-hint">' + esc(l.imprint) + '</div>' : '') +
+            (l.detail ? '<div class="pp-hint">' + esc(l.detail) + '</div>' : '') +
+          '</td>' +
+          '<td class="num">' + esc(l.qty) + '</td>' +
+          '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
+          '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '–') + '</td>' +
+          '<td class="num">' + money(l.unitCost) + '</td>' +
+          '<td class="num">' + money(lineTotal(l)) + '</td>' +
+          (booking
+            ? '<td class="num"><input type="number" step="1" style="width:80px;text-align:right" ' +
+              'data-recvline="' + i + '" placeholder="' + (short ? esc(short) : '0') + '"></td>'
+            : '') +
+        '</tr>';
+      }).join('');
+
+      const totalRow = '<tr><td colspan="6" class="num"><strong>Total</strong></td>' +
+        '<td class="num"><strong>' + money(poTotal(po)) + '</strong></td>' +
+        (booking ? '<td></td>' : '') + '</tr>';
+
+      const status = sum.complete
         ? '<div class="pp-hint">All ' + sum.ordered + ' received.</div>'
         : sum.partial
-          ? '<div class="pp-notice"><strong>Partly received.</strong> ' + sum.received + ' of ' + sum.ordered +
-            ' in, ' + sum.outstanding + ' still outstanding on ' + sum.short.length +
+          ? '<div class="pp-hint"><strong>' + sum.received + ' of ' + sum.ordered + ' in.</strong> ' +
+            sum.outstanding + ' outstanding on ' + sum.short.length +
             (sum.short.length === 1 ? ' line' : ' lines') + '.</div>'
-          : '<div class="pp-hint">Nothing booked in yet.</div>';
+          : '';
 
+      // The receipt log is history, so it collapses. It matters the day
+      // somebody asks when the short 24 turned up, and never otherwise.
       const log = receipts.length
-        ? '<div class="pp-hint" style="margin-top:8px">' + receipts.map((r) =>
+        ? '<details class="pp-fold"><summary>' + receipts.length +
+          (receipts.length === 1 ? ' booking' : ' bookings') + '</summary>' +
+          '<div class="pp-hint">' + receipts.map((r) =>
             esc(r.date) + ': ' + r.lines.map((l) => (l.qty > 0 ? '+' : '') + l.qty).join(', ') +
             (r.by ? ' by ' + esc(r.by) : '') +
             (r.note ? ' (' + esc(r.note) + ')' : '')
-          ).join('<br>') + '</div>'
+          ).join('<br>') + '</div></details>'
         : '';
 
-      if (!canEdit || sum.complete) return '<div class="pp-sect">Receiving</div>' + banner + log;
+      const controls = booking
+        ? '<div class="pp-recv">' +
+            '<button class="pp-btn" id="ppReceive">Book in what arrived</button>' +
+            '<button class="pp-btn ghost" id="ppReceiveAll">Everything arrived</button>' +
+            '<input type="date" id="ppRecvDate" value="' + esc(today()) + '" title="Date received">' +
+            '<input id="ppRecvNote" placeholder="Note, e.g. short 24, vendor says Friday">' +
+          '</div>' +
+          '<div class="pp-hint">A negative number corrects a miscount. The order marks itself received once nothing is short.</div>' +
+          '<div class="pp-err" id="ppRecvErr" hidden></div>'
+        : '';
 
-      return '<div class="pp-sect">Receiving</div>' + banner +
-        '<table class="pp-table"><thead><tr><th>Line</th><th class="num">Ordered</th>' +
-        '<th class="num">Already in</th><th class="num">Arrived now</th></tr></thead><tbody>' +
-        (po.lines || []).map((l, i) => {
-          const got = Number(l.receivedQty) || 0;
-          const short = Math.max(0, (Number(l.qty) || 0) - got);
-          return '<tr><td>' + esc(l.description) + (l.itemNumber ? ' <span class="pp-hint">' + esc(l.itemNumber) + '</span>' : '') + '</td>' +
-            '<td class="num">' + esc(l.qty) + '</td>' +
-            '<td class="num">' + esc(got) + '</td>' +
-            '<td class="num"><input type="number" step="1" style="width:90px;text-align:right" ' +
-              'data-recvline="' + i + '" placeholder="' + (short ? esc(short) : '0') + '"></td></tr>';
-        }).join('') + '</tbody></table>' +
-        '<div class="pp-row" style="margin-top:8px">' +
-          '<div class="pp-field"><label>Date received</label><input type="date" id="ppRecvDate" value="' + esc(today()) + '"></div>' +
-          '<div class="pp-field"><label>Note</label><input id="ppRecvNote" placeholder="Short 24, vendor says Friday"></div>' +
-        '</div>' +
-        '<div style="margin-top:8px;display:flex;gap:8px;flex-wrap:wrap">' +
-          '<button class="pp-btn" id="ppReceive">Book in</button>' +
-          '<button class="pp-btn ghost" id="ppReceiveAll">Everything outstanding arrived</button>' +
-        '</div>' +
-        '<div class="pp-hint" style="margin-top:6px">A negative number corrects a miscount. The order is marked received on its own once nothing is short.</div>' +
-        '<div class="pp-err" id="ppRecvErr" hidden></div>' + log;
+      return head + rows + totalRow + '</tbody></table>' + status + controls + log;
     }
 
     async function postReceipt(entries) {
@@ -1106,6 +1185,62 @@ export default {
     /* ---------------- detail ---------------- */
 
     /**
+     * WHERE THE ORDER HAS GOT TO, as ticks.
+     *
+     * It used to be a row of date boxes, one per step, which asked everybody
+     * to type a date they were only ever going to answer "today" to. A tick
+     * stamps today and saves immediately. There is no Save to forget.
+     *
+     * Two steps are not here, because nobody should be ticking them:
+     *   art sent   the artwork goes out attached to the purchase order, so
+     *              this is stamped by the send. It shows as a fact below.
+     *   closed     an order is closed when everything else is ticked, worked
+     *              out on the server so it is true however the dates got set.
+     *
+     * Back-filling is still possible, behind "Adjust dates", because real
+     * life is full of things that happened on Tuesday and got recorded on
+     * Friday. It is one click away rather than in everybody's face.
+     */
+    function progressHtml(po) {
+      const ticks = MANUAL_STAGES.map((s) => {
+        const val = po[s.dateField] || '';
+        return '<label class="pp-tick' + (val ? ' done' : '') + '">' +
+          '<input type="checkbox" data-stagetick="' + esc(s.dateField) + '"' +
+            (val ? ' checked' : '') + (canEdit ? '' : ' disabled') + '>' +
+          '<span class="k">' + esc(s.label) + '</span>' +
+          '<span class="d">' + (val ? esc(val) : '') + '</span>' +
+        '</label>';
+      }).join('');
+
+      const facts = [];
+      if (po.artSentAt) facts.push('Art went with the order on ' + po.artSentAt);
+      if (po.closedAt) facts.push('Closed ' + po.closedAt + ', on its own, because every step is done');
+      if (po.cancelledAt) facts.push('Cancelled ' + po.cancelledAt);
+
+      const dates = st.showDates
+        ? '<div class="pp-trail">' + STAGES.filter((s) => s.dateField).map((s) =>
+            '<div class="pp-step' + (po[s.dateField] ? ' done' : '') + '">' +
+              '<div class="k">' + esc(s.label) + '</div>' +
+              '<input type="date" data-datefield="' + esc(s.dateField) + '" value="' + esc(po[s.dateField] || '') + '"' +
+                (canEdit ? '' : ' disabled') + '>' +
+            '</div>').join('') +
+            '<div class="pp-step"><div class="k">Art sent</div>' +
+              '<input type="date" data-datefield="artSentAt" value="' + esc(po.artSentAt || '') + '"' +
+              (canEdit ? '' : ' disabled') + '></div>' +
+          '</div>' +
+          '<div class="pp-hint">Changed dates need Save changes at the bottom. Ticks save on their own.</div>'
+        : '';
+
+      return '<div class="pp-ticks">' + ticks + '</div>' +
+        (facts.length ? '<div class="pp-hint">' + esc(facts.join('. ')) + '.</div>' : '') +
+        (canEdit
+          ? '<div class="pp-hint"><button class="pp-linkish" id="ppToggleDates">' +
+            (st.showDates ? 'Hide the dates' : 'Adjust dates') + '</button></div>'
+          : '') +
+        dates;
+    }
+
+    /**
      * WHAT THE VENDOR ACTUALLY SAID, on the order.
      *
      * This was the hole in reply capture: inbound.js logged the message and
@@ -1130,19 +1265,32 @@ export default {
           'and the chasing stops until we email them again.</div>';
       }
 
+      // A line each, opening to the whole message. A vendor thread with a
+      // quoted history underneath it can run for pages, and pages of it
+      // between the order and the send button is how the page became
+      // unreadable. The first line is what somebody is scanning for; the rest
+      // is one click away, and none of it is trimmed once open.
       return '<div class="pp-sect">What the vendor said</div>' +
-        list.map((r) =>
-          '<div class="pp-reply">' +
-            '<div class="pp-reply-hd">' +
+        list.map((r, i) => {
+          const when = String(r.at || '').slice(0, 16).replace('T', ' ');
+          const body = String(r.text || '');
+          const gist = body.split('\n').map((x) => x.trim()).filter(Boolean)[0] || '';
+          return '<details class="pp-fold"' + (i === 0 ? ' open' : '') + '>' +
+            '<summary>' +
+              '<span class="pp-fold-when">' + esc(when) + '</span> ' +
               '<strong>' + esc(r.subject || '(no subject)') + '</strong>' +
-              '<span>' + esc(String(r.at || '').slice(0, 16).replace('T', ' ')) + '</span>' +
-            '</div>' +
+              (gist ? '<span class="pp-fold-gist">' + esc(gist.slice(0, 90)) + (gist.length > 90 ? '…' : '') + '</span>' : '') +
+            '</summary>' +
             '<div class="pp-hint">From ' + esc(r.from || 'unknown') + '</div>' +
-            '<div class="pp-reply-body">' + esc(r.text || '') + '</div>' +
-          '</div>'
-        ).join('') +
+            (body
+              ? '<div class="pp-reply-body">' + esc(body) + '</div>'
+              : '<div class="pp-hint">' +
+                esc(r.bodyProblem || 'No message text came through with this reply.') +
+                ' Open it in your own mail to read it.</div>') +
+          '</details>';
+        }).join('') +
         '<div class="pp-hint">A reply never moves the order along on its own. If this one means it is ' +
-        'confirmed or shipped, set the date above.</div>';
+        'confirmed or shipped, tick the step above.</div>';
     }
 
     function renderDetail(po) {
@@ -1186,65 +1334,44 @@ export default {
           : '') +
         (orderBy ? '<div class="sub" style="font-size:12px;color:var(--muted)">To hit the due date this needed ordering by ' + esc(orderBy) + '</div>' : '') +
 
-        '<div class="pp-trail">' + STAGES.filter((s) => s.dateField).map((s) => {
-          const val = po[s.dateField] || '';
-          return '<div class="pp-step' + (val ? ' done' : '') + '">' +
-            '<div class="k">' + esc(s.label) + '</div>' +
-            '<input type="date" data-datefield="' + esc(s.dateField) + '" value="' + esc(val) + '"' + (canEdit ? '' : ' disabled') + '>' +
-          '</div>';
-        }).join('') + '</div>' +
+        progressHtml(po) +
 
-        '<div class="pp-row">' +
-          '<div class="pp-field"><label>Carrier</label><input id="ppCarrier" value="' + esc(po.carrier || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
-          '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
-        '</div>' +
-
-        '<table class="pp-table"><thead><tr><th>Item #</th><th>Description</th><th>Detail</th>' +
-          '<th class="num">Qty</th><th class="num">In</th><th class="num">Short</th>' +
-          '<th class="num">Cost</th><th class="num">Total</th></tr></thead><tbody>' +
-          (po.lines || []).map((l) => {
-            const got = Number(l.receivedQty) || 0;
-            const short = Math.max(0, (Number(l.qty) || 0) - got);
-            return '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
-            '<td>' + esc(l.description) +
-              (l.imprint ? '<div class="pp-hint">' + esc(l.imprint) + '</div>' : '') +
-            '</td><td>' + esc(l.detail || '') + '</td>' +
-            '<td class="num">' + esc(l.qty) + '</td>' +
-            '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
-            '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '\u2013') + '</td>' +
-            '<td class="num">' + money(l.unitCost) + '</td>' +
-            '<td class="num">' + money(lineTotal(l)) + '</td></tr>';
-          }).join('') +
-          '<tr><td colspan="7" class="num"><strong>Total</strong></td><td class="num"><strong>' + money(poTotal(po)) + '</strong></td></tr>' +
-        '</tbody></table>' +
-
-        receivingHtml(po) +
+        linesHtml(po) +
 
         repliesHtml(po) +
 
-        (po.shipTo || po.shippingInstructions
-          ? '<div class="pp-sect">Shipping</div>' +
-            '<div style="font-size:13px">' + esc(po.shipTo || '') +
-            (po.shippingInstructions ? '<div class="pp-hint" style="font-size:12px">' + esc(po.shippingInstructions) + '</div>' : '') +
-            '</div>'
-          : '') +
-
-        '<div class="pp-sect">Artwork for the vendor</div>' +
-        '<div class="pp-hint" style="margin-bottom:8px">' +
-          'The vendor gets a signed link that expires. Withdrawing links kills every one already sent for this order, ' +
-          'which is what to do if a link went somewhere it should not have.' +
+        // Shipping and artwork side by side. They are the two things somebody
+        // checks before pressing send, and stacked they pushed the send
+        // button off the bottom of the screen.
+        '<div class="pp-cols">' +
+          '<div>' +
+            '<div class="pp-sect">Shipping</div>' +
+            '<div style="font-size:13px">' + esc(po.shipTo || 'No ship-to on this order') +
+              (po.shippingInstructions ? '<div class="pp-hint">' + esc(po.shippingInstructions) + '</div>' : '') +
+            '</div>' +
+            '<div class="pp-row" style="margin-top:10px">' +
+              '<div class="pp-field"><label>Carrier</label><input id="ppCarrier" value="' + esc(po.carrier || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
+              '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
+            '</div>' +
+          '</div>' +
+          '<div>' +
+            '<div class="pp-sect">Artwork</div>' +
+            '<div id="ppArtList">' + artListHtml(po) + '</div>' +
+            (canEdit
+              ? '<div style="margin-top:8px">' +
+                  '<input type="file" id="ppArtFile" multiple style="display:none" ' +
+                    'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
+                  '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
+                  '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
+                  ((po.art || []).length
+                    ? '<div class="pp-hint" style="margin-top:6px">Goes out attached to the order. ' +
+                      'Anything too big to attach becomes a link that expires. ' +
+                      '<button class="pp-linkish" id="ppArtRevoke">Withdraw sent links</button></div>'
+                    : '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. It goes out with the order.</div>') +
+                '</div>'
+              : '') +
+          '</div>' +
         '</div>' +
-        '<div id="ppArtList">' + artListHtml(po) + '</div>' +
-        (canEdit
-          ? '<div style="margin-top:8px">' +
-              '<input type="file" id="ppArtFile" multiple style="display:none" ' +
-                'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
-              '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
-              '<span class="pp-hint" style="margin-left:8px">Up to 20 MB per file</span>' +
-              ((po.art || []).length ? '<button class="pp-btn ghost" id="ppArtRevoke" style="margin-left:6px">Withdraw sent links</button>' : '') +
-              '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
-            '</div>'
-          : '') +
 
         '<div class="pp-sect">Send this order</div>' +
         (po.lastSentAt
@@ -1280,15 +1407,19 @@ export default {
               (po.cancelledAt
                 ? '<button class="pp-btn ghost" id="ppUncancel">Reinstate this order</button>' +
                   '<span class="pp-hint">Cancelled ' + esc(String(po.cancelledAt).slice(0, 10)) + '.</span>'
-                : '<button class="pp-btn ghost" id="ppCancelPo">Cancel this order</button>') +
-              (isAdmin && !po.lastSentAt
-                ? '<button class="pp-btn ghost" id="ppDeletePo">Delete, raised in error</button>'
+                : '<button class="pp-btn ghost" id="ppCancelPo">Cancel and tell the vendor</button>') +
+              (isAdmin
+                ? '<button class="pp-btn ghost" id="ppDeletePo">Delete</button>'
                 : '') +
             '</div>' +
             '<div class="pp-hint" style="margin-top:6px">' +
-              (po.lastSentAt
-                ? 'This order has been emailed, so it can be cancelled but not deleted. The record of what the vendor received stays.'
-                : 'Cancelling keeps the record and stops the chasing. Deleting removes it entirely, which is only offered because this one has never been sent.') +
+              'Cancelling emails the vendor that ' + esc(po.poNumber || 'this order') + ' is cancelled, keeps the record ' +
+              'and stops the chasing. ' +
+              (isAdmin
+                ? (po.lastSentAt
+                    ? 'Deleting removes the record completely and tells nobody, so it is for a mis-send. It asks you to type the PO number first.'
+                    : 'Deleting removes the record completely. This one has never been sent, so nothing is owed to anybody.')
+                : '') +
             '</div>'
           : '') +
       '</div>';
@@ -2028,26 +2159,66 @@ export default {
       }
 
       if (t.id === 'ppSave') { await saveNew(); return; }
+      if (t.id === 'ppSaveSend') { await saveNew({ thenSend: true }); return; }
       if (t.id === 'ppSaveDetail') { await saveDetail(); return; }
 
       if (t.id === 'ppCancelPo' || t.id === 'ppUncancel') {
         const undo = t.id === 'ppUncancel';
-        if (!undo && !window.confirm('Cancel this purchase order? It stays on the record and stops being chased. Let the vendor know separately if they already have it.')) return;
         const err = $('#ppDetailErr');
         if (err) err.hidden = true;
+        const open = st.pos.find((p) => p.id === st.openPoId) || {};
+
+        // CANCELLING TELLS THE VENDOR, so it goes through the send route
+        // rather than quietly patching a date. A cancellation the vendor
+        // never hears about is not a cancellation: they may be cutting
+        // garments against that number right now.
+        if (!undo) {
+          if (!window.confirm(
+            'Cancel ' + (open.poNumber || 'this order') + ' and email the vendor to say so?\n\n' +
+            'They are told not to produce or ship against it. The order stays on the record and stops being chased.'
+          )) return;
+          const note = window.prompt('Anything to add for the vendor? Leave blank for none.', '') || '';
+          try {
+            const res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, cancel: true, note });
+            if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
+            await loadAll();
+            renderAll();
+            const po = st.pos.find((p) => p.id === st.openPoId);
+            if (po) renderDetail(po);
+            const msg = $('#ppSendMsg');
+            if (msg) {
+              msg.textContent = res.emailed
+                ? 'Cancelled, and the vendor was emailed at ' + (res.to || []).join(', ')
+                : (res.warning || 'Cancelled, but the vendor could not be emailed.');
+            }
+          } catch (e) {
+            if (err) { err.textContent = e.message || 'Could not cancel that.'; err.hidden = false; }
+          }
+          return;
+        }
+
         try {
           const res = await ctx.api.request(ENDPOINTS.ppPos, {
             method: 'PATCH',
-            body: JSON.stringify({ id: st.openPoId, cancelledAt: undo ? null : today() }),
+            body: JSON.stringify({ id: st.openPoId, cancelledAt: null }),
           });
           if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
           await loadAll();
           renderAll();
           const po = st.pos.find((p) => p.id === st.openPoId);
           if (po) renderDetail(po);
+          const msg = $('#ppSendMsg');
+          if (msg) msg.textContent = 'Reinstated. The vendor was told it was cancelled, so tell them it is back on.';
         } catch (e) {
           if (err) { err.textContent = e.message || 'Could not change that.'; err.hidden = false; }
         }
+        return;
+      }
+
+      if (t.id === 'ppToggleDates') {
+        st.showDates = !st.showDates;
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
         return;
       }
 
@@ -2056,13 +2227,23 @@ export default {
         // Typing the number is deliberate friction. This is the one action in
         // the app with nothing behind it.
         const typed = window.prompt(
+          (po && po.lastSentAt
+            ? 'This order WAS EMAILED to ' + (po.sentTo || 'the vendor') + ' on ' + String(po.lastSentAt).slice(0, 10) + '.\n' +
+              'Deleting removes our only record of what they were sent, and tells them nothing. ' +
+              'If they really have it, cancel instead.\n\n'
+            : '') +
           'This deletes the purchase order and its history for good. There is no undo.\n\n' +
           'Type the PO number to confirm: ' + ((po && po.poNumber) || ''));
         if (!typed || typed.trim() !== String((po && po.poNumber) || '').trim()) return;
         const err = $('#ppDetailErr');
         if (err) err.hidden = true;
         try {
-          const res = await ctx.api.request(ENDPOINTS.ppPos + '?id=' + encodeURIComponent(st.openPoId), { method: 'DELETE' });
+          const res = await ctx.api.request(
+            ENDPOINTS.ppPos + '?id=' + encodeURIComponent(st.openPoId) +
+            // The server asks for the number too, so a delete cannot be
+            // fired at the API by something that never saw the warning.
+            '&confirmNumber=' + encodeURIComponent(String((po && po.poNumber) || '')),
+            { method: 'DELETE' });
           if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
           $('#ppDetailWrap').hidden = true;
           st.openPoId = null;
@@ -2108,69 +2289,11 @@ export default {
 
       if (t.id === 'ppSend' || t.id === 'ppSendTest') {
         const isTest = t.id === 'ppSendTest';
-        const msg = $('#ppSendMsg');
         // Sending to an outside party is not undoable, so it asks once.
         if (!isTest && !window.confirm('Email this purchase order to the vendor?')) return;
-        if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
         t.disabled = true;
-        try {
-          // No check here any more, and deliberately none.
-          //
-          // This used to re-read the order and, if the artwork had not been
-          // recorded yet, ask whether to send without it. That was a
-          // question nobody should ever be asked: the file was uploaded, so
-          // obviously it belongs on the email. The send route now asks
-          // STORAGE what artwork exists rather than trusting the record, so
-          // the race it was guarding against cannot happen.
-          let res;
-          try {
-            res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
-          } catch (e) {
-            // Asked again at send time, not just at creation: a vendor can be
-            // blacklisted AFTER the order was raised, which is the case most
-            // worth catching. It comes back as a 409, which the seam throws,
-            // so the question has to be asked from here.
-            const asked = refusal(e);
-            if (!asked || asked.blacklisted !== true) throw e;
-            if (!confirmBlacklisted(asked)) {
-              if (msg) msg.textContent = asked.error + ' Nothing was sent.';
-              t.disabled = false;
-              return;
-            }
-            res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest, confirmBlacklist: true });
-          }
-          if (res && res.error) {
-            if (msg) msg.textContent = res.error;
-            t.disabled = false;
-            return;
-          }
-          if (isTest) {
-            // A test send is how the reply-capture setup gets checked, so it
-            // says where a reply would land. Reading it here beats digging
-            // the Reply-To out of a mail client's headers.
-            if (msg) {
-              msg.textContent = 'Test sent to ' + (res.to || []).join(', ') +
-                (res.replyTo ? '. Replies would go to ' + res.replyTo : '') +
-                (res.warning ? '. ' + res.warning : '');
-            }
-            t.disabled = false;
-            return;
-          }
-          await loadAll();
-          renderAll();
-          const po = st.pos.find((p) => p.id === st.openPoId);
-          if (po) renderDetail(po);
-          const msg2 = $('#ppSendMsg');
-          if (msg2) msg2.textContent = 'Sent to ' + (res.to || []).join(', ') +
-            ((res.cc && res.cc.length) ? ', copied to ' + res.cc.join(', ') : '') +
-            // Never swallowed. Capture switched on but unusable means this
-            // vendor's reply will not be captured, and the send is the only
-            // moment anybody is looking.
-            (res.warning ? '. ' + res.warning : '');
-        } catch (e) {
-          if (msg) msg.textContent = e.message || 'Could not send.';
-          t.disabled = false;
-        }
+        await sendOrder(isTest, $('#ppSendMsg'));
+        t.disabled = false;
         return;
       }
 
@@ -2311,6 +2434,14 @@ export default {
 
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
+
+      // A TICK SAVES ITSELF. No Save button to forget, because the tick is
+      // the whole action: ticked means it happened today, unticked means it
+      // did not happen. Anything other than today goes through Adjust dates.
+      if (e.target.dataset && e.target.dataset.stagetick) {
+        tickStage(e.target.dataset.stagetick, e.target.checked, e.target);
+        return;
+      }
       if (e.target.dataset && e.target.dataset.imprint) {
         const gid = e.target.dataset.imprint;
         st.pickedGroups = e.target.checked
@@ -2608,6 +2739,24 @@ export default {
         const made = newId ? st.pos.find((p) => p.id === newId) : null;
         if (made) { st.openPoId = made.id; renderDetail(made); }
 
+        // CREATE AND SEND is one action to the person doing it. The send
+        // happens only after the artwork has finished landing, because a PO
+        // emailed a second too early goes out without the art on it, which
+        // is the single worst thing this app can do.
+        if (said.thenSend && made && !artProblem) {
+          await sendOrder(false, $('#ppSendMsg'));
+          return;
+        }
+        if (said.thenSend && artProblem) {
+          const where = made ? $('#ppDetailErr') : err;
+          if (where) {
+            where.textContent = artProblem.trim() +
+              ' Nothing was emailed: fix the artwork first, then press Send to vendor.';
+            where.hidden = false;
+          }
+          return;
+        }
+
         if (artProblem) {
           // On the order rather than on the form when the order is open: the
           // fix is to attach the missing file, and that button is here.
@@ -2618,6 +2767,100 @@ export default {
       } catch (e) {
         err.textContent = e.message || 'Could not save.';
         err.hidden = false;
+      }
+    }
+
+    /**
+     * Email the open order, or a test of it.
+     *
+     * One function, because there are now two ways in: Send on the order, and
+     * Create and send on the form. Two copies would drift, and the half that
+     * drifts is always the blacklist question or the capture warning.
+     *
+     * No artwork check here, deliberately. The send route asks STORAGE what
+     * artwork exists rather than trusting the record, so the race that used
+     * to prompt "send without the art?" cannot happen.
+     */
+    async function sendOrder(isTest, msg) {
+      if (msg) msg.textContent = isTest ? 'Sending a test…' : 'Sending…';
+      try {
+        let res;
+        try {
+          res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest });
+        } catch (e) {
+          // A vendor can be blacklisted AFTER an order was raised, which is
+          // the case most worth catching. It comes back as a 409, which the
+          // seam throws, so the question has to be asked from here.
+          const asked = refusal(e);
+          if (!asked || asked.blacklisted !== true) throw e;
+          if (!confirmBlacklisted(asked)) {
+            if (msg) msg.textContent = asked.error + ' Nothing was sent.';
+            return false;
+          }
+          res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, test: isTest, confirmBlacklist: true });
+        }
+
+        if (res && res.error) {
+          if (msg) msg.textContent = res.error;
+          return false;
+        }
+
+        if (isTest) {
+          // A test send is how the reply-capture setup gets checked, so it
+          // says where a reply would land. Reading it here beats digging the
+          // Reply-To out of a mail client's headers.
+          if (msg) {
+            msg.textContent = 'Test sent to ' + (res.to || []).join(', ') +
+              (res.replyTo ? '. Replies would go to ' + res.replyTo : '') +
+              (res.warning ? '. ' + res.warning : '');
+          }
+          return true;
+        }
+
+        await loadAll();
+        renderAll();
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
+
+        const after = $('#ppSendMsg');
+        if (after) {
+          after.textContent = 'Sent to ' + (res.to || []).join(', ') +
+            ((res.cc && res.cc.length) ? ', copied to ' + res.cc.join(', ') : '') +
+            // Never swallowed. Capture on but unusable means this vendor's
+            // reply will not be captured, and the send is the only moment
+            // anybody is looking.
+            (res.warning ? '. ' + res.warning : '');
+        }
+        return true;
+      } catch (e) {
+        if (msg) msg.textContent = e.message || 'Could not send.';
+        return false;
+      }
+    }
+
+    /**
+     * Tick or untick one step, saved immediately.
+     *
+     * The box is put back the way it was if the save fails, because a tick
+     * that looks saved and is not is the worst of the three possible states:
+     * somebody walks away believing the order is confirmed.
+     */
+    async function tickStage(dateField, on, box) {
+      const err = $('#ppDetailErr');
+      if (err) err.hidden = true;
+      try {
+        const res = await ctx.api.request(ENDPOINTS.ppPos, {
+          method: 'PATCH',
+          body: JSON.stringify({ id: st.openPoId, [dateField]: on ? today() : null }),
+        });
+        if (res && res.error) throw new Error(res.error);
+        await loadAll();
+        renderAll();
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
+      } catch (e) {
+        if (box) box.checked = !on;
+        if (err) { err.textContent = e.message || 'Could not save that step.'; err.hidden = false; }
       }
     }
 
@@ -2641,13 +2884,52 @@ export default {
       }
     }
 
+    /**
+     * Open one order by id, from outside this closure.
+     *
+     * showView() runs on the app object rather than in here, so the deep link
+     * needs a way in. A scan that arrives before the orders have loaded waits
+     * for them rather than showing "not found", because the wait is a second
+     * and being told an order does not exist is not something you argue with.
+     */
+    this._openPo = async (poId) => {
+      if (!st.pos.length) await loadAll();
+      const po = st.pos.find((p) => p.id === poId);
+      if (!po) {
+        const body = $('#ppOrdersBody');
+        if (body) {
+          body.innerHTML = '<div class="pp-empty">That purchase order could not be found. ' +
+            'It may have been deleted since the sheet was printed.</div>';
+        }
+        return;
+      }
+      st.openPoId = po.id;
+      renderAll();
+      renderDetail(po);
+      const wrap = $('#ppDetailWrap');
+      if (wrap && wrap.scrollIntoView) wrap.scrollIntoView({ block: 'start' });
+    };
+
     await loadAll();
     renderAll();
   },
 
-  showView(view) {
+  /**
+   * `param` is the third part of the route, the same mechanism ShopStock's
+   * shelf labels use: #/promopro/orders/<poId>. It is what the QR code on a
+   * printed purchase order points at, so somebody holding the paper can open
+   * that exact order instead of signing in and searching a list for a number
+   * they are already looking at.
+   */
+  showView(view, param) {
     const root = this._root;
     if (!root) return;
+    if (param && typeof this._openPo === 'function') {
+      // Orders, always: a deep link to one order that landed on the pipeline
+      // would look like the link had failed.
+      view = 'orders';
+      this._openPo(String(param));
+    }
     const pages = {
       pipeline: '#ppPipelinePage',
       orders: '#ppOrdersPage',
