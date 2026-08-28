@@ -151,7 +151,11 @@ Promise.all([
     const src = read('api/sitework.js');
     t.assert(/requireAuth\(req, res\)/.test(src), 'the route must require a session');
     t.assert(/isBuilder/.test(src), 'the route needs an explicit superuser check');
-    const gate = src.indexOf('Site Work is superuser only');
+    // Anchored on the CHECK, not on the wording of the 403. The message was
+    // "Site Work is superuser only" until Aug 2026, when the flag was
+    // renamed Admin in every user-facing string; a rewording of an error
+    // message is not a security regression and should not read as one here.
+    const gate = src.search(/if\s*\(\s*!\s*\(?\s*await\s+isBuilder|if\s*\(\s*!\s*isBuilder/);
     const firstMethod = src.indexOf('req.method === "GET"');
     t.assert(gate > 0 && firstMethod > gate,
       'the 403 must sit ABOVE the first method branch so a new method cannot ship ungated');

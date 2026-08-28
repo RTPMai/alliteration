@@ -555,9 +555,31 @@ Promise.all([
     // Building a self-serve view and forgetting to grant it is a silent
     // failure: the rail just does not show it, no error anywhere.
     const users = read('lib/users.js');
-    const block = users.slice(users.indexOf('employee: {'), users.indexOf('employee: {') + 700);
+    // Sliced to the END OF THE ROLE, not a fixed character count: a comment
+    // added inside the role used to push the grant out of a 700-character
+    // window and fail this test while the grant itself was fine.
+    const start = users.indexOf('employee: {');
+    const block = users.slice(start, users.indexOf('};', start));
     t.assert(block.includes('crewcore:timeclock'),
       'the employee role must be granted the timeclock view or the self-serve screen is dead code');
+    t.assert(!block.includes('crewcore:roster'),
+      'the roster lists the whole team and is admin-only as of Aug 2026');
+  });
+
+  t.test('the Time Clock grant is stripped for anyone who does not punch', () => {
+    // Aug 2026, Ryan's call: the view is only for people who clock in and
+    // out. Every employee record already carries clock_enabled, so the grant
+    // is narrowed at read time rather than being a second switch to
+    // remember. Source-matched because permsFor() needs live KV to run.
+    const users = read('lib/users.js');
+    const fn = users.slice(users.indexOf('export async function permsFor'),
+                           users.indexOf('/* ------------------------------------------------------------------ *\n * READS'));
+    t.assert(/crewcore:timeclock/.test(fn),
+      'permsFor must know about the timeclock grant to be able to strip it');
+    t.assert(/clock_enabled === false/.test(fn),
+      'the strip must key on clock_enabled, not on a role or a second flag');
+    t.assert(/viewGrants\.includes\("crewcore:timeclock"\)/.test(fn),
+      'the employee lookup must be skipped for roles that never had the grant');
   });
 
   t.test('per-view grants come from code, not from a stale stored roles blob', () => {
@@ -568,7 +590,7 @@ Promise.all([
     // unreachable before this was fixed.
     const users = read('lib/users.js');
     const fn = users.slice(users.indexOf('export async function getRoles'), users.indexOf('export async function getRole('));
-    t.assert(/tabs: DEFAULT_ROLES\[name\]\.tabs\.slice\(\)/.test(fn),
+    t.assert(/tabs = DEFAULT_ROLES\[name\]\.tabs\.slice\(\)|tabs: DEFAULT_ROLES\[name\]\.tabs\.slice\(\)/.test(fn),
       'getRoles must take tabs from DEFAULT_ROLES, not from stored');
   });
 
