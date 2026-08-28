@@ -467,6 +467,13 @@ export default {
     let adminKey = localStorage.getItem("shopstock.admin_key") || "";
     let currentItemId = null;
 
+    // Where "← Back" on the item page returns to. The button used to be
+    // hardcoded to "inventory", which is the DASHBOARD, so opening an item from
+    // Full Inventory (or the order queue) and clicking back dumped you on the
+    // dashboard instead of the list you came from. Set on every viewItem().
+    let itemReturnView = "inventory";
+    const VIEW_LABELS = { inventory: "Dashboard", full: "Full Inventory", queue: "Order Queue" };
+
     // ── Routing ───────────────────────────────────────────────────────────────
     function getPage() {
       // The standalone app read window.location.pathname. Under the shell the
@@ -813,6 +820,14 @@ export default {
       currentItemId = id;
       const item = allItems.find(i=>i.id===id);
       if(!item) return;
+
+      // Remember the page we came FROM before switching, so back goes there.
+      // A re-render of an item already open (flagItem, updateStatus) finds
+      // "item" already active and must not overwrite the real origin.
+      const active = $one(".page.active");
+      const from = active && active.id ? active.id.replace(/^page-/, "") : "";
+      if (from && from !== "item" && VIEW_LABELS[from]) itemReturnView = from;
+
       showPage("item");
       $all(".nav-btn").forEach(b=>b.classList.remove("active"));
 
@@ -874,8 +889,20 @@ export default {
             <button class="btn btn-gray btn-sm" style="margin-top:12px" onclick="ShopStock.scrapeOne('${item.id}')">🤖 Scrape Price Now</button>
           </div>
         </div>
-        <button class="btn btn-gray" onclick="ShopStock.showPage('inventory')">← Back to Inventory</button>
+        <button class="btn btn-gray" onclick="ShopStock.backFromItem()">← Back to ${VIEW_LABELS[itemReturnView] || "Dashboard"}</button>
       `;
+    }
+
+    // Two steps on purpose. A row click opens an item WITHOUT touching the
+    // hash, so ctx.go() alone would be a no-op (the router returns early when
+    // the hash already matches) and the button would do nothing. showPage()
+    // does the actual move; ctx.go() afterwards is a no-op in that common case
+    // and only matters after a QR deep link, where the hash still reads
+    // #/shopstock/item/<id> and needs correcting.
+    function backFromItem() {
+      const view = VIEW_LABELS[itemReturnView] ? itemReturnView : "inventory";
+      showPage(view);
+      if (typeof ctx.go === "function") ctx.go(view);
     }
 
     async function flagItem(id) {
@@ -1326,6 +1353,7 @@ export default {
     window.ShopStock = {
       addCategory,
       addDepartment,
+      backFromItem,
       bulkPrintQR,
       bulkStatusChange,
       closeModal,
