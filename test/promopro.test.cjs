@@ -96,11 +96,17 @@ t.test('adding a vendor is one card, not a chain of prompts', () => {
   // file, which was a fine proxy while nothing else used one. The typed
   // confirmation on Delete is a deliberate exception: it is friction on the
   // one action with nothing behind it, not a data-entry step. So the rule is
-  // now what it always meant, no prompts in vendor entry, plus an explicit
-  // cap of one prompt in the whole file so a second cannot creep in unnoticed.
+  // now what it always meant, no prompts in vendor entry, plus a cap on the
+  // whole file so a form cannot get built out of them unnoticed.
+  //
+  // RAISED TO TWO, Aug 28 2026. Cancelling an order now emails the vendor,
+  // and it offers one line to add to that email. Same category as the delete
+  // confirmation: a single question attached to an irreversible thing that
+  // leaves the building, not a field that belongs on a card.
   t.assert(!/window\.alert/.test(app), 'nothing here should need an alert');
   const prompts = (app.match(/window\.prompt/g) || []).length;
-  t.equal(prompts, 1, 'the only prompt should be the typed delete confirmation');
+  t.assert(prompts <= 2,
+    'at most two prompts, the typed delete confirmation and the note on a cancellation (got ' + prompts + ')');
   const deleteHandler = app.slice(app.indexOf("t.id === 'ppDeletePo'"));
   t.assert(deleteHandler.indexOf('window.prompt') !== -1 && deleteHandler.indexOf('window.prompt') < 600,
     'the prompt that exists should be the delete confirmation, not something in vendor entry');
@@ -428,9 +434,27 @@ t.test('deleting a purchase order stays admin only', () => {
   t.assert(gate !== -1 && gate < del, 'delete must sit behind the admin gate');
 });
 
-t.test('the app hides delete once an order has been emailed', () => {
-  t.assert(/isAdmin && !po\.lastSentAt/.test(app),
-    'deleting the only record of a document a vendor holds cannot be walked back');
+t.test('deleting an order that was emailed takes the PO number, on both sides', () => {
+  // CHANGED Aug 28 2026, deliberately. Delete used to be hidden entirely once
+  // an order had been emailed, on the grounds that it is a document an
+  // outside party may be working from. That is right about the risk and
+  // wrong about who decides: a PO sent to the wrong vendor is a mis-send, and
+  // the record of it is noise that outlives the mistake.
+  //
+  // So the guard is no longer a refusal, it is deliberateness, and it exists
+  // in BOTH places. The screen warns and asks for the number; the route
+  // refuses without it, so nothing can fire a delete at the API having never
+  // seen the warning.
+  const posRouteSrc = read('api/promopro/pos.js');
+  t.assert(/confirmNumberRequired/.test(posRouteSrc), 'the route should refuse without the number');
+  t.assert(/doomed\.lastSentAt/.test(posRouteSrc), 'and only ask for it on an order that was sent');
+  t.assert(/confirmNumber=/.test(app), 'the screen should send the number it made somebody type');
+
+  const deleteHandler = app.slice(app.indexOf("t.id === 'ppDeletePo'"));
+  t.assert(/WAS EMAILED/.test(deleteHandler.slice(0, 900)),
+    'and say plainly that the vendor already has it');
+  t.assert(/cancel instead/.test(deleteHandler.slice(0, 900)),
+    'and point at the option that keeps the record and tells them');
 });
 
 t.test('the UPS account number is not committed to source', () => {
