@@ -26,7 +26,8 @@
 import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
-  withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState
+  withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
+  repliedSinceSend, replyCount
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 
@@ -54,6 +55,28 @@ export default {
     .pp-btn.ghost { background: var(--card); border-color: var(--line); color: var(--muted); }
     .pp-btn.ghost:hover { color: var(--ink); }
     .pp-btn:disabled { opacity: .5; cursor: default; }
+
+    /* What a vendor said, on the order. Kept plainly readable rather than
+       styled like a chat: it is a business record, and the whole message
+       matters. */
+    .pp-reply {
+      border: 1px solid var(--line); border-radius: var(--radius-sm);
+      padding: 10px 12px; margin-bottom: 8px; background: var(--card);
+    }
+    .pp-reply-hd { display: flex; justify-content: space-between; gap: 12px; font-size: 13px; }
+    .pp-reply-hd span { color: var(--muted); font-size: 12px; white-space: nowrap; }
+    .pp-reply-body {
+      white-space: pre-wrap; font-size: 13px; margin-top: 8px;
+      max-height: 260px; overflow-y: auto;
+    }
+
+    /* The vendor has answered since we last wrote. The one thing somebody
+       scanning the list is looking for. */
+    .pp-replied {
+      display: inline-block; margin-left: 6px; padding: 1px 6px;
+      border: 1px solid var(--line); border-radius: 999px;
+      font-size: 11px; font-weight: 700; color: var(--muted);
+    }
 
     /* A number that is also a way to get to that order. Reads as text, not as
        a control, because it sits inside a sentence. */
@@ -364,7 +387,9 @@ export default {
               const p = x.po;
               const why = x.health.reasons.length ? x.health.reasons[0] : '';
               return '<button class="pp-card pp-h-' + x.health.level + '" data-po="' + esc(p.id) + '">' +
-                '<div class="po">' + esc(p.poNumber || 'Draft') + '</div>' +
+                '<div class="po">' + esc(p.poNumber || 'Draft') +
+                  (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
+                '</div>' +
                 '<div class="cust">' + esc((p.printavo && p.printavo.customerName) || 'Manual order') + '</div>' +
                 '<div class="vend">' + esc(vendorName(p.vendorId)) + ' &middot; ' + money(poTotal(p)) + '</div>' +
                 (why ? '<div class="why">' + esc(why) + '</div>' : '') +
@@ -418,7 +443,11 @@ export default {
           const stageDef = STAGES.find((s) => s.key === h.stage);
           const due = p.neededBy || (p.printavo && p.printavo.dueDate) || '';
           return '<tr data-po="' + esc(p.id) + '">' +
-            '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong></td>' +
+            '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong>' +
+              // "Did they come back to us" is the question this list is
+              // scanned for, so it is answered here rather than one click in.
+              (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
+            '</td>' +
             '<td>' + esc((p.printavo && p.printavo.customerName) || 'Manual order') + '</td>' +
             '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
             '<td>' + esc(amName(p.accountManager)) + '</td>' +
@@ -1076,6 +1105,46 @@ export default {
 
     /* ---------------- detail ---------------- */
 
+    /**
+     * WHAT THE VENDOR ACTUALLY SAID, on the order.
+     *
+     * This was the hole in reply capture: inbound.js logged the message and
+     * stopped the silence clock, and no screen ever showed it. A reply
+     * captured where nobody looks is the same failure as a reply sitting in
+     * one person's inbox, which is the thing this feature exists to end.
+     *
+     * Newest first, because the last thing a vendor said is the thing being
+     * asked about. The message is shown in full rather than trimmed to a
+     * preview: "confirmed, but the navy is on backorder until the 14th" is
+     * the half that gets cut.
+     */
+    function repliesHtml(po) {
+      const list = Array.isArray(po.replies) ? po.replies.slice().reverse() : [];
+
+      if (!list.length) {
+        // Only worth a line when capture is on. Off, this section would be
+        // asking about something nobody switched on.
+        if (!st.settings.captureReplies) return '';
+        return '<div class="pp-sect">What the vendor said</div>' +
+          '<div class="pp-hint">Nothing captured yet. When they reply to the purchase order email it lands here, ' +
+          'and the chasing stops until we email them again.</div>';
+      }
+
+      return '<div class="pp-sect">What the vendor said</div>' +
+        list.map((r) =>
+          '<div class="pp-reply">' +
+            '<div class="pp-reply-hd">' +
+              '<strong>' + esc(r.subject || '(no subject)') + '</strong>' +
+              '<span>' + esc(String(r.at || '').slice(0, 16).replace('T', ' ')) + '</span>' +
+            '</div>' +
+            '<div class="pp-hint">From ' + esc(r.from || 'unknown') + '</div>' +
+            '<div class="pp-reply-body">' + esc(r.text || '') + '</div>' +
+          '</div>'
+        ).join('') +
+        '<div class="pp-hint">A reply never moves the order along on its own. If this one means it is ' +
+        'confirmed or shipped, set the date above.</div>';
+    }
+
     function renderDetail(po) {
       const wrap = $('#ppDetailWrap');
       const v = vendorById(po.vendorId);
@@ -1109,6 +1178,12 @@ export default {
         '</div></div>' +
 
         (h.reasons.length ? '<div class="pp-notice"><strong>Attention.</strong> ' + esc(h.reasons.join('. ')) + '</div>' : '') +
+        (repliedSinceSend(po)
+          ? '<div class="pp-notice"><strong>The vendor has replied</strong> since this was last emailed, ' +
+            esc(String(po.lastVendorReplyAt || '').slice(0, 16).replace('T', ' ')) + '. ' +
+            (replyCount(po) > 1 ? esc(replyCount(po)) + ' messages are on this order. ' : '') +
+            'It is below, and chasing has stopped.</div>'
+          : '') +
         (orderBy ? '<div class="sub" style="font-size:12px;color:var(--muted)">To hit the due date this needed ordering by ' + esc(orderBy) + '</div>' : '') +
 
         '<div class="pp-trail">' + STAGES.filter((s) => s.dateField).map((s) => {
@@ -1144,6 +1219,8 @@ export default {
         '</tbody></table>' +
 
         receivingHtml(po) +
+
+        repliesHtml(po) +
 
         (po.shipTo || po.shippingInstructions
           ? '<div class="pp-sect">Shipping</div>' +
