@@ -144,7 +144,9 @@ export default async function handler(req, res) {
     // raising the PO did. Asked again here rather than trusting the answer
     // given at creation, because a vendor can be blacklisted AFTER an order
     // was raised, and that is exactly the case worth catching.
-    if (vendor && vendor.blacklisted === true && body.confirmBlacklist !== true) {
+    // Cancelling is exempt. Telling a blacklisted vendor to STOP is the one
+    // message nobody should have to confirm twice.
+    if (body.cancel !== true && vendor && vendor.blacklisted === true && body.confirmBlacklist !== true) {
       return res.status(409).json({
         error: blacklistWarning(vendor),
         blacklisted: true,
@@ -154,10 +156,93 @@ export default async function handler(req, res) {
       });
     }
 
-    if (problems.length) return res.status(400).json({ error: problems.join("; "), problems });
+    // A cancellation needs far less than a purchase order does: somebody to
+    // tell, and an address to tell them from. Refusing to cancel because the
+    // costs total zero would leave the vendor working on a dead order.
+    if (body.cancel === true) {
+      const blockers = [];
+      if (!vendor) blockers.push("the vendor on this PO no longer exists");
+      else if (!looksLikeEmail(vendor.email)) blockers.push("that vendor has no order email set");
+      if (!looksLikeEmail(fromAddress)) blockers.push("no from-address is set in Settings");
+      if (blockers.length) {
+        return res.status(400).json({ error: blockers.join("; "), problems: blockers });
+      }
+    } else if (problems.length) {
+      return res.status(400).json({ error: problems.join("; "), problems });
+    }
 
     const sender = settings.accountManagers.find((a) => a.id === po.accountManager) || null;
     const isTest = body.test === true;
+
+    // CANCELLING TELLS THE VENDOR.
+    //
+    // A cancellation that only changes our record is not a cancellation. The
+    // vendor may be cutting garments against this number right now, and the
+    // one thing that stops that is an email. So cancelling goes through the
+    // send route rather than being a quiet PATCH: same vendor address, same
+    // CC list, same from-address checks that a purchase order gets, because a
+    // cancellation that silently fails to send is worse than one that never
+    // claimed to.
+    //
+    // The order is cancelled either way. If the email fails, the record still
+    // says cancelled and the response says the vendor was not told, so
+    // somebody can pick up the phone.
+    if (body.cancel === true) {
+      const at = new Date().toISOString();
+      const note = String(body.note || "").slice(0, 500);
+      const ccCancel = ccListFor(po, vendor, settings);
+
+      let emailed = false;
+      let emailError = "";
+      try {
+        await sendOne({
+          from: `${settings.brandName || "P&M Apparel"} <${fromAddress}>`,
+          to: [vendor.email],
+          ...(ccCancel.length ? { cc: ccCancel } : {}),
+          subject: `CANCELLED: Purchase Order ${po.poNumber} from ${settings.brandName || "P&M Apparel"}`,
+          text:
+            `Purchase order ${po.poNumber} is cancelled.\n\n` +
+            `Please do not produce or ship against it. If any part of this order has already ` +
+            `shipped or been produced, reply to this email and let us know.\n\n` +
+            (note ? `${note}\n\n` : "") +
+            `${settings.brandName || "P&M Apparel"}\n` +
+            (settings.brandPhone ? `${settings.brandPhone}\n` : ""),
+          reply_to: (sender && sender.email) || settings.replyTo || fromAddress,
+        });
+        emailed = true;
+      } catch (e) {
+        emailError = (e && e.message) || String(e);
+        console.error("promopro/send could not email a cancellation:", emailError);
+      }
+
+      const cancelHistory = Array.isArray(po.history) ? po.history.slice() : [];
+      cancelHistory.push({
+        at,
+        by: String(sess.username || "").toLowerCase(),
+        what: emailed
+          ? `cancelled, vendor emailed at ${vendor.email}`
+          : `cancelled, the vendor could NOT be emailed (${emailError})`,
+      });
+
+      const cancelled = await updatePo(poId, {
+        cancelledAt: at.slice(0, 10),
+        history: cancelHistory,
+        cancelNote: note,
+      });
+
+      return res.status(200).json({
+        ok: true,
+        cancelled: true,
+        po: cancelled,
+        emailed,
+        to: emailed ? [vendor.email] : [],
+        cc: emailed ? ccCancel : [],
+        warning: emailed
+          ? ""
+          : `The order is cancelled, but the vendor could not be emailed: ${emailError} Tell them another way.`,
+      });
+    }
+
 
     // A test goes to the account manager only. Nobody outside the shop sees a
     // PO that is being checked.
@@ -288,6 +373,14 @@ export default async function handler(req, res) {
       sendCount: (Number(po.sendCount) || 0) + 1,
     };
     if (!po.submittedAt) patch.submittedAt = now.slice(0, 10);
+
+    // The artwork went WITH this email, attached or as a signed link, so
+    // "have we sent the art" is answered by "have we sent the PO". It used to
+    // be a second box somebody had to remember to tick, which meant it was
+    // ticked by whoever remembered and blank everywhere else.
+    if (!po.artSentAt && (built.attachments.length || Object.keys(artUrls).length)) {
+      patch.artSentAt = now.slice(0, 10);
+    }
 
     const saved = await updatePo(poId, patch);
     return res.status(200).json({
