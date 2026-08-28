@@ -226,6 +226,59 @@ const settingsRoute = read('api/promopro/settings.js');
     t.assert(/Nothing has ever arrived here/.test(body), 'in words, not as a blank space');
   });
 
+  /* ---- a captured reply has to be VISIBLE ----------------------------- */
+
+  t.test('a reply counts as an answer only if it came after the last send', () => {
+    // A reply to the first send is not an answer to the one we sent this
+    // morning, and colouring it as one is how the marker stops meaning
+    // anything.
+    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-01T10:00:00Z', lastVendorReplyAt: '2026-08-02T09:00:00Z' }), true);
+    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-03T10:00:00Z', lastVendorReplyAt: '2026-08-02T09:00:00Z' }), false);
+  });
+
+  t.test('a reply on an order we never sent still counts', () => {
+    // Odd, but real: a PO forwarded by hand, or the send record lost. The
+    // vendor did say something, and hiding it would be the worse error.
+    t.equal(s.repliedSinceSend({ lastVendorReplyAt: '2026-08-02T09:00:00Z' }), true);
+  });
+
+  t.test('no reply is not a reply', () => {
+    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-01T10:00:00Z' }), false);
+    t.equal(s.repliedSinceSend({}), false);
+    t.equal(s.repliedSinceSend(null), false);
+    t.equal(s.replyCount({}), 0);
+    t.equal(s.replyCount({ replies: [{}, {}] }), 2);
+  });
+
+  t.test('the order screen shows what the vendor said', () => {
+    // The hole this closes: inbound.js logged the message and stopped the
+    // clock, and no screen anywhere rendered it. A reply captured where
+    // nobody looks is the same failure as a reply in one person's inbox.
+    t.assert(/function repliesHtml/.test(app), 'there should be a section for it');
+    const fn = app.slice(app.indexOf('function repliesHtml'));
+    const body = fn.slice(0, fn.indexOf('\n    }'));
+    t.assert(/po\.replies/.test(body), 'it should read the replies on the order');
+    t.assert(/r\.text/.test(body), 'and show the message itself, not just that one exists');
+    t.assert(/reverse\(\)/.test(body), 'newest first: the last thing said is what is being asked about');
+    t.assert(/Nothing captured yet/.test(body), 'and say so plainly when there are none');
+    t.assert(/repliesHtml\(po\)/.test(app.slice(app.indexOf('function renderDetail'))),
+      'and the detail screen has to actually call it');
+  });
+
+  t.test('the list and the pipeline say a vendor has come back', () => {
+    // "Did they confirm" is what these screens get scanned for.
+    const orders = app.slice(app.indexOf('function renderOrders'));
+    t.assert(/repliedSinceSend\(p\)/.test(orders.slice(0, 2500)), 'the orders list should mark it');
+    const pipe = app.slice(app.indexOf('function renderPipeline'));
+    t.assert(/repliedSinceSend\(p\)/.test(pipe.slice(0, 2500)), 'and so should the pipeline card');
+  });
+
+  t.test('the reply notice says the chasing has stopped', () => {
+    // Otherwise the natural reading of a stopped clock is that something is
+    // broken.
+    t.assert(/chasing has stopped/.test(app));
+  });
+
   t.test('the send route no longer claims capture is unwired', () => {
     // It was wired at the reply_to line while the header still said it was
     // not. A comment that lies is worse than no comment.
