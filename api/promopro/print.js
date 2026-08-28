@@ -15,6 +15,7 @@ import { requireAuth } from "../../lib/session.js";
 import { getPo, getVendors, getSettings } from "../../lib/promopro/store.js";
 import { withSettingDefaults } from "../../lib/promopro/schema.js";
 import { renderPrintPage } from "../../lib/promopro/document.js";
+import { poQrSvg } from "../../lib/promopro/qr.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -58,6 +59,13 @@ export default async function handler(req, res) {
       // the same mark the vendor's emailed copy does.
       logoUrl: settings.logoUrl || "",
       artUrls,
+      // Built from the host this request actually arrived on, so a sheet
+      // printed from a preview deployment does not send somebody to
+      // production, or the other way round.
+      qrSvg: await poQrSvg(
+        process.env.PROMOPRO_PUBLIC_URL || `https://${(req.headers && req.headers.host) || ""}`,
+        po.id
+      ),
     });
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
