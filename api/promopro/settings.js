@@ -24,11 +24,11 @@
 // outgoing mail to an outside party, which is not a personal preference.
 
 import { requireAuth } from "../../lib/session.js";
-import { isAdminSession } from "../../lib/promopro/access.js";
+import { isAdminSession, callerFor } from "../../lib/promopro/access.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
-import { resolveAccountManagers, candidatesFrom, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
+import { resolveAccountManagers, candidatesFrom, effectiveAccountManagerIds, identifyAccountManager } from "../../lib/promopro/account-managers.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -45,6 +45,10 @@ export default async function handler(req, res) {
 
   try {
     const isAdmin = await isAdminSession(sess);
+    // The display name, for the fallback match in identifyAccountManager. A
+    // session carries a username but no name, and an account created before
+    // CrewCore existed may never have been linked to a roster record.
+    const { user: caller } = await callerFor(sess);
 
     // A CrewCore outage must not take the whole app down: PromoPro can run
     // with an empty account-manager list and say so, which is far better
@@ -65,6 +69,9 @@ export default async function handler(req, res) {
       if (employees === null) {
         settings.accountManagers = [];
         settings.rosterUnavailable = true;
+        // Same key, explicitly empty. An absent field and a null one read the
+        // same in the browser, but only one of them says it was considered.
+        settings.me = null;
         if (isAdmin) settings.candidates = [];
         return settings;
       }
@@ -80,6 +87,21 @@ export default async function handler(req, res) {
       settings.accountManagerIds = ids;
       settings.accountManagers = resolveAccountManagers(ids, employees);
       settings.usingDefaults = !withSettingDefaults(stored).accountManagerIds.length;
+
+      // WHO IS ASKING. Only ever the caller's own id and name, so this adds
+      // nothing to what they can already see about themselves. It is here
+      // rather than on the purchase-order route because the roster is already
+      // being read here, and the screen already loads this on mount. It powers
+      // the "Mine" filter: a purchase order names its account manager by
+      // employee id, and a browser has no way to turn a signed-in username
+      // into one. Null when the account is not linked to a roster record,
+      // which the screen reads as "do not offer the filter" rather than
+      // offering one that would silently match nothing.
+      settings.me = identifyAccountManager(
+        { username: sess.username, name: caller && caller.name },
+        employees,
+        ids,
+      );
 
       const candidates = candidatesFrom(employees);
       if (isAdmin) settings.candidates = candidates;
