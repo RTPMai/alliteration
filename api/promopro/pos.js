@@ -235,6 +235,45 @@ export default async function handler(req, res) {
       const existing = await getPo(String(id));
       if (!existing) return res.status(404).json({ error: "Not found" });
 
+      // REFRESH THE CUSTOMER NAMES FROM PRINTAVO.
+      //
+      // Its own action rather than an editable field, because nobody should
+      // be typing a customer name into a PO: Printavo owns it and typing it
+      // here creates a second version that drifts. It exists because orders
+      // raised before the company and the contact were separated carry only
+      // the contact's personal name, and there is otherwise no way to correct
+      // one short of deleting and re-raising it.
+      //
+      // Names only. Lines, costs, dates and everything else on a PO are
+      // deliberately snapshots of what the vendor was told, and a refresh
+      // that quietly rewrote a sent document would be a far worse thing than
+      // a stale name.
+      if (body.refreshPrintavo === true) {
+        if (!existing.printavo || !existing.printavo.id) {
+          return res.status(400).json({ error: "This order is not linked to a Printavo job, so there is nothing to refresh." });
+        }
+        let invoice = null;
+        try {
+          const { getInvoice } = await import("../../lib/promopro/printavo-lookup.js");
+          const r = await getInvoice(String(existing.printavo.id));
+          invoice = r && r.invoice;
+        } catch (e) {
+          console.error("promopro/pos refresh lookup failed:", e && e.message);
+          return res.status(200).json({ error: "Printavo did not answer: " + (e && e.message) });
+        }
+        if (!invoice) {
+          return res.status(200).json({ error: "Printavo returned nothing for that job. The order is unchanged." });
+        }
+        const printavo = {
+          ...existing.printavo,
+          companyName: invoice.companyName || "",
+          contactName: invoice.contactName || "",
+          customerName: invoice.customerName || existing.printavo.customerName || "",
+        };
+        const saved = await updatePo(String(id), { printavo });
+        return res.status(200).json({ ok: true, po: saved });
+      }
+
       const [vendors, settings, employees] = await Promise.all([getVendors(), getSettings(), roster()]);
       const amIds = effectiveAccountManagerIds(settings, employees);
       const check = validatePatch(body, vendors.map((v) => v.id), amIds);
