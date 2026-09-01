@@ -363,6 +363,23 @@ export default {
     const vendorById = (id) => st.vendors.find((v) => v.id === id) || null;
     const vendorName = (id) => { const v = vendorById(id); return v ? v.name : 'Unknown vendor'; };
 
+    // WHO THE JOB IS FOR. The company, not the person who placed it.
+    //
+    // Printavo hangs a job off a contact, so a lookup that asked only for the
+    // contact put "Jill Stevents" on a pipeline card where "Hy-Vee" belonged.
+    // New orders now store the company separately. Orders raised BEFORE that
+    // only have the old field, which still holds a person's name, hence the
+    // fallback: an out-of-date name beats a blank card, and Refresh from
+    // Printavo on the order fixes it for good.
+    const custName = (p) =>
+      (p && p.printavo && (p.printavo.companyName || p.printavo.customerName)) || 'Manual order';
+    // The person, only where there is room for both. Suppressed when it is
+    // the same string as the company, which is what an old record looks like.
+    const custContact = (p) => {
+      const c = (p && p.printavo && p.printavo.contactName) || '';
+      return c && c !== custName(p) ? c : '';
+    };
+
     /* ---------------- loading ---------------- */
 
     async function loadAll() {
@@ -506,7 +523,7 @@ export default {
                 '<div class="po">' + esc(p.poNumber || 'Draft') +
                   (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
                 '</div>' +
-                '<div class="cust">' + esc((p.printavo && p.printavo.customerName) || 'Manual order') + '</div>' +
+                '<div class="cust">' + esc(custName(p)) + '</div>' +
                 '<div class="vend">' + esc(vendorName(p.vendorId)) + ' &middot; ' + money(poTotal(p)) + '</div>' +
                 (why ? '<div class="why">' + esc(why) + '</div>' : '') +
               '</button>';
@@ -582,7 +599,7 @@ export default {
               // scanned for, so it is answered here rather than one click in.
               (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
             '</td>' +
-            '<td>' + esc((p.printavo && p.printavo.customerName) || 'Manual order') + '</td>' +
+            '<td>' + esc(custName(p)) + '</td>' +
             '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
             '<td>' + esc(amName(p.accountManager)) + '</td>' +
             '<td><span class="pp-pill">' + esc(stageDef ? stageDef.label : h.stage) + '</span></td>' +
@@ -1402,7 +1419,7 @@ export default {
         '<div class="pp-hd"><div>' +
           '<h1 style="font-size:22px">' + esc(po.poNumber || 'Draft') + '</h1>' +
           '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; ' +
-            esc((po.printavo && po.printavo.customerName) || 'Manual order') +
+            esc(custName(po)) + (custContact(po) ? ' (' + esc(custContact(po)) + ')' : '') +
             (po.printavo ? ' &middot; Printavo ' + esc(po.printavo.invoiceNumber) : '') +
           '</div>' +
           '<div class="sub" style="font-size:12px">AM ' + esc(amName(po.accountManager)) +
@@ -1421,6 +1438,12 @@ export default {
           // the ordinary thing somebody does with a finished order, not part
           // of taking one apart.
           (canEdit ? '<button class="pp-btn ghost" id="ppReorder">Reorder</button>' : '') +
+          // Only on orders that have a Printavo job to re-read. Offering it on
+          // a manual order would be a button whose only possible outcome is an
+          // error message.
+          (canEdit && po.printavo && po.printavo.id
+            ? '<button class="pp-btn ghost" id="ppRefreshCust" title="Re-read the customer name from Printavo">Refresh customer</button>'
+            : '') +
           '<button class="pp-btn ghost" id="ppCloseDetail">Close</button>' +
         '</div></div>' +
 
@@ -2177,6 +2200,47 @@ export default {
         return;
       }
 
+      if (t.id === 'ppRefreshCust') {
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (!po) return;
+        // The detail's own error line and status line, the same two the send
+        // and cancel actions use. A browser alert would be the only one in
+        // this app and it is banned for good reason: it stops the page dead
+        // to say something the page could have said in place.
+        const err = $('#ppDetailErr');
+        const say = (m) => { const el = $('#ppSendMsg'); if (el) el.textContent = m; };
+        const fail = (m) => { if (err) { err.textContent = m; err.hidden = false; } };
+        if (err) err.hidden = true;
+
+        t.textContent = 'Checking Printavo…';
+        t.disabled = true;
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppPos, {
+            method: 'PATCH',
+            body: JSON.stringify({ id: po.id, refreshPrintavo: true }),
+          });
+          // The route answers 200 with an error string when Printavo is the
+          // problem, so a silence from them does not look like a broken app.
+          if (res && res.error) { fail(res.error); t.textContent = 'Refresh customer'; t.disabled = false; return; }
+          const before = custName(po);
+          await loadAll();
+          const fresh = st.pos.find((p) => p.id === po.id);
+          renderAll();
+          if (fresh) renderDetail(fresh);
+          // renderDetail has just rebuilt this part of the page, so the
+          // message goes in after it, not before.
+          const after = fresh ? custName(fresh) : before;
+          say(after === before
+            ? 'Printavo still says ' + after + '.'
+            : 'Updated to ' + after + '.');
+        } catch (e) {
+          fail('Could not refresh: ' + (e && e.message ? e.message : 'unknown error'));
+          t.textContent = 'Refresh customer';
+          t.disabled = false;
+        }
+        return;
+      }
+
       if (t.id === 'ppClearReorder') {
         // Keep the form open, drop everything that came from the old order.
         // Somebody who clicked Reorder by mistake should not have to close
@@ -2761,6 +2825,8 @@ export default {
           id: st.picked.id,
           invoiceNumber: st.picked.invoiceNumber,
           customerName: st.picked.customerName,
+          companyName: st.picked.companyName || '',
+          contactName: st.picked.contactName || '',
           dueDate: st.picked.dueDate,
           // Drives the PO number's suffix: 26-66608-9.
           imprintNumber: st.poSuffix,
