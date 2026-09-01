@@ -1,4 +1,3 @@
-// js/api.js
 /**
  * alliteration. — THE SEAM
  *
@@ -253,6 +252,9 @@ export const ENDPOINTS = {
   ccReviews:       '/api/crewcore/reviews',
   ccHandbook:      '/api/crewcore/handbook',
   ccSettings:      '/api/crewcore/settings',
+  // SanMar sample drops. Already live by prefix ('/api/crewcore/' above), so
+  // this needs no LIVE_PREFIXES entry of its own.
+  ccSamples:       '/api/crewcore/samples',
   // Time clock back side. The PUBLIC punch endpoint (/api/crewcore/clock)
   // is deliberately NOT listed here: clock.html lives outside the shell and
   // calls it directly, the same way scan.html calls api/scan-status.js. The
