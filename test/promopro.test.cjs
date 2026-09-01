@@ -1337,13 +1337,37 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
 
   t.test('the query never asks for a field this account does not have', () => {
     const src = read('lib/promopro/printavo-lookup.js');
-    const sets = src.slice(src.indexOf('const LINE_FIELD_SETS'), src.indexOf('function invoiceQuery'));
+    // NARROWED Sep 2026. This used to slice from the array to the next
+    // function, which swept up whatever comments happened to sit between
+    // them. It went red the day a comment EXPLAINED the incident it was
+    // written for, which is the opposite of the point: prose about a hazard
+    // is not the hazard. Read the array literal, which is the only thing
+    // that ends up in a query.
+    const start = src.indexOf('const LINE_FIELD_SETS');
+    const sets = src.slice(start, src.indexOf('];', start) + 2);
+    t.assert(/LINE_FIELD_SETS = \[/.test(sets) && sets.length < 800,
+      'the slice should be the array itself, not a chunk of the file');
     ['styleNumber', 'sku', 'productNumber', 'quantity'].forEach((f) => {
       t.assert(!new RegExp('\\b' + f + '\\b').test(sets),
         'the line-item query still asks for "' + f + '", which this account does not have');
     });
     t.assert(/\bitemNumber\b/.test(sets) && /\bitems\b/.test(sets),
       'the query should use the confirmed itemNumber and items fields');
+  });
+
+  t.test('the customer field sets do not smuggle in an unprobed name either', () => {
+    // Same rule, applied to the ladder added when the company name went onto
+    // the purchase order. Its bottom rung has to stay the selection that is
+    // already known to work on this account.
+    const src = read('lib/promopro/printavo-lookup.js');
+    const start = src.indexOf('const PARTY_FIELD_SETS');
+    const sets = src.slice(start, src.indexOf('];', start) + 2);
+    ['organization', 'accountName', 'businessName'].forEach((f) => {
+      t.assert(!new RegExp('\\b' + f + '\\b').test(sets),
+        'the customer query asks for "' + f + '", which has never been probed');
+    });
+    t.assert(/contact \{ fullName email \}/.test(sets),
+      'the last rung must be the selection that already works');
   });
 
   t.test('the item number never just repeats the description', () => {
