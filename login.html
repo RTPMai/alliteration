@@ -1,5 +1,3 @@
-<!-- PUT IN: login.html, at repo root (REPLACES the current one) -->
-<!-- PUT IN: login.html, at repo root (REPLACES the current one) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -12,6 +10,29 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+
+<!-- Theme, before any stylesheet.
+
+     Sign-in FOLLOWS THE SYSTEM ONLY. It deliberately does not read the stored
+     preference, because test/auth-live.test.cjs forbids this page from
+     touching browser storage at all: it is the one screen that handles a
+     password, and the cheapest way to guarantee a password is never persisted
+     is for the page to have no storage code in it to audit. An explicit
+     light-or-dark override therefore does not apply here, only on the app
+     itself. That is the right way round to lose the argument.
+
+     Everything after sign-in uses the stored preference (js/theme.js). -->
+<script>
+  (function () {
+    try {
+      var dark = window.matchMedia &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var t = dark ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.style.colorScheme = t;
+    } catch (e) {}
+  })();
+</script>
 
 <link rel="stylesheet" href="css/tokens.css">
 <link rel="stylesheet" href="css/shell.css">
