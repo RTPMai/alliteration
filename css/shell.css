@@ -1,633 +1,608 @@
-/* ==========================================================================
-   alliteration. — design tokens
-   THE ONLY PLACE COLORS AND DIMENSIONS ARE DEFINED.
+/**
+ * alliteration. — shell
+ *
+ * Owns the chrome (header, rail, crumb), the session, and which app is on
+ * screen. Everything app-specific lives in apps/. Everything network lives in
+ * api.js.
+ *
+ * The chrome never re-renders on navigation. Switching views repaints the rail
+ * sub-nav and the crumb; the header and the mounted app hosts stay put.
+ *
+ * Routes:
+ *   #/            -> hub ("All apps")
+ *   #/<app>/<view>
+ */
 
-   No app file declares a hex value. Components reference var(--accent) and
-   friends, so setting data-app on <body> re-themes the entire shell.
+import { APPS, SHELL_APPS, SITE_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
+import * as api from './api.js';
+import * as router from './router.js';
+import { mountApp, showView, isMounted } from './app-host.js';
+import { initHelp } from './help.js';
+import * as theme from './theme.js';
 
-   Neutrals below were already identical across BackBone, ShopStock,
-   ErrorEngine and GivingGauge, so consolidating them here changed nothing
-   visually. Only the accent triplet varies per app.
-   ========================================================================== */
+const HUB = 'hub';
 
-:root {
-  /* ---- Surfaces & text (shared by every app) ---------------------------- */
-  --bg:            #F4F6F8;
-  --card:          #FFFFFF;
-  --ink:           #1C2430;
-  --muted:         #6B7684;
-  --faint:         #9CA3AF;
-  --line:          #E4E8EC;
-  --line-soft:     #EDF0F3;
-  --wordmark-ink:  #231F20;
+const el = {};
+const state = {
+  user: null,
+  perms: null,
+  app: HUB,
+  view: null,
+  hosts: new Map(),
+  // Counts an app wants shown in the rail (e.g. ShopStock's "needs ordering").
+  // The apps used to render these into their own headers, which the shell
+  // replaced, so the shell surfaces them instead.
+  badges: new Map()
+};
 
-  /* ---- Semantic status colors ------------------------------------------
-     These mean "good/bad", never "which app". GivingGauge's gauge depends on
-     green staying a GRADE color rather than a brand color, which is why its
-     accent is gold. Do not repoint --success at an accent. */
-  --success:       #3D9A5C;
-  --success-dk:    #2F7A48;
-  --success-tint:  #EAF5EE;
-  --warn:          #B4791E;
-  --warn-dk:       #8A5C16;
-  --warn-tint:     #FCF3E3;
-  --danger:        #C0392B;
-  --danger-dk:     #96271B;
-  --danger-tint:   #FDECEA;
-  --danger-line:   #F5C6C0;
+/* ------------------------------------------------------------------ *
+ * BOOT
+ * ------------------------------------------------------------------ */
 
-  /* ---- Dimensions ------------------------------------------------------- */
-  --radius:        12px;
-  --radius-sm:     8px;
-  --radius-md:     12px;
-  --radius-pill:   99px;
+export async function boot() {
+  el.rail       = document.getElementById('rail');
+  el.main       = document.getElementById('main');
+  el.crumb      = document.getElementById('crumb');
+  el.avatar     = document.getElementById('avatar');
+  el.mockBanner = document.getElementById('mockBanner');
+  el.brandBtn   = document.getElementById('brandBtn');
+  el.railToggle = document.getElementById('railToggle');
+  el.bellBtn    = document.getElementById('bellBtn');
+  el.themeBtn   = document.getElementById('themeBtn');
 
-  --shell-header-h: 60px;
-  /* Content width. The prototype capped this at 1180px, which suits prose but
-     wastes half a wide screen on a data table. Apps here are dense: inventory
-     rows, error logs, rosters. They should use the width available. */
-  --shell-max-w:    none;
-  --shell-max-w-prose: 1180px;
-  --rail:           248px;
-  --gutter:         20px;
-  --gutter-sm:      12px;
+  // index.html paints a "Starting…" message before this module loads, so a
+  // failed load leaves something readable instead of a blank page. Reaching
+  // here means the module loaded, so clear it.
+  if (el.main) el.main.innerHTML = '';
 
-  --font: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  // Name the apps that are actually on sample data. A blanket "sample data"
+  // message is wrong once some backends are deployed, and wrong in the
+  // direction that matters: it makes real data look fake.
+  if (el.mockBanner) {
+    const pending = api.appsOnSampleData();
+    if (pending.length) {
+      const names = pending.map((id) => {
+        const a = getApp(id);
+        return a ? a.name : id;
+      });
+      el.mockBanner.innerHTML =
+        'Sample data in ' + escape(names.join(', ')) +
+        '. Everything else is live.';
+      el.mockBanner.hidden = false;
+    } else {
+      el.mockBanner.hidden = true;
+    }
+  }
 
-  --shadow-card: 0 1px 2px rgba(16, 24, 40, .04), 0 1px 3px rgba(16, 24, 40, .06);
-  --shadow-pop:  0 1px 2px rgba(16, 24, 40, .04), 0 4px 12px rgba(16, 24, 40, .04);
+  initTheme();
 
-  --speed: .14s;
+  el.brandBtn.addEventListener('click', () => router.go(HUB, null));
+  el.railToggle.addEventListener('click', () => document.body.classList.toggle('rail-open'));
 
-  /* ---- Hub (the "All apps" landing view) -------------------------------
-     The hub is not one of the five apps, so it carries its own accent. This
-     green is the shell's own color, used when no app is selected. */
-  --hub:      #52A246;
-  --hub-deep: #3F8236;
-  --hub-tint: #EDF6EB;
+  api.onAuthFailure(() => renderMessage(
+    'Session expired',
+    'Your session ended or was signed out elsewhere. Reload to sign in again.'
+  ));
 
-  /* ---- Notifications panel (header bell dropdown) ------------------------
-     Not one of the nine apps and not a routed screen (no data-app value of
-     its own), so like --hub above it gets a fixed color rather than reading
-     var(--accent), which would otherwise shift with whatever app happens to
-     be open behind it. Same slate used before this became a header panel. */
-  --notif:      #3E4C59;
-  --notif-deep: #2F3B45;
-  --notif-tint: #EAECEF;
+  renderSpinner();
 
-  /* ---- Tier badges (BackBone scorecard, shown on the hub too) ----------
-     Fixed per tier, NOT app accents: an A-tier account is blue whichever app
-     is on screen. Declared here so no app file needs a hex. */
-  --tier-a: #1B5DAB;
-  --tier-b: #52A246;
-  --tier-c: #B4791E;
-  --tier-d: #9CA3AF;
+  let session;
+  try {
+    session = await api.auth.session();
+  } catch (e) {
+    return renderMessage(
+      'Cannot reach the server',
+      'The session endpoint did not respond. If you are working offline, run with <code>?mock=1</code>.'
+    );
+  }
 
-  /* ---- Amber (ShopStock "Ordered" state and its button) -----------------
-     Distinct from --warn, which means "needs attention". Amber here means
-     "in progress, nothing wrong", so the two must not be merged. */
-  --amber:       #A67C00;
-  --amber-tint:  #FEF6E0;
-  --amber-line:  #F5E4B0;
-  --amber-hover: #FBEEC8;
+  if (!session || session.authenticated === false || !session.user) {
+    // Always hand off to the sign-in screen. This used to be skipped in mock
+    // mode, back when mock mode faked the user too. It no longer does: auth is
+    // ALWAYS real (see LIVE_PREFIXES in api.js), so skipping the redirect just
+    // stranded signed-out visitors on a dead end that offered no way to sign in.
+    location.replace('login.html');
+    return;
+  }
 
-  /* A bright, saturated gold for celebration marks (ShopStock's "nothing needs
-     ordering" star). Deliberately NOT --amber: that is a dark text color chosen
-     for contrast against a pale background, and it reads muddy when it fills a
-     large shape. */
-  --gold-bright: #F5B301;
-  --gold-deep:   #D99400;
+  state.user  = session.user;
+  state.perms = session.user.perms || {};
 
-  /* ---- Status hues (BackBone) -------------------------------------------
-     BackBone encodes MEANING in color, not decoration: a lead's stage, what
-     contact details are on file, how loaded an account manager is. Those need
-     hues the semantic tokens above do not cover, so they get their own scale.
-     Each is tint (background) + ink (text on that tint). */
-  --hue-blue:        #1D4ED8;
-  --hue-blue-tint:   #E3EBFD;
-  --hue-blue-deep:   #1E40AF;
-  --hue-indigo:      #4F46E5;
-  --hue-indigo-tint: #EEF2FF;
-  --hue-violet:      #6D28D9;
-  --hue-violet-tint: #EDE9FE;
-  --hue-sky:         #0369A1;
-  --hue-sky-tint:    #E0F2FE;
-  --hue-forest:      #1E7A44;
-  --hue-forest-tint: #E4F4EA;
-  --hue-clay:        #B42318;
-  --hue-clay-tint:   #FDE7E5;
-  --hue-clay-line:   #F5B5B0;
+  renderAvatar();
+  initBell();
 
-  /* ---- Categorical chart palette ---------------------------------------
-     Charts need colors chosen to be TOLD APART, which is a different job
-     from the semantic and per-app colors above. Reusing those produced
-     real bugs: TravelTrack's green accent against --success made one
-     indistinguishable ring, and the --hue-* set clusters four values in
-     the blues. These nine are spaced for perceptual separation (minimum
-     ~120 on a weighted RGB distance) and all clear 3:1 contrast against
-     --card, so a small legend swatch stays visible.
+  // The help bubble, bottom right, on every screen. It reads the CURRENT app
+  // and view at ask time rather than being handed them once, so an answer to
+  // "how is this calculated" is about whatever is actually on screen.
+  initHelp(() => {
+    const a = getApp(state.app);
+    return {
+      app: state.app,
+      view: state.view,
+      appName: a ? a.name : null,
+      viewName: a && state.view ? viewLabel(a, state.view) : null,
+    };
+  });
 
-     Order matters: series rotate through 1..9 in sequence, so adjacent
-     numbers are the most-separated pairs, not merely different. */
-  --chart-1: #1D4ED8;   /* blue */
-  --chart-2: #E8590C;   /* orange */
-  --chart-3: #2E9E5B;   /* green */
-  --chart-4: #7C3AED;   /* violet */
-  --chart-5: #A16207;   /* bronze */
-  --chart-6: #0E9AA7;   /* teal */
-  --chart-7: #9F1239;   /* crimson */
-  --chart-8: #D946A0;   /* magenta */
-  --chart-9: #57606A;   /* slate */
-
-  /* ---- Misc surfaces ---------------------------------------------------- */
-  --on-accent:   #FFFFFF;
-  --footer-bg:   #FCFDFD;
-  --dot-idle:    #C9CFD6;
-  --row-hover:   #FAFAFA;
-  --head-bg:     #F9FAFB;
-
-  /* ---- Default accent (shell chrome before an app is chosen) ------------
-     Defaults to the hub green so the "All apps" view is themed correctly on
-     first paint, before data-app is set. */
-  --accent:        var(--hub);
-  --accent-deep:   var(--hub-deep);
-  --accent-tint:   var(--hub-tint);
+  const start = router.start();
+  router.onRoute((route) => { handleRoute(route); refreshBell(); });
+  await handleRoute(start);
 }
 
-/* ==========================================================================
-   PER-APP ACCENTS
-   Setting <body data-app="backbone"> re-themes everything downstream.
-   Adding an app = add a block here + one file in apps/ + two lines in
-   js/registry.js.
-   ========================================================================== */
+/* ------------------------------------------------------------------ *
+ * ROUTING
+ * ------------------------------------------------------------------ */
 
-body[data-app="hub"] {
-  --accent:      var(--hub);
-  --accent-deep: var(--hub-deep);
-  --accent-tint: var(--hub-tint);
+async function handleRoute(route) {
+  const { app: appId, view, param } = route;
+
+  // No route at all, or an explicit hub route.
+  if (!appId || appId === HUB) {
+    state.app = HUB;
+    state.view = null;
+    document.body.dataset.app = HUB;
+    renderRail();
+    renderCrumb();
+    return activateHub();
+  }
+
+  // Unknown app, or one this user cannot open: fall back to the first they can.
+  if (!getApp(appId) || !canAccess(state.perms, appId)) {
+    const fallback = firstAllowed(state.perms);
+    if (!fallback) {
+      renderRail();
+      return renderMessage(
+        'No apps available',
+        'This account has no apps assigned. An administrator can grant access in Settings.'
+      );
+    }
+    return router.go(fallback.id, fallback.defaultView, { replace: true });
+  }
+
+  const meta = getApp(appId);
+  const permitted = allowedViews(state.perms, appId);
+
+  if (!view || !permitted.includes(view)) {
+    const target = permitted.includes(meta.defaultView) ? meta.defaultView : permitted[0];
+    if (!target) {
+      return renderMessage('No views available',
+        'This account cannot open any view in ' + meta.name + '.');
+    }
+    return router.go(appId, target, { replace: true });
+  }
+
+  state.app = appId;
+  state.view = view;
+  state.param = param;
+  document.body.dataset.app = appId;
+
+  renderRail();
+  renderCrumb();
+
+  if (meta.stub) return renderStub(meta);
+
+  try {
+    await activate(meta, view, param);
+  } catch (e) {
+    console.error('[shell] failed to mount ' + appId, e);
+
+    // Distinguish "not built yet" from "built but failed to load". They look
+    // identical to a user and have completely different fixes: the first is
+    // waiting on work, the second is usually a file that did not deploy.
+    // app-host.js sets moduleLoadFailed when the dynamic import itself threw.
+    // Anything else reached the file fine and broke later, so blaming the
+    // deploy sends you to check a file that is sitting there correct. The old
+    // rule treated ANY TypeError as a missing file, which is exactly what
+    // happened on Aug 18.
+    const missing = !!(e && (e.moduleLoadFailed ||
+      /Failed to fetch|Importing a module|dynamically imported/i.test(e.message || '')));
+
+    renderMessage(
+      'Could not load ' + meta.name,
+      missing
+        // Name the ACTUAL path, which for a folder app is not apps/<id>.js.
+        // Hardcoding the single-file form sent three rounds of debugging at the
+        // wrong file: the message said apps/backbone.js while the code was
+        // correctly requesting apps/backbone/index.js.
+        ? 'The app file did not load. Check that <code>apps/' +
+          (meta.entry || (appId + '.js')) + '</code> ' +
+          'and everything it imports were deployed, then look at the browser console ' +
+          'for the exact path that failed.'
+        : 'The app failed to start: ' + escape(e && e.message ? e.message : String(e)) +
+          '. See the browser console for details.'
+    );
+  }
 }
 
-body[data-app="backbone"] {
-  --accent:      #1B5DAB;
-  --accent-deep: #164B8A;
-  --accent-tint: #EAF1F9;
+function hostFor(id) {
+  let host = state.hosts.get(id);
+  if (!host) {
+    host = document.createElement('div');
+    host.className = 'app-host';
+    host.id = 'host-' + id;
+    el.main.appendChild(host);
+    state.hosts.set(id, host);
+  }
+  return host;
 }
 
-body[data-app="shopstock"] {
-  --accent:      #E36325;
-  --accent-deep: #C24F16;
-  --accent-tint: #FCEEE6;
+function hideAllHosts() {
+  state.hosts.forEach((h) => h.classList.remove('active'));
 }
 
-body[data-app="errorengine"] {
-  --accent:      #745DA8;
-  --accent-deep: #5B4788;
-  --accent-tint: #F0ECF7;
+async function activateHub() {
+  clearShellMessage();
+  hideAllHosts();
+
+  const host = hostFor(HUB);
+  host.classList.add('active');
+
+  if (!isMounted(HUB)) {
+    host.innerHTML = '<div class="shell-spinner"></div>';
+    await mountApp({ id: HUB, views: [], defaultView: null }, host, {
+      user: state.user,
+      perms: state.perms,
+      go: () => {},
+      goApp: (a, v) => router.go(a, v)
+    });
+    const spinner = host.querySelector(':scope > .shell-spinner');
+    if (spinner) spinner.remove();
+  }
+
+  window.scrollTo({ top: 0 });
 }
 
-/* GivingGauge is GOLD, not green. The brief listed #3D9A5C, but that value is
-   --success in all four apps, and this app's gauge renders green/gold/red as
-   GRADE outcomes. A green accent would make the app chrome match its own
-   "grade A" color. Gold is what the app actually ships. */
-body[data-app="givinggauge"] {
-  --accent:      #D5A029;
-  --accent-deep: #A87A16;
-  --accent-tint: #FBF2E1;
+async function activate(meta, view, param) {
+  clearShellMessage();
+  hideAllHosts();
+
+  const host = hostFor(meta.id);
+  host.classList.add('active');
+
+  if (!isMounted(meta.id)) {
+    host.innerHTML = '<div class="shell-spinner"></div>';
+    await mountApp(meta, host, {
+      user: state.user,
+      perms: state.perms,
+      go: (v) => router.goView(v),
+      goApp: (a, v, p) => router.go(a, v, { param: p }),
+      setBadge: (n) => setBadge(meta.id, n)
+    });
+    const spinner = host.querySelector(':scope > .shell-spinner');
+    if (spinner) spinner.remove();
+  }
+
+  // The param is the third route segment (e.g. an item id from a QR scan).
+  showView(meta.id, view, param);
+  window.scrollTo({ top: 0 });
 }
 
-/* Sticky Notes is a SITE WORK screen: not an app, not part of Shared. Muted
-   gold rather than a bright post-it yellow, because the accent themes the
-   whole chrome and a fluorescent rail is unreadable. The paper colours below
-   are the ones that actually appear on the notes. */
-body[data-app="stickies"] {
-  --accent:      #C9A227;
-  --accent-deep: #9A7A18;
-  --accent-tint: #FAF3DF;
+/* ------------------------------------------------------------------ *
+ * RAIL
+ * ------------------------------------------------------------------ */
+
+/** A count an app asked the shell to show beside its name in the rail. */
+function badgeHtml(app) {
+  const n = state.badges.get(app.id);
+  if (!n) return '';
+  return '<span class="rail-badge">' + (n > 99 ? '99+' : n) + '</span>';
 }
 
-/* ---- Sticky note paper -------------------------------------------------
-   Five paper colours plus a matching ink for each, kept here rather than in
-   apps/stickies.js like every other colour in this repo. Ink is a darkened
-   version of the same hue so text stays legible on its own note. */
-:root {
-  --sticky-yellow:      #FBF0B2;
-  --sticky-yellow-edge: #EFDF8A;
-  --sticky-green:       #D8EFC2;
-  --sticky-green-edge:  #BEE0A0;
-  --sticky-blue:        #CFE4F5;
-  --sticky-blue-edge:   #ABCDEB;
-  --sticky-pink:        #F8D6DE;
-  --sticky-pink-edge:   #EDB6C3;
-  --sticky-grey:        #E4E7EA;
-  --sticky-grey-edge:   #CDD2D7;
-  --sticky-ink:         #2E2A20;
+function setBadge(appId, n) {
+  const next = Number(n) || 0;
+  if (state.badges.get(appId) === next) return;
+  state.badges.set(appId, next);
+  renderRail();
 }
 
-/* Settings is a SHELL screen, not one of the five apps. Deliberately neutral
-   grey: it belongs to the shell, and giving it a brand color would imply it is
-   another app in the lineup. */
-body[data-app="settings"] {
-  --accent:      #6B7684;
-  --accent-deep: #55606D;
-  --accent-tint: #EEF1F4;
+function renderRail() {
+  if (!el.rail) return;
+
+  const visible = APPS.filter((a) => canAccess(state.perms, a.id));
+  let html = '<div class="rail-label">Apps</div>';
+
+  visible.forEach((a) => {
+    const on = state.app === a.id;
+    html += `
+      <button class="rail-item${on ? ' active' : ''}${a.stub ? ' planned' : ''}"
+              data-app="${a.id}" style="--dot:${a.accent}">
+        <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}${a.stub ? '<span class="tag">Soon</span>' : ''}
+      </button>`;
+
+    // Sub-nav only under the open app, and only views this user may see.
+    if (on) {
+      // Hidden views (a QR destination, a row-click detail page) are routable
+      // but must not appear as nav links.
+      const hidden = a.hiddenViews || [];
+      const views = allowedViews(state.perms, a.id).filter((v) => !hidden.includes(v));
+      if (views.length > 1) {
+        html += '<div class="subnav">';
+        views.forEach((v) => {
+          html += `
+            <button class="sub-item${state.view === v ? ' active' : ''}"
+                    data-app="${a.id}" data-view="${v}">${escape(viewLabel(a, v))}</button>`;
+        });
+        html += '</div>';
+      }
+    }
+  });
+
+  html += '<div class="rail-hr"></div><div class="rail-label">Shared</div>';
+  html += `
+    <button class="rail-item${state.app === HUB ? ' active' : ''}" data-app="${HUB}">
+      <span class="sq" style="--dot:var(--hub)"></span>All apps
+    </button>`;
+
+  // Shell-level screens (Settings, Notifications). Not apps, so they sit
+  // under Shared and gate on role rather than on a role's app grants.
+  // Reuses the same rail-badge count mechanism as the apps above it — the
+  // "eye-catching" spot Ryan asked for, rather than the small header bell
+  // badge alone.
+  SHELL_APPS.filter((a) => canAccess(state.perms, a.id)).forEach((a) => {
+    html += `
+      <button class="rail-item${state.app === a.id ? ' active' : ''}"
+              data-app="${a.id}" style="--dot:${a.accent}">
+        <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}
+      </button>`;
+  });
+
+  // Site Work. A third section, not another Shared entry: these screens are
+  // about building Alliteration, not about running the business with it. The
+  // whole block disappears for anyone without the superuser flag, so most of
+  // the team never sees a section that would only confuse them.
+  const siteVisible = SITE_APPS.filter((a) => canAccess(state.perms, a.id));
+  if (siteVisible.length) {
+    html += '<div class="rail-hr"></div><div class="rail-label">Site Work</div>';
+    siteVisible.forEach((a) => {
+      html += `
+        <button class="rail-item${state.app === a.id ? ' active' : ''}"
+                data-app="${a.id}" style="--dot:${a.accent}">
+          <span class="sq"></span>${escape(a.name)}${badgeHtml(a)}
+        </button>`;
+    });
+  }
+
+  el.rail.innerHTML = html;
+
+  el.rail.querySelectorAll('[data-app]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      document.body.classList.remove('rail-open');
+      const id = btn.dataset.app;
+      if (id === HUB) return router.go(HUB, null);
+      const target = getApp(id);
+      router.go(id, btn.dataset.view || (target ? target.defaultView : null));
+    });
+  });
 }
 
-/* Notifications is a shell-level screen like Settings, not one of the nine
-   apps, so it gets its own neutral slate rather than borrowing a real app's
-   brand color. Same slate as --notif below (kept in sync on purpose — the
-   header bell uses the fixed token since it has no data-app scope of its
-   own, this block themes the routed screen when it's the active app). */
-body[data-app="notifications"] {
-  --accent:      #3E4C59;
-  --accent-deep: #2F3B45;
-  --accent-tint: #EAECEF;
+/* ------------------------------------------------------------------ *
+ * CRUMB + AVATAR
+ * ------------------------------------------------------------------ */
+
+function renderCrumb() {
+  if (!el.crumb) return;
+
+  if (state.app === HUB) {
+    el.crumb.innerHTML = '<span>All apps</span>';
+    return;
+  }
+
+  const app = getApp(state.app);
+  if (!app) { el.crumb.innerHTML = ''; return; }
+
+  el.crumb.innerHTML =
+    '<span>alliteration</span>' +
+    '<span class="sep">/</span>' +
+    `<span class="now">${escape(app.name)}</span>` +
+    (state.view
+      ? '<span class="sep">/</span><span>' + escape(viewLabel(app, state.view)) + '</span>'
+      : '');
 }
 
-/* TravelTrack's accent is the EXACT fill from the vector logo file
-   (assets/logos/traveltrack-mark.svg / -wordmark.svg), corrected Aug 2026
-   from an earlier hand-sampled #51A446. It is #52A246 — the same green as
-   --hub, the "All apps" landing view's own color, which is intentional:
-   both trace back to the same brand green. Deep/tint below are shared with
-   --hub-deep/--hub-tint rather than a fresh pair, since a second
-   near-identical green would just be noise. */
-body[data-app="traveltrack"] {
-  --accent:      #52A246;
-  --accent-deep: #428238;
-  --accent-tint: #EFF7EE;
+/* ------------------------------------------------------------------ *
+ * THEME
+ *
+ * The paint already happened: the inline script in index.html set
+ * <html data-theme> before the stylesheets loaded. This only takes over the
+ * live parts, the button and following the system while the preference is
+ * 'system'.
+ *
+ * Wired before the session call on purpose. Appearance is chrome, not user
+ * data, so it should still work on the sign-in redirect and on the "cannot
+ * reach the server" screen.
+ * ------------------------------------------------------------------ */
+
+function initTheme() {
+  theme.initTheme();
+  if (!el.themeBtn) return;
+
+  const paint = () => {
+    const pref = theme.getPreference();
+    const resolved = document.documentElement.getAttribute('data-theme') || 'light';
+    el.themeBtn.setAttribute('data-pref', pref);
+    // The title reports the CHOICE and names what comes next, because a
+    // three-way control that only shows an icon leaves people guessing what a
+    // click will do.
+    const label = theme.preferenceLabel(pref, resolved);
+    el.themeBtn.title = 'Appearance: ' + label + '. Click for ' +
+      theme.preferenceLabel(theme.nextPreference(pref), resolved).replace(/ \(.*\)$/, '') + '.';
+    el.themeBtn.setAttribute('aria-label', 'Appearance: ' + label);
+  };
+
+  paint();
+  theme.onChange(paint);
+  el.themeBtn.addEventListener('click', () => { theme.cycle(); paint(); });
 }
 
-/* CrewCore's accent is RED, per the logo lineup. An earlier pass shipped
-   this block with #4A90E2 (blue, corrected Aug 3, 2026), then with #D61623
-   (a red, but not quite the right one). This is now the EXACT fill from
-   the vector logo file (assets/logos/crewcore-mark.svg / -wordmark.svg),
-   corrected Aug 2026: #E1251B. */
-body[data-app="crewcore"] {
-  --accent:      #C83E73;
-  --accent-deep: #A32E5B;
-  --accent-tint: #FBEDF3;
+function renderAvatar() {
+  if (!el.avatar || !state.user) return;
+  const name = state.user.name || state.user.username || '?';
+  el.avatar.textContent = name.trim()[0].toUpperCase();
+  el.avatar.title = name + ' — click to sign out';
+  el.avatar.style.cursor = 'pointer';
+  el.avatar.setAttribute('role', 'button');
+  el.avatar.setAttribute('tabindex', '0');
+
+  const signOut = async () => {
+    try { await api.auth.logout(); } catch (e) { /* sign out locally regardless */ }
+    location.replace('login.html');
+  };
+
+  el.avatar.addEventListener('click', signOut);
+  el.avatar.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); signOut(); }
+  });
 }
 
-/* PromoPro. Red, from the Aug 14 2026 logo lineup. This is the value CrewCore
-   used to hold: the lineup moved CrewCore to raspberry and gave the red to
-   PromoPro, so the two are no longer near-identical in the rail. */
-body[data-app="promopro"] {
-  --accent:      #E31E2D;
-  --accent-deep: #B81824;
-  --accent-tint: #FDEBEC;
+/* ------------------------------------------------------------------ *
+ * NOTIFICATIONS BELL
+ *
+ * Header-level, visible from every app. Clicking it navigates straight to
+ * the "Assigned to me" view. It no longer carries its own badge — the open
+ * count now shows on the rail item next to "Notifications" instead (Ryan's
+ * call: the small header number wasn't eye-catching enough). refreshBell()
+ * still owns the polling, it just calls setBadge('notifications', n) rather
+ * than painting a number onto the bell itself. Refreshed on every
+ * navigation plus a standing interval so the count updates even while
+ * parked on one screen.
+ *
+ * That "one filtered GET" was described as cheap here and was not: the
+ * route loaded every notification record to hand back a length. It now
+ * asks for ?count=1, which the notifications index answers on its own.
+ * See lib/notifications/store.js.
+ *
+ * This briefly rendered its own dropdown (Aug 6) and got reverted the same
+ * day — Ryan preferred Notifications stay a full routed screen.
+ * ------------------------------------------------------------------ */
+
+const BELL_POLL_MS = 60000;
+let bellTimer = null;
+let bellVisibilityBound = false;
+
+/**
+ * A BACKGROUND TAB POLLS NOTHING (Aug 2026).
+ *
+ * The interval below runs per open tab, and a tab nobody is looking at was
+ * calling just as often as the one on screen. A laptop left open over a
+ * weekend polled all weekend. Since the count is only ever read off the
+ * rail badge, a hidden tab has nothing to update, so it stops entirely and
+ * refreshes once when it comes back into view.
+ *
+ * Guarded rather than assumed: `document.visibilityState` is checked for
+ * existence so this cannot throw in any context without it.
+ */
+function bellVisible() {
+  return typeof document === 'undefined' ||
+    typeof document.visibilityState !== 'string' ||
+    document.visibilityState === 'visible';
 }
 
-/* MailMe's accent is the EXACT fill from the vector logo file
-   (assets/logos/mailme-mark.svg / -wordmark.svg), corrected Aug 2026 from
-   an earlier hand-sampled #85A0C6: a slate/muted blue, deliberately
-   quieter than BackBone's or CrewCore's colors since this app sends real
-   email once built. */
-body[data-app="mailme"] {
-  --accent:      #8CA9CC;
-  --accent-deep: #7087A3;
-  --accent-tint: #F5F7FA;
+function startBellPolling() {
+  stopBellPolling();
+  bellTimer = setInterval(refreshBell, BELL_POLL_MS);
 }
 
-/* TeleTally's accent is the EXACT fill from the vector logo file
-   (assets/logos/teletally-mark.svg / -wordmark.svg), corrected Aug 2026
-   from an earlier hand-sampled #282A72 (too indigo/purple) — the logo's
-   dark navy is #000B8C. The periwinkle-blue circle stays in the SVG mark
-   itself rather than becoming a second CSS variable (only one accent per
-   app in this scale). */
-body[data-app="teletally"] {
-  --accent:      #000B8C;
-  --accent-deep: #000970;
-  --accent-tint: #E8E9F5;
+function stopBellPolling() {
+  if (bellTimer) { clearInterval(bellTimer); bellTimer = null; }
 }
 
-/* WebsiteWidget's accent is the EXACT fill from the vector logo file
-   (assets/logos/websitewidget-mark.svg / -wordmark.svg): teal, corrected
-   Aug 2026 from an earlier hand-sampled #02A9A5. */
-body[data-app="websitewidget"] {
-  --accent:      #00BBB4;
-  --accent-deep: #009690;
-  --accent-tint: #E8F9F8;
+function onBellVisibilityChange() {
+  if (!state.user) { stopBellPolling(); return; }
+  if (bellVisible()) { refreshBell(); startBellPolling(); }
+  else stopBellPolling();
 }
 
-/* StitchSense. Magenta, chosen to match the coverage overlay the estimator
-   paints over customer artwork: the AM sees the same colour on the picture and
-   in the app chrome, so the overlay reads as "this app measured that" rather
-   than as an unexplained highlight. Distinct from CrewCore's raspberry
-   (#C83E73) and PromoPro's red (#E31E2D) in the rail. */
-body[data-app="stitchsense"] {
-  --accent:      #D61F7A;
-  --accent-deep: #AE1862;
-  --accent-tint: #FCEBF3;
+function initBell() {
+  if (!el.bellBtn || !canAccess(state.perms, 'notifications')) return;
+  el.bellBtn.hidden = false;
+
+  el.bellBtn.addEventListener('click', () => router.go('notifications', 'inbox'));
+
+  // Bound once. initBell() runs on every sign-in, and stacking a listener
+  // per sign-in would multiply the refresh on each visibility change.
+  if (!bellVisibilityBound && typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', onBellVisibilityChange);
+    bellVisibilityBound = true;
+  }
+
+  refreshBell();
+  if (bellVisible()) startBellPolling();
 }
 
-/* MarketMachine. PROVISIONAL VIOLET, not off a logo file.
-   The palette is crowded by this point: blue (BackBone), orange (ShopStock),
-   muted purple (ErrorEngine), gold (GivingGauge), green (TravelTrack),
-   raspberry (CrewCore), red (PromoPro), slate (MailMe), navy (TeleTally),
-   teal (WebsiteWidget) and magenta (StitchSense) are all taken. This violet is
-   saturated enough to read as its own colour beside ErrorEngine's greyer
-   #745DA8 at rail-dot size, but it is a placeholder chosen by elimination.
-   CHECK IT AGAINST THE LOGO LINEUP SHEET and correct it here before the app
-   has been in front of the team long enough for the colour to stick. CrewCore
-   went blue -> red -> the exact logo red precisely because that check was
-   skipped the first time. */
-body[data-app="marketmachine"] {
-  --accent:      #6E1E2B;
-  --accent-deep: #55161F;
-  --accent-tint: #F6EBED;
+async function refreshBell() {
+  if (!state.user) return;
+  if (!bellVisible()) return;
+  try {
+    const username = String(state.user.username || '').toLowerCase();
+    // count=1 answers from the notifications index alone: ONE storage read
+    // no matter how many notifications exist. Asking for the full list and
+    // taking .length read every record on every poll. The list shape is
+    // still accepted below so an older cached shell keeps working through
+    // a deploy.
+    const data = await api.get(api.ENDPOINTS.notifications, {
+      assignedTo: username, status: 'open', count: '1',
+    });
+    const n = (data && typeof data.count === 'number')
+      ? data.count
+      : (Array.isArray(data && data.notifications) ? data.notifications.length : 0);
+    // The count now lives on the rail item next to "Notifications" (Ryan's
+    // call: the small header badge wasn't eye-catching enough), reusing the
+    // same rail-badge mechanism apps like ShopStock already use for counts.
+    setBadge('notifications', n);
+  } catch (e) {
+    // Silent: a failed poll should not surface as an error banner over
+    // whatever app the person is actually looking at.
+  }
 }
 
-/* ==========================================================================
-   COMPATIBILITY ALIASES
-   Ported app markup references its own old variable names. Rather than
-   find-and-replace across 10k+ lines of working HTML (and risk changing
-   behaviour), the old names are aliased to the new ones. New code should use
-   --accent. These exist so ports drop in unmodified.
-   ========================================================================== */
+/* ------------------------------------------------------------------ *
+ * SHELL-LEVEL VIEWS
+ * ------------------------------------------------------------------ */
 
-/* ErrorEngine used --purple / --purple-deep throughout. */
-body[data-app="errorengine"] {
-  --purple:      var(--accent);
-  --purple-deep: var(--accent-deep);
+function shellMessageNode() {
+  let node = document.getElementById('shellMessage');
+  if (!node) {
+    node = document.createElement('div');
+    node.id = 'shellMessage';
+    el.main.appendChild(node);
+  }
+  return node;
 }
 
-/* BackBone aliased its accent to --green* (a leftover from an earlier palette). */
-body[data-app="backbone"] {
-  --green:       var(--accent);
-  --green-dk:    var(--accent-deep);
-  --green-tint:  var(--accent-tint);
+function clearShellMessage() {
+  const node = document.getElementById('shellMessage');
+  if (node) node.remove();
 }
 
-/* ErrorEngine also referenced a bare --green for status. */
-body[data-app="errorengine"] {
-  --green: var(--success);
+function renderSpinner() {
+  shellMessageNode().innerHTML = '<div class="shell-spinner"></div>';
 }
 
-/* ==========================================================================
-   DARK THEME
-   Everything above is the light theme and stays the default. This block is
-   the whole of dark mode: the same token names, different values.
-
-   HOW IT IS SWITCHED. js/theme.js resolves a person's choice (system, light
-   or dark) down to one of two answers and writes it to <html data-theme>.
-   CSS therefore never has to handle "system", which is why there is one dark
-   block here rather than one block plus a duplicate inside a
-   prefers-color-scheme media query that would have to be kept in step with it.
-
-   THREE THINGS THAT ARE NOT JUST "INVERT IT":
-
-   1. TINTS FLIP FROM PALE TO DEEP. Every *-tint token is a background with
-      darker text sitting on it. In dark the background has to become a deep,
-      desaturated version of the same hue, or a "pale green success pill"
-      turns into a glowing slab that outshouts the text it is behind.
-
-   2. THE -dk TOKENS GET LIGHTER. --success-dk and friends mean "the emphatic
-      version of this colour, for text on its own tint". Emphasis on white is
-      darker; emphasis on near-black is lighter. So they invert direction
-      rather than merely shifting.
-
-   3. SOME ACCENTS CANNOT SURVIVE THE MOVE. TeleTally's #000B8C and
-      MarketMachine's #6E1E2B were picked to read against white. On a dark
-      surface they are indistinguishable from the background, so those two get
-      genuinely different values here, not tonal nudges. The rail dot has to
-      stay recognisable as that app's colour in both themes, which is the
-      constraint that decided how far each one moved.
-   ========================================================================== */
-
-:root { color-scheme: light; }
-
-html[data-theme="dark"] {
-  color-scheme: dark;
-
-  /* ---- Surfaces & text -------------------------------------------------
-     --card is LIGHTER than --bg, the reverse of light mode. On white, a card
-     is separated from the page by a shadow. On a dark page a shadow is
-     invisible, so raised things read as raised by being lighter. */
-  --bg:            #11161C;
-  --card:          #191F27;
-  --ink:           #E7EBF0;
-  --muted:         #98A3B0;
-  --faint:         #6B7684;
-  --line:          #2A313B;
-  --line-soft:     #212831;
-  --wordmark-ink:  #E7EBF0;
-
-  /* ---- Semantic status colors ------------------------------------------
-     Still grades, still never app colours. Lifted enough to clear 4.5:1 on
-     --card, since these carry meaning and are frequently the only thing
-     distinguishing one row from another. */
-  --success:       #4CAF71;
-  --success-dk:    #74D096;
-  --success-tint:  #16291E;
-  --warn:          #D6A03C;
-  --warn-dk:       #EBBB63;
-  --warn-tint:     #2C2413;
-  --danger:        #EF6B5C;
-  --danger-dk:     #FF8E80;
-  --danger-tint:   #301A19;
-  --danger-line:   #57302C;
-
-  /* ---- Shadows ----------------------------------------------------------
-     The light values are near-transparent slate and vanish completely here.
-     Deepened to real black at higher opacity so a modal still reads as
-     floating above the page rather than pasted onto it. */
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, .40), 0 1px 3px rgba(0, 0, 0, .30);
-  --shadow-pop:  0 2px 4px rgba(0, 0, 0, .40), 0 8px 24px rgba(0, 0, 0, .45);
-
-  /* ---- Hub -------------------------------------------------------------- */
-  --hub:      #52A246;
-  --hub-deep: #6FBB63;
-  --hub-tint: #1A2A18;
-
-  /* ---- Notifications ----------------------------------------------------
-     The light slate is a dark grey, which is invisible here, so this becomes
-     a light grey. It keeps its job of being obviously not an app colour. */
-  --notif:      #8996A4;
-  --notif-deep: #A3AEBA;
-  --notif-tint: #232A32;
-
-  /* ---- Tier badges ------------------------------------------------------ */
-  --tier-a: #4A90D9;
-  --tier-b: #5FB552;
-  --tier-c: #D6A03C;
-  --tier-d: #7A8593;
-
-  /* ---- Amber (ShopStock "Ordered") --------------------------------------
-     The light --amber is #A67C00, a deliberately dark gold chosen as TEXT on
-     a pale chip. Carried over unchanged it would be an unreadable brown here,
-     so it moves further than most tokens in this block. */
-  --amber:       #D7A32B;
-  --amber-tint:  #2C2414;
-  --amber-line:  #46391B;
-  --amber-hover: #362B17;
-
-  /* --gold-bright and --gold-deep are unchanged: a saturated celebration
-     gold reads on either background, and it fills a shape rather than
-     carrying text, so contrast with the surface is not the constraint. */
-
-  /* ---- Status hues (BackBone) ------------------------------------------- */
-  --hue-blue:        #6D9BF5;
-  --hue-blue-tint:   #182338;
-  --hue-blue-deep:   #8FB3F8;
-  --hue-indigo:      #8B85F0;
-  --hue-indigo-tint: #1E1F3A;
-  --hue-violet:      #A78BFA;
-  --hue-violet-tint: #241E3A;
-  --hue-sky:         #4DB3E8;
-  --hue-sky-tint:    #122835;
-  --hue-forest:      #52B67B;
-  --hue-forest-tint: #16291F;
-  --hue-clay:        #EF7A6E;
-  --hue-clay-tint:   #331D1B;
-  --hue-clay-line:   #5C332E;
-
-  /* ---- Categorical chart palette ----------------------------------------
-     Re-picked, not lightened one by one. The light set was spaced for
-     separation AND for 3:1 against white; four of them (blue, bronze,
-     crimson, slate) fail that test against #191F27. These keep the same hue
-     order, so a series that was blue stays blue when the theme changes, while
-     clearing 3:1 on the dark card. */
-  --chart-1: #5B9BF8;   /* blue */
-  --chart-2: #FF8A47;   /* orange */
-  --chart-3: #4FC07C;   /* green */
-  --chart-4: #A78BFA;   /* violet */
-  --chart-5: #D4A24A;   /* bronze */
-  --chart-6: #35C4CE;   /* teal */
-  --chart-7: #F2708F;   /* crimson */
-  --chart-8: #E97DC4;   /* magenta */
-  --chart-9: #94A2B0;   /* slate */
-
-  /* ---- Misc surfaces ---------------------------------------------------- */
-  --on-accent:   #FFFFFF;
-  --footer-bg:   #151A21;
-  --dot-idle:    #39424E;
-  --row-hover:   #212933;
-  --head-bg:     #1F2630;
-
-  /* ---- Default accent --------------------------------------------------- */
-  --accent:        var(--hub);
-  --accent-deep:   var(--hub-deep);
-  --accent-tint:   var(--hub-tint);
+function renderMessage(title, body) {
+  hideAllHosts();
+  shellMessageNode().innerHTML =
+    '<div class="shell-msg"><h2>' + escape(title) + '</h2><p>' + body + '</p></div>';
 }
 
-/* ==========================================================================
-   PER-APP ACCENTS, DARK
-   Same twelve apps plus the shell screens. Two rules held throughout:
-
-   --accent-deep GOES LIGHTER THAN --accent, not darker. It is the hover and
-   emphasis direction, and on a dark surface emphasis means moving away from
-   the background, which is up.
-
-   --accent-tint IS A DEEP VERSION OF THE ACCENT'S OWN HUE, not a flat grey.
-   Keeping the hue is what makes a tinted panel still read as belonging to
-   the app it is in.
-   ========================================================================== */
-
-html[data-theme="dark"] body[data-app="hub"] {
-  --accent:      var(--hub);
-  --accent-deep: var(--hub-deep);
-  --accent-tint: var(--hub-tint);
+function renderStub(meta) {
+  hideAllHosts();
+  // Each stub carries its own note in the registry. This text used to be
+  // hardcoded here, which was fine with one stub (TravelTrack) and wrong the
+  // moment a second one existed: CrewCore's page would have claimed it runs
+  // on Base44.
+  shellMessageNode().innerHTML =
+    '<div class="view"><div class="page-head"><div>' +
+      '<div class="page-title">' + escape(meta.name) + '<span class="dot">.</span></div>' +
+      '<div class="page-sub">' + escape(meta.role || meta.blurb) + '</div>' +
+    '</div></div>' +
+    '<div class="card"><div class="card-bd"><div class="empty">' +
+      '<strong>Not built yet</strong>' +
+      escape(meta.stubNote || 'Planned. This app ships as a placeholder until it is built.') +
+    '</div></div></div></div>';
 }
 
-html[data-theme="dark"] body[data-app="backbone"] {
-  --accent:      #4A8FD9;
-  --accent-deep: #6BA6E4;
-  --accent-tint: #16243A;
+function escape(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  })[c]);
 }
-
-html[data-theme="dark"] body[data-app="shopstock"] {
-  --accent:      #E36325;
-  --accent-deep: #EE8450;
-  --accent-tint: #331E13;
-}
-
-html[data-theme="dark"] body[data-app="errorengine"] {
-  --accent:      #9B85CE;
-  --accent-deep: #B3A1DC;
-  --accent-tint: #241F33;
-}
-
-html[data-theme="dark"] body[data-app="givinggauge"] {
-  --accent:      #D5A029;
-  --accent-deep: #E5BA55;
-  --accent-tint: #2E2614;
-}
-
-html[data-theme="dark"] body[data-app="stickies"] {
-  --accent:      #C9A227;
-  --accent-deep: #DCB94E;
-  --accent-tint: #2D2714;
-}
-
-html[data-theme="dark"] body[data-app="settings"] {
-  --accent:      #8B95A2;
-  --accent-deep: #A4ADB8;
-  --accent-tint: #232830;
-}
-
-html[data-theme="dark"] body[data-app="notifications"] {
-  --accent:      var(--notif);
-  --accent-deep: var(--notif-deep);
-  --accent-tint: var(--notif-tint);
-}
-
-html[data-theme="dark"] body[data-app="traveltrack"] {
-  --accent:      #52A246;
-  --accent-deep: #6FBB63;
-  --accent-tint: #1A2A18;
-}
-
-html[data-theme="dark"] body[data-app="crewcore"] {
-  --accent:      #E0578A;
-  --accent-deep: #EA7BA4;
-  --accent-tint: #331A25;
-}
-
-html[data-theme="dark"] body[data-app="promopro"] {
-  --accent:      #F2495A;
-  --accent-deep: #F7727F;
-  --accent-tint: #33171B;
-}
-
-html[data-theme="dark"] body[data-app="mailme"] {
-  --accent:      #8CA9CC;
-  --accent-deep: #A8C0DC;
-  --accent-tint: #1F2731;
-}
-
-/* TeleTally's #000B8C is a near-black navy. It is the one accent that simply
-   cannot appear on a dark surface, so this is a real reinterpretation: the
-   same blue-violet family, lifted far enough to be a visible rail dot. */
-html[data-theme="dark"] body[data-app="teletally"] {
-  --accent:      #5B67E0;
-  --accent-deep: #7B85E8;
-  --accent-tint: #1B1E3A;
-}
-
-html[data-theme="dark"] body[data-app="websitewidget"] {
-  --accent:      #00BBB4;
-  --accent-deep: #2FD6CF;
-  --accent-tint: #10302F;
-}
-
-html[data-theme="dark"] body[data-app="stitchsense"] {
-  --accent:      #E64D96;
-  --accent-deep: #ED74AC;
-  --accent-tint: #331A28;
-}
-
-/* MarketMachine's #6E1E2B is a dark maroon, the second accent that disappears
-   against a dark page. Lifted into a dusty rose that still reads as the same
-   colour family beside StitchSense's magenta and PromoPro's red. This accent
-   is still marked PROVISIONAL in the light block; whatever replaces it there
-   needs a matching pass here. */
-html[data-theme="dark"] body[data-app="marketmachine"] {
-  --accent:      #C4566A;
-  --accent-deep: #D4788A;
-  --accent-tint: #331A1F;
-}
-
-/* Sticky note paper is deliberately NOT re-themed. The notes are meant to look
-   like paper on a board, and pale paper on a dark board is what a real board
-   looks like. --sticky-ink stays dark because it sits on the paper, not on the
-   page. */
