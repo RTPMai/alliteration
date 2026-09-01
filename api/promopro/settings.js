@@ -24,7 +24,7 @@
 // outgoing mail to an outside party, which is not a personal preference.
 
 import { requireAuth } from "../../lib/session.js";
-import { isAdminSession, callerFor } from "../../lib/promopro/access.js";
+import { isAdminSession, callerFor, editVerdict, receiveVerdict } from "../../lib/promopro/access.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
@@ -48,7 +48,7 @@ export default async function handler(req, res) {
     // The display name, for the fallback match in identifyAccountManager. A
     // session carries a username but no name, and an account created before
     // CrewCore existed may never have been linked to a roster record.
-    const { user: caller } = await callerFor(sess);
+    const { user: caller, role: callerRole } = await callerFor(sess);
 
     // A CrewCore outage must not take the whole app down: PromoPro can run
     // with an empty account-manager list and say so, which is far better
@@ -72,6 +72,12 @@ export default async function handler(req, res) {
         // Same key, explicitly empty. An absent field and a null one read the
         // same in the browser, but only one of them says it was considered.
         settings.me = null;
+        // These do not depend on CrewCore at all, so a roster outage must not
+        // take them with it. Without them the screen would read undefined as
+        // "you cannot do anything" and hide every button over an unrelated
+        // failure.
+        settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
+        settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
         if (isAdmin) settings.candidates = [];
         return settings;
       }
@@ -102,6 +108,65 @@ export default async function handler(req, res) {
         employees,
         ids,
       );
+
+      // WHAT THE CALLER THEMSELVES MAY DO.
+      //
+      // Sent to everyone, because the screen has to stop offering buttons the
+      // server is going to refuse. It read the shell's blanket can_edit flag
+      // before, which is not the rule the routes use, so the moment Settings
+      // names any roles the New purchase order button would still appear for
+      // people who cannot use it and fail at the last step.
+      settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
+      settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
+
+      // WHO CAN BUY, ONE ROW PER ACCOUNT. Admins only.
+      //
+      // The rule is three clauses deep across a role flag, this settings list
+      // and a per-account switch, so "who can raise a PO right now" was a
+      // question nobody could answer without asking people to try it. That is
+      // no way to decide what to tighten. Every row is computed by the SAME
+      // function the routes gate on, so this cannot drift into a reassuring
+      // screen that disagrees with what actually happens.
+      //
+      // Username, display name and role only. No hashes, no dates, nothing
+      // the Accounts screen does not already show an admin.
+      if (isAdmin) {
+        try {
+          const { listUsers, getRole, permsFor } = await import("../../lib/users.js");
+          const accounts = await listUsers();
+          const rows = [];
+          for (const u of accounts) {
+            const r = await getRole(u.role);
+            const perms = await permsFor(u.username);
+            const tabs = (perms && perms.tabs) || [];
+            // Superusers see every app including ones no role grants, which
+            // is how the stub apps work — see permsFor's superuser comment.
+            const canOpen = u.superuser === true || tabs.some((tItem) => tItem === "promopro" || String(tItem).startsWith("promopro:"));
+            const raise = editVerdict(u, r, settings);
+            rows.push({
+              username: u.username,
+              name: u.name || u.username,
+              role: (r && (r.label || r.name)) || u.role || "",
+              superuser: u.superuser === true,
+              canOpen,
+              // Somebody who cannot open the app cannot raise one either,
+              // whatever the rule would otherwise say. Reporting "yes" for a
+              // person with no access is technically true and completely
+              // misleading on a screen being used to decide who to remove.
+              canRaise: canOpen && raise.allowed,
+              canReceive: canOpen && receiveVerdict(u, r).allowed,
+              why: canOpen ? raise.why : "Cannot open PromoPro at all",
+            });
+          }
+          settings.buyers = rows;
+        } catch (e) {
+          console.error("promopro/settings could not build the buyer list:", e && e.message);
+          // Null, not an empty array. An empty list would render as "nobody
+          // can raise a purchase order", which is a frightening and false
+          // thing to show on the screen somebody opened to tighten access.
+          settings.buyers = null;
+        }
+      }
 
       const candidates = candidatesFrom(employees);
       if (isAdmin) settings.candidates = candidates;

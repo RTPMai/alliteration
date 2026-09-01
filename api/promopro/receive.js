@@ -18,7 +18,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { canEditSession } from "../../lib/promopro/access.js";
+import { canReceiveSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings } from "../../lib/promopro/store.js";
 import { applyReceipt, receiptSummary, closedPatch } from "../../lib/promopro/schema.js";
 
@@ -42,7 +42,10 @@ export default async function handler(req, res) {
 
   try {
     const settings = await getSettings();
-    if (!(await canEditSession(sess, settings))) {
+    // NOT canEditSession. Booking in stock is deliberately wider than raising
+    // a purchase order: buying is a decision to spend money, receiving is a
+    // record that a box turned up. See receiveVerdict in access.js.
+    if (!(await canReceiveSession(sess))) {
       return res.status(403).json({ error: "Read-only access" });
     }
 
