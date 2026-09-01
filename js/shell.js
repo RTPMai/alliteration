@@ -18,6 +18,7 @@ import * as api from './api.js';
 import * as router from './router.js';
 import { mountApp, showView, isMounted } from './app-host.js';
 import { initHelp } from './help.js';
+import * as theme from './theme.js';
 
 const HUB = 'hub';
 
@@ -47,6 +48,7 @@ export async function boot() {
   el.brandBtn   = document.getElementById('brandBtn');
   el.railToggle = document.getElementById('railToggle');
   el.bellBtn    = document.getElementById('bellBtn');
+  el.themeBtn   = document.getElementById('themeBtn');
 
   // index.html paints a "Starting…" message before this module loads, so a
   // failed load leaves something readable instead of a blank page. Reaching
@@ -71,6 +73,8 @@ export async function boot() {
       el.mockBanner.hidden = true;
     }
   }
+
+  initTheme();
 
   el.brandBtn.addEventListener('click', () => router.go(HUB, null));
   el.railToggle.addEventListener('click', () => document.body.classList.toggle('rail-open'));
@@ -393,6 +397,41 @@ function renderCrumb() {
     (state.view
       ? '<span class="sep">/</span><span>' + escape(viewLabel(app, state.view)) + '</span>'
       : '');
+}
+
+/* ------------------------------------------------------------------ *
+ * THEME
+ *
+ * The paint already happened: the inline script in index.html set
+ * <html data-theme> before the stylesheets loaded. This only takes over the
+ * live parts, the button and following the system while the preference is
+ * 'system'.
+ *
+ * Wired before the session call on purpose. Appearance is chrome, not user
+ * data, so it should still work on the sign-in redirect and on the "cannot
+ * reach the server" screen.
+ * ------------------------------------------------------------------ */
+
+function initTheme() {
+  theme.initTheme();
+  if (!el.themeBtn) return;
+
+  const paint = () => {
+    const pref = theme.getPreference();
+    const resolved = document.documentElement.getAttribute('data-theme') || 'light';
+    el.themeBtn.setAttribute('data-pref', pref);
+    // The title reports the CHOICE and names what comes next, because a
+    // three-way control that only shows an icon leaves people guessing what a
+    // click will do.
+    const label = theme.preferenceLabel(pref, resolved);
+    el.themeBtn.title = 'Appearance: ' + label + '. Click for ' +
+      theme.preferenceLabel(theme.nextPreference(pref), resolved).replace(/ \(.*\)$/, '') + '.';
+    el.themeBtn.setAttribute('aria-label', 'Appearance: ' + label);
+  };
+
+  paint();
+  theme.onChange(paint);
+  el.themeBtn.addEventListener('click', () => { theme.cycle(); paint(); });
 }
 
 function renderAvatar() {
