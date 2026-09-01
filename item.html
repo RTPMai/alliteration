@@ -1,4 +1,3 @@
-<!-- PUT IN: item.html, at repo root (REPLACES the current one) -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -7,6 +6,21 @@
 <title>Redirecting…</title>
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+
+<!-- Follows the system theme only, no stored preference: this page is reached
+     by scanning a QR label with no sign-in, so there is no person to have a
+     preference. It is fully token-driven, so this is the whole change. -->
+<script>
+  (function () {
+    try {
+      var dark = window.matchMedia &&
+        window.matchMedia('(prefers-color-scheme: dark)').matches;
+      var t = dark ? 'dark' : 'light';
+      document.documentElement.setAttribute('data-theme', t);
+      document.documentElement.style.colorScheme = t;
+    } catch (e) {}
+  })();
+</script>
 
 <link rel="stylesheet" href="/css/tokens.css">
 <link rel="stylesheet" href="/css/shell.css">
