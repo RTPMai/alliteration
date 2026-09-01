@@ -211,6 +211,9 @@ export const APPS = [
       ['roster', 'Roster'],
       ['timeclock', 'Time Clock'],
       ['stipend', 'Stipend'],
+      // SanMar sample drops. Sits next to Stipend because a pick draws that
+      // person's apparel allotment the moment it is made.
+      ['samples', 'Samples'],
       ['reviews', 'Reviews'],
       ['handbook', 'Handbook'],
       ['settings', 'Settings']
