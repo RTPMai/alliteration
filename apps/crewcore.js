@@ -403,6 +403,46 @@ export default {
     font-family:inherit}
   .cc-modal-x:hover{color:var(--ink)}
 
+  /* Samples (SanMar sample drops) */
+  .cc-note{background:var(--line-soft);border:1px solid var(--line);border-radius:var(--radius-md);padding:12px 14px;margin-bottom:16px;font-size:13.5px}
+  .cc-note.over{border-color:var(--danger);color:var(--danger)}
+  .cc-note .note{font-size:12px;color:var(--muted);margin-top:3px}
+  .cc-note .cc-balance-bar{margin-top:8px}
+  .cc-pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 7px;border-radius:999px;background:var(--line-soft);color:var(--muted);border:1px solid var(--line)}
+  .cc-pill.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+  .cc-sec{margin-top:26px}
+  .cc-sec h3{font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:8px}
+  .cc-sec h3 .note{text-transform:none;letter-spacing:0;font-weight:500;margin-left:8px}
+  .cc-rows{border:1px solid var(--line);border-radius:var(--radius-md);background:var(--card)}
+  .cc-rows .cc-row{display:flex;align-items:center;gap:12px;padding:10px 14px}
+  .cc-rows .cc-row .grow{flex:1;min-width:0}
+  .cc-rows .cc-row .amt{font-weight:700;font-variant-numeric:tabular-nums}
+  .cc-rows .cc-row .sw{width:26px;height:26px;border-radius:4px;overflow:hidden;border:1px solid var(--line);flex:none}
+  .cc-rows .cc-row .sw img{width:100%;height:100%;object-fit:cover}
+  .cc-btn.sm{padding:4px 10px;font-size:12px}
+  .cc-cat{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:14px}
+  .cc-tile{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);overflow:hidden}
+  .cc-tile .shot{aspect-ratio:3/4;background:var(--line-soft);display:flex;align-items:center;justify-content:center}
+  .cc-tile .shot img{width:100%;height:100%;object-fit:contain}
+  .cc-tile-b{padding:10px 12px}
+  .cc-tile-b .s{font-size:12.5px;font-weight:700;display:flex;align-items:center;gap:6px;justify-content:space-between}
+  .cc-tile-b .t{font-size:12.5px;margin-top:3px;line-height:1.3}
+  .cc-style{display:grid;grid-template-columns:minmax(180px,280px) 1fr;gap:22px;margin-top:14px}
+  .cc-style .shot.big{aspect-ratio:3/4;background:var(--line-soft);border:1px solid var(--line);border-radius:var(--radius-md);overflow:hidden}
+  .cc-style .shot.big img{width:100%;height:100%;object-fit:contain}
+  .cc-style h3{font-size:16px;font-weight:700}
+  .cc-style .note.lbl{margin-top:14px;font-weight:600;color:var(--muted)}
+  .cc-swatches{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .cc-swatch{width:30px;height:30px;border-radius:5px;border:2px solid var(--line);overflow:hidden;padding:0;background:var(--line-soft);cursor:pointer;font-size:10px}
+  .cc-swatch.on{border-color:var(--accent)}
+  .cc-swatch img{width:100%;height:100%;object-fit:cover;display:block}
+  .cc-sizes{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+  .cc-size{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:56px;padding:7px 10px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--card);cursor:pointer;font-size:12.5px;font-weight:700}
+  .cc-size:hover{border-color:var(--accent)}
+  .cc-size .p{font-weight:500;color:var(--muted);font-size:11.5px}
+  .cc-form .hint{font-size:12.5px;color:var(--muted);line-height:1.5;margin-bottom:12px}
+  .cc-form textarea{width:100%;font-family:inherit;font-size:13px;padding:8px 10px;border:1px solid var(--line);border-radius:var(--radius-md);background:var(--card);color:inherit}
+  @media (max-width:720px){ .cc-style{grid-template-columns:1fr} }
   .tc-pinstate{font-size:11.5px;font-weight:700;margin-top:5px}
   .tc-pinstate.set{color:var(--success-dk)}
   .tc-pinstate.unset{color:var(--warn-dk)}
@@ -605,6 +645,22 @@ export default {
       body.innerHTML = this._renderStipend();
       this._syncStipendActions();
       this._wireStipend();
+      return;
+    }
+
+    if (view === 'samples') {
+      title.textContent = 'Samples.';
+      sub.textContent = isAdmin
+        ? 'SanMar sample drops, picks and the sheet that goes back to them.'
+        : 'Pick your SanMar samples.';
+      // Entering from the rail always lands on the catalog, never on whatever
+      // style was open last time, the same rule the stipend detail follows.
+      this._sampleStyleOpen = null;
+      await this._loadSamples();
+      if (this._sampleDropId) await this._loadSampleDrop();
+      body.innerHTML = this._renderSamples();
+      this._syncSampleActions();
+      this._wireSamples();
       return;
     }
 
@@ -1171,6 +1227,477 @@ export default {
           : `<div class="cc-empty">${esc(emptyMsg)}</div>`}
       </div>
     `;
+  },
+
+  // ---- Samples (SanMar sample drops) --------------------------------------
+  //
+  // Twice a year SanMar discounts New Arrivals samples. Everyone picks their
+  // own; a pick draws their apparel stipend the moment it is made, which is
+  // why the remaining balance sits at the top of the screen the whole time
+  // somebody is choosing.
+
+  async _loadSamples() {
+    const out = await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=drops');
+    this._sampleDrops = out.drops || [];
+    this._sampleCanPick = out.can_pick !== false;
+    if (this._sampleDropId && !this._sampleDrops.some((d) => d.id === this._sampleDropId)) {
+      this._sampleDropId = null;
+    }
+    // One open drop and nothing chosen: go straight into it. Nobody opens
+    // this screen to look at a list of one.
+    if (!this._sampleDropId) {
+      const open = this._sampleDrops.filter((d) => d.status === 'open');
+      if (open.length === 1) this._sampleDropId = open[0].id;
+    }
+  },
+
+  async _loadSampleDrop() {
+    if (!this._sampleDropId) return;
+    const id = encodeURIComponent(this._sampleDropId);
+    const [drop, picks] = await Promise.all([
+      this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=drop&id=' + id),
+      this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=picks&drop_id=' + id),
+    ]);
+    this._sampleDrop = drop.drop;
+    this._sampleCatalog = drop.catalog || [];
+    this._sampleImport = drop.import || null;
+    this._samplePicks = picks.picks || [];
+    this._sampleBalance = picks.balance || null;
+    this._samplePeople = picks.people || [];
+    this._sampleMeId = picks.me_employee_id || null;
+    this._sampleEmployees = picks.employees || [];
+  },
+
+  _renderSamples() {
+    if (!this._sampleDropId) return this._renderSampleDrops();
+    return this._renderSampleDrop();
+  },
+
+  _renderSampleDrops() {
+    if (!this._sampleDrops.length) {
+      return `<div class="cc-empty">${this._isAdmin
+        ? 'No sample drops yet. Start one when SanMar opens the season.'
+        : 'No sample drops are open right now.'}</div>`;
+    }
+    const cards = this._sampleDrops.map((d) => `
+      <div class="cc-card tap" data-drop="${esc(d.id)}" role="button" tabindex="0">
+        <div class="cardhd"><h3>${esc(d.name)}</h3>
+          <span class="cc-pill${d.status === 'open' ? ' on' : ''}">${d.status === 'open' ? 'Open' : 'Closed'}</span>
+        </div>
+        <div class="big">${d.catalog_count}</div>
+        <div class="note">${d.catalog_count === 1 ? 'style' : 'styles'} in the catalog</div>
+        ${d.due_date ? `<div class="note">Picks due ${esc(d.due_date)}</div>` : ''}
+      </div>`).join('');
+    return `<div class="cc-grid">${cards}</div>`;
+  },
+
+  _renderSampleDrop() {
+    const d = this._sampleDrop || {};
+    const imp = this._sampleImport;
+    const bal = this._sampleBalance;
+    const closed = d.status === 'closed';
+
+    // An import in flight owns the screen. Showing a half-built catalog
+    // underneath a progress bar invites somebody to pick off it.
+    if (imp && imp.running) {
+      const pct = imp.total ? Math.round((imp.done / imp.total) * 100) : 0;
+      return `
+        <div class="cc-note">
+          <strong>Importing the catalog.</strong>
+          <div class="note">Style ${imp.done} of ${imp.total}. This keeps going on its own.</div>
+          <div class="cc-balance-bar"><div class="fill" style="width:${pct}%"></div></div>
+          ${imp.errors && imp.errors.length
+            ? `<div class="note">${imp.errors.length} could not be read so far.</div>` : ''}
+        </div>`;
+    }
+
+    const balStrip = bal ? `
+      <div class="cc-note${isOverStipend(bal) ? ' over' : ''}">
+        <strong>${fmtMoney(bal.remaining)}</strong> of ${bal.allotted > 0 ? fmtMoney(bal.allotted) : 'no stipend set'}
+        ${bal.allotted > 0 ? 'left this year' : ''}${bal.over ? ' · over by ' + fmtMoney(bal.over) : ''}.
+        <span class="note">A pick comes off this straight away.</span>
+      </div>` : '';
+
+    const errs = imp && imp.errors && imp.errors.length ? `
+      <div class="cc-note">
+        <strong>${imp.errors.length} ${imp.errors.length === 1 ? 'style' : 'styles'} could not be read.</strong>
+        <div class="note">${imp.errors.map((e) => esc(e.style) + ' (' + esc(e.error) + ')').join(', ')}</div>
+      </div>` : '';
+
+    const catalog = this._sampleCatalog.length
+      ? `<div class="cc-cat">${this._sampleCatalog.map((c) => this._sampleTile(c)).join('')}</div>`
+      : `<div class="cc-empty">${this._isAdmin
+          ? 'No catalog yet. Import one from the style lists on SanMar\u2019s order form.'
+          : 'The catalog for this drop has not been imported yet.'}</div>`;
+
+    return `
+      ${balStrip}
+      ${errs}
+      ${closed ? '<div class="cc-note">This drop is closed. Picks can no longer be changed.</div>' : ''}
+      ${this._sampleStyleOpen ? this._renderSampleStyle() : catalog}
+      ${this._renderSamplePicks()}
+      ${this._isAdmin ? this._renderSamplePeople() : ''}
+    `;
+  },
+
+  _sampleTile(c) {
+    const price = c.from_price == null ? '' :
+      (c.split_pricing ? 'from ' + fmtMoney(c.from_price) : fmtMoney(c.from_price));
+    return `
+      <div class="cc-tile tap" data-style="${esc(c.style)}" role="button" tabindex="0">
+        <div class="shot">${c.image ? `<img src="${esc(c.image)}" alt="" loading="lazy">` : ''}</div>
+        <div class="cc-tile-b">
+          <div class="s">${esc(c.style)} <span class="cc-pill">${c.tier}% off</span></div>
+          <div class="t">${esc(c.title || '')}</div>
+          <div class="note">${price}${c.color_count ? ' · ' + c.color_count + ' colours' : ''}</div>
+        </div>
+      </div>`;
+  },
+
+  _renderSampleStyle() {
+    const s = this._sampleStyleOpen;
+    const colorName = this._sampleColor || (s.colors[0] && s.colors[0].name);
+    const color = s.colors.find((c) => c.name === colorName) || s.colors[0];
+    const chips = s.colors.map((c) => `
+      <button class="cc-swatch${c.name === color.name ? ' on' : ''}" data-color="${esc(c.name)}"
+        title="${esc(c.name)}">${c.swatch
+          ? `<img src="${esc(c.swatch)}" alt="${esc(c.name)}">`
+          : `<span>${esc(c.name.slice(0, 2))}</span>`}</button>`).join('');
+
+    const sizes = color.sizes.map((z) => `
+      <button class="cc-size" data-size="${esc(z.size)}">
+        <span>${esc(z.size)}</span>
+        <span class="p">${z.price == null ? '\u2014' : fmtMoney(z.price)}</span>
+      </button>`).join('');
+
+    return `
+      <div class="cc-detail">
+        <button class="cc-btn ghost" id="sBack">Back to the catalog</button>
+        <div class="cc-style">
+          <div class="shot big">${color.image ? `<img src="${esc(color.image)}" alt="">` : ''}</div>
+          <div>
+            <h3>${esc(s.title || s.style)}</h3>
+            <div class="note">${esc(s.style)} · ${esc(s.brand || '')} · ${s.tier}% off
+              ${s.on_sale ? ' · <span title="Sample pricing always comes off the regular case price">on sale at SanMar</span>' : ''}</div>
+            <div class="note lbl">Colour: <strong>${esc(color.name)}</strong></div>
+            <div class="cc-swatches">${chips}</div>
+            <div class="note lbl">Size</div>
+            <div class="cc-sizes">${sizes}</div>
+            ${s.spec_sheet ? `<div class="note"><a href="${esc(s.spec_sheet)}" target="_blank" rel="noopener">Spec sheet</a></div>` : ''}
+          </div>
+        </div>
+      </div>`;
+  },
+
+  _renderSamplePicks() {
+    const mine = this._samplePicks.filter((p) => this._isAdmin
+      ? p.employee_id === this._sampleMineId()
+      : true);
+    const rows = (this._isAdmin && this._sampleShowAll ? this._samplePicks : mine);
+    if (!rows.length) {
+      return `<div class="cc-sec"><h3>${this._isAdmin && this._sampleShowAll ? 'All picks' : 'Your picks'}</h3>
+        <div class="cc-empty">Nothing picked yet.</div></div>`;
+    }
+    const total = rows.reduce((sum, p) => sum + Number(p.price || 0), 0);
+    const closed = (this._sampleDrop || {}).status === 'closed';
+    const nameFor = (id) => {
+      const e = this._sampleEmployees.find((x) => x.id === id);
+      return e ? e.name : '';
+    };
+    return `
+      <div class="cc-sec">
+        <h3>${this._isAdmin && this._sampleShowAll ? 'All picks' : 'Your picks'}
+          <span class="note">${rows.length} · ${fmtMoney(total)}</span></h3>
+        <div class="cc-rows">
+          ${rows.map((p) => `
+            <div class="cc-row">
+              <div class="sw">${p.swatch ? `<img src="${esc(p.swatch)}" alt="">` : ''}</div>
+              <div class="grow">
+                <strong>${esc(p.style)} ${esc(p.color)} ${esc(p.size)}</strong>
+                <div class="note">${esc(p.title || '')}${this._isAdmin && this._sampleShowAll
+                  ? ' · ' + esc(nameFor(p.employee_id)) : ''}${p.received ? ' · received' : ''}</div>
+              </div>
+              <div class="amt">${fmtMoney(p.price)}</div>
+              ${this._isAdmin ? `<button class="cc-btn ghost sm" data-recv="${esc(p.id)}">${p.received ? 'Undo' : 'Received'}</button>` : ''}
+              ${(!closed || this._isAdmin) ? `<button class="cc-btn ghost sm" data-drop-pick="${esc(p.id)}">Remove</button>` : ''}
+            </div>`).join('')}
+        </div>
+      </div>`;
+  },
+
+  _renderSamplePeople() {
+    if (!this._samplePeople.length) return '';
+    return `
+      <div class="cc-sec">
+        <h3>By person <span class="note">${this._samplePeople.length}</span></h3>
+        <div class="cc-rows">
+          ${this._samplePeople.map((p) => `
+            <div class="cc-row">
+              <div class="grow"><strong>${esc(p.name || p.employee_id)}</strong>
+                <div class="note">${p.count} ${p.count === 1 ? 'item' : 'items'}</div></div>
+              <div class="amt">${fmtMoney(p.total)}</div>
+            </div>`).join('')}
+        </div>
+      </div>`;
+  },
+
+  _sampleMineId() {
+    // The server tells us which employee record this login is, rather than
+    // the screen guessing from a name. A login with no linked record has
+    // none, which is a real state: it is what Alexis hit on the handbook.
+    return this._sampleMeId || null;
+  },
+
+  _wireSamples() {
+    const root = this._root;
+    const $$ = (s) => Array.from(root.querySelectorAll(s));
+
+    $$('[data-drop]').forEach((el) => {
+      const go = () => { this._sampleDropId = el.dataset.drop; this._sampleStyleOpen = null; this._refreshSamples(); };
+      el.onclick = go;
+      el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
+    });
+
+    $$('[data-style]').forEach((el) => {
+      const go = async () => {
+        try {
+          const out = await this._ctx.api.request(ENDPOINTS.ccSamples +
+            '?resource=style&drop_id=' + encodeURIComponent(this._sampleDropId) +
+            '&style=' + encodeURIComponent(el.dataset.style));
+          this._sampleStyleOpen = out.style;
+          this._sampleColor = null;
+          this._paintSamples();
+        } catch (e) { this._sampleError(e); }
+      };
+      el.onclick = go;
+      el.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } };
+    });
+
+    const back = root.querySelector('#sBack');
+    if (back) back.onclick = () => { this._sampleStyleOpen = null; this._paintSamples(); };
+
+    $$('[data-color]').forEach((el) => {
+      el.onclick = () => { this._sampleColor = el.dataset.color; this._paintSamples(); };
+    });
+
+    $$('[data-size]').forEach((el) => {
+      el.onclick = () => this._addSamplePick(el.dataset.size);
+    });
+
+    $$('[data-drop-pick]').forEach((el) => {
+      el.onclick = () => this._removeSamplePick(el.dataset.dropPick);
+    });
+
+    $$('[data-recv]').forEach((el) => {
+      el.onclick = () => this._toggleSampleReceived(el.dataset.recv);
+    });
+  },
+
+  async _addSamplePick(size) {
+    const s = this._sampleStyleOpen;
+    if (!s) return;
+    const color = this._sampleColor || (s.colors[0] && s.colors[0].name);
+    try {
+      await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=picks', {
+        method: 'POST',
+        body: { drop_id: this._sampleDropId, style: s.style, color, size },
+      });
+      await this._refreshSamples({ keepStyle: true });
+    } catch (e) { this._sampleError(e); }
+  },
+
+  async _removeSamplePick(id) {
+    try {
+      await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=picks&id=' + encodeURIComponent(id),
+        { method: 'DELETE' });
+      await this._refreshSamples({ keepStyle: true });
+    } catch (e) { this._sampleError(e); }
+  },
+
+  async _toggleSampleReceived(id) {
+    const pick = this._samplePicks.find((p) => p.id === id);
+    if (!pick) return;
+    try {
+      await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=picks&id=' + encodeURIComponent(id),
+        { method: 'PATCH', body: { received: !pick.received } });
+      await this._refreshSamples({ keepStyle: true });
+    } catch (e) { this._sampleError(e); }
+  },
+
+  _sampleError(e) {
+    const msg = (e && e.body && e.body.error) || (e && e.message) || 'Something went wrong.';
+    const box = this._root.querySelector('#ccBody');
+    const note = document.createElement('div');
+    note.className = 'cc-note over';
+    note.textContent = msg;
+    if (box) box.prepend(note);
+    setTimeout(() => note.remove(), 6000);
+  },
+
+  async _refreshSamples(opts = {}) {
+    const keep = opts.keepStyle ? this._sampleStyleOpen : null;
+    await this._loadSamples();
+    if (this._sampleDropId) await this._loadSampleDrop();
+    this._sampleStyleOpen = keep;
+    this._paintSamples();
+  },
+
+  _paintSamples() {
+    const body = this._root.querySelector('#ccBody');
+    if (!body) return;
+    body.innerHTML = this._renderSamples();
+    this._syncSampleActions();
+    this._wireSamples();
+  },
+
+  _syncSampleActions() {
+    const actions = this._root.querySelector('#ccHdActions');
+    if (!actions) return;
+    const inDrop = !!this._sampleDropId;
+    const closed = (this._sampleDrop || {}).status === 'closed';
+    const bits = [];
+    if (inDrop && this._sampleDrops.length > 1) bits.push(`<button class="cc-btn ghost" id="sAll">All drops</button>`);
+    if (inDrop && this._isAdmin) {
+      bits.push(`<button class="cc-btn ghost" id="sToggle">${this._sampleShowAll ? 'Just mine' : 'Everyone'}</button>`);
+      bits.push(`<button class="cc-btn ghost" id="sImport">Import catalog</button>`);
+      bits.push(`<button class="cc-btn ghost" id="sExport">Export CSV</button>`);
+      bits.push(`<button class="cc-btn ghost" id="sClose">${closed ? 'Reopen' : 'Close'}</button>`);
+    }
+    if (!inDrop && this._isAdmin) bits.push(`<button class="cc-btn" id="sNew">New drop</button>`);
+    actions.innerHTML = bits.join('');
+
+    const on = (id, fn) => { const el = actions.querySelector(id); if (el) el.onclick = fn; };
+    on('#sAll', () => { this._sampleDropId = null; this._sampleStyleOpen = null; this._refreshSamples(); });
+    on('#sToggle', () => { this._sampleShowAll = !this._sampleShowAll; this._paintSamples(); });
+    on('#sNew', () => this._openSampleDropForm());
+    on('#sImport', () => this._openSampleImport());
+    on('#sExport', () => {
+      window.open(ENDPOINTS.ccSamples + '?resource=export&drop_id=' +
+        encodeURIComponent(this._sampleDropId), '_blank');
+    });
+    on('#sClose', async () => {
+      try {
+        await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=drops&id=' +
+          encodeURIComponent(this._sampleDropId), {
+          method: 'PATCH', body: { status: closed ? 'open' : 'closed' },
+        });
+        await this._refreshSamples();
+      } catch (e) { this._sampleError(e); }
+    });
+  },
+
+  _openSampleDropForm() {
+    const body = this._root.querySelector('#ccBody');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="cc-form">
+        <h3>New sample drop</h3>
+        <div class="cc-form-grid">
+          <div><label>Name</label><input id="dName" placeholder="Fall 2026"></div>
+          <div><label>Picks due</label><input id="dDue" type="date"></div>
+          <div class="full"><label>Notes</label><input id="dNotes" placeholder="optional"></div>
+        </div>
+        <div class="cc-err" id="dErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="dCancel">Cancel</button>
+          <button class="cc-btn" id="dSave">Create</button>
+        </div>
+      </div>`;
+    body.prepend(wrap);
+    const $ = (s) => wrap.querySelector(s);
+    $('#dCancel').onclick = () => wrap.remove();
+    $('#dSave').onclick = async () => {
+      try {
+        const out = await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=drops', {
+          method: 'POST',
+          body: { name: $('#dName').value, due_date: $('#dDue').value, notes: $('#dNotes').value },
+        });
+        wrap.remove();
+        this._sampleDropId = out.drop.id;
+        await this._refreshSamples();
+      } catch (e) {
+        const err = $('#dErr');
+        err.hidden = false;
+        err.textContent = (e.body && e.body.error) || e.message || 'Could not create the drop.';
+      }
+    };
+  },
+
+  _openSampleImport() {
+    const body = this._root.querySelector('#ccBody');
+    const wrap = document.createElement('div');
+    wrap.innerHTML = `
+      <div class="cc-form">
+        <h3>Import catalog</h3>
+        <p class="hint">
+          Paste the style lists off the back of SanMar\u2019s order form, one style per line.
+          A full line like &ldquo;F180 Port Authority Therma-Tek Fleece Jacket&rdquo; works, and so
+          does a bare style number. Colours, sizes, photos and prices come from SanMar
+          directly, so there is no price list to attach.
+          <strong>This replaces the current catalog.</strong>
+        </p>
+        <div class="cc-form-grid">
+          <div class="full"><label>50% off styles</label><textarea id="iFifty" rows="8"></textarea></div>
+          <div class="full"><label>25% off styles</label><textarea id="iTwentyFive" rows="6"></textarea></div>
+        </div>
+        <div class="cc-err" id="iErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="iCancel">Cancel</button>
+          <button class="cc-btn" id="iGo">Import</button>
+        </div>
+      </div>`;
+    body.prepend(wrap);
+    const $ = (s) => wrap.querySelector(s);
+    const fail = (msg) => {
+      const err = $('#iErr');
+      err.hidden = false;
+      err.textContent = msg;
+      $('#iGo').disabled = false;
+    };
+    $('#iCancel').onclick = () => wrap.remove();
+    $('#iGo').onclick = async () => {
+      $('#iGo').disabled = true;
+      const drop = encodeURIComponent(this._sampleDropId);
+      try {
+        const q = await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=import&drop_id=' + drop, {
+          method: 'POST',
+          body: { fifty: $('#iFifty').value, twentyfive: $('#iTwentyFive').value },
+        });
+        if (q.error) return fail(q.error);
+        wrap.remove();
+        await this._runSampleImport(drop, q.queued);
+      } catch (e) {
+        fail((e.body && e.body.error) || e.message || 'Could not start the import.');
+      }
+    };
+  },
+
+  /**
+   * Walk the import a few styles at a time.
+   *
+   * The server saves after every single style, so closing the tab half way
+   * leaves a partly-built catalog rather than a broken one, and pressing
+   * Import again picks up where it stopped. The loop is here rather than on
+   * the server because a serverless function that calls itself trips Vercel's
+   * loop guard, the same reason the ops sync leans on its cron.
+   */
+  async _runSampleImport(dropParam, queued) {
+    this._sampleImport = { total: queued, done: 0, remaining: queued, errors: [], running: true };
+    this._paintSamples();
+    for (let guard = 0; guard < 400; guard += 1) {
+      let out;
+      try {
+        out = await this._ctx.api.request(
+          ENDPOINTS.ccSamples + '?resource=import-step&drop_id=' + dropParam, { method: 'POST' });
+      } catch (e) {
+        this._sampleError(e);
+        break;
+      }
+      this._sampleImport = out.progress;
+      this._paintSamples();
+      if (out.done) break;
+    }
+    await this._refreshSamples();
   },
 
   _renderStipend() {
