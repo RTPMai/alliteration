@@ -1,4 +1,3 @@
-// apps/websitewidget.js
 /**
  * WebsiteWidget — web analytics across every site P&M tracks.
  *
@@ -26,6 +25,7 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
+import { showsTrendLabel, isDenseTrend } from '../lib/websitewidget/chart.js';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -201,13 +201,30 @@ export default {
     .ww-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
     @media (max-width: 860px) { .ww-grid { grid-template-columns: 1fr; } }
 
+    /* A grid column is allowed to be narrower than the widest thing inside it.
+       Without this, one unshrinkable child (a row of nowrap date labels, an
+       error message with no spaces in it) sets a floor for the whole track,
+       both columns scale up to keep the 1.4:1 ratio, and the right-hand cards
+       end up off the side of the screen behind a horizontal scrollbar. */
+    .ww-grid > * { min-width: 0; }
+
     .ww-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 18px 20px; margin-bottom: 16px; }
     .ww-card h2 { font-size: 15px; font-weight: 700; margin-bottom: 14px; }
 
-    .ww-trend { display: flex; align-items: flex-end; gap: 3px; height: 110px; }
-    .ww-trend .col { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+    .ww-trend { display: flex; align-items: flex-end; gap: 3px; height: 110px; min-width: 0; }
+    /* Ninety columns of 3px gap is more whitespace than chart. */
+    .ww-trend.dense { gap: 1px; }
+    .ww-trend .col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
     .ww-trend .bar { width: 100%; max-width: 18px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
-    .ww-trend .lbl { font-size: 9px; color: var(--muted); margin-top: 4px; white-space: nowrap; }
+
+    /* The date sits in a zero-width box and spills evenly out of both sides,
+       so a label can never decide how wide its column is. Fixed height so a
+       column carrying no label still lines its bar up with its neighbours. */
+    .ww-trend .lbl {
+      flex: none; width: 0; height: 12px; margin-top: 4px; overflow: visible;
+      display: flex; align-items: center; justify-content: center;
+    }
+    .ww-trend .lbl span { font-size: 9px; color: var(--muted); white-space: nowrap; }
 
     .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 13px; }
     .bar-row .k { width: 140px; color: var(--muted); flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -221,7 +238,11 @@ export default {
       border: 1px solid var(--danger-line); border-radius: var(--radius-sm);
       padding: 9px 11px; line-height: 1.5;
     }
-    .ww-cardfail .why { color: var(--muted); display: block; margin-top: 4px; font-size: 11px; word-break: break-word; }
+    /* overflow-wrap: anywhere, not break-word: only the former lets the
+       browser count a long unbroken string as narrow when it works out how
+       wide the card has to be. Google's failure messages carry URLs with no
+       spaces in them, and one of those was enough to widen the page. */
+    .ww-cardfail .why { color: var(--muted); display: block; margin-top: 4px; font-size: 11px; overflow-wrap: anywhere; word-break: break-word; }
 
     /* Secondary stats. Smaller than the four headline cards on purpose:
        they explain the traffic rather than count it. */
@@ -470,8 +491,9 @@ export default {
           '</div>'
         : '';
 
-      const trendHtml = (data.trend || []).length
-        ? trendLegend + '<div class="ww-trend">' + data.trend.map((d, i) => {
+      const trendCount = (data.trend || []).length;
+      const trendHtml = trendCount
+        ? trendLegend + '<div class="ww-trend' + (isDenseTrend(trendCount) ? ' dense' : '') + '">' + data.trend.map((d, i) => {
             // Aligned by position, not by date: day one against day one,
             // which is what a year comparison needs since the dates differ.
             // Safe only because the server fills GA4's missing zero-session
@@ -487,7 +509,12 @@ export default {
               '<div class="stack">' + ghost +
                 '<div class="bar" style="height:' + Math.max(2, (d.sessions / trendMax) * 100) + '%"></div>' +
               '</div>' +
-              '<div class="lbl">' + esc(fmtDate(d.date)) + '</div>' +
+              // Every column keeps its label box so the bars stay level; only
+              // some of them get text in it. The date each column stands for
+              // is still on its tooltip.
+              '<div class="lbl">' +
+                (showsTrendLabel(i, trendCount) ? '<span>' + esc(fmtDate(d.date)) + '</span>' : '') +
+              '</div>' +
             '</div>';
           }).join('') + '</div>'
         : '<div class="ww-empty">No trend data for this range yet.</div>';
