@@ -40,18 +40,6 @@ import { getUser } from "../lib/users.js";
 const ENDPOINT =
   "https://ws.sanmar.com:8080/SanMarWebService/SanMarProductInfoServicePort";
 
-// Fields worth pulling out of each row. Everything else SanMar returns
-// (keywords, the full description) is bulk we would never store, so the
-// summary drops it rather than making the response unreadable.
-const FIELDS = [
-  "style", "color", "catalogColor", "size", "sizeIndex",
-  "inventoryKey", "uniqueKey", "caseSize",
-  "piecePrice", "casePrice", "pieceSalePrice", "caseSalePrice",
-  "priceCode", "priceText", "mapPrice", "productStatus", "brandName",
-  "saleStartDate", "saleEndDate",
-  "colorProductImage", "colorSquareImage", "frontModel", "productImage",
-];
-
 const MAX_RAW = 40000; // enough to read the shape, not enough to flood a screen
 
 async function isBuilder(sess) {
@@ -87,67 +75,154 @@ function buildEnvelope({ style, color, size, customerNumber, user, password }) {
     "</soapenv:Body></soapenv:Envelope>";
 }
 
-// Deliberately not a real XML parser. This is a probe: it reads a flat
-// response well enough to show what came back, and the raw XML is one query
-// parameter away when it does not. The importer will not reuse this.
+// Deliberately not a real XML parser. This is a probe: it reads the response
+// well enough to show what came back, and the raw XML is one query parameter
+// away when it does not. The importer will not reuse this.
+//
+// AUG 31 FIX: the first version chunked on <productBasicInfo> and so read only
+// a third of each item. SanMar returns THREE sibling blocks per item, and the
+// pricing and the images are in the other two:
+//
+//   <listResponse>
+//     <productBasicInfo>  style, colour, size, keys, status
+//     <productImageInfo>  every image URL
+//     <productPriceInfo>  casePrice, piecePrice, priceCode, MAP, sale dates
+//   </listResponse>
+//
+// The tag matcher was also too loose: "size" would match <sizeIndex> and
+// "color" would match <colorSquareImage>, because it allowed any characters
+// after the tag name. It now requires a "<tag>" or a "<tag attr=...>", which
+// is the difference between reading a field and reading the field next to it.
+
+/** One envelope-level field, e.g. errorOccured. Tight tag boundary: "size"
+ *  must not match <sizeIndex>. */
 export function tagText(chunk, tag) {
-  const m = chunk.match(new RegExp("<(?:\\w+:)?" + tag + "[^>]*>([\\s\\S]*?)</(?:\\w+:)?" + tag + ">"));
+  const m = chunk.match(new RegExp(
+    "<(?:\\w+:)?" + tag + "(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?" + tag + ">"));
   return m ? m[1].trim() : "";
 }
 
+function decode(s) {
+  return String(s)
+    .replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&#(\d+);/g, (m, n) => String.fromCharCode(Number(n)))
+    .replace(/&amp;/g, "&") // last, so &amp;lt; does not become <
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Every leaf element in a chunk, as { tag: value }. A leaf is an element with
+ *  no child elements, which is every field SanMar returns. */
+export function leafFields(chunk) {
+  const out = {};
+  const re = /<(\w+)(?:\s[^>]*)?>([^<]*)<\/\1>/g;
+  let m;
+  while ((m = re.exec(chunk)) !== null) {
+    const v = decode(m[2]);
+    if (v && out[m[1]] === undefined) out[m[1]] = v;
+  }
+  return out;
+}
+
+/** One entry per product returned. Chunks on <listResponse>, which wraps all
+ *  three blocks for a single style/colour/size. Falls back to the basic block
+ *  alone if the response is shaped differently than documented, so a surprise
+ *  shows up as thin rows rather than as zero rows. */
 export function splitRows(xml) {
   const out = [];
-  const re = /<productBasicInfo[^>]*>([\s\S]*?)<\/productBasicInfo>/g;
+  let re = /<listResponse[^>]*>([\s\S]*?)<\/listResponse>/g;
   let m;
+  while ((m = re.exec(xml)) !== null) out.push(m[1]);
+  if (out.length) return out;
+  re = /<productBasicInfo[^>]*>([\s\S]*?)<\/productBasicInfo>/g;
   while ((m = re.exec(xml)) !== null) out.push(m[1]);
   return out;
 }
 
 export function summarise(xml) {
-  const rows = splitRows(xml).map((chunk) => {
-    const row = {};
-    FIELDS.forEach((f) => {
-      const v = tagText(chunk, f);
-      if (v) row[f] = v;
-    });
-    return row;
+  const rows = splitRows(xml).map(leafFields);
+
+  // What fields actually came back, and on how many rows. This is the part
+  // that tells us what an importer can rely on: a field present on 12 of 558
+  // rows is not a field to build on.
+  const fieldCounts = {};
+  rows.forEach((r) => {
+    Object.keys(r).forEach((k) => { fieldCounts[k] = (fieldCounts[k] || 0) + 1; });
   });
 
   const colors = [];
   const sizes = [];
-  const priceByColor = {};
+  const sizeIndexBySize = {};
   rows.forEach((r) => {
     const c = r.color || r.catalogColor || "";
-    const s = r.size || "";
     if (c && !colors.includes(c)) colors.push(c);
-    if (s && !sizes.includes(s)) sizes.push(s);
-    if (c && r.casePrice) {
-      const key = c + " / " + (s || "?");
-      priceByColor[key] = r.casePrice;
+    if (r.size && !sizes.includes(r.size)) sizes.push(r.size);
+    if (r.size && r.sizeIndex) {
+      sizeIndexBySize[r.size] = sizeIndexBySize[r.size] || [];
+      if (!sizeIndexBySize[r.size].includes(r.sizeIndex)) {
+        sizeIndexBySize[r.size].push(r.sizeIndex);
+      }
     }
   });
 
-  // The whole point of the probe: do two colours of the same size ever carry
-  // different case prices? If yes, the colour itself decides the price and the
-  // importer never has to ask which price group a style is in.
+  // The question the probe exists to answer: within one size, do two colours
+  // ever carry different case prices? If yes, the colour decides the price and
+  // the importer never has to ask which price group a style is in.
   const bySize = {};
   rows.forEach((r) => {
     if (!r.size || !r.casePrice) return;
     bySize[r.size] = bySize[r.size] || {};
-    bySize[r.size][r.casePrice] = (bySize[r.size][r.casePrice] || 0) + 1;
+    (bySize[r.size][r.casePrice] = bySize[r.size][r.casePrice] || []).push(
+      r.color || r.catalogColor || "?");
   });
-  const sizesWithSplitPricing = Object.keys(bySize)
-    .filter((s) => Object.keys(bySize[s]).length > 1);
+  const sizesWithSplitPricing = {};
+  Object.keys(bySize).forEach((sz) => {
+    const prices = Object.keys(bySize[sz]);
+    if (prices.length > 1) {
+      sizesWithSplitPricing[sz] = {};
+      prices.forEach((p) => {
+        sizesWithSplitPricing[sz][p] = {
+          colors: bySize[sz][p].length,
+          example: bySize[sz][p].slice(0, 4),
+        };
+      });
+    }
+  });
+
+  // Price by size at one colour, which is the shape the samples sheet needs:
+  // 2XL and up are separate rows at their own price.
+  const firstColor = rows.length ? (rows[0].color || rows[0].catalogColor) : null;
+  const priceLadder = {};
+  rows.forEach((r) => {
+    if ((r.color || r.catalogColor) !== firstColor || !r.size) return;
+    priceLadder[r.size] = {
+      casePrice: r.casePrice || null,
+      piecePrice: r.piecePrice || null,
+      priceCode: r.priceCode || null,
+      priceText: r.priceText || null,
+    };
+  });
+
+  // Any price actually on sale right now. A sample priced off a temporary sale
+  // would come back cheaper than the sheet SanMar is expecting.
+  const onSale = rows.filter((r) => r.saleStartDate || r.caseSalePrice).length;
 
   return {
     rowCount: rows.length,
+    fieldsSeen: Object.keys(fieldCounts).sort().map((k) => k + ":" + fieldCounts[k]),
     colorCount: colors.length,
-    colors: colors.slice(0, 60),
+    colors: colors.slice(0, 80),
     sizes,
+    sizeIndexBySize,
+    priceLadderAt: firstColor,
+    priceLadder,
     sizesWithSplitPricing,
-    priceSpotCheck: priceByColor,
+    rowsWithSalePricing: onSale,
+    // Whether the split-pricing answer means anything at all. Without a price
+    // on the rows, an empty result is silence, not a clean bill of health.
+    pricingPresent: rows.some((r) => !!r.casePrice),
     firstRow: rows[0] || null,
-    lastRow: rows.length > 1 ? rows[rows.length - 1] : null,
   };
 }
 
