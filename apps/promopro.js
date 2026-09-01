@@ -335,7 +335,23 @@ export default {
     const root = ctx.root;
     const $ = (sel) => root.querySelector(sel);
 
-    const canEdit = !!(ctx.perms && (ctx.perms.can_edit !== false || ctx.perms.superuser));
+    // WHAT THIS PERSON MAY DO. Both start from the shell's blanket edit flag
+    // and are then REPLACED by the server's answer once Settings loads.
+    //
+    // The shell flag is not the rule the routes use. PromoPro Settings can
+    // name which roles may buy, and once it does, reading can_edit here would
+    // keep offering New purchase order to people the server refuses at the
+    // last step. A button that fails after you have filled the form in is
+    // worse than no button.
+    //
+    // They stay as the fallback for the case where the settings route does
+    // not answer at all, e.g. a deploy where it is missing: an app that
+    // behaves like yesterday beats one that hides every control.
+    let canEdit = !!(ctx.perms && (ctx.perms.can_edit !== false || ctx.perms.superuser));
+    // Booking in stock is deliberately wider than raising an order. Buying is
+    // a decision to spend money; receiving is recording that a box turned up,
+    // and it belongs to whoever opened the box.
+    let canReceive = canEdit;
     const isAdmin = !!(ctx.perms && (ctx.perms.role === 'admin' || ctx.perms.superuser));
 
     const st = {
@@ -404,6 +420,13 @@ export default {
       st.vendors = took(venRes, 'vendors', [], 'Vendors');
       st.settingsFailed = setRes.status !== 'fulfilled';
       st.settings = withSettingDefaults(took(setRes, 'settings', null, 'Settings'));
+
+      // The server decides, not the shell flag. Only when it actually said
+      // so: an older deploy that does not send these keys leaves the
+      // fallback in place rather than locking the screen down over a
+      // missing field.
+      if (typeof st.settings.youCanRaise === 'boolean') canEdit = st.settings.youCanRaise;
+      if (typeof st.settings.youCanReceive === 'boolean') canReceive = st.settings.youCanReceive;
     }
 
     function loadErrorHtml() {
@@ -1201,7 +1224,7 @@ export default {
     function linesHtml(po) {
       const sum = receiptSummary(po);
       const receipts = Array.isArray(po.receipts) ? po.receipts : [];
-      const booking = canEdit && !sum.complete && (po.lines || []).length > 0;
+      const booking = canReceive && !sum.complete && (po.lines || []).length > 0;
 
       const head = '<table class="pp-table"><thead><tr>' +
         '<th>Item #</th><th>Description</th><th class="num">Qty</th>' +
@@ -1873,6 +1896,70 @@ export default {
         '</div>';
     }
 
+    /**
+     * WHO CAN RAISE A PURCHASE ORDER, RIGHT NOW.
+     *
+     * The rule is three clauses deep: the per-account Admin flag, the shell
+     * role's edit permission, and the list of roles ticked above. Working out
+     * who that adds up to meant asking people to try it, which is no way to
+     * decide what to tighten. Every row here is computed by the same function
+     * the routes gate on, so this cannot become a reassuring screen that
+     * disagrees with what actually happens.
+     *
+     * It is a readout, not a control. Access is changed by ticking a role
+     * above, or on the shell's Accounts screen. Two places to change one
+     * thing is how the two get out of step.
+     */
+    function buyersHtml(S) {
+      if (!isAdmin) return '';
+      // Null means the lookup failed. An empty table would read as "nobody
+      // can raise a purchase order", which is a frightening and false thing
+      // to show somebody who opened this screen to tighten access.
+      if (S.buyers === null || S.buyers === undefined) {
+        return '<div class="pp-sect">Who can raise one today</div>' +
+          '<div class="pp-notice">The account list could not be read, so this cannot be shown right now. ' +
+          'It does not affect who can actually do what.</div>';
+      }
+      const rows = Array.isArray(S.buyers) ? S.buyers : [];
+      const withAccess = rows.filter((r) => r.canOpen);
+      const canBuy = withAccess.filter((r) => r.canRaise);
+
+      const yes = '<span style="font-weight:700">Yes</span>';
+      const no = '<span style="color:var(--muted)">No</span>';
+
+      return '<div class="pp-sect">Who can raise one today</div>' +
+        '<div class="pp-hint" style="margin-bottom:10px">' +
+          esc(String(canBuy.length)) + ' of ' + esc(String(withAccess.length)) +
+          ' people who can open PromoPro can raise a purchase order. ' +
+          'Worked out by the same rule the server uses, so it is what will actually happen. ' +
+          'Change it by ticking a role above, or on the shell Accounts screen.' +
+        '</div>' +
+        (withAccess.length
+          ? '<table class="pp-table" style="margin-bottom:14px"><thead><tr>' +
+              '<th>Person</th><th>Role</th><th>Raise a PO</th><th>Book in stock</th><th>Why</th>' +
+            '</tr></thead><tbody>' +
+            withAccess.map((r) =>
+              '<tr>' +
+                '<td>' + esc(r.name) + '<div style="color:var(--muted);font-size:11px">' + esc(r.username) + '</div></td>' +
+                '<td>' + esc(r.role) + (r.superuser ? ' <span style="color:var(--muted)">(Admin flag)</span>' : '') + '</td>' +
+                '<td>' + (r.canRaise ? yes : no) + '</td>' +
+                '<td>' + (r.canReceive ? yes : no) + '</td>' +
+                '<td style="color:var(--muted)">' + esc(r.why) + '</td>' +
+              '</tr>'
+            ).join('') +
+            '</tbody></table>'
+          : '<div class="pp-notice">Nobody but you can open PromoPro yet.</div>') +
+        // Accounts that cannot open the app are counted but not listed. They
+        // are the shell's business, not this screen's, and a table of people
+        // who are not involved makes the ones who are harder to see.
+        (rows.length > withAccess.length
+          ? '<div class="pp-hint" style="margin-bottom:14px">' +
+              esc(String(rows.length - withAccess.length)) +
+              ' other account' + (rows.length - withAccess.length === 1 ? '' : 's') +
+              ' cannot open PromoPro at all, so they are not listed.</div>'
+          : '');
+    }
+
     function renderSettings() {
       const S = st.settings;
       const chosen = new Set(S.accountManagerIds || []);
@@ -2015,6 +2102,8 @@ export default {
                 ((S.editRoles || []).length ? esc((S.editRoles || []).join(', ')) : 'Anyone with edit access in the shell.') +
               '</div>') +
 
+          buyersHtml(S) +
+
           '<div class="pp-sect">Promo categories</div>' +
           '<div class="pp-hint" style="margin-bottom:10px">' +
             'Which Printavo line-item categories count as promo. A lookup then shows just those imprints instead of the whole job. ' +
@@ -2154,7 +2243,23 @@ export default {
       }
     }
 
+    // The three create buttons live in the static template, so they were
+    // visible to everybody who could open the app regardless of whether the
+    // server would accept anything they made. That is the whole of "anyone
+    // can raise a PO right now": the button was simply there.
+    //
+    // Hidden rather than disabled. A greyed-out button invites a question
+    // about who to ask; an absent one just is not part of the job.
+    function applyPerms() {
+      [['#ppNewFromPipe', canEdit], ['#ppNewToggle', canEdit], ['#ppNewVendor', canEdit]]
+        .forEach(([sel, allowed]) => {
+          const el = $(sel);
+          if (el) el.hidden = !allowed;
+        });
+    }
+
     function renderAll() {
+      applyPerms();
       renderPipeline();
       renderOrders();
       renderVendors();
