@@ -140,6 +140,10 @@ export default {
       cursor: pointer; font-family: inherit;
     }
     .pp-filters button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    /* Stage and owner are two independent filters. The gap says so, otherwise
+       Just mine reads as a fourth stage that cancels the other three. */
+    .pp-filters .pp-fsep { width: 10px; }
+    .pp-filters button.pp-mine[aria-pressed="false"] { border-style: dashed; }
 
     /* ---- pipeline ---- */
     .pp-lanes { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; align-items: start; }
@@ -285,6 +289,7 @@ export default {
         </div>
         <button class="pp-btn" id="ppNewFromPipe">New purchase order</button>
       </div>
+      <div class="pp-filters" id="ppPipeFilters"></div>
       <div id="ppPipeBody">Loading…</div>
     </div>
 
@@ -340,6 +345,7 @@ export default {
       loadErrors: [],
       settingsFailed: false,
       filter: 'open',
+      mine: false,          // "only the orders I am the account manager for"
       draftLines: [],
       draftVendorId: '',
       pickedGroups: [],      // the imprints this PO covers
@@ -398,18 +404,78 @@ export default {
     const amById = (id) => st.settings.accountManagers.find((a) => a.id === id) || null;
     const amName = (id) => { const a = amById(id); return a ? a.name : 'Unassigned'; };
 
+    /* ---------------- "just mine" ---------------- */
+
+    // The signed-in person's own roster id, resolved by the server. Null when
+    // their account is not linked to a CrewCore record, in which case no
+    // filter is offered at all. A button that always returns nothing is worse
+    // than no button, because it reads as "you have no orders".
+    const meId = () => (st.settings.me && st.settings.me.id) || '';
+
+    // Offer the toggle to account managers, and to anybody who owns at least
+    // one purchase order even if they have since been taken off the Settings
+    // list. Somebody's history does not stop being theirs when their duties
+    // change.
+    function canScopeToMine() {
+      const id = meId();
+      if (!id) return false;
+      if (st.settings.me.isAccountManager) return true;
+      return st.pos.some((p) => p.accountManager === id);
+    }
+
+    const isMine = (p) => !!meId() && p.accountManager === meId();
+
+    // EVERY count and list on the two list screens starts here. Scoping the
+    // rows but not the pill counts would put "Open 12" above four rows, and
+    // then the number on the screen is answering a question nobody asked.
+    function scoped() {
+      return (st.mine && canScopeToMine()) ? st.pos.filter(isMine) : st.pos;
+    }
+
+    // Persisted in the browser, not in KV, for the same reason BackBone's
+    // dashboard layout is: it is one person's view preference on one machine,
+    // not a shop setting. It sticks because an account manager who wants their
+    // own orders wants them tomorrow as well.
+    const MINE_KEY = 'promopro.mine';
+    function loadMinePref() {
+      try { st.mine = localStorage.getItem(MINE_KEY) === '1'; } catch (e) { st.mine = false; }
+    }
+    function saveMinePref() {
+      try { localStorage.setItem(MINE_KEY, st.mine ? '1' : '0'); } catch (e) {}
+    }
+
+    // One control, drawn the same on both screens, so the toggle does not look
+    // like a different feature depending on which tab you are on.
+    function mineToggleHtml() {
+      if (!canScopeToMine()) return '';
+      const n = st.pos.filter(isMine).length;
+      return '<button data-mine="1" class="pp-mine" aria-pressed="' + (st.mine ? 'true' : 'false') + '">' +
+        'Just mine ' + n + '</button>';
+    }
+
     /* ---------------- pipeline ---------------- */
 
     function renderPipeline() {
       const body = $('#ppPipeBody');
-      const open = st.pos.filter((p) => {
+      const rows = scoped();
+      const scoping = st.mine && canScopeToMine();
+      const filters = $('#ppPipeFilters');
+      if (filters) filters.innerHTML = mineToggleHtml();
+
+      const open = rows.filter((p) => {
         const s = currentStage(p);
         return s !== 'closed' && s !== 'cancelled' && s !== 'received';
       });
 
-      if (!st.pos.length) {
-        body.innerHTML = loadErrorHtml() + '<div class="pp-empty">No purchase orders yet. Create one to get started.</div>';
-        $('#ppPipeSub').textContent = 'Every open purchase order, by stage.';
+      if (!rows.length) {
+        body.innerHTML = loadErrorHtml() + '<div class="pp-empty">' +
+          (scoping
+            ? 'No purchase orders with your name on them. Turn off Just mine to see the whole shop.'
+            : 'No purchase orders yet. Create one to get started.') +
+          '</div>';
+        $('#ppPipeSub').textContent = scoping
+          ? 'Your open purchase orders, by stage.'
+          : 'Every open purchase order, by stage.';
         return;
       }
 
@@ -417,7 +483,8 @@ export default {
       const late = scored.filter((x) => x.health.level === 'red').length;
       const soon = scored.filter((x) => x.health.level === 'amber').length;
       $('#ppPipeSub').textContent =
-        open.length + ' open, ' + late + ' late, ' + soon + ' needing attention';
+        open.length + ' open, ' + late + ' late, ' + soon + ' needing attention' +
+        (scoping ? ', yours only' : '');
 
       // Draft and closed do not get lanes: draft is not in flight yet and
       // closed is finished. Everything between them is what needs watching.
@@ -453,34 +520,52 @@ export default {
     /* ---------------- orders list ---------------- */
 
     function renderFilters() {
+      // Counted off the scoped set, not the whole shop, so the number on a
+      // pill is the number of rows pressing it produces.
+      const rows = scoped();
       const counts = {
-        open: st.pos.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p))).length,
-        late: st.pos.filter((p) => health(p).level === 'red').length,
-        all: st.pos.length,
+        open: rows.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p))).length,
+        late: rows.filter((p) => health(p).level === 'red').length,
+        all: rows.length,
       };
-      $('#ppOrdersFilters').innerHTML = [
+      // Two separate questions, so two separate groups. Stage and owner stack:
+      // "my late orders" is the thing an account manager actually opens this
+      // screen to see, and it would be unreachable if Just mine were a fourth
+      // option in the same row and cancelled the others.
+      const stage = [
         ['open', 'Open', counts.open],
         ['late', 'Late', counts.late],
         ['all', 'All', counts.all],
       ].map(([k, label, n]) =>
         '<button data-filter="' + k + '" aria-pressed="' + (st.filter === k) + '">' + label + ' ' + n + '</button>'
       ).join('');
+
+      const mine = mineToggleHtml();
+      $('#ppOrdersFilters').innerHTML = stage + (mine ? '<span class="pp-fsep"></span>' + mine : '');
     }
 
     function visiblePos() {
-      if (st.filter === 'all') return st.pos;
-      if (st.filter === 'late') return st.pos.filter((p) => health(p).level === 'red');
-      return st.pos.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p)));
+      const rows = scoped();
+      if (st.filter === 'all') return rows;
+      if (st.filter === 'late') return rows.filter((p) => health(p).level === 'red');
+      return rows.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p)));
     }
 
     function renderOrders() {
       renderFilters();
       const rows = visiblePos();
       const body = $('#ppOrdersBody');
-      $('#ppOrdersSub').textContent = st.pos.length + ' purchase orders on file';
+      const scoping = st.mine && canScopeToMine();
+      $('#ppOrdersSub').textContent = scoping
+        ? scoped().length + ' of ' + st.pos.length + ' purchase orders are yours'
+        : st.pos.length + ' purchase orders on file';
 
       if (!rows.length) {
-        body.innerHTML = '<div class="pp-empty">Nothing here. Try a different filter, or create a purchase order.</div>';
+        // Which of the two filters emptied the list is the whole question when
+        // somebody is staring at a screen that says nothing is here.
+        body.innerHTML = '<div class="pp-empty">Nothing here. Try a different filter' +
+          (scoping ? ', turn off Just mine,' : ',') +
+          ' or create a purchase order.</div>';
         return;
       }
 
@@ -2147,6 +2232,16 @@ export default {
 
       if (t.dataset && t.dataset.filter) { st.filter = t.dataset.filter; renderOrders(); return; }
 
+      // Both screens share the preference, because "show me my orders" is one
+      // question and having to answer it twice is how it gets left half on.
+      if (t.dataset && t.dataset.mine) {
+        st.mine = !st.mine;
+        saveMinePref();
+        renderOrders();
+        renderPipeline();
+        return;
+      }
+
       if (t.dataset && t.dataset.po) {
         const po = st.pos.find((p) => p.id === t.dataset.po);
         if (po) { st.openPoId = po.id; renderDetail(po); this.showView('orders'); }
@@ -2928,6 +3023,7 @@ export default {
       if (wrap && wrap.scrollIntoView) wrap.scrollIntoView({ block: 'start' });
     };
 
+    loadMinePref();
     await loadAll();
     renderAll();
   },
