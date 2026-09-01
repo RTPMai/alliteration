@@ -131,7 +131,7 @@ export default {
     .ww-page { padding: 24px 32px 60px; max-width: 1200px; }
     .ww-hd { display: flex; justify-content: space-between; align-items: flex-end; margin-bottom: 16px; flex-wrap: wrap; gap: 12px; }
     .ww-hd h1 { font-size: 28px; font-weight: 800; letter-spacing: -.02em; }
-    .ww-hd .sub { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .ww-hd .wwsub { font-size: 13px; color: var(--muted); margin-top: 2px; }
     .ww-range { display: flex; gap: 6px; }
     .ww-range button, .ww-sitetabs button {
       background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm);
@@ -185,18 +185,18 @@ export default {
 
     /* The ghost sits behind the live bar and both scale to the same maximum,
        so the height difference on screen is the real difference. */
-    .ww-trend .stack { position: relative; width: 100%; height: 100%; display: flex; align-items: flex-end; justify-content: center; }
-    .ww-trend .ghost {
+    .ww-trend .wwstack { position: relative; width: 100%; height: 100%; display: flex; align-items: flex-end; justify-content: center; }
+    .ww-trend .wwghost {
       position: absolute; bottom: 0; left: 50%; transform: translateX(-50%);
       width: 100%; max-width: 18px; background: var(--line);
       border-radius: 3px 3px 0 0; min-height: 2px;
     }
-    .ww-trend .bar { position: relative; z-index: 1; }
+    .ww-trend .wwbar { position: relative; z-index: 1; }
 
-    .bar-row .cmp { width: 62px; text-align: right; font-size: 11.5px; font-weight: 700; flex: none; }
-    .bar-row .cmp.up { color: var(--success-dk); }
-    .bar-row .cmp.down { color: var(--danger-dk); }
-    .bar-row .cmp.flat, .bar-row .cmp.unknown { color: var(--faint); }
+    .wwrow .cmp { width: 62px; text-align: right; font-size: 11.5px; font-weight: 700; flex: none; }
+    .wwrow .cmp.up { color: var(--success-dk); }
+    .wwrow .cmp.down { color: var(--danger-dk); }
+    .wwrow .cmp.flat, .wwrow .cmp.unknown { color: var(--faint); }
 
     .ww-grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; align-items: start; }
     @media (max-width: 860px) { .ww-grid { grid-template-columns: 1fr; } }
@@ -214,23 +214,32 @@ export default {
     .ww-trend { display: flex; align-items: flex-end; gap: 3px; height: 110px; min-width: 0; }
     /* Ninety columns of 3px gap is more whitespace than chart. */
     .ww-trend.dense { gap: 1px; }
-    .ww-trend .col { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
-    .ww-trend .bar { width: 100%; max-width: 18px; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
+    .ww-trend .wwcol { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
+    /* Every class inside the chart carries a ww prefix, and has to keep it.
+       css/shell.css styles a bare .bar for the little progress bars on the
+       shell's own screens, unscoped, and it sets min-width: 90px. A chart
+       column named "bar" inherits that, and a minimum always beats the
+       maximum set here, so every bar becomes 90px wide, they overlap into one
+       solid block, and the chart paints out over the card next to it. The
+       names col, stack, lbl and ghost are the same kind of name and are
+       prefixed for the same reason. Do not shorten them back.
+       (No backticks in here: this whole block is a template literal.) */
+    .ww-trend .wwbar { width: 100%; max-width: 18px; min-width: 0; background: var(--accent); border-radius: 3px 3px 0 0; min-height: 2px; }
 
     /* The date sits in a zero-width box and spills evenly out of both sides,
        so a label can never decide how wide its column is. Fixed height so a
        column carrying no label still lines its bar up with its neighbours. */
-    .ww-trend .lbl {
+    .ww-trend .wwlbl {
       flex: none; width: 0; height: 12px; margin-top: 4px; overflow: visible;
       display: flex; align-items: center; justify-content: center;
     }
-    .ww-trend .lbl span { font-size: 9px; color: var(--muted); white-space: nowrap; }
+    .ww-trend .wwlbl span { font-size: 9px; color: var(--muted); white-space: nowrap; }
 
-    .bar-row { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 13px; }
-    .bar-row .k { width: 140px; color: var(--muted); flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .bar-row .track { flex: 1; height: 8px; background: var(--bg); border-radius: 5px; overflow: hidden; }
-    .bar-row .fill { height: 100%; background: var(--accent); border-radius: 5px; }
-    .bar-row .v { width: 44px; text-align: right; font-weight: 600; flex: none; }
+    .wwrow { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; font-size: 13px; }
+    .wwrow .k { width: 140px; color: var(--muted); flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wwrow .track { flex: 1; height: 8px; background: var(--bg); border-radius: 5px; overflow: hidden; }
+    .wwrow .fill { height: 100%; background: var(--accent); border-radius: 5px; }
+    .wwrow .v { width: 44px; text-align: right; font-weight: 600; flex: none; }
 
     .ww-empty { text-align: center; color: var(--muted); font-size: 13px; padding: 24px 0; }
     .ww-cardfail {
@@ -318,7 +327,7 @@ export default {
       <div class="ww-hd">
         <div>
           <h1>WebsiteWidget.</h1>
-          <div class="sub" id="wwMeta"></div>
+          <div class="wwsub" id="wwMeta"></div>
         </div>
         <div style="display:flex; gap:16px; flex-wrap:wrap;">
           <div class="ww-range" id="wwRange">
@@ -345,7 +354,7 @@ export default {
       <div class="ww-hd">
         <div>
           <h1>Manage Sites.</h1>
-          <div class="sub">Which GA4 properties WebsiteWidget shows.</div>
+          <div class="wwsub">Which GA4 properties WebsiteWidget shows.</div>
         </div>
       </div>
       <div id="wwSettingsBody">Loading…</div>
@@ -503,16 +512,16 @@ export default {
             const tip = fmtDate(d.date) + ': ' + fmtNum(d.sessions) + ' sessions' +
               (was ? ' (was ' + fmtNum(was.sessions) + ' on ' + fmtDate(was.date) + ')' : '');
             const ghost = was
-              ? '<div class="ghost" style="height:' + Math.max(2, (was.sessions / trendMax) * 100) + '%"></div>'
+              ? '<div class="wwghost" style="height:' + Math.max(2, (was.sessions / trendMax) * 100) + '%"></div>'
               : '';
-            return '<div class="col" title="' + esc(tip) + '">' +
-              '<div class="stack">' + ghost +
-                '<div class="bar" style="height:' + Math.max(2, (d.sessions / trendMax) * 100) + '%"></div>' +
+            return '<div class="wwcol" title="' + esc(tip) + '">' +
+              '<div class="wwstack">' + ghost +
+                '<div class="wwbar" style="height:' + Math.max(2, (d.sessions / trendMax) * 100) + '%"></div>' +
               '</div>' +
               // Every column keeps its label box so the bars stay level; only
               // some of them get text in it. The date each column stands for
               // is still on its tooltip.
-              '<div class="lbl">' +
+              '<div class="wwlbl">' +
                 (showsTrendLabel(i, trendCount) ? '<span>' + esc(fmtDate(d.date)) + '</span>' : '') +
               '</div>' +
             '</div>';
@@ -550,7 +559,7 @@ export default {
         const body = list.map((r) => {
           const raw = r[keyField];
           const label = (labels && labels[raw]) || raw;
-          return '<div class="bar-row"><div class="k" title="' + esc(label) + '">' + esc(label) + '</div>' +
+          return '<div class="wwrow"><div class="k" title="' + esc(label) + '">' + esc(label) + '</div>' +
             '<div class="track"><div class="fill" style="width:' + ((r[valueField] || 0) / max) * 100 + '%"></div></div>' +
             '<div class="v">' + fmtNum(r[valueField]) + '</div>' + cmpCell(r.delta) + '</div>';
         }).join('');
