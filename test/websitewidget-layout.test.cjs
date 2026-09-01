@@ -24,8 +24,22 @@ const t = require('./harness.cjs');
 const ROOT = path.join(__dirname, '..');
 const app = fs.readFileSync(path.join(ROOT, 'apps/websitewidget.js'), 'utf8');
 
-import(path.join(ROOT, 'lib/websitewidget/chart.js')).then((chart) => {
+Promise.all([
+  import(path.join(ROOT, 'lib/websitewidget/chart.js')),
+  // Importing the screen itself is the only way to prove the styles template
+  // literal is still balanced. A stray backtick in a CSS comment inside it
+  // ends the string, and the app fails to load with nothing wrong on sight.
+  import(path.join(ROOT, 'apps/websitewidget.js')).then((m) => m, (e) => ({ loadError: e })),
+]).then(([chart, screen]) => {
   const { trendLabelStep, showsTrendLabel, isDenseTrend, MAX_TREND_LABELS } = chart;
+
+  t.test('apps/websitewidget.js loads as a module', () => {
+    t.assert(!screen.loadError,
+      'the app file will not import: ' + (screen.loadError && screen.loadError.message));
+    t.equal(screen.default.id, 'websitewidget', 'the module should export the app');
+    t.assert(typeof screen.default.styles === 'string' && screen.default.styles.length > 500,
+      'the styles block should have survived intact');
+  });
 
   const drawn = (n) => {
     let count = 0;
@@ -98,22 +112,58 @@ import(path.join(ROOT, 'lib/websitewidget/chart.js')).then((chart) => {
   });
 
   t.test('a trend column can be narrower than its date', () => {
-    t.assert(/\.ww-trend\s+\.col\s*\{[^}]*min-width:\s*0/.test(app),
-      '.ww-trend .col needs min-width: 0');
-    t.assert(/\.ww-trend\s+\.lbl\s*\{[^}]*width:\s*0/.test(app),
-      '.ww-trend .lbl must be a zero-width box so a date cannot set the column width');
+    t.assert(/\.ww-trend\s+\.wwcol\s*\{[^}]*min-width:\s*0/.test(app),
+      '.ww-trend .wwcol needs min-width: 0');
+    t.assert(/\.ww-trend\s+\.wwlbl\s*\{[^}]*width:\s*0/.test(app),
+      '.ww-trend .wwlbl must be a zero-width box so a date cannot set the column width');
+    t.assert(/\.ww-trend\s+\.wwbar\s*\{[^}]*min-width:\s*0/.test(app),
+      '.ww-trend .wwbar needs min-width: 0, in case a bare .bar rule ever reaches it again');
   });
 
   t.test('a label with no text still holds its column height', () => {
     // Otherwise the eight labelled columns sit a line lower than the rest and
     // their bars stop lining up.
-    t.assert(/\.ww-trend\s+\.lbl\s*\{[^}]*height:\s*\d/.test(app),
-      '.ww-trend .lbl needs a fixed height');
+    t.assert(/\.ww-trend\s+\.wwlbl\s*\{[^}]*height:\s*\d/.test(app),
+      '.ww-trend .wwlbl needs a fixed height');
   });
 
   t.test('a spaceless failure message cannot set the card width', () => {
     t.assert(/\.ww-cardfail\s+\.why\s*\{[^}]*overflow-wrap:\s*anywhere/.test(app),
       '.ww-cardfail .why needs overflow-wrap: anywhere; break-word alone does not reduce the intrinsic width');
+  });
+
+  /* ---- the class-name collision ---------------------------------------- */
+
+  t.test('the chart owns its class names, none shared with the shell', () => {
+    // css/shell.css is not scoped to an app. Its bare `.bar` sets
+    // min-width: 90px for the little progress bars on the shell's own
+    // screens. A chart column called `bar` picked that up, a minimum beats a
+    // maximum, and every 6px bar became 90px: one solid block painting out
+    // over the next card. Same trap waits in col, stack, lbl, ghost, sub and
+    // bar-row, all of which the shell also styles bare.
+    const shellCss = fs.readFileSync(path.join(ROOT, 'css/shell.css'), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    const bare = new Set();
+    (shellCss.match(/[^{}]+\{/g) || []).forEach((chunk) => {
+      chunk.slice(0, -1).split(',').forEach((sel) => {
+        const m = /^\s*\.([A-Za-z0-9_-]+)\s*$/.exec(sel);
+        if (m) bare.add(m[1]);
+      });
+    });
+    t.assert(bare.size > 10, 'could not read the shell stylesheet, the check would pass by accident');
+
+    const mine = (app.match(/class="([^"'<>+{}]+)"/g) || [])
+      .map((s) => s.slice(7, -1)).join(' ').split(/\s+/).filter(Boolean);
+    const clash = [...new Set(mine)].filter((c) => bare.has(c));
+    t.assert(clash.length === 0,
+      'these WebsiteWidget class names are also styled globally in shell.css: ' + clash.join(', '));
+  });
+
+  t.test('the old unprefixed chart class names are gone', () => {
+    ['bar', 'col', 'stack', 'ghost', 'bar-row'].forEach((name) => {
+      t.assert(!app.includes('class="' + name + '"'),
+        'class="' + name + '" is back in the chart markup and will collide with shell.css');
+    });
   });
 
   t.test('the screen asks the shared helper rather than counting for itself', () => {
