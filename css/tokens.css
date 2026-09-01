@@ -362,3 +362,272 @@ body[data-app="backbone"] {
 body[data-app="errorengine"] {
   --green: var(--success);
 }
+
+/* ==========================================================================
+   DARK THEME
+   Everything above is the light theme and stays the default. This block is
+   the whole of dark mode: the same token names, different values.
+
+   HOW IT IS SWITCHED. js/theme.js resolves a person's choice (system, light
+   or dark) down to one of two answers and writes it to <html data-theme>.
+   CSS therefore never has to handle "system", which is why there is one dark
+   block here rather than one block plus a duplicate inside a
+   prefers-color-scheme media query that would have to be kept in step with it.
+
+   THREE THINGS THAT ARE NOT JUST "INVERT IT":
+
+   1. TINTS FLIP FROM PALE TO DEEP. Every *-tint token is a background with
+      darker text sitting on it. In dark the background has to become a deep,
+      desaturated version of the same hue, or a "pale green success pill"
+      turns into a glowing slab that outshouts the text it is behind.
+
+   2. THE -dk TOKENS GET LIGHTER. --success-dk and friends mean "the emphatic
+      version of this colour, for text on its own tint". Emphasis on white is
+      darker; emphasis on near-black is lighter. So they invert direction
+      rather than merely shifting.
+
+   3. SOME ACCENTS CANNOT SURVIVE THE MOVE. TeleTally's #000B8C and
+      MarketMachine's #6E1E2B were picked to read against white. On a dark
+      surface they are indistinguishable from the background, so those two get
+      genuinely different values here, not tonal nudges. The rail dot has to
+      stay recognisable as that app's colour in both themes, which is the
+      constraint that decided how far each one moved.
+   ========================================================================== */
+
+:root { color-scheme: light; }
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* ---- Surfaces & text -------------------------------------------------
+     --card is LIGHTER than --bg, the reverse of light mode. On white, a card
+     is separated from the page by a shadow. On a dark page a shadow is
+     invisible, so raised things read as raised by being lighter. */
+  --bg:            #11161C;
+  --card:          #191F27;
+  --ink:           #E7EBF0;
+  --muted:         #98A3B0;
+  --faint:         #6B7684;
+  --line:          #2A313B;
+  --line-soft:     #212831;
+  --wordmark-ink:  #E7EBF0;
+
+  /* ---- Semantic status colors ------------------------------------------
+     Still grades, still never app colours. Lifted enough to clear 4.5:1 on
+     --card, since these carry meaning and are frequently the only thing
+     distinguishing one row from another. */
+  --success:       #4CAF71;
+  --success-dk:    #74D096;
+  --success-tint:  #16291E;
+  --warn:          #D6A03C;
+  --warn-dk:       #EBBB63;
+  --warn-tint:     #2C2413;
+  --danger:        #EF6B5C;
+  --danger-dk:     #FF8E80;
+  --danger-tint:   #301A19;
+  --danger-line:   #57302C;
+
+  /* ---- Shadows ----------------------------------------------------------
+     The light values are near-transparent slate and vanish completely here.
+     Deepened to real black at higher opacity so a modal still reads as
+     floating above the page rather than pasted onto it. */
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, .40), 0 1px 3px rgba(0, 0, 0, .30);
+  --shadow-pop:  0 2px 4px rgba(0, 0, 0, .40), 0 8px 24px rgba(0, 0, 0, .45);
+
+  /* ---- Hub -------------------------------------------------------------- */
+  --hub:      #52A246;
+  --hub-deep: #6FBB63;
+  --hub-tint: #1A2A18;
+
+  /* ---- Notifications ----------------------------------------------------
+     The light slate is a dark grey, which is invisible here, so this becomes
+     a light grey. It keeps its job of being obviously not an app colour. */
+  --notif:      #8996A4;
+  --notif-deep: #A3AEBA;
+  --notif-tint: #232A32;
+
+  /* ---- Tier badges ------------------------------------------------------ */
+  --tier-a: #4A90D9;
+  --tier-b: #5FB552;
+  --tier-c: #D6A03C;
+  --tier-d: #7A8593;
+
+  /* ---- Amber (ShopStock "Ordered") --------------------------------------
+     The light --amber is #A67C00, a deliberately dark gold chosen as TEXT on
+     a pale chip. Carried over unchanged it would be an unreadable brown here,
+     so it moves further than most tokens in this block. */
+  --amber:       #D7A32B;
+  --amber-tint:  #2C2414;
+  --amber-line:  #46391B;
+  --amber-hover: #362B17;
+
+  /* --gold-bright and --gold-deep are unchanged: a saturated celebration
+     gold reads on either background, and it fills a shape rather than
+     carrying text, so contrast with the surface is not the constraint. */
+
+  /* ---- Status hues (BackBone) ------------------------------------------- */
+  --hue-blue:        #6D9BF5;
+  --hue-blue-tint:   #182338;
+  --hue-blue-deep:   #8FB3F8;
+  --hue-indigo:      #8B85F0;
+  --hue-indigo-tint: #1E1F3A;
+  --hue-violet:      #A78BFA;
+  --hue-violet-tint: #241E3A;
+  --hue-sky:         #4DB3E8;
+  --hue-sky-tint:    #122835;
+  --hue-forest:      #52B67B;
+  --hue-forest-tint: #16291F;
+  --hue-clay:        #EF7A6E;
+  --hue-clay-tint:   #331D1B;
+  --hue-clay-line:   #5C332E;
+
+  /* ---- Categorical chart palette ----------------------------------------
+     Re-picked, not lightened one by one. The light set was spaced for
+     separation AND for 3:1 against white; four of them (blue, bronze,
+     crimson, slate) fail that test against #191F27. These keep the same hue
+     order, so a series that was blue stays blue when the theme changes, while
+     clearing 3:1 on the dark card. */
+  --chart-1: #5B9BF8;   /* blue */
+  --chart-2: #FF8A47;   /* orange */
+  --chart-3: #4FC07C;   /* green */
+  --chart-4: #A78BFA;   /* violet */
+  --chart-5: #D4A24A;   /* bronze */
+  --chart-6: #35C4CE;   /* teal */
+  --chart-7: #F2708F;   /* crimson */
+  --chart-8: #E97DC4;   /* magenta */
+  --chart-9: #94A2B0;   /* slate */
+
+  /* ---- Misc surfaces ---------------------------------------------------- */
+  --on-accent:   #FFFFFF;
+  --footer-bg:   #151A21;
+  --dot-idle:    #39424E;
+  --row-hover:   #212933;
+  --head-bg:     #1F2630;
+
+  /* ---- Default accent --------------------------------------------------- */
+  --accent:        var(--hub);
+  --accent-deep:   var(--hub-deep);
+  --accent-tint:   var(--hub-tint);
+}
+
+/* ==========================================================================
+   PER-APP ACCENTS, DARK
+   Same twelve apps plus the shell screens. Two rules held throughout:
+
+   --accent-deep GOES LIGHTER THAN --accent, not darker. It is the hover and
+   emphasis direction, and on a dark surface emphasis means moving away from
+   the background, which is up.
+
+   --accent-tint IS A DEEP VERSION OF THE ACCENT'S OWN HUE, not a flat grey.
+   Keeping the hue is what makes a tinted panel still read as belonging to
+   the app it is in.
+   ========================================================================== */
+
+html[data-theme="dark"] body[data-app="hub"] {
+  --accent:      var(--hub);
+  --accent-deep: var(--hub-deep);
+  --accent-tint: var(--hub-tint);
+}
+
+html[data-theme="dark"] body[data-app="backbone"] {
+  --accent:      #4A8FD9;
+  --accent-deep: #6BA6E4;
+  --accent-tint: #16243A;
+}
+
+html[data-theme="dark"] body[data-app="shopstock"] {
+  --accent:      #E36325;
+  --accent-deep: #EE8450;
+  --accent-tint: #331E13;
+}
+
+html[data-theme="dark"] body[data-app="errorengine"] {
+  --accent:      #9B85CE;
+  --accent-deep: #B3A1DC;
+  --accent-tint: #241F33;
+}
+
+html[data-theme="dark"] body[data-app="givinggauge"] {
+  --accent:      #D5A029;
+  --accent-deep: #E5BA55;
+  --accent-tint: #2E2614;
+}
+
+html[data-theme="dark"] body[data-app="stickies"] {
+  --accent:      #C9A227;
+  --accent-deep: #DCB94E;
+  --accent-tint: #2D2714;
+}
+
+html[data-theme="dark"] body[data-app="settings"] {
+  --accent:      #8B95A2;
+  --accent-deep: #A4ADB8;
+  --accent-tint: #232830;
+}
+
+html[data-theme="dark"] body[data-app="notifications"] {
+  --accent:      var(--notif);
+  --accent-deep: var(--notif-deep);
+  --accent-tint: var(--notif-tint);
+}
+
+html[data-theme="dark"] body[data-app="traveltrack"] {
+  --accent:      #52A246;
+  --accent-deep: #6FBB63;
+  --accent-tint: #1A2A18;
+}
+
+html[data-theme="dark"] body[data-app="crewcore"] {
+  --accent:      #E0578A;
+  --accent-deep: #EA7BA4;
+  --accent-tint: #331A25;
+}
+
+html[data-theme="dark"] body[data-app="promopro"] {
+  --accent:      #F2495A;
+  --accent-deep: #F7727F;
+  --accent-tint: #33171B;
+}
+
+html[data-theme="dark"] body[data-app="mailme"] {
+  --accent:      #8CA9CC;
+  --accent-deep: #A8C0DC;
+  --accent-tint: #1F2731;
+}
+
+/* TeleTally's #000B8C is a near-black navy. It is the one accent that simply
+   cannot appear on a dark surface, so this is a real reinterpretation: the
+   same blue-violet family, lifted far enough to be a visible rail dot. */
+html[data-theme="dark"] body[data-app="teletally"] {
+  --accent:      #5B67E0;
+  --accent-deep: #7B85E8;
+  --accent-tint: #1B1E3A;
+}
+
+html[data-theme="dark"] body[data-app="websitewidget"] {
+  --accent:      #00BBB4;
+  --accent-deep: #2FD6CF;
+  --accent-tint: #10302F;
+}
+
+html[data-theme="dark"] body[data-app="stitchsense"] {
+  --accent:      #E64D96;
+  --accent-deep: #ED74AC;
+  --accent-tint: #331A28;
+}
+
+/* MarketMachine's #6E1E2B is a dark maroon, the second accent that disappears
+   against a dark page. Lifted into a dusty rose that still reads as the same
+   colour family beside StitchSense's magenta and PromoPro's red. This accent
+   is still marked PROVISIONAL in the light block; whatever replaces it there
+   needs a matching pass here. */
+html[data-theme="dark"] body[data-app="marketmachine"] {
+  --accent:      #C4566A;
+  --accent-deep: #D4788A;
+  --accent-tint: #331A1F;
+}
+
+/* Sticky note paper is deliberately NOT re-themed. The notes are meant to look
+   like paper on a board, and pale paper on a dark board is what a real board
+   looks like. --sticky-ink stays dark because it sits on the paper, not on the
+   page. */
