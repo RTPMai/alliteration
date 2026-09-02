@@ -1,3 +1,4 @@
+// PUT IN: apps/shopstock.js
 /**
  * ShopStock — supply inventory, ordering, and QR labels.
  *
@@ -206,7 +207,7 @@ export default {
           <div style="font-size:13px;color:var(--muted);margin-top:2px" id="inv-sub"></div>
         </div>
         <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-          <div style="display:flex;align-items:center;gap:6px;background:var(--head-bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px">
+          <div id="bulk-bar" style="display:flex;align-items:center;gap:6px;background:var(--head-bg);border:1px solid var(--line);border-radius:8px;padding:6px 10px">
             <span style="font-size:12px;color:var(--muted);white-space:nowrap">Bulk:</span>
             <select id="bulk-status-select" style="border:none;background:transparent;font-size:12px;color:var(--ink);outline:none;cursor:pointer">
               <option value="">Change selected to...</option>
@@ -219,7 +220,7 @@ export default {
             <button class="btn btn-green btn-sm" onclick="ShopStock.bulkStatusChange()">Apply</button>
           </div>
           <button class="btn btn-gray" onclick="ShopStock.bulkPrintQR()" title="Print QR codes for checked items, or all items if none checked">🖨️ Print QR Codes</button>
-          <button class="btn btn-green" onclick="ShopStock.openAddModal()">Add item</button>
+          <button class="btn btn-green write-only" onclick="ShopStock.openAddModal()">Add item</button>
         </div>
       </div>
       <div class="stats" id="inv-stats"></div>
@@ -239,7 +240,7 @@ export default {
             <option value="">All Suppliers</option>
           </select>
           <button class="btn btn-gray" onclick="ShopStock.bulkPrintQR()" title="Print QR codes for checked items, or all items if none checked">🖨️ Print QR Codes</button>
-          <button class="btn btn-green" onclick="ShopStock.openAddModal()">Add item</button>
+          <button class="btn btn-green write-only" onclick="ShopStock.openAddModal()">Add item</button>
         </div>
       </div>
       <div id="full-inventory-list"></div>
@@ -387,6 +388,20 @@ export default {
   async mount(ctx) {
     const root = ctx.root;
     const api = ctx.api;
+
+    // CAN THIS PERSON WRITE? Same rule the server applies, from the same
+    // fields (see lib/shopstock/access.js). It used to read the role NAME:
+    //     role === "admin" || role === "manager"
+    // which refused everybody on a role created in Settings, and refused
+    // accounts carrying the per-account Admin flag too, because the session
+    // cookie does not carry that flag. Worse, the screen kept OFFERING the
+    // buttons and let the server say no, and a 403 painted "Session expired"
+    // over the whole shell. Offering a button that cannot work is the bug;
+    // this is the half that stops offering it.
+    const _perms = (ctx.perms || (ctx.user && ctx.user.perms) || {});
+    const canWrite = _perms.superuser === true ||
+                     _perms.role === "admin" ||
+                     _perms.can_edit === true;
 
     // Root-scoped DOM helpers. These replace document.getElementById and
     // friends so this app can only ever see its own markup.
@@ -737,8 +752,8 @@ export default {
             ${item.supplierLink?`<a href="${item.supplierLink}" target="_blank" style="font-size:12px;color:var(--accent)">Open supplier page →</a>`:""}
           </div>
           <div class="queue-actions">
-            ${item.status==="Needs Ordered"?`<button class="btn btn-amber btn-sm" onclick="ShopStock.updateStatus('${item.id}','Ordered')">Mark Ordered</button>`:""}
-            <button class="btn btn-green btn-sm" onclick="ShopStock.updateStatus('${item.id}','In Stock')">Mark Issue</button>
+            ${canWrite && item.status==="Needs Ordered"?`<button class="btn btn-amber btn-sm" onclick="ShopStock.updateStatus('${item.id}','Ordered')">Mark Ordered</button>`:""}
+            ${canWrite?`<button class="btn btn-green btn-sm" onclick="ShopStock.updateStatus('${item.id}','In Stock')">Mark Issue</button>`:""}
             <button class="btn btn-gray btn-sm" onclick="ShopStock.viewItem('${item.id}')">Details</button>
           </div>
         </div>
@@ -1140,13 +1155,13 @@ export default {
     // ── Admin ─────────────────────────────────────────────────────────────────
     function initAdmin() {
       var who = ctx.user ? (ctx.user.name || ctx.user.username) : "";
-      var role = ctx.user ? ctx.user.role : "";
-      var canWrite = role === "admin" || role === "manager";
+      var role = (_perms.role || (ctx.user ? ctx.user.role : "")) || "no role";
       // textContent, not innerHTML: a name is user-controlled and this needs no
       // markup, so there is nothing to escape and nothing to get wrong.
       $id("admin-status").textContent = canWrite
         ? "Signed in as " + who + " (" + role + "). You can edit inventory."
-        : "Signed in as " + who + " (" + role + "). This role is read only.";
+        : "Signed in as " + who + " (" + role + "). This role is read only. " +
+          "You can still flag an item as needing ordered from its detail page.";
       renderDeptList();
       renderCatList();
     }
@@ -1381,6 +1396,19 @@ export default {
       updateStatus,
       viewItem,
     };
+
+    // Hide the controls a read-only account is not allowed to use. These live
+    // in the static template, which is built before mount() runs and has no
+    // way to see who is signed in, so they are switched off here instead.
+    // Print QR Codes stays: it writes nothing.
+    if (!canWrite) {
+      // style.display, not the hidden attribute: the bulk bar carries an
+      // inline display:flex, and an inline style beats [hidden]{display:none}.
+      // Setting hidden there would look like it worked and change nothing.
+      const bar = $id("bulk-bar");
+      if (bar) bar.style.display = "none";
+      $all(".write-only").forEach((b) => { b.style.display = "none"; });
+    }
 
     // Init runs AFTER window.ShopStock exists: the markup contains inline
     // handlers, and one firing before the namespace was set would silently fail.
