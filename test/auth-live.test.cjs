@@ -1,3 +1,4 @@
+// PUT IN: test/auth-live.test.cjs
 // test/auth-live.test.cjs
 /**
  * Live auth surface tests.
@@ -80,7 +81,14 @@ t.test('every API endpoint authenticates or is public by documented design', () 
     'MAILME_WEBHOOK_SECRET',
     // PromoPro's inbound-mail webhook, on the same footing as MailMe's:
     // secret-checked with safeEqual, fails closed when unset.
-    'PROMOPRO_INBOUND_SECRET'
+    'PROMOPRO_INBOUND_SECRET',
+    // ShopStock's three routes (items, settings, scrape) delegate to
+    // lib/shopstock/access.js, which reads the session, looks the permissions
+    // up fresh and still honours ADMIN_KEY for the price-scraper cron. This
+    // sweep reads source text, so moving a check into a shared function makes
+    // it invisible here unless the function's name is a mark too. The rule
+    // itself is exercised for real in test/shopstock-access.test.cjs.
+    'shopstockAccess'
   ];
   const offenders = [];
   const scan = (dir) => {
