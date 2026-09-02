@@ -810,25 +810,40 @@ export default {
           return;
         }
         const results = (res && res.results) || [];
+        // Half an answer must never be shown as no answer. If the quote
+        // search was down and the invoice search was not, saying "nothing
+        // matched" tells somebody their job does not exist when it does.
+        const missed = ((res && res.unavailable) || [])
+          .map((u) => (u.root === 'quotes' ? 'quotes' : u.root === 'invoices' ? 'invoices' : u.root))
+          .join(' and ');
+        const partial = missed
+          ? '<div style="padding:8px;font-size:12px;color:var(--muted)">Printavo did not answer for ' +
+            esc(missed) + ', so anything only in there is missing from this list.</div>'
+          : '';
         box.innerHTML = results.length
-          ? '<div class="pp-search-results">' + results.map((r) =>
-              '<button data-inv="' + esc(r.id) + '"><strong>' + esc(r.invoiceNumber) + '</strong> ' +
+          ? partial + '<div class="pp-search-results">' + results.map((r) =>
+              '<button data-inv="' + esc(r.id) + '" data-kind="' + esc(r.kind || 'invoice') + '">' +
+              '<strong>' + esc(r.kind === 'quote' ? 'Quote ' : '') + esc(r.invoiceNumber) + '</strong> ' +
               esc(r.customerName) + (r.dueDate ? ' &middot; due ' + esc(r.dueDate) : '') +
               ' &middot; ' + money(r.total) + '</button>'
             ).join('') + '</div>'
-          : '<div style="padding:8px;font-size:12px;color:var(--muted)">Nothing matched.</div>';
+          : (partial || '<div style="padding:8px;font-size:12px;color:var(--muted)">Nothing matched ' +
+              esc(String(term).trim()) + ' in Printavo, as a quote or an invoice.</div>');
       } catch (e) {
         box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">Search failed. Fill the lines in by hand.</div>';
       }
     }
 
-    async function pickInvoice(id) {
+    async function pickInvoice(id, kind) {
       const box = $('#ppSearchResults');
       if (box) box.innerHTML = '<div style="padding:8px;font-size:12px;color:var(--muted)">Loading that order…</div>';
 
       let res;
       try {
-        res = await ctx.api.get(ENDPOINTS.ppPrintavo, { id });
+        // The kind is a hint, not a rule: the server tries the other root
+        // anyway. It saves a round trip on a quote, which is the common case
+        // for a PO raised before the job is invoiced.
+        res = await ctx.api.get(ENDPOINTS.ppPrintavo, { id, kind: kind || '' });
       } catch (e) {
         if (box) box.innerHTML = '<div class="pp-notice">Could not load that order: ' + esc(e.message || 'request failed') + '. Fill the lines in by hand.</div>';
         return;
@@ -1443,7 +1458,8 @@ export default {
           '<h1 style="font-size:22px">' + esc(po.poNumber || 'Draft') + '</h1>' +
           '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; ' +
             esc(custName(po)) + (custContact(po) ? ' (' + esc(custContact(po)) + ')' : '') +
-            (po.printavo ? ' &middot; Printavo ' + esc(po.printavo.invoiceNumber) : '') +
+            (po.printavo ? ' &middot; Printavo ' +
+              (po.printavo.kind === 'quote' ? 'quote ' : '') + esc(po.printavo.invoiceNumber) : '') +
           '</div>' +
           '<div class="sub" style="font-size:12px">AM ' + esc(amName(po.accountManager)) +
             (ccListFor(po, v, st.settings).length
@@ -2395,7 +2411,7 @@ export default {
         return;
       }
 
-      if (t.dataset && t.dataset.inv) { await pickInvoice(t.dataset.inv); return; }
+      if (t.dataset && t.dataset.inv) { await pickInvoice(t.dataset.inv, t.dataset.kind); return; }
 
       if (t.dataset && t.dataset.vendorpick) { pickVendor(t.dataset.vendorpick); return; }
 
@@ -2928,6 +2944,7 @@ export default {
         lines: st.draftLines,
         printavo: st.picked ? {
           id: st.picked.id,
+          kind: st.picked.kind || 'invoice',
           invoiceNumber: st.picked.invoiceNumber,
           customerName: st.picked.customerName,
           companyName: st.picked.companyName || '',
