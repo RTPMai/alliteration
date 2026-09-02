@@ -28,7 +28,7 @@ Promise.all([
   import(path.join(ROOT, 'lib/notifications/schema.js')),
   import(path.join(ROOT, 'js/registry.js')),
   import(path.join(ROOT, 'lib/users.js')),
-]).then(([schema, reg, users]) => {
+]).then(async ([schema, reg, users]) => {
   const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES, keys } = schema;
   const { APPS, SHELL_APPS } = reg;
   const { DEFAULT_ROLES, permsFor } = users;
@@ -236,7 +236,7 @@ Promise.all([
     });
   });
 
-  t.test('can_delete_notifications defaults true when a role omits it (opt-out, not opt-in)', async () => {
+  await t.test('can_delete_notifications defaults true when a role omits it (opt-out, not opt-in)', async () => {
     // A role saved before this flag existed (no can_delete_notifications key
     // at all) must not silently lose delete access.
     const fakeRole = { name: 'legacy', apps: ['backbone'] };

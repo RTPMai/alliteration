@@ -74,7 +74,7 @@ Promise.all([
       'a blank from-address on the chosen identity must block the send');
   });
 
-  t.test('sendReadiness blocks when a campaign resolves to no identity at all', () => {
+  await t.test('sendReadiness blocks when a campaign resolves to no identity at all', () => {
     // Guards against a campaign pointing at an identity that was deleted in
     // Settings: better a clear blocker than a crash or a silent wrong sender.
     return send.sendReadiness(schema.mergeSettings(READY_BASE), null).then((b) => {

@@ -232,7 +232,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
 
   const creds = { customerNumber: '71892', user: 'u', password: 'secret-pw' };
 
-  t.test('a good response comes back built', async () => {
+  await t.test('a good response comes back built', async () => {
     const res = await m.fetchStyle('PC61', {
       tier: 50, creds,
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => PC61 }),
@@ -241,7 +241,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.equal(res.record.colors.length, 2);
   });
 
-  t.test('a network failure is reported, not thrown', async () => {
+  await t.test('a network failure is reported, not thrown', async () => {
     // 138 styles must not lose 137 because one call failed.
     const res = await m.fetchStyle('PC61', {
       tier: 50, creds,
@@ -251,7 +251,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.assert(res.error.includes('socket hang up'), 'the reason survives');
   });
 
-  t.test('a failure never carries the password back', async () => {
+  await t.test('a failure never carries the password back', async () => {
     const res = await m.fetchStyle('PC61', {
       tier: 50, creds,
       fetchImpl: async () => {
@@ -265,7 +265,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.assert(!JSON.stringify(res).includes('secret-pw'), 'password must not be in the result');
   });
 
-  t.test('SanMar answering with its own error is reported with its message', async () => {
+  await t.test('SanMar answering with its own error is reported with its message', async () => {
     const res = await m.fetchStyle('PC61', {
       tier: 50, creds,
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => ERRORED }),
@@ -274,7 +274,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.assert(res.error.includes('authenticating failed'));
   });
 
-  t.test('a non-2xx is reported with its status', async () => {
+  await t.test('a non-2xx is reported with its status', async () => {
     const res = await m.fetchStyle('PC61', {
       tier: 50, creds,
       fetchImpl: async () => ({ ok: false, status: 503, text: async () => '' }),
@@ -283,7 +283,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.assert(res.error.includes('503'));
   });
 
-  t.test('a retired style is reported by name rather than silently skipped', async () => {
+  await t.test('a retired style is reported by name rather than silently skipped', async () => {
     const res = await m.fetchStyle('OLD1', {
       tier: 50, creds,
       fetchImpl: async () => ({ ok: true, status: 200, text: async () => EMPTY }),
@@ -292,7 +292,7 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.equal(res.style, 'OLD1');
   });
 
-  t.test('missing credentials are named, and no call is attempted', async () => {
+  await t.test('missing credentials are named, and no call is attempted', async () => {
     let called = false;
     const res = await m.fetchStyle('PC61', {
       tier: 50,

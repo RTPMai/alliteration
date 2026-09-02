@@ -133,7 +133,7 @@ const copySrc = read('lib/promopro/art-copy.js');
     t.equal(emptyStore.calls.length, 0);
   });
 
-  t.test('copying somewhere unnamed is refused rather than guessed', async () => {
+  await t.test('copying somewhere unnamed is refused rather than guessed', async () => {
     let threw = false;
     try { await ac.copyArt(source, '', { copy: fakeStore().copy }); } catch (e) { threw = true; }
     t.assert(threw, 'a missing destination should throw, not write to a folder called undefined');
@@ -145,7 +145,7 @@ const copySrc = read('lib/promopro/art-copy.js');
     store.calls.forEach((c) => t.equal(c.opts.access, 'private'));
   });
 
-  t.test('the destination is built from the same prefix the send reads', async () => {
+  await t.test('the destination is built from the same prefix the send reads', async () => {
     const rec = await import('../lib/promopro/art-reconcile.js');
     t.assert(ac.destinationFor('po_new', { filename: 'front.pdf' }).startsWith(rec.artPrefix('po_new')),
       'art-copy and art-reconcile must agree on where a file lives, or the send cannot find it');

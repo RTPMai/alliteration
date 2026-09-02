@@ -105,8 +105,8 @@ const inv = (contact, extra) => Object.assign({
   });
 
   t.test('a real failure stops the ladder instead of spending six requests', () => {
-    const fn = lookupSrc.slice(lookupSrc.indexOf('export async function getInvoice'));
-    t.assert(/if \(!isFieldError\(e\.message\)\) return/.test(fn.slice(0, 2000)),
+    const fn = lookupSrc.slice(lookupSrc.indexOf('async function getFromRoot'));
+    t.assert(/if \(!isSchemaError\(e\.message\)\) return/.test(fn.slice(0, 2500)),
       'an auth error or an outage is not something to retry with fewer fields');
   });
 
@@ -117,9 +117,10 @@ const inv = (contact, extra) => Object.assign({
   });
 
   t.test('the job picker searches with the company too', () => {
-    const fn = lookupSrc.slice(lookupSrc.indexOf('export async function searchInvoices'));
-    t.assert(/companyName/.test(fn.slice(0, 1800)), 'picking a job by contact name is the same problem one step earlier');
-    t.assert(/contact { fullName }/.test(fn.slice(0, 1800)), 'and it needs the same bottom rung');
+    const start = lookupSrc.indexOf('const SEARCH_PARTY_SETS');
+    const sets = lookupSrc.slice(start, lookupSrc.indexOf('];', start) + 2);
+    t.assert(/companyName/.test(sets), 'picking a job by contact name is the same problem one step earlier');
+    t.assert(/contact { fullName }/.test(sets), 'and it needs the same bottom rung');
   });
 
   /* ---- what gets stored ------------------------------------------------ */

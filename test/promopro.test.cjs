@@ -227,7 +227,7 @@ t.test('the probe accepts an invoice number, not just an internal id', () => {
   // a round trip: the probe answered "Not found" and said nothing about the
   // schema question being asked.
   t.assert(/req\.query\.q/.test(printavoRoute), 'the probe should resolve an invoice number');
-  t.assert(printavoRoute.includes('searchInvoices'), 'by searching for it first');
+  t.assert(printavoRoute.includes('searchOrders'), 'by searching for it first');
 });
 
 t.test('the schema probe is admin only and writes nothing', () => {
@@ -1114,6 +1114,10 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
   /* -- clicking a search result must never do nothing -- */
 
   function fakePrintavo(handler) {
+    // The schema cache lives for ten minutes inside the module, so without
+    // this a fake account answers introspection once and every later test
+    // inherits it.
+    pl._resetSchemaCache();
     const calls = [];
     global.fetch = async (url, opts) => {
       const q = JSON.parse(opts.body).query;
@@ -1131,14 +1135,20 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     ] } }] },
   };
 
-  t.test('an unknown line-item field degrades instead of failing the lookup', async () => {
+  await t.test('an unknown line-item field degrades instead of failing the lookup', async () => {
     // GraphQL validates the whole query first, so ONE field this account
     // does not have makes the entire request fail and the invoice come back
     // null. That is what made clicking a search result do nothing: a
     // speculative styleNumber field was added without checking the schema.
     process.env.PRINTAVO_API_TOKEN = 'x';
     process.env.PRINTAVO_EMAIL = 'x@y.com';
-    const supported = new Set(['id', 'description', 'quantity']);
+    // The fake account has description and items but NOT itemNumber, so the
+    // top rung fails and `basic` is the one that answers. Kept in step with
+    // LINE_FIELD_SETS: this list used to say `quantity`, which no rung asks
+    // for any more, so every rung failed and the ladder fell all the way to
+    // `minimal`. The assertion below caught it; the harness threw the catch
+    // away (fixed Sep 2, 2026).
+    const supported = new Set(['id', 'description', 'itemNumber', 'items']);
     fakePrintavo((q) => {
       const leaf = (q.match(/lineItems \{ nodes \{ ([^}]*)\}/) || [])[1] || '';
       const asked = leaf.trim().split(/\s+/).filter((w) => /^[a-z]/i.test(w) && w !== 'name');
@@ -1146,30 +1156,32 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
       if (bad) return { errors: [{ message: `Field '${bad}' doesn't exist on type 'LineItem'` }] };
       return { data: { invoice: OK_INVOICE } };
     });
-    const r = await pl.getInvoice('1');
+    const r = await pl.getOrder('1');
     t.assert(r.invoice, 'a reduced field set should still return the invoice');
     t.equal(r.via, 'basic');
     t.equal(r.invoice.lines[0].qty, 50);
     t.equal(r.invoice.customerName, 'Acme Corp');
   });
 
-  t.test('a real error stops immediately rather than retrying every field set', async () => {
+  await t.test('a real error stops immediately rather than retrying every field set', async () => {
     // Retrying an auth failure five times just burns five requests against
     // Printavo's rate limiter and reports the same thing at the end.
     process.env.PRINTAVO_API_TOKEN = 'x';
     process.env.PRINTAVO_EMAIL = 'x@y.com';
     const calls = fakePrintavo(() => ({ errors: [{ message: 'Not authorized' }] }));
-    const r = await pl.getInvoice('1');
+    const r = await pl.getOrder('1');
     t.equal(r.invoice, null);
-    t.equal(calls.length, 1);
+    // Two: the one-off schema question, then the lookup itself. Not six, and
+    // not twelve now that there are two roots to try.
+    t.equal(calls.length, 2);
     t.assert(/Not authorized/.test(r.tried[0].error), 'the real reason should be reported');
   });
 
-  t.test('a failed lookup always carries a reason back to the screen', async () => {
+  await t.test('a failed lookup always carries a reason back to the screen', async () => {
     process.env.PRINTAVO_API_TOKEN = 'x';
     process.env.PRINTAVO_EMAIL = 'x@y.com';
     fakePrintavo(() => ({ data: { invoice: null } }));
-    const r = await pl.getInvoice('999');
+    const r = await pl.getOrder('999');
     t.equal(r.invoice, null);
     t.assert(r.tried.length && r.tried[0].error, 'there must be something to show the user');
   });
@@ -1287,7 +1299,7 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     });
   });
 
-  t.test('imprint text reads the way Printavo shows it', async () => {
+  await t.test('imprint text reads the way Printavo shows it', async () => {
     process.env.PRINTAVO_API_TOKEN = 'x';
     process.env.PRINTAVO_EMAIL = 'x@y.com';
     global.fetch = async (u, o) => {
@@ -1311,7 +1323,7 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
         ] } }] },
       } } }) };
     };
-    const r = await pl.getInvoice('f76a');
+    const r = await pl.getOrder('f76a');
     t.equal(r.invoice.groups[0].imprintText, 'Laser Engraved // 023-185');
     t.equal(r.invoice.groups[0].lines[0].imprint, 'Laser Engraved // 023-185');
     t.equal(r.imprintVia, 'typed');

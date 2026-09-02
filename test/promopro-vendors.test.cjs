@@ -484,14 +484,14 @@ t.test('capture cannot be switched on without somewhere for mail to land', () =>
 const MB = 1024 * 1024;
 const file = (id, mb) => ({ id, filename: id + '.pdf', bytes: mb * MB, pathname: 'promopro/art/p1/' + id });
 
-t.test('a normal set of files all attach', async () => {
+await t.test('a normal set of files all attach', async () => {
   const at = await import('../lib/promopro/attachments.js');
   const plan = at.planAttachments([file('a', 2), file('b', 3), file('c', 1)]);
   t.equal(plan.attach.length, 3);
   t.equal(plan.link.length, 0);
 });
 
-t.test('a file over the per-file limit becomes a link, not a dropped file', async () => {
+await t.test('a file over the per-file limit becomes a link, not a dropped file', async () => {
   const at = await import('../lib/promopro/attachments.js');
   const plan = at.planAttachments([file('big', 30)]);
   t.equal(plan.attach.length, 0);
@@ -499,7 +499,7 @@ t.test('a file over the per-file limit becomes a link, not a dropped file', asyn
   t.assert(/too large to attach/.test(plan.reasons.big), 'and say why');
 });
 
-t.test('the whole message has a budget, because base64 inflates by a third', async () => {
+await t.test('the whole message has a budget, because base64 inflates by a third', async () => {
   // Resend accepts about 40 MB. Two 20 MB files would be roughly 54 MB on
   // the wire, so they cannot both ride in one email.
   const at = await import('../lib/promopro/attachments.js');
@@ -509,7 +509,7 @@ t.test('the whole message has a budget, because base64 inflates by a third', asy
   t.assert(/already full/.test(plan.reasons.two));
 });
 
-t.test('smallest first, so one big file cannot push out three small ones', async () => {
+await t.test('smallest first, so one big file cannot push out three small ones', async () => {
   const at = await import('../lib/promopro/attachments.js');
   const plan = at.planAttachments([file('huge', 20), file('a', 1), file('b', 1), file('c', 1)]);
   const names = plan.attach.map((f) => f.id).sort().join(',');
@@ -520,14 +520,14 @@ t.test('smallest first, so one big file cannot push out three small ones', async
     'the small ones should win the space');
 });
 
-t.test('nothing attached and nothing linked is an empty plan, not a crash', async () => {
+await t.test('nothing attached and nothing linked is an empty plan, not a crash', async () => {
   const at = await import('../lib/promopro/attachments.js');
   const plan = at.planAttachments(null);
   t.equal(plan.attach.length, 0);
   t.equal(plan.link.length, 0);
 });
 
-t.test('the email names what is attached as well as attaching it', async () => {
+await t.test('the email names what is attached as well as attaching it', async () => {
   // An attachment stripped by a vendor's mail filter is otherwise invisible
   // to both sides.
   const doc = await import('../lib/promopro/document.js');
@@ -539,7 +539,7 @@ t.test('the email names what is attached as well as attaching it', async () => {
   t.assert(html.includes('logo.pdf') && html.includes('proof.pdf'));
 });
 
-t.test('a linked file explains why it was not attached', async () => {
+await t.test('a linked file explains why it was not attached', async () => {
   const doc = await import('../lib/promopro/document.js');
   const html = doc.renderPoHtml(
     { poNumber: '26-1', createdAt: '2026-08-25', lines: [],
@@ -701,7 +701,7 @@ t.test('a failed check reads as a problem, not as the thing it wanted', () => {
   t.assert(/is NOT set/.test(route), 'the negative case should be stated negatively');
 });
 
-t.test('the blob token is found under a prefixed name too', async () => {
+await t.test('the blob token is found under a prefixed name too', async () => {
   // Live on Aug 25: the store `backbone-briefs` was connected to the project
   // and working, but the SDK only looks for BLOB_READ_WRITE_TOKEN, and a
   // store connected under its own name produces
@@ -853,13 +853,13 @@ t.test('sending asks storage what artwork exists, not the record', () => {
   t.assert(!/artJustUploaded/.test(app), 'and the state it needed with it');
 });
 
-t.test('reconciling finds files the record missed', async () => {
+await t.test('reconciling finds files the record missed', async () => {
   const rec = await import('../lib/promopro/art-reconcile.js');
   t.equal(rec.artPrefix('po1'), 'promopro/art/po1/',
     'the folder must match what the upload route signs tokens for');
 });
 
-t.test('a listing failure falls back to the record rather than failing the send', async () => {
+await t.test('a listing failure falls back to the record rather than failing the send', async () => {
   // Losing the ability to double-check must not cost you the ability to send
   // a purchase order.
   const rec = await import('../lib/promopro/art-reconcile.js');
@@ -892,7 +892,7 @@ t.test('the callback address is set explicitly, not guessed by the SDK', () => {
   t.equal(uses, 2, 'both upload flows need it');
 });
 
-t.test('the signing key is paired to the store, never looked up alone', async () => {
+await t.test('the signing key is paired to the store, never looked up alone', async () => {
   // Live on Aug 25: once artwork moved to its own store, the callback was
   // signed with THAT store's key while the SDK verified against the default
   // store's key. Upload fine, callback fine, signature rejected, order empty,
@@ -921,7 +921,7 @@ t.test('the signing key is paired to the store, never looked up alone', async ()
   }
 });
 
-t.test('a missing key reports nothing rather than the wrong key', async () => {
+await t.test('a missing key reports nothing rather than the wrong key', async () => {
   const bt = await import('../lib/promopro/blob-token.js');
   const saved = { ...process.env };
   try {
@@ -970,7 +970,7 @@ t.test('the browser is told which flow to use rather than guessing', () => {
     'the app needs both calls available to pick between');
 });
 
-t.test('a token is only passed when one exists', async () => {
+await t.test('a token is only passed when one exists', async () => {
   // Passing token: undefined stops the SDK falling back to its OIDC path,
   // which turns a working deployment into a broken one. Checked by CALLING
   // the helper rather than grepping for a spelling: the logic moved into
@@ -995,7 +995,7 @@ t.test('a token is only passed when one exists', async () => {
   }
 });
 
-t.test('the store id is found under the name Vercel actually creates', async () => {
+await t.test('the store id is found under the name Vercel actually creates', async () => {
   // Live on Aug 25: connecting a store with the prefix PROMOPRO produced
   // PROMOPRO_STORE_ID, not PROMOPRO_BLOB_STORE_ID. Only the default
   // connection is called BLOB_STORE_ID. Guessing the convention from the
@@ -1015,7 +1015,7 @@ t.test('the store id is found under the name Vercel actually creates', async () 
   }
 });
 
-t.test('the shared public store is the last resort, never a preference', async () => {
+await t.test('the shared public store is the last resort, never a preference', async () => {
   const bt = await import('../lib/promopro/blob-token.js');
   const saved = { ...process.env };
   try {
@@ -1032,7 +1032,7 @@ t.test('the shared public store is the last resort, never a preference', async (
   }
 });
 
-t.test('artwork can live in a store of its own', async () => {
+await t.test('artwork can live in a store of its own', async () => {
   // Live on Aug 25: public and private are a property of the STORE. The
   // shared store is public and has to stay public, because BackBone's
   // emailed briefs are plain public URLs already in people's inboxes.
