@@ -35,7 +35,7 @@ import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
 import { artPrefix } from "../../lib/promopro/art-reconcile.js";
-import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore } from "../../lib/promopro/blob-token.js";
+import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore, artWebhookKey, artWebhookKeySource } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
 // whether a file that used to be fine still is.
@@ -577,6 +577,23 @@ async function diagnose(req, res, sess) {
       "the shared store cannot hold private files, and it cannot be made private because " +
         "BackBone's emailed briefs are public URLs already in people's inboxes. Create a " +
         "private Blob store, connect it to this project with the prefix PROMOPRO, and redeploy."
+    );
+
+    // THE PAIR, NOT THE TWO HALVES.
+    //
+    // A callback signed by one store and verified against another store's
+    // key is refused, and the refusal looks exactly like an upload that
+    // silently did not attach. That happened on Aug 25. The check is not
+    // "is a key set" but "is the key from the SAME connection as the store".
+    add(
+      artWebhookKey()
+        ? "the callback key belongs to the artwork store (" + artWebhookKeySource() + ")"
+        : "the artwork store has no callback key of its own",
+      Boolean(artWebhookKey()),
+      "the store artwork uses has no matching WEBHOOK_PUBLIC_KEY",
+      "the store is " + (artStoreSource() || "not set") + ", so the key must be " +
+        String(artStoreSource() || "BLOB_STORE_ID").replace(/_STORE_ID$/, "_WEBHOOK_PUBLIC_KEY") +
+        ". Another store's key verifies nothing and fails without saying so"
     );
 
     const failed = checks.filter((c) => !c.ok);

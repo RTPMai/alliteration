@@ -1,8 +1,11 @@
 // api/promopro/printavo.js — search Printavo and pull one job's line items,
 // so a PO can be filled in from the quote instead of retyped.
 //
-// GET ?q=<term>   search invoices by number or customer name (light shape)
-// GET ?id=<id>    one invoice WITH line items (what autofill uses)
+// GET ?q=<term>          search QUOTES AND INVOICES by number or customer
+//                        name (light shape)
+// GET ?id=<id>&kind=...  one order WITH line items (what autofill uses).
+//                        `kind` is the hint off the search result, quote or
+//                        invoice, so the right root is asked first.
 //
 // Read-only against Printavo. There is no write path here on purpose: this
 // route exists to copy information OUT of Printavo, and nothing in PromoPro
@@ -13,7 +16,7 @@
 // the front end can show a setup notice instead of a broken screen.
 
 import { requireAuth } from "../../lib/session.js";
-import { isConfigured, searchInvoices, getInvoice, probeTypes, probeInvoice } from "../../lib/promopro/printavo-lookup.js";
+import { isConfigured, searchOrders, getOrder, probeTypes, probeInvoice } from "../../lib/promopro/printavo-lookup.js";
 import { isAdminSession } from "../../lib/promopro/access.js";
 
 export default async function handler(req, res) {
@@ -51,12 +54,13 @@ export default async function handler(req, res) {
       let probeId = req.query.id ? String(req.query.id) : null;
       let resolvedFrom = null;
       if (!probeId && req.query.q) {
-        const hits = await searchInvoices(String(req.query.q), 1);
+        const found = await searchOrders(String(req.query.q), 1);
+        const hits = found.results || [];
         if (!hits.length) {
-          return res.status(200).json({ configured: true, probe: { error: "No invoice matched " + String(req.query.q) } });
+          return res.status(200).json({ configured: true, probe: { error: "No quote or invoice matched " + String(req.query.q) } });
         }
         probeId = hits[0].id;
-        resolvedFrom = { invoiceNumber: hits[0].invoiceNumber, customerName: hits[0].customerName };
+        resolvedFrom = { invoiceNumber: hits[0].invoiceNumber, customerName: hits[0].customerName, kind: hits[0].kind };
       }
 
       const types = await probeTypes();
@@ -80,7 +84,7 @@ export default async function handler(req, res) {
 
     const id = req.query && req.query.id;
     if (id) {
-      const { invoice, via, tried } = await getInvoice(String(id));
+      const { invoice, kind, via, tried } = await getOrder(String(id), req.query.kind);
       if (!invoice) {
         // 200, not 404. The front end has to be able to TELL the user what
         // went wrong, and `tried` carries the actual Printavo messages. A
@@ -92,14 +96,22 @@ export default async function handler(req, res) {
           tried,
         });
       }
-      return res.status(200).json({ configured: true, invoice, via });
+      return res.status(200).json({ configured: true, invoice, kind, via });
     }
 
     const q = (req.query && req.query.q) || "";
     if (!String(q).trim()) return res.status(200).json({ configured: true, results: [] });
 
-    const results = await searchInvoices(String(q), req.query && req.query.limit);
-    return res.status(200).json({ configured: true, results });
+    // `unavailable` is carried through so the screen can tell "Printavo has
+    // no such job" apart from "the quote half of the search did not answer".
+    // Those look identical from the outside and need opposite next steps.
+    const found = await searchOrders(String(q), req.query && req.query.limit);
+    return res.status(200).json({
+      configured: true,
+      results: found.results,
+      searched: found.searched,
+      unavailable: found.unavailable,
+    });
   } catch (e) {
     console.error("promopro/printavo route error:", e);
     // A Printavo outage or a rate limit should not look like a broken app.
