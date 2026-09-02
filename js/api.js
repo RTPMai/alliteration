@@ -1,3 +1,4 @@
+// PUT IN: js/api.js
 /**
  * alliteration. — THE SEAM
  *
@@ -336,7 +337,18 @@ export class ApiError extends Error {
     this.status = status;
     this.body = body;
   }
-  get isAuth() { return this.status === 401 || this.status === 403; }
+  // 401 ONLY. A 401 means the server does not know who you are, which is a
+  // dead or missing session and the one thing worth wiping the screen for.
+  //
+  // A 403 means the server knows exactly who you are and the answer is no.
+  // That used to land here too, so every permission refusal anywhere in the
+  // shell painted "Session expired" over the whole page. Somebody without
+  // edit rights in ShopStock got signed-out-looking every single time they
+  // pressed a button, and reporting it truthfully ("it says my session
+  // expired") pointed the search at cookies and SESSION_SECRET, which were
+  // fine. A refusal now surfaces as the app's own error message.
+  get isAuth() { return this.status === 401; }
+  get isForbidden() { return this.status === 403; }
 }
 
 /* ------------------------------------------------------------------ *
