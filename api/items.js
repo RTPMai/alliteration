@@ -1,4 +1,5 @@
-import { getSession } from "../lib/session.js";
+// PUT IN: api/items.js
+import { shopstockAccess, denyWrite } from "../lib/shopstock/access.js";
 
 export default async function handler(req, res) {
   // Same-origin under the shell: no cross-origin access needed.
@@ -8,18 +9,22 @@ export default async function handler(req, res) {
 
   const kvUrl   = process.env.KV_REST_API_URL;
   const kvToken = process.env.KV_REST_API_TOKEN;
-  const adminKey = process.env.ADMIN_KEY;
 
   if(!kvUrl || !kvToken) return res.status(500).json({ error: "Upstash not configured" });
 
-  // Under the shell, being SIGNED IN is the credential. The standalone app had
-  // no accounts, so it gated writes behind a shared ADMIN_KEY typed into the
-  // Admin screen; that key is still accepted so existing bookmarks and the
-  // scrape cron keep working, but a normal signed-in user no longer needs it.
-  function isAdmin() {
-    const sess = getSession(req);
-    if (sess && (sess.role === "admin" || sess.role === "manager")) return true;
-    return adminKey && req.headers["x-admin-key"] === adminKey;
+  // WHO MAY WRITE lives in lib/shopstock/access.js, shared with api/settings.js
+  // and api/scrape.js. It reads the same permissions the rest of the shell
+  // reads (the per-account Admin flag and the role's can_edit), not the role
+  // NAME, which is what used to refuse everyone whose role was not literally
+  // "admin" or "manager" — including accounts flagged Admin, because the
+  // session cookie does not carry that flag. The legacy shared key still works
+  // for the price-scraper cron.
+  //
+  // Looked up once per request, and only on a write: a GET pays nothing.
+  let access = null;
+  async function may() {
+    if (!access) access = await shopstockAccess(req);
+    return access;
   }
 
   async function kvGet(key) {
@@ -64,7 +69,8 @@ export default async function handler(req, res) {
 
   // POST — create item (admin only)
   if(req.method === "POST") {
-    if(!isAdmin()) return res.status(401).json({ error: "Unauthorized" });
+    const can = await may();
+    if(!can.write) return denyWrite(res, can, "add inventory items");
     const body = req.body;
     const id = Date.now().toString(36) + Math.random().toString(36).slice(2,6);
     const item = {
@@ -106,7 +112,8 @@ export default async function handler(req, res) {
     if(!item) return res.status(404).json({ error: "Item not found" });
 
     const body = req.body;
-    const isAdminReq = isAdmin();
+    const can = await may();
+    const isAdminReq = can.write;
 
     // Staff can only flag status
     if(!isAdminReq) {
@@ -127,7 +134,7 @@ export default async function handler(req, res) {
         await kvSet(`supply_item_${item.id}`, item);
         return res.status(200).json(item);
       }
-      return res.status(401).json({ error: "Unauthorized" });
+      return denyWrite(res, can, "edit inventory items");
     }
 
     // Admin full update
@@ -164,7 +171,8 @@ export default async function handler(req, res) {
 
   // DELETE item (admin only) — supports ?all=true to wipe every item (for clean re-imports)
   if(req.method === "DELETE") {
-    if(!isAdmin()) return res.status(401).json({ error: "Unauthorized" });
+    const can = await may();
+    if(!can.remove) return denyWrite(res, can, "delete inventory items");
     if(req.query.all === "true") {
       const index = await kvGet("supply_index") || [];
       for(const id of index) {

@@ -1,4 +1,5 @@
-import { getSession } from "../lib/session.js";
+// PUT IN: api/settings.js
+import { shopstockAccess, denyWrite } from "../lib/shopstock/access.js";
 
 export default async function handler(req, res) {
   // Same-origin under the shell.
@@ -8,7 +9,6 @@ export default async function handler(req, res) {
 
   const kvUrl   = process.env.KV_REST_API_URL;
   const kvToken = process.env.KV_REST_API_TOKEN;
-  const adminKey = process.env.ADMIN_KEY;
 
   if(!kvUrl || !kvToken) return res.status(500).json({ error: "Upstash not configured" });
 
@@ -54,11 +54,10 @@ export default async function handler(req, res) {
 
   // POST — save settings (admin only)
   if(req.method === "POST") {
-    // Signed-in admins/managers may write; the legacy key still works.
-    const sess = getSession(req);
-    const allowed = (sess && (sess.role === "admin" || sess.role === "manager")) ||
-                    (adminKey && req.headers["x-admin-key"] === adminKey);
-    if(!allowed) return res.status(401).json({ error: "Unauthorized" });
+    // Same rule as api/items.js, from one shared function. See
+    // lib/shopstock/access.js for why the role NAME is no longer read.
+    const can = await shopstockAccess(req);
+    if(!can.write) return denyWrite(res, can, "change ShopStock settings");
     const { deptColors, categories } = req.body;
     if(deptColors) await kvSet("ss_dept_colors", deptColors);
     if(categories) await kvSet("ss_categories", categories);

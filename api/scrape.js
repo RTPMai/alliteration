@@ -1,19 +1,16 @@
-import { getSession } from "../lib/session.js";
+// PUT IN: api/scrape.js
+import { shopstockAccess, denyWrite } from "../lib/shopstock/access.js";
 
 export default async function handler(req, res) {
   // Same-origin under the shell.
 
   const kvUrl   = process.env.KV_REST_API_URL;
   const kvToken = process.env.KV_REST_API_TOKEN;
-  const adminKey = process.env.ADMIN_KEY;
-
-  // A signed-in admin/manager, OR the shared key. The key path stays because
-  // this endpoint can also be hit by a scheduled job, which has no session.
-  const sess = getSession(req);
-  const signedIn = sess && (sess.role === "admin" || sess.role === "manager");
-  if(!signedIn && req.headers["x-admin-key"] !== adminKey && req.query.secret !== adminKey) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  // Same rule as api/items.js, from one shared function. The shared-key path
+  // is inside it, because this endpoint is also hit by a scheduled job that
+  // has no session. See lib/shopstock/access.js.
+  const can = await shopstockAccess(req);
+  if(!can.write) return denyWrite(res, can, "run the price scraper");
 
   async function kvGet(key) {
     const r = await fetch(`${kvUrl}/get/${encodeURIComponent(key)}`, { headers: { Authorization: `Bearer ${kvToken}` } });
