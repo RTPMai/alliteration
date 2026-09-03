@@ -368,8 +368,13 @@ t.test('api/notifications.js exposes a link search for the picker, scoped like t
   const src = read('api/notifications.js');
   t.assert(src.includes('linkSearch'), 'no linkSearch branch found in api/notifications.js');
   t.assert(src.includes('searchLinkable'), 'searchLinkable helper is missing');
-  t.assert(src.includes('KEYS.leads') && src.includes('KEYS.intake') && src.includes('KEYS.data'),
-    'link search should read from all three BackBone data sets (leads, intake, roster)');
+  // The roster is read through readRoster() rather than readKey(KEYS.data) as
+  // of Sep 2026, so that a client held as two Printavo records shows up in the
+  // picker once instead of twice. Leads and intake are unaffected.
+  t.assert(src.includes('KEYS.leads') && src.includes('KEYS.intake'),
+    'link search should still read leads and intake directly');
+  t.assert(src.includes('readRoster('),
+    'the client branch must read the FOLDED roster, or merged clients appear twice in the picker');
   t.assert(src.includes('data_scope') && src.includes('"own"'),
     'client link search should respect the same "own" AM scoping as the roster endpoint');
 });

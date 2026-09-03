@@ -14,7 +14,7 @@
 // confidence and the final match is a human's to confirm.
 
 import { requireAuth } from "../lib/session.js";
-import { KEYS, readKey, isConfigured } from "../lib/backbone-store.js";
+import { readRoster, isConfigured } from "../lib/backbone-store.js";
 // The matching logic lives in lib/ so the intake path can match automatically
 // too. This endpoint stays the human-facing "suggest candidates" surface.
 import { similarity, confidenceOf, toAccount } from "../lib/customer-match.js";
@@ -46,7 +46,7 @@ export default async function handler(req, res) {
   const ids = (req.query && req.query.ids) || "";
   if (String(ids).trim()) {
     try {
-      const data = await readKey(KEYS.data);
+      const data = await readRoster();
       if (!data || !Array.isArray(data.synced)) {
         return res.status(200).json({ accounts: {} });
       }
@@ -74,7 +74,9 @@ export default async function handler(req, res) {
   const limit = Math.min(parseInt(req.query.limit, 10) || 5, 20);
 
   try {
-    const data = await readKey(KEYS.data);
+    // Folded, so a donation is scored against the whole client rather than
+    // whichever of their two records happened to match the name.
+    const data = await readRoster();
     if (!data || !Array.isArray(data.synced)) {
       return res.status(200).json({ query: q, candidates: [] });
     }

@@ -62,7 +62,7 @@ const LIVE_PREFIXES = [
   '/api/data', '/api/save', '/api/leads-data', '/api/leads-save',
   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
-  '/api/reorder-settings', '/api/marketmachine/',
+  '/api/reorder-settings', '/api/marketmachine/', '/api/merges',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
   // the 's' vs 'e' at position 10 keeps them distinct.)
@@ -178,6 +178,10 @@ export const ENDPOINTS = {
   bbScanCard:      '/api/scan-card',
   bbPrintavoSync:  '/api/printavo-sync',
   bbPrintavoSchema:'/api/printavo-schema',
+  // Clients BackBone holds as more than one Printavo record. The fold happens
+  // server-side on every roster read, so this endpoint is only for managing
+  // the merges themselves, never for reading customers.
+  bbMerges:        '/api/merges',
   bbCustomerMatch: '/api/customer-match',
   bbZipCheck:      '/api/zip-check',
   bbInquiryBrief:  '/api/inquiry-brief',

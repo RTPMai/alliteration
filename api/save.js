@@ -6,13 +6,22 @@
 // scoring) and vice versa. A whole-object overwrite here would silently destroy
 // hand-entered data on every sync.
 //
+// MERGES ARE UNFOLDED ON THE WAY IN. api/data.js hands the browser a roster
+// with merged clients already folded into one row, so a caller writing the
+// whole roster back would delete the absorbed customers and store a primary
+// whose revenue is already the group's total, which the next read would fold
+// again. restoreAbsorbed() puts the originals back before anything is stored.
+// Storage always holds the ORIGINAL rows; the fold lives between the database
+// and the screen and nowhere else.
+//
 // lib/session.js, not lib/auth.js — that file was renamed in BackBone after
 // having both api/auth.js and lib/auth.js got them confused and the library was
 // overwritten. ESM `import`, not `require`: mixing module systems is what made
 // requireAuth undefined and 500'd every call.
 
 import { requireAuth } from "../lib/session.js";
-import { KEYS, readKey, kvSet, isConfigured } from "../lib/backbone-store.js";
+import { KEYS, readKey, kvSet, isConfigured, readMergeGroups } from "../lib/backbone-store.js";
+import { restoreAbsorbed } from "../lib/backbone-merge.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -38,16 +47,19 @@ export default async function handler(req, res) {
     const existing = (await readKey(KEYS.data)) ||
       { synced: [], enrichment: {}, lastSynced: null };
 
+    const groups = await readMergeGroups();
+    const safe = restoreAbsorbed(existing, body, groups);
+
     // Only touch what was actually sent.
     const next = {
-      synced: body.synced !== undefined ? body.synced : existing.synced,
-      enrichment: body.enrichment !== undefined ? body.enrichment : existing.enrichment,
+      synced: body.synced !== undefined ? safe.synced : existing.synced,
+      enrichment: body.enrichment !== undefined ? safe.enrichment : existing.enrichment,
       // lastSynced tracks the ROSTER, so it only moves when synced does.
       lastSynced: body.synced !== undefined ? new Date().toISOString() : existing.lastSynced,
     };
 
     await kvSet(KEYS.data, next);
-    return res.status(200).json({ ok: true, ...next });
+    return res.status(200).json({ ok: true, ...next, restored: safe.restored });
   } catch (e) {
     console.error("save error:", e);
     return res.status(500).json({ error: e.message });

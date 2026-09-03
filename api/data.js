@@ -17,7 +17,7 @@
 
 import { requireAuth } from "../lib/session.js";
 import { getUser, getRole } from "../lib/users.js";
-import { KEYS, readKey, isConfigured } from "../lib/backbone-store.js";
+import { KEYS, readKey, readRoster, isConfigured } from "../lib/backbone-store.js";
 
 export default async function handler(req, res) {
   res.setHeader("Cache-Control", "no-store");
@@ -45,7 +45,10 @@ export default async function handler(req, res) {
       return res.status(200).json(Object.assign({ available: true }, ops));
     }
 
-    const data = await readKey(KEYS.data);
+    // readRoster(), not readKey: a client held as two Printavo records is
+    // folded into one here, so the roster, the dashboard and the scorecard all
+    // count them once. See lib/backbone-merge.js.
+    const data = await readRoster();
     if (!data) {
       // Nothing saved yet. An empty shape rather than an error, so a fresh
       // deploy shows an empty roster instead of a broken page.

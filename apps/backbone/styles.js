@@ -651,4 +651,46 @@ body.read-only .btn-green,body.read-only .btn-red{display:none !important}
 }
 .bulk-status-group .field-lbl { font-size: 11px; color: var(--muted); white-space: nowrap; }
 .bulk-status-group select.field { padding: 5px 8px; font-size: 12px; }
+
+/* ---- Merged clients (Settings) ---- */
+.merge-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 14px 0 0; }
+.merge-row {
+  display: flex; align-items: flex-start; gap: 12px; padding: 11px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+.merge-row:first-child { border-top: 1px solid var(--line-soft); }
+.merge-row .grow { flex: 1; min-width: 0; }
+.merge-name { font-weight: 600; font-size: 13.5px; }
+.merge-sub { font-size: 12px; color: var(--muted); margin-top: 3px; line-height: 1.5; }
+.merge-why { font-size: 12px; color: var(--muted); margin-top: 5px; }
+.merge-why li { margin-left: 16px; }
+.merge-acts { display: flex; gap: 6px; flex: none; }
+.merge-empty { font-size: 12.5px; color: var(--muted); padding: 12px 0; }
+.merge-pill {
+  display: inline-block; font-size: 10.5px; font-weight: 700; letter-spacing: .03em;
+  text-transform: uppercase; padding: 2px 7px; border-radius: 999px; margin-right: 7px;
+}
+.merge-pill.high { color: var(--hue-forest); background: var(--hue-forest-tint); }
+.merge-pill.medium { color: var(--amber); background: var(--amber-tint); }
+.merge-pill.low { color: var(--muted); background: var(--line-soft); }
+.merge-panel {
+  border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px;
+  margin-top: 14px; background: var(--card);
+}
+.merge-panel h4 { font-size: 13px; margin: 0 0 4px; }
+.merge-pick { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
+.merge-pick label {
+  display: flex; align-items: flex-start; gap: 9px; font-size: 13px; cursor: pointer;
+}
+.merge-pick input { margin-top: 3px; width: auto; }
+.merge-pick .amt { color: var(--muted); font-size: 12px; }
+.merge-namefield { display: flex; flex-direction: column; gap: 5px; margin: 12px 0; max-width: 420px; }
+.merge-namefield span { font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); }
+.merge-search { max-width: 420px; margin-bottom: 8px; }
+.merge-results { max-height: 220px; overflow: auto; border: 1px solid var(--line-soft); border-radius: 8px; }
+.merge-results div {
+  padding: 7px 10px; font-size: 12.5px; cursor: pointer; border-bottom: 1px solid var(--line-soft);
+}
+.merge-results div:last-child { border-bottom: 0; }
+.merge-results div:hover { background: var(--accent-tint); }
 `;

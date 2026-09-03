@@ -47,7 +47,7 @@ import {
   getNotification, updateNotification, deleteNotification,
   listNotificationSummaries, countSummaries, canCountFromIndex,
 } from "../lib/notifications/store.js";
-import { KEYS, readKey, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
+import { KEYS, readKey, readRoster, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
 import { listEmployees } from "../lib/crewcore/store.js";
 
 // Who reports to the caller, for the "My team" tab (Ryan's ask, Aug 25 2026).
@@ -153,7 +153,7 @@ async function searchLinkable(type, q, sess) {
   }
 
   if (type === "client") {
-    const data = await readKey(KEYS.data);
+    const data = await readRoster();
     let synced = data && Array.isArray(data.synced) ? data.synced : [];
 
     const user = sess.username ? await getUser(sess.username) : null;

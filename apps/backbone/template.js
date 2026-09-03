@@ -445,6 +445,38 @@ export default `
         <span class="save-status" id="reconcileStatus" style="margin-left:10px"></span>
       </div>
     </div>
+    <!-- Merged clients. Added Sep 2026. One company arriving as two or three
+         Printavo customer ids splits its revenue, its order count and its
+         scoring across those rows, so every screen under-reports them. The
+         merge is applied when the roster is READ (lib/backbone-merge.js), so
+         the sync never has to know and a merge survives every reconcile. -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-hd"><h3>Merged clients</h3></div>
+      <div class="card-bd">
+        <div class="help">
+          One company can end up with more than one record: Printavo issued a second
+          customer id, or two businesses merged in real life. Their revenue, order
+          count and scoring then split across those rows, and every screen shows them
+          smaller than they are.
+          <br/><br/>
+          Merging folds them into one client <b>when the roster is read</b>. Nothing is
+          rewritten, so a reconcile can never undo it and unmerging puts the original
+          rows straight back. <b>You choose the name</b> the merged client goes by.
+          <br/><br/>
+          Merging changes what everyone sees on every screen at once, so it is limited
+          to admins.
+        </div>
+        <div id="mergeErr"></div>
+        <div id="mergeList"></div>
+        <div class="merge-tools">
+          <button class="btn btn-green" id="mergeScanBtn">Scan for duplicates</button>
+          <button class="btn" id="mergeManualBtn">Merge two records by name</button>
+          <span class="save-status" id="mergeStatus" style="margin-left:10px"></span>
+        </div>
+        <div id="mergeSuggestions"></div>
+        <div id="mergeForm"></div>
+      </div>
+    </div>
     <div class="card" style="margin-bottom:16px">
       <div class="card-hd"><h3>Calculate distances</h3></div>
       <div class="card-bd">

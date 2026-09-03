@@ -6258,6 +6258,415 @@ export async function start(ctx) {
    * would quietly overwrite the real settings with the placeholders.
    */
 
+  /* ------------------------------------------------------------------ *
+   * MERGED CLIENTS (Settings)
+   *
+   * One company arriving as two or three Printavo customer ids splits its
+   * revenue, order count and scoring across those rows. The fold happens
+   * server-side on every roster read (lib/backbone-merge.js), so this screen
+   * only manages the merges themselves.
+   *
+   * THE NAME IS PICKED HERE, BY A PERSON. Which of "KBS", "CRS" and "Kitchen
+   * Bath Solutions" the team says out loud is not something software can work
+   * out, and getting it wrong renames a client on every screen at once.
+   *
+   * Nothing is ever merged without a confirmation. The scan proposes with its
+   * evidence attached; a wrong merge welds two real customers together and has
+   * no visible symptom, which is exactly why it is never automatic.
+   * ------------------------------------------------------------------ */
+
+  let mergeGroups = [];
+  let mergeSuggestions = [];
+  let mergeCanEdit = true;
+  let mergeDraft = null;   // { rows: [...], name, editingId } while the panel is open
+
+  function mergeStatus(text) {
+    const el = $id("mergeStatus");
+    if (el) el.textContent = text || "";
+  }
+
+  function mergeError(msg) {
+    const el = $id("mergeErr");
+    if (el) el.innerHTML = msg ? '<div class="err">' + escapeHtml(msg) + "</div>" : "";
+  }
+
+  function rosterRow(id) {
+    return state.synced.find(function (c) { return String(c.customer_id) === String(id); }) || null;
+  }
+
+  function renderMergeList() {
+    const el = $id("mergeList");
+    if (!el) return;
+
+    if (!mergeGroups.length) {
+      el.innerHTML = '<div class="merge-empty">No clients are merged. ' +
+        "Scan for duplicates to see whether any of your records look like the same company.</div>";
+      return;
+    }
+
+    el.innerHTML = mergeGroups.map(function (g) {
+      const from = (g.memberIds || []).map(function (id) {
+        const r = rosterRow(id);
+        // A member that is no longer in the roster means Printavo has merged
+        // them for real. Worth saying, not worth alarming about.
+        return r ? escapeHtml(r.company_name) : escapeHtml(String(id)) + " (no longer in Printavo)";
+      }).join(", ");
+
+      return '<div class="merge-row">' +
+        '<div class="grow">' +
+          '<div class="merge-name">' + escapeHtml(g.name) + "</div>" +
+          '<div class="merge-sub">Also counted here: ' + from + "</div>" +
+          '<div class="merge-sub">Merged by ' + escapeHtml(g.mergedBy || "someone") +
+            (g.mergedAt ? " on " + fmtDate(String(g.mergedAt).slice(0, 10)) : "") + "</div>" +
+        "</div>" +
+        '<div class="merge-acts">' +
+          '<button class="btn" data-merge-edit="' + escapeHtml(g.id) + '">Rename</button>' +
+          '<button class="btn btn-gray" data-merge-undo="' + escapeHtml(g.id) + '">Unmerge</button>' +
+        "</div>" +
+      "</div>";
+    }).join("");
+
+    el.querySelectorAll("[data-merge-edit]").forEach(function (b) {
+      b.disabled = !mergeCanEdit;
+      b.addEventListener("click", function () { openMergePanel(null, b.dataset.mergeEdit); });
+    });
+    el.querySelectorAll("[data-merge-undo]").forEach(function (b) {
+      b.disabled = !mergeCanEdit;
+      b.addEventListener("click", function () { handleUnmerge(b.dataset.mergeUndo); });
+    });
+  }
+
+  function renderMergeSuggestions() {
+    const el = $id("mergeSuggestions");
+    if (!el) return;
+
+    if (!mergeSuggestions.length) {
+      el.innerHTML = "";
+      return;
+    }
+
+    el.innerHTML =
+      '<div class="section-lbl" style="margin-top:18px">Possible duplicates</div>' +
+      '<div class="help">Nothing here is merged until you say so. The reasons are listed so ' +
+        "you can tell a real duplicate from two companies that happen to be named alike.</div>" +
+      mergeSuggestions.map(function (sg, i) {
+        const a = sg.rows[0];
+        const b = sg.rows[1];
+        return '<div class="merge-row">' +
+          '<div class="grow">' +
+            '<span class="merge-pill ' + sg.confidence + '">' + sg.confidence + "</span>" +
+            '<span class="merge-name">' + escapeHtml(a.company_name) + " + " +
+              escapeHtml(b.company_name) + "</span>" +
+            '<div class="merge-sub">' +
+              escapeHtml(a.company_name) + ": " + fmtMoney(a.total_revenue) + ", " +
+                a.invoice_count + " invoices &middot; " +
+              escapeHtml(b.company_name) + ": " + fmtMoney(b.total_revenue) + ", " +
+                b.invoice_count + " invoices" +
+            "</div>" +
+            '<div class="merge-why"><ul>' +
+              sg.reasons.map(function (r) { return "<li>" + escapeHtml(r) + "</li>"; }).join("") +
+            "</ul></div>" +
+          "</div>" +
+          '<div class="merge-acts">' +
+            '<button class="btn btn-green" data-merge-take="' + i + '">Merge these</button>' +
+            '<button class="btn btn-gray" data-merge-skip="' + i + '">Not the same</button>' +
+          "</div>" +
+        "</div>";
+      }).join("");
+
+    el.querySelectorAll("[data-merge-take]").forEach(function (b) {
+      b.disabled = !mergeCanEdit;
+      b.addEventListener("click", function () {
+        const sg = mergeSuggestions[Number(b.dataset.mergeTake)];
+        if (sg) openMergePanel(sg.rows.map(function (r) { return String(r.customer_id); }), null);
+      });
+    });
+    el.querySelectorAll("[data-merge-skip]").forEach(function (b) {
+      b.disabled = !mergeCanEdit;
+      b.addEventListener("click", function () {
+        const sg = mergeSuggestions[Number(b.dataset.mergeSkip)];
+        if (sg) handleDismissSuggestion(sg);
+      });
+    });
+  }
+
+  /**
+   * The confirm step. Every record in the merge is listed, and one radio button
+   * decides which one the others fold into. The name box starts as that
+   * record's name and can be typed over: the company may go by something none
+   * of the Printavo records spell correctly.
+   */
+  function openMergePanel(ids, editingId) {
+    const el = $id("mergeForm");
+    if (!el) return;
+
+    let rows;
+    let name = "";
+    let primaryId = "";
+
+    if (editingId) {
+      const g = mergeGroups.find(function (x) { return String(x.id) === String(editingId); });
+      if (!g) return;
+      // The primary is a folded row in the roster now, so its own name has been
+      // replaced by the chosen one. Show the group's members as recorded.
+      rows = [{ customer_id: g.primaryId, company_name: g.name }].concat(
+        (g.memberIds || []).map(function (id) {
+          const r = rosterRow(id);
+          return { customer_id: id, company_name: r ? r.company_name : String(id) };
+        })
+      );
+      name = g.name;
+      primaryId = g.primaryId;
+    } else {
+      rows = (ids || []).map(function (id) {
+        const r = rosterRow(id);
+        return r || { customer_id: id, company_name: String(id) };
+      });
+      if (rows.length < 2) return;
+      // Defaulted to the record with the most revenue, because that is usually
+      // the one people already recognise. It is only a default: the whole point
+      // of this screen is that a person picks.
+      const biggest = rows.slice().sort(function (x, y) {
+        return (y.total_revenue || 0) - (x.total_revenue || 0);
+      })[0];
+      primaryId = String(biggest.customer_id);
+      name = biggest.company_name;
+    }
+
+    mergeDraft = { rows: rows, editingId: editingId || null };
+
+    el.innerHTML =
+      '<div class="merge-panel">' +
+        "<h4>" + (editingId ? "Rename this merged client" : "Merge these records into one client") + "</h4>" +
+        '<div class="help">' + (editingId
+          ? "Only the name and which record is the main one can change here. To add or remove a record, unmerge and start again."
+          : "Pick the record everything folds into, then confirm the name it should go by everywhere.") +
+        "</div>" +
+        '<div class="merge-pick" id="mergePick">' +
+          rows.map(function (r) {
+            const full = rosterRow(r.customer_id);
+            const detail = full
+              ? fmtMoney(full.total_revenue) + ", " + (full.invoice_count || 0) + " invoices"
+              : "not in the roster";
+            return "<label>" +
+              '<input type="radio" name="mergePrimary" value="' + escapeHtml(String(r.customer_id)) + '"' +
+                (String(r.customer_id) === String(primaryId) ? " checked" : "") + ">" +
+              "<span>" + escapeHtml(r.company_name) +
+                '<span class="amt"> &middot; ' + detail + "</span></span>" +
+            "</label>";
+          }).join("") +
+        "</div>" +
+        '<label class="merge-namefield"><span>Name it goes by</span>' +
+          '<input class="field" id="mergeName" maxlength="120" value="' + escapeHtml(name) + '">' +
+        "</label>" +
+        '<div id="mergePanelErr"></div>' +
+        '<button class="btn btn-green" id="mergeConfirm">' +
+          (editingId ? "Save" : "Merge into one client") + "</button> " +
+        '<button class="btn" id="mergeCancel">Cancel</button>' +
+      "</div>";
+
+    // Picking a different main record swaps the name box to that record's
+    // name, unless the name has been typed over by hand.
+    let nameEdited = false;
+    const nameEl = $id("mergeName");
+    if (nameEl) nameEl.addEventListener("input", function () { nameEdited = true; });
+
+    el.querySelectorAll('input[name="mergePrimary"]').forEach(function (radio) {
+      radio.addEventListener("change", function () {
+        if (nameEdited || !nameEl) return;
+        const r = rows.find(function (x) { return String(x.customer_id) === radio.value; });
+        if (r) nameEl.value = r.company_name;
+      });
+    });
+
+    $id("mergeCancel").addEventListener("click", closeMergePanel);
+    $id("mergeConfirm").addEventListener("click", handleConfirmMerge);
+  }
+
+  function closeMergePanel() {
+    mergeDraft = null;
+    const el = $id("mergeForm");
+    if (el) el.innerHTML = "";
+  }
+
+  async function handleConfirmMerge() {
+    if (!mergeDraft) return;
+    const errEl = $id("mergePanelErr");
+    if (errEl) errEl.innerHTML = "";
+
+    const picked = $one('input[name="mergePrimary"]:checked');
+    if (!picked) {
+      if (errEl) errEl.innerHTML = '<div class="err">Pick which record the others merge into.</div>';
+      return;
+    }
+    const nameEl = $id("mergeName");
+    const name = nameEl ? nameEl.value.trim() : "";
+    if (!name) {
+      if (errEl) errEl.innerHTML = '<div class="err">A merged client needs a name.</div>';
+      return;
+    }
+
+    const primaryId = picked.value;
+    const memberIds = mergeDraft.rows
+      .map(function (r) { return String(r.customer_id); })
+      .filter(function (id) { return id !== primaryId; });
+
+    const btn = $id("mergeConfirm");
+    if (btn) btn.disabled = true;
+    mergeStatus("Merging...");
+
+    try {
+      await api.post(ENDPOINTS.bbMerges, {
+        id: mergeDraft.editingId || undefined,
+        primaryId: primaryId,
+        memberIds: memberIds,
+        name: name,
+      });
+      closeMergePanel();
+      mergeStatus("Merged. Reloading the roster...");
+      // The fold happens server-side, so the roster has to come back down for
+      // any screen to show it. Cheaper and more honest than patching the rows
+      // in the browser and hoping the two agree.
+      await loadMerges(false);
+      await loadData();
+      mergeStatus("Done. " + escapeHtml(name) + " now counts as one client everywhere.");
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      mergeStatus("");
+      if (errEl) errEl.innerHTML = '<div class="err">' + escapeHtml(e.message) + "</div>";
+    }
+  }
+
+  async function handleUnmerge(id) {
+    const g = mergeGroups.find(function (x) { return String(x.id) === String(id); });
+    if (!g) return;
+    if (!confirm('Unmerge "' + g.name + '"? The original records come straight back, ' +
+                 "with their own revenue and scoring. Nothing is lost either way.")) return;
+
+    mergeStatus("Unmerging...");
+    try {
+      // del() takes OPTIONS, not a body: an id goes in query, per the note on
+      // the helper in js/api.js.
+      await api.del(ENDPOINTS.bbMerges, { query: { id: id } });
+      await loadMerges(false);
+      await loadData();
+      mergeStatus("Unmerged. The original records are back on the roster.");
+    } catch (e) {
+      mergeStatus("");
+      mergeError(e.message);
+    }
+  }
+
+  async function handleDismissSuggestion(sg) {
+    try {
+      await api.post(ENDPOINTS.bbMerges + "?action=dismiss", {
+        a: sg.rows[0].customer_id,
+        b: sg.rows[1].customer_id,
+      });
+      // Remembered on the server, so it does not come back at the top of the
+      // list tomorrow. A list that keeps proposing the same wrong pair stops
+      // being read.
+      mergeSuggestions = mergeSuggestions.filter(function (x) { return x.key !== sg.key; });
+      renderMergeSuggestions();
+    } catch (e) {
+      mergeError(e.message);
+    }
+  }
+
+  async function loadMerges(withSuggestions) {
+    if (!$id("mergeList")) return;
+    mergeError("");
+    try {
+      const d = await api.get(ENDPOINTS.bbMerges + (withSuggestions ? "?suggest=1" : ""));
+      mergeGroups = d.groups || [];
+      mergeCanEdit = d.canEdit !== false;
+      if (withSuggestions) mergeSuggestions = d.suggestions || [];
+      renderMergeList();
+      renderMergeSuggestions();
+      if (withSuggestions) {
+        mergeStatus(mergeSuggestions.length
+          ? "Scanned " + d.scanned + " records, " + mergeSuggestions.length + " to look at"
+          : "Scanned " + d.scanned + " records, nothing looks like a duplicate");
+      }
+      const scan = $id("mergeScanBtn");
+      const manual = $id("mergeManualBtn");
+      if (scan) scan.disabled = !mergeCanEdit;
+      if (manual) manual.disabled = !mergeCanEdit;
+      if (!mergeCanEdit) mergeStatus("Read-only: merging is limited to admins");
+    } catch (e) {
+      mergeError("Could not load merged clients: " + e.message);
+    }
+  }
+
+  /** Pick any two roster rows by name, for a merge the scan did not find. */
+  function openManualMergePicker() {
+    const el = $id("mergeForm");
+    if (!el) return;
+
+    const chosen = [];
+
+    function paint() {
+      el.innerHTML =
+        '<div class="merge-panel">' +
+          "<h4>Merge two records by name</h4>" +
+          '<div class="help">Search the roster and pick the records that are really one company. ' +
+            "You choose which one they fold into on the next step.</div>" +
+          '<div class="merge-sub">Picked: ' +
+            (chosen.length ? chosen.map(function (c) { return escapeHtml(c.company_name); }).join(", ")
+                           : "nothing yet") + "</div>" +
+          '<input class="field merge-search" id="mergeSearch" placeholder="Type part of a company name">' +
+          '<div class="merge-results" id="mergeResults"></div>' +
+          '<div style="margin-top:12px">' +
+            '<button class="btn btn-green" id="mergeNext"' + (chosen.length < 2 ? " disabled" : "") + ">Next</button> " +
+            '<button class="btn" id="mergePickCancel">Cancel</button>' +
+          "</div>" +
+        "</div>";
+
+      const search = $id("mergeSearch");
+      const results = $id("mergeResults");
+
+      function renderResults() {
+        const q = (search.value || "").trim().toLowerCase();
+        if (q.length < 2) {
+          results.innerHTML = '<div style="cursor:default;color:var(--muted)">Type at least two letters.</div>';
+          return;
+        }
+        const hits = state.synced
+          .filter(function (c) {
+            return String(c.company_name || "").toLowerCase().indexOf(q) >= 0 &&
+              !chosen.some(function (x) { return String(x.customer_id) === String(c.customer_id); });
+          })
+          .slice(0, 25);
+        results.innerHTML = hits.length
+          ? hits.map(function (c) {
+              return '<div data-pick="' + escapeHtml(String(c.customer_id)) + '">' +
+                escapeHtml(c.company_name) + " &middot; " + fmtMoney(c.total_revenue) + "</div>";
+            }).join("")
+          : '<div style="cursor:default;color:var(--muted)">Nothing matches.</div>';
+
+        results.querySelectorAll("[data-pick]").forEach(function (d) {
+          d.addEventListener("click", function () {
+            const row = rosterRow(d.dataset.pick);
+            if (row) chosen.push(row);
+            paint();
+          });
+        });
+      }
+
+      search.addEventListener("input", renderResults);
+      renderResults();
+      search.focus();
+
+      $id("mergePickCancel").addEventListener("click", closeMergePanel);
+      const next = $id("mergeNext");
+      if (next) next.addEventListener("click", function () {
+        openMergePanel(chosen.map(function (c) { return String(c.customer_id); }), null);
+      });
+    }
+
+    paint();
+  }
+
   const REORDER_FIELDS = [
     ["reorderDue", "dueAt"],
     ["reorderOverdue", "overdueAt"],
@@ -10135,6 +10544,19 @@ export async function start(ctx) {
   $id("resetBtn").addEventListener("click", handleReset);
   $id("reconcileBtn").addEventListener("click", handleReconcile);
   loadMarketingInitiatives();
+  (function wireMergedClients() {
+    const scan = $id("mergeScanBtn");
+    const manual = $id("mergeManualBtn");
+    if (scan) scan.addEventListener("click", function () {
+      mergeStatus("Scanning the roster...");
+      loadMerges(true);
+    });
+    if (manual) manual.addEventListener("click", openManualMergePicker);
+    // The list of existing merges loads on mount so Settings always says what
+    // is merged. The SCAN is on a button: it compares thousands of records and
+    // nobody needs it on every page load.
+    loadMerges(false);
+  })();
   (function wireReorderTiming() {
     const save = $id("reorderSaveBtn");
     const reset = $id("reorderResetBtn");
