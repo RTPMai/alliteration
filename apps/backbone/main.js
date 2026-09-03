@@ -6357,11 +6357,14 @@ export async function start(ctx) {
             '<span class="merge-pill ' + sg.confidence + '">' + sg.confidence + "</span>" +
             '<span class="merge-name">' + escapeHtml(a.company_name) + " + " +
               escapeHtml(b.company_name) + "</span>" +
+            // The customer id is shown deliberately. Two rows that look
+            // identical in every column are the shape a scanning bug takes,
+            // and the id is the one field that proves these are two records.
             '<div class="merge-sub">' +
-              escapeHtml(a.company_name) + ": " + fmtMoney(a.total_revenue) + ", " +
-                a.invoice_count + " invoices &middot; " +
-              escapeHtml(b.company_name) + ": " + fmtMoney(b.total_revenue) + ", " +
-                b.invoice_count + " invoices" +
+              escapeHtml(a.company_name) + " (" + escapeHtml(a.customer_id) + "): " +
+                fmtMoney(a.total_revenue) + ", " + a.invoice_count + " invoices &middot; " +
+              escapeHtml(b.company_name) + " (" + escapeHtml(b.customer_id) + "): " +
+                fmtMoney(b.total_revenue) + ", " + b.invoice_count + " invoices" +
             "</div>" +
             '<div class="merge-why"><ul>' +
               sg.reasons.map(function (r) { return "<li>" + escapeHtml(r) + "</li>"; }).join("") +

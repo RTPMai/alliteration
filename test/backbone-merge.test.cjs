@@ -164,6 +164,97 @@ import(path.join(ROOT, 'lib/backbone-merge.js')).then((m) => {
       'roster order must not decide whether a duplicate is found');
   });
 
+  /* ---- a record is never its own duplicate -------------------------------
+   * THE FIRST REAL SCAN, Sep 3 2026: all 60 suggestions were a record paired
+   * with itself. Same name, same revenue, same invoice count, same contact
+   * email, same ZIP, scored as a near-certainty and sitting on top of every
+   * genuine duplicate.
+   *
+   * The cause: a customer with two contacts at the same company domain was
+   * added to that domain's bucket once per contact, and the pair loop then
+   * compared the row with itself. Perfectly ordinary data, and the blocking
+   * step turned it into a confident wrong answer.
+   * ---------------------------------------------------------------------- */
+
+  t.test('a row with two contacts on one domain is not proposed against itself', () => {
+    const rows = [
+      {
+        customer_id: 'f1', company_name: 'Foth & VanDyke LLC',
+        total_revenue: 514096, invoice_count: 560, zip: '50021',
+        contacts: [
+          { name: 'Shani', email: 'shani.wahl@foth.com' },
+          { name: 'Pat', email: 'pat@foth.com' },
+          { name: 'Lee', email: 'lee@foth.com' },
+        ],
+      },
+      { customer_id: 'f2', company_name: 'Ankeny Fire Department', total_revenue: 100, invoice_count: 1 },
+    ];
+    const out = suggestDuplicates(rows, {});
+    t.equal(out.length, 0, 'one company with three contacts is one company');
+  });
+
+  t.test('no suggestion ever names the same record twice', () => {
+    // The general form of the same bug: whatever the blocking does, a pair of
+    // one is not a pair. A self-pair scores as a certainty and buries the real
+    // duplicates underneath it.
+    const rows = [
+      {
+        customer_id: 'a', company_name: 'Housby', total_revenue: 163642, invoice_count: 241, zip: '50313',
+        contacts: [{ email: 'aswanson@housby.com' }, { email: 'b@housby.com' }],
+      },
+      {
+        customer_id: 'b', company_name: 'HOUSBY MACK', total_revenue: 12000, invoice_count: 9, zip: '50313',
+        contacts: [{ email: 'c@housby.com' }, { email: 'd@housby.com' }],
+      },
+    ];
+    const out = suggestDuplicates(rows, {});
+    out.forEach((sg) => {
+      t.assert(String(sg.rows[0].customer_id) !== String(sg.rows[1].customer_id),
+        'suggested ' + sg.rows[0].customer_id + ' against itself');
+    });
+    t.assert(out.some((sg) => sg.key === pairKey('a', 'b')),
+      'and the genuine pair between the two records is still found');
+  });
+
+  t.test('a common first word does not make everyone a duplicate of everyone', () => {
+    // "t:school" would otherwise hold half the roster, and comparing every
+    // school with every other school is the quadratic scan blocking exists to
+    // avoid. Capped tighter than the precise keys for that reason.
+    const rows = [];
+    for (let i = 0; i < 300; i++) {
+      rows.push({ customer_id: 's' + i, company_name: 'School District ' + i, total_revenue: 1000 });
+    }
+    const started = Date.now();
+    const out = suggestDuplicates(rows, {});
+    t.assert(Date.now() - started < 2000, 'a common token must not blow the scan up');
+    t.assert(out.length < 60, 'and must not fill the list with 300 unrelated schools');
+  });
+
+  t.test('names that differ only by a number are not proposed', () => {
+    const a = { customer_id: 'n1', company_name: 'Ankeny Elementary 1' };
+    const b = { customer_id: 'n2', company_name: 'Ankeny Elementary 2' };
+    t.equal(scorePair(a, b), null,
+      'two thirds of the words match, and the third word is the whole point');
+  });
+
+  t.test('the same words in a different order are still proposed', () => {
+    const a = { customer_id: 'k1', company_name: 'Ankeny Kiwanis Club' };
+    const b = { customer_id: 'k2', company_name: 'Kiwanis Club of Ankeny' };
+    const sc = scorePair(a, b);
+    t.assert(sc && sc.score >= 70, 'nothing else here would connect these two');
+    t.assert(sc.reasons.join(' ').indexOf('different order') >= 0, 'and it says why');
+  });
+
+  t.test('partial overlap corroborates a real signal instead of standing alone', () => {
+    const a = { customer_id: 'c1', company_name: 'Saydel Community Schools', zip: '50313',
+                contacts: [{ email: 'a@saydel.org' }] };
+    const b = { customer_id: 'c2', company_name: 'Saydel Community School District', zip: '50313',
+                contacts: [{ email: 'b@saydel.org' }] };
+    const sc = scorePair(a, b);
+    t.assert(sc && sc.score >= 70, 'a shared domain and a prefix is a real pair');
+    t.assert(sc.reasons.length >= 2, 'and the corroborating reasons are listed too');
+  });
+
   t.test('a pair already merged is not suggested again', () => {
     const out = suggestDuplicates(ROSTER.synced, { groups: [GROUP] });
     t.equal(out.some((s) => s.key === pairKey('1', '2')), false,
