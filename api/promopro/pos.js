@@ -1,3 +1,4 @@
+// PUT IN: api/promopro/pos.js
 // api/promopro/pos.js — purchase orders.
 //
 // GET     list, or one by ?id=
@@ -18,7 +19,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
-import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch } from "../../lib/promopro/schema.js";
+import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
 import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
@@ -172,7 +173,11 @@ export default async function handler(req, res) {
         reorderOfNumber: source ? (source.poNumber || "") : "",
         receipts: [],
         history: [
-          { at: createdAt, by: String(sess.username || "").toLowerCase(), what: "created" },
+          {
+            at: createdAt,
+            by: String(sess.username || "").toLowerCase(),
+            what: check.record.outsourced ? "created as outsourced work, no purchase order" : "created",
+          },
           ...(source
             ? [{
                 at: createdAt,
@@ -284,6 +289,18 @@ export default async function handler(req, res) {
       // Doing this HERE rather than on the screen means it is true however
       // the dates got set: a tick, a back-fill, a receipt booking in the last
       // of a short delivery.
+      // A DOCUMENT THAT WENT OUT CANNOT BE UN-ISSUED FROM A CHECKBOX.
+      // Going the other way is fine, and is the likelier mistake to need
+      // fixing: somebody raises a PO for work that turned out to be a
+      // drop-off, notices before sending, and unticks it.
+      if (check.patch.outsourced === true && !isOutsourced(existing) && existing.lastSentAt) {
+        return res.status(400).json({
+          error: "This purchase order was already emailed to the vendor on " +
+            String(existing.lastSentAt).slice(0, 10) +
+            ", so it cannot be turned into outsourced work. Cancel it and raise the job fresh if the PO should not stand.",
+        });
+      }
+
       const closing = closedPatch({ ...existing, ...check.patch });
       Object.assign(check.patch, closing);
 
@@ -292,6 +309,18 @@ export default async function handler(req, res) {
       const before = currentStage(existing);
       const after = currentStage({ ...existing, ...check.patch });
       const history = Array.isArray(existing.history) ? existing.history.slice() : [];
+      // Whether a job carries a purchase order is not a stage, but it is the
+      // kind of thing somebody will later ask who decided and when.
+      if (check.patch.outsourced !== undefined && check.patch.outsourced !== isOutsourced(existing)) {
+        history.push({
+          at: new Date().toISOString(),
+          by: String(sess.username || "").toLowerCase(),
+          what: check.patch.outsourced
+            ? "marked as outsourced work, no purchase order"
+            : "marked as a purchase order",
+        });
+      }
+
       if (after !== before) {
         history.push({
           at: new Date().toISOString(),
