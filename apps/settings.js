@@ -17,6 +17,10 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
+// Resolves the donation-decision switch the same way the server does, so the
+// box shows ticked for a role that has always been able to decide even though
+// nothing was ever written to storage for it.
+import { givingDecideVerdict } from '../lib/giving-access.js';
 
 export default {
   id: 'settings',
@@ -384,6 +388,14 @@ export default {
               // notifications until an admin turns it off for a role.
               '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_delete_notifications"' +
                 (r.can_delete_notifications !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can delete notifications</label>' +
+              // GIVINGGAUGE, Sep 2026. Separate from can_edit on purpose:
+              // somebody can be given the app to type in the requests that
+              // arrive by phone without also being handed the yes or no. The
+              // tick shown is the RESOLVED answer, so a role that has been
+              // deciding all along reads as ticked rather than as blank.
+              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_decide_giving"' +
+                (givingDecideVerdict(null, r).allowed ? ' checked' : '') + (locked ? ' disabled' : '') +
+                '> Can approve donations</label>' +
             '</div>' +
 
             (locked
@@ -620,7 +632,12 @@ export default {
         apps: ['backbone'],
         data_scope: 'all',
         can_edit: true,
-        can_export: false
+        can_export: false,
+        // Written explicitly, and off, from the moment the role exists. A
+        // missing value means "this role predates the switch" and falls back
+        // to deciding (see lib/giving-access.js), which must never be what a
+        // brand new role gets by accident.
+        can_decide_giving: false
       };
       renderRoles();
       markDirty(true);

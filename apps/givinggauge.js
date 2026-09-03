@@ -1,3 +1,4 @@
+// PUT IN: apps/givinggauge.js (REPLACES the current one)
 /**
  * GivingGauge — donation and sponsorship scoring.
  *
@@ -23,6 +24,10 @@ import { loadEngine } from '../js/giving-engine.js';
 import { loadDial } from '../js/giving-dial.js';
 import { ENDPOINTS } from '../js/api.js';
 import { buildLedgerCsv } from '../lib/giving-summary.js';
+// Who may add, decide and run the bulk jobs. The SAME file api/giving-requests.js
+// asks, so a button that is showing and a request that is refused cannot
+// disagree. It imports nothing, so it is safe to pull into the browser.
+import { permsCanAdd, permsCanDecide, permsCanManage } from '../lib/giving-access.js';
 
 export default {
   id: 'givinggauge',
@@ -427,6 +432,17 @@ export default {
     const engine = await loadEngine();
     const dial = await loadDial();
 
+    // PERMISSIONS, Sep 2026. Read once, used by everything below. Hiding a
+    // control is a courtesy: the route refuses the same three things whatever
+    // the screen shows. What it is NOT is a role-name check — this app used to
+    // test for the words "admin" and "manager", which meant a role built in
+    // Settings for exactly this job was refused.
+    const canAdd = permsCanAdd(ctx.perms);
+    const canDecide = permsCanDecide(ctx.perms);
+    const canManage = permsCanManage(ctx.perms);
+    // Read-only visitors get a plain list rather than controls that error.
+    const dis = canAdd ? '' : ' disabled';
+
     // Requests come through the seam. Under MOCK these are the same six records
     // the standalone app had inline; with MOCK off they come from the endpoint.
     const payload = await ctx.api.get(ENDPOINTS.ggRequests);
@@ -786,7 +802,7 @@ export default {
       var matchUI = a.found
         ? '<div class="match-done">Matched to <b>' + esc(a.name || '') + '</b>' +
             (a.matchConfidence ? ' (' + esc(a.matchConfidence) + ' confidence)' : '') +
-            ' <button class="match-clear" data-unmatch="' + esc(row.meta.id) + '">Change</button></div>'
+            (canAdd ? ' <button class="match-clear" data-unmatch="' + esc(row.meta.id) + '">Change</button>' : '') + '</div>'
         : '<div class="match-wrap">' +
             '<button class="match-btn" data-match="' + esc(row.meta.id) + '">Find this account</button>' +
             '<span class="match-hint">Relationship and spend score 0 of 46 until matched.</span>' +
@@ -861,7 +877,7 @@ export default {
         return '' +
           '<label class="cls-row">' +
             '<span class="cls-lbl">' + esc(name) + '</span>' +
-            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '">' +
+            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '"' + dis + '>' +
               '<option value="">Not classified</option>' +
               options.map(function (o) {
                 return '<option value="' + o[0] + '"' +
@@ -875,7 +891,7 @@ export default {
         return '' +
           '<label class="cls-row">' +
             '<span class="cls-lbl">' + esc(name) + '</span>' +
-            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '">' +
+            '<select class="cls-sel" data-classify="' + esc(hint) + '" data-id="' + esc(id) + '"' + dis + '>' +
               '<option value=""' + (current == null ? ' selected' : '') + '>Not answered</option>' +
               '<option value="yes"' + (current === true ? ' selected' : '') + '>Yes</option>' +
               '<option value="no"' + (current === false ? ' selected' : '') + '>No</option>' +
@@ -923,23 +939,23 @@ export default {
             '<label class="spend-f">' +
               '<span>Retail value</span>' +
               '<input type="text" inputmode="decimal" class="spend-in" data-spend="retailValue" ' +
-                'data-id="' + esc(id) + '" value="' + esc(f.retailValue == null ? '' : f.retailValue) + '" placeholder="0.00">' +
+                'data-id="' + esc(id) + '" value="' + esc(f.retailValue == null ? '' : f.retailValue) + '" placeholder="0.00"' + dis + '>' +
             '</label>' +
             '<label class="spend-f">' +
               '<span>Our cost</span>' +
               '<input type="text" inputmode="decimal" class="spend-in" data-spend="cost" ' +
-                'data-id="' + esc(id) + '" value="' + esc(f.cost == null ? '' : f.cost) + '" placeholder="0.00">' +
+                'data-id="' + esc(id) + '" value="' + esc(f.cost == null ? '' : f.cost) + '" placeholder="0.00"' + dis + '>' +
             '</label>' +
             '<label class="spend-f spend-date">' +
               '<span>Date</span>' +
               '<input type="date" class="spend-in" data-spend="fulfilledAt" ' +
-                'data-id="' + esc(id) + '" value="' + esc(f.fulfilledAt || '') + '">' +
+                'data-id="' + esc(id) + '" value="' + esc(f.fulfilledAt || '') + '"' + dis + '>' +
             '</label>' +
           '</div>' +
           '<label class="spend-f">' +
             '<span>Notes</span>' +
             '<textarea class="spend-in spend-notes" data-spend="notes" data-id="' + esc(id) + '" ' +
-              'rows="2" placeholder="What went out, any conditions agreed">' + esc(f.notes || '') + '</textarea>' +
+              'rows="2" placeholder="What went out, any conditions agreed"' + dis + '>' + esc(f.notes || '') + '</textarea>' +
           '</label>' +
           '<div class="spend-msg" id="spendMsg-' + esc(id) + '">' +
             (f.recordedBy ? 'Recorded by ' + esc(f.recordedBy) : '') +
@@ -960,9 +976,23 @@ export default {
               (dec.by ? ' by ' + esc(dec.by) : '') +
               (ovr ? ' &middot; <span class="ov">override</span>, engine said ' + esc(r.decision) : '') +
               (dec.note ? '<br>' + esc(dec.note) : '') +
-              '<br><button class="undo" data-undo="' + row.meta.id + '">Reopen this request</button>' +
+              (canDecide
+                ? '<br><button class="undo" data-undo="' + row.meta.id + '">Reopen this request</button>'
+                : '') +
             '</div>' +
             (dec.status === 'approved' ? spendBlock(row) : '') +
+          '</div>';
+      }
+
+      // Somebody who may add a request but not judge one sees where the
+      // decision goes and who it is waiting on, rather than two buttons that
+      // would come back 403. Saying "waiting on a decision" is the useful
+      // half of the block; the buttons were never the informative part.
+      if (!canDecide) {
+        return '' +
+          '<div class="decide">' +
+            '<div class="logged">Waiting on a decision. The engine says ' +
+              esc(r.decision) + '.</div>' +
           '</div>';
       }
 
@@ -1343,18 +1373,21 @@ export default {
     var importBtn = $('#importBtn');
     var importMsg = $('#importMsg');
 
-    // Only admins and managers can run this; the endpoint enforces it too, so
-    // hiding the button is a courtesy rather than the control.
+    // The endpoint enforces all of this too, so hiding a button is a courtesy
+    // rather than the control.
     var rematchBtn = $('#rematchBtn');
 
     var manualBtn = $('#manualBtn');
 
-    var role = ctx.user && ctx.user.role;
-    if (role !== 'admin' && role !== 'manager') {
+    // Import and re-match rewrite the whole queue in one press, so they stay
+    // with the all-data roles. Adding one request by hand only needs edit
+    // rights, which is the switch an admin ticks when granting this app to
+    // somebody who takes the phone calls.
+    if (!canManage) {
       if (importBtn) importBtn.style.display = 'none';
       if (rematchBtn) rematchBtn.style.display = 'none';
-      if (manualBtn) manualBtn.style.display = 'none';
     }
+    if (!canAdd && manualBtn) manualBtn.style.display = 'none';
 
     /* ---------------- add a request by hand ---------------- */
 
@@ -1410,6 +1443,10 @@ export default {
             area('description', 'What is it for', 'The event, and what the merchandise does for it') +
           '</div>' +
 
+          // The whole block is a decision, so it belongs to whoever may make
+          // one. Without the switch the form still works: the request lands
+          // as pending, which is the normal path anyway.
+          (canDecide ?
           '<div class="mf-sec">' +
             '<h3>Already decided?</h3>' +
             '<p class="hint">Leave this alone and the request lands in the queue as pending. ' +
@@ -1426,7 +1463,7 @@ export default {
               field('fulfilledAt', 'Date given', 'type="date" value="' + today + '"') +
               area('decisionNote', 'Note', 'Anything worth knowing about the decision') +
             '</div>' +
-          '</div>' +
+          '</div>' : '') +
 
           '<div class="mf-acts">' +
             '<button class="btn btn-green" id="mfSave">Add request</button>' +

@@ -1,3 +1,4 @@
+// PUT IN: api/giving-requests.js (REPLACES the current one)
 // api/giving-requests.js — read and update donation requests.
 //
 //   GET    /api/giving-requests            list (what the app loads)
@@ -10,8 +11,24 @@
 //
 // Everything here requires a signed-in session. The public webhook lives in
 // api/giving-intake.js and can only create.
+//
+// WHO MAY DO WHAT, Sep 2026. Three gates, all answered by
+// lib/giving-access.js, which apps/givinggauge.js asks the same questions so
+// a hidden button and a refused request always agree:
+//
+//   read            anyone who can open the app
+//   add / correct   can_edit (typing in a request, recording what it cost,
+//                   fixing a classification, attaching an account)
+//   approve/decline the per-role can_decide_giving switch in Settings
+//   import/rematch  an all-data role that can edit, or the Admin flag
+//
+// This replaces `sess.role !== "admin" && sess.role !== "manager"`, which
+// matched two role names literally and so refused every role created in
+// Settings, and it puts a gate on deciding, which had none at all.
 
 import { requireAuth } from "../lib/session.js";
+import { getUser, getRole } from "../lib/users.js";
+import { givingAddVerdict, givingDecideVerdict, givingManageVerdict } from "../lib/giving-access.js";
 import { listRequests, getRequest, updateRequest, buildRequest, buildManualRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 import { applyClassification } from "../lib/giving-classify.js";
@@ -29,6 +46,16 @@ export default async function handler(req, res) {
   if (!isConfigured()) {
     return res.status(503).json({ error: "Storage is not configured." });
   }
+
+  // Resolved once per request. A session can carry a role but no username
+  // (see lib/promopro/access.js for how that bit an admin), so the role is
+  // read off the account when there is one and off the session when there is
+  // not, which is what every working gate in the shell does.
+  const account = sess.username ? await getUser(sess.username) : null;
+  const callerRole = await getRole(account ? account.role : sess.role);
+  const mayAdd = givingAddVerdict(account, callerRole);
+  const mayDecide = givingDecideVerdict(account, callerRole);
+  const mayManage = givingManageVerdict(account, callerRole);
 
   let body = req.body;
   if (typeof body === "string") {
@@ -66,6 +93,10 @@ export default async function handler(req, res) {
     // re-importing will not fix them: the endpoint skips submissions it
     // already has, by design. This is the one-click repair for that backlog.
     if (req.method === "POST" && action === "rematch") {
+      // Rewrites every stored request in one press. Same gate as the import.
+      if (!mayManage.allowed) {
+        return res.status(403).json({ error: "Re-matching every request is an admin action. " + mayManage.why + "." });
+      }
       const rows = await listRequests();
       let matched = 0, already = 0, unmatched = 0, repaired = 0;
       const recovered = {};
@@ -104,8 +135,8 @@ export default async function handler(req, res) {
     // It runs through the same builder, the same roster match and the same
     // classifier as an imported one, so it is scored on identical terms.
     if (req.method === "POST" && action === "manual") {
-      if (sess.role !== "admin" && sess.role !== "manager") {
-        return res.status(403).json({ error: "Adding a request requires admin or manager" });
+      if (!mayAdd.allowed) {
+        return res.status(403).json({ error: "Adding a request needs edit rights. " + mayAdd.why + "." });
       }
 
       const row = buildManualRequest(body.request || body, {
@@ -120,6 +151,14 @@ export default async function handler(req, res) {
       // last spring already knows the answer, and making them save it twice is
       // how half of them end up sitting in the queue as pending forever.
       const decision = body.decision || {};
+      // Approving on the way in is still a decision. Somebody who may add a
+      // request but not judge one cannot get around the gate by ticking
+      // "already decided" on the entry form.
+      if ((decision.status === "approved" || decision.status === "declined") && !mayDecide.allowed) {
+        return res.status(403).json({
+          error: "That request can be added, but not already approved or declined. " + mayDecide.why + "."
+        });
+      }
       if (decision.status === "approved" || decision.status === "declined") {
         row.status = decision.status;
         row.decidedBy = sess.name || sess.username;
@@ -149,14 +188,27 @@ export default async function handler(req, res) {
 
     if (req.method === "POST" && action === "backfill") {
       // Writing a batch of records is an admin action.
-      if (sess.role !== "admin" && sess.role !== "manager") {
-        return res.status(403).json({ error: "Backfill requires admin or manager" });
+      if (!mayManage.allowed) {
+        return res.status(403).json({ error: "Importing from Jotform is an admin action. " + mayManage.why + "." });
       }
       return await backfill(req, res, body);
     }
 
     if (req.method === "PATCH" || req.method === "PUT") {
       if (!id) return res.status(400).json({ error: "id is required" });
+
+      // A decision and a correction arrive down the same route, so they are
+      // separated here rather than by method. Everything that is not a status
+      // change is ordinary record-keeping and needs edit rights; the status
+      // itself is the one thing that needs the decide switch.
+      if (body.status && !mayDecide.allowed) {
+        return res.status(403).json({ error: "Approving and declining is off for your role. " + mayDecide.why + "." });
+      }
+      const editing = body.note !== undefined || body.request || body.account ||
+                      body.fulfillment || body.override !== undefined;
+      if (editing && !mayAdd.allowed) {
+        return res.status(403).json({ error: "Changing a request needs edit rights. " + mayAdd.why + "." });
+      }
 
       const patch = {};
       if (body.status)   patch.status = body.status;

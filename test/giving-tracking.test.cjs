@@ -1,3 +1,4 @@
+// PUT IN: test/giving-tracking.test.cjs (REPLACES the current one)
 /**
  * GivingGauge: the tracking rollups, the CSV, and requests typed in by hand.
  * Sep 3, 2026.
@@ -323,7 +324,13 @@ Promise.all([
     t.assert(/action === "manual"/.test(route), 'the branch exists');
     t.assert(/buildManualRequest/.test(route), 'and uses the shared builder, not its own mapping');
     const branch = route.slice(route.indexOf('action === "manual"'), route.indexOf('action === "backfill"'));
-    t.assert(/admin.*manager|manager.*admin/s.test(branch), 'creating a record is gated');
+    // Sep 2026: this used to assert the words "admin" and "manager" appeared
+    // in the branch, which is what the gate literally was — a role-NAME test
+    // that refused every role created in Settings. The gate is now a verdict
+    // from lib/giving-access.js, exercised for real in giving-access.test.cjs.
+    t.assert(/mayAdd\.allowed/.test(branch), 'creating a record is gated on the add verdict');
+    t.equal(/if \(sess\.role/.test(route), false,
+      'and no branch in this file is back to matching role names literally');
     t.assert(/attachAccount/.test(branch), 'a manual request is matched against the roster');
     t.assert(/decidedBy/.test(branch) && /sess\./.test(branch),
       'who decided comes from the session, never from the payload');
