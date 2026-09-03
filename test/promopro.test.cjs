@@ -1,1415 +1,908 @@
-// test/promopro.test.cjs
+// lib/promopro/printavo-lookup.js — read ONE Printavo quote/invoice, with its
+// real line items, so PromoPro can autofill a PO from it.
+//
+// WHY THIS EXISTS RATHER THAN READING BACKBONE'S SYNC:
+// api/printavo-sync.js already walks line items, but it deliberately selects
+// ONLY the category name and stores nothing but a per-invoice category
+// histogram (row._categories -> top_categories). That is because it pages
+// thousands of invoices at once and Printavo scores query complexity: pulling
+// category AND product across a full reconcile blew past their 25k ceiling.
+//
+// PromoPro has the opposite shape. It reads ONE invoice, on demand, when
+// somebody is looking at it. Complexity is a non-issue at n=1, so it can ask
+// for the full detail the sync cannot afford: description, quantity, price,
+// sizes, colors.
+//
+// lib/ never imports from api/, so the GraphQL call is re-implemented here
+// rather than shared. It is a dozen lines and the two have genuinely
+// different needs.
+//
+// ESM. Do NOT convert to module.exports.
+
+const PRINTAVO_URL = "https://www.printavo.com/api/v2";
+
+export function isConfigured() {
+  return !!(process.env.PRINTAVO_API_TOKEN && process.env.PRINTAVO_EMAIL);
+}
+
 /**
- * PromoPro tests.
- *
- * Two halves. First the contract checks every app in this shell gets: app
- * module shape, seam usage, registry entry, tokens block, route auth.
- *
- * Then the part that actually matters, run against the real functions rather
- * than matched in the source: PO numbering (including the sibling renumber
- * rule), stage derivation from dates, and the two independent clocks that
- * decide whether a PO is late. Those are the app's reason to exist, so they
- * are tested by calling them, not by grepping for them.
+ * One GraphQL call. Retries a 429 the same way the sync does, because
+ * Printavo rate limits per email at 10 requests per 5 seconds and a user
+ * clicking through search results will hit it.
  */
-
-const fs = require('fs');
-const path = require('path');
-const t = require('./harness.cjs');
-
-const ROOT = path.join(__dirname, '..');
-const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
-// A missing file should produce a NAMED failure, not crash the whole test
-// file before it can say which one. That is what happened on Aug 14: the
-// suite blew up at load instead of reporting the absent settings route.
-const readSoft = (p) => { try { return read(p); } catch (e) { return ''; } };
-const exists = (p) => fs.existsSync(path.join(ROOT, p));
-
-const app = read('apps/promopro.js');
-const posRoute = read('api/promopro/pos.js');
-const vendorsRoute = read('api/promopro/vendors.js');
-const printavoRoute = read('api/promopro/printavo.js');
-const settingsRoute = readSoft('api/promopro/settings.js');
-const artRoute = readSoft('api/promopro/art.js');
-// Uploads moved out of art.js in Aug 2026, so the checks about how a file
-// gets INTO the store now read the route that issues the upload token.
-const artUploadRoute = readSoft('api/promopro/art-upload.js');
-const sendRoute = readSoft('api/promopro/send.js');
-const printRoute = readSoft('api/promopro/print.js');
-const doc = readSoft('lib/promopro/document.js');
-const lookup = read('lib/promopro/printavo-lookup.js');
-const store = read('lib/promopro/store.js');
-const registry = read('js/registry.js');
-const apiJs = read('js/api.js');
-const tokens = read('css/tokens.css');
-
-/* ---- app contract ------------------------------------------------------- */
-
-t.test('apps/promopro.js exists and follows the app contract', () => {
-  ['export default', "id: 'promopro'", 'mount', 'showView', 'styles:', 'template:']
-    .forEach((k) => t.assert(app.includes(k), 'apps/promopro.js is missing ' + k));
-});
-
-t.test('promopro fetches through the seam, never fetch() directly', () => {
-  t.assert(app.includes('ctx.api.get(ENDPOINTS.ppPos'),
-    'promopro should read purchase orders through ENDPOINTS.ppPos');
-  t.assert(!/[^.\w]fetch\s*\(/.test(app.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')),
-    'apps/promopro.js must not call fetch() directly');
-});
-
-t.test('the registry entry is real, not a stub', () => {
-  t.assert(registry.includes("id: 'promopro'"), 'registry has no promopro entry');
-  const block = registry.slice(registry.indexOf("id: 'promopro'"));
-  const end = block.indexOf('\n  },');
-  t.assert(!/stub:\s*true/.test(block.slice(0, end)), 'promopro should not be a stub');
-});
-
-t.test('every promopro view in the registry is reachable in showView', () => {
-  const block = registry.slice(registry.indexOf("id: 'promopro'"));
-  const viewsPart = block.slice(block.indexOf('views:'), block.indexOf('defaultView'));
-  const keys = [...viewsPart.matchAll(/\['(\w+)',/g)].map((m) => m[1]);
-  t.assert(keys.length >= 2, 'expected several views');
-  keys.forEach((k) => {
-    t.assert(app.includes(k + ':'), 'showView has no page mapped for the "' + k + '" view');
-  });
-});
-
-t.test('tokens.css carries the promopro accent block', () => {
-  t.assert(/body\[data-app="promopro"\]/.test(tokens), 'no promopro block in tokens.css');
-  t.assert(tokens.includes('#E31E2D'), 'promopro accent should be #E31E2D from the logo lineup');
-});
-
-t.test('CrewCore moved off red so the two rail dots are distinguishable', () => {
-  // Aug 14 2026 lineup: PromoPro took red, CrewCore became raspberry. Two
-  // near-identical reds in the rail is exactly the confusion this prevents.
-  t.assert(tokens.includes('#C83E73'), 'CrewCore should now be raspberry #C83E73');
-  t.assert(!/body\[data-app="crewcore"\][\s\S]{0,120}#E1251B/.test(tokens),
-    'CrewCore still carries the old red accent');
-  t.assert(registry.includes("accent: '#C83E73'"), 'registry still has CrewCore on the old red');
-});
-
-t.test('adding a vendor is one card, not a chain of prompts', () => {
-  // A lead time is a judgement call. You cannot make it well when you can
-  // only see one question at a time and cannot go back and change an
-  // earlier answer.
-  //
-  // NARROWED Aug 2026. This used to forbid window.prompt anywhere in the
-  // file, which was a fine proxy while nothing else used one. The typed
-  // confirmation on Delete is a deliberate exception: it is friction on the
-  // one action with nothing behind it, not a data-entry step. So the rule is
-  // now what it always meant, no prompts in vendor entry, plus a cap on the
-  // whole file so a form cannot get built out of them unnoticed.
-  //
-  // RAISED TO TWO, Aug 28 2026. Cancelling an order now emails the vendor,
-  // and it offers one line to add to that email. Same category as the delete
-  // confirmation: a single question attached to an irreversible thing that
-  // leaves the building, not a field that belongs on a card.
-  t.assert(!/window\.alert/.test(app), 'nothing here should need an alert');
-  const prompts = (app.match(/window\.prompt/g) || []).length;
-  t.assert(prompts <= 2,
-    'at most two prompts, the typed delete confirmation and the note on a cancellation (got ' + prompts + ')');
-  const deleteHandler = app.slice(app.indexOf("t.id === 'ppDeletePo'"));
-  t.assert(deleteHandler.indexOf('window.prompt') !== -1 && deleteHandler.indexOf('window.prompt') < 600,
-    'the prompt that exists should be the delete confirmation, not something in vendor entry');
-
-  ['ppVenName', 'ppVenEmail', 'ppVenLead', 'ppVenTerms', 'ppVenPrepay', 'ppVenNotes']
-    .forEach((f) => t.assert(app.includes(f), 'the vendor card is missing the ' + f + ' field'));
-  ['ppQName', 'ppQEmail', 'ppQLead', 'ppQTerms']
-    .forEach((f) => t.assert(app.includes(f), 'the quick-add card is missing the ' + f + ' field'));
-});
-
-t.test('quick-add is reachable from the vendor picker, not just the Vendors tab', () => {
-  t.assert(/data-newvendor/.test(app),
-    'a vendor that is not on the list must be addable without leaving the order');
-  t.assert(/openQuickVendor/.test(app), 'the quick-add card should have a way to open');
-});
-
-t.test('quick-add does not rebuild the half-finished order underneath it', () => {
-  // loadAll() + renderAll() here would wipe the lines somebody has typed.
-  // The route hands back the new list, so the state is updated from that.
-  const fn = app.slice(app.indexOf('async function saveQuickVendor'));
-  const body = fn.slice(0, fn.indexOf('\n    }'));
-  t.assert(!/loadAll\(\)/.test(body),
-    'reloading everything mid-order would throw away what has been typed');
-  t.assert(/st\.vendors = res\.vendors/.test(body), 'the new list should come off the response');
-});
-
-t.test('the vendor card asks two numbers, not six', () => {
-  // Simplified Aug 14 2026. Six per-stage waits meant six guesses per vendor,
-  // and a guessed threshold produces a false amber. False ambers train people
-  // to ignore the colour, at which point the alerting is worse than none.
-  t.assert(!app.includes('data-wait='), 'the per-stage wait grid is back on the vendor card');
-  t.assert(app.includes('ppVenLead'), 'the vendor card should still ask for lead days');
-  t.assert(app.includes('ppVenResponse'), 'the vendor card should offer one optional response-time override');
-});
-
-t.test('every screen judges lateness against the same shop-wide setting', () => {
-  // Calling poHealth directly anywhere would silently fall back to the
-  // built-in default and disagree with what Settings says.
-  const direct = app.split('poHealth(').length - 1;
-  t.assert(direct <= 2, 'poHealth should be called through the shared health() wrapper, found ' + direct + ' direct uses');
-  t.assert(app.includes('chaseAfterDays: st.settings.chaseAfterDays'),
-    'the wrapper should pass the configured threshold');
-});
-
-t.test('an existing vendor can be edited, not just created', () => {
-  t.assert(app.includes('data-editvendor='), 'no edit affordance on the vendor list');
-  t.assert(/method:\s*'PATCH'[\s\S]{0,120}ppVendors|ppVendors[\s\S]{0,120}method:\s*'PATCH'/.test(app),
-    'editing a vendor should PATCH rather than create a duplicate');
-});
-
-/* ---- seam --------------------------------------------------------------- */
-
-t.test('the seam knows every promopro endpoint and marks them live', () => {
-  ['ppPos', 'ppVendors', 'ppPrintavo', 'ppSettings', 'ppArt', 'ppSend', 'ppPrint'].forEach((k) => {
-    t.assert(apiJs.includes(k + ':'), 'js/api.js is missing ENDPOINTS.' + k);
-  });
-  t.assert(apiJs.includes("'/api/promopro/'"), 'the /api/promopro/ prefix is not marked live');
-});
-
-t.test('the promopro mocks are empty, never invented purchase orders', () => {
-  // A fake PO looks exactly like a real one on screen, and the entire value
-  // of this app is that people trust what the pipeline says.
-  // Anchored on the mock DEFINITION. "[ENDPOINTS.ppPos]" also appears in
-  // appsOnSampleData() further up the file, which is what a plain indexOf
-  // finds first.
-  const mock = apiJs.slice(apiJs.indexOf('[ENDPOINTS.ppPos]: ()'));
-  t.assert(/pos:\s*\[\]/.test(mock.slice(0, 200)), 'ppPos mock should be an empty list');
-  t.assert(/vendors:\s*\[\]/.test(apiJs.slice(apiJs.indexOf('[ENDPOINTS.ppVendors]: ()'), apiJs.indexOf('[ENDPOINTS.ppVendors]: ()') + 200)),
-    'ppVendors mock should be an empty list');
-});
-
-/* ---- routes ------------------------------------------------------------- */
-
-t.test('every promopro route requires a session', () => {
-  [['pos', posRoute], ['vendors', vendorsRoute], ['printavo', printavoRoute], ['settings', settingsRoute], ['art', artRoute], ['send', sendRoute], ['print', printRoute]].forEach(([name, src]) => {
-    t.assert(src.includes('requireAuth(req, res)'), 'api/promopro/' + name + '.js does not require auth');
-    t.assert(src.includes('if (!sess) return'), 'api/promopro/' + name + '.js does not bail on a missing session');
-  });
-});
-
-t.test('reading purchase orders is open, writing is not', () => {
-  // AMs need to answer "where is my order" without asking anybody. Gating the
-  // read would defeat the point of the app.
-  const gate = posRoute.indexOf('if (!canEdit)');
-  const getBlock = posRoute.indexOf('if (req.method === "GET")');
-  t.assert(getBlock !== -1 && gate !== -1 && getBlock < gate,
-    'the GET branch must come before the can_edit gate, or read access is blocked');
-});
-
-t.test('deleting a purchase order is admin only', () => {
-  const del = posRoute.slice(posRoute.indexOf('if (req.method === "DELETE")'));
-  t.assert(/if \(!isAdmin\)/.test(del.slice(0, 300)), 'DELETE is not gated to admins');
-});
-
-t.test('vendor writes are admin only, vendor reads are not', () => {
-  const getIdx = vendorsRoute.indexOf('if (req.method === "GET")');
-  const gateIdx = vendorsRoute.indexOf('if (!isAdmin)');
-  t.assert(getIdx !== -1 && gateIdx !== -1 && getIdx < gateIdx,
-    'vendor GET must be reachable without admin, since every PO screen needs lead times');
-});
-
-t.test('a vendor with purchase orders against it is deactivated, never deleted', () => {
-  // Deleting would leave those POs pointing at nothing, and the health maths
-  // would fall back to zero lead time, which reads as "on schedule".
-  t.assert(vendorsRoute.includes('inUse'), 'no in-use check before removing a vendor');
-  t.assert(vendorsRoute.includes('active: false'), 'an in-use vendor should be deactivated');
-});
-
-t.test('the Printavo route answers cleanly when Printavo is not configured', () => {
-  t.assert(printavoRoute.includes('configured: false'),
-    'should answer 200 with configured:false rather than erroring');
-  t.assert(!/status\(500\)/.test(printavoRoute),
-    'a Printavo outage should not 500 the form; it should degrade to manual entry');
-});
-
-t.test('the probe accepts an invoice number, not just an internal id', () => {
-  // The hash in the Printavo web URL is not the GraphQL id. Passing it cost
-  // a round trip: the probe answered "Not found" and said nothing about the
-  // schema question being asked.
-  t.assert(/req\.query\.q/.test(printavoRoute), 'the probe should resolve an invoice number');
-  t.assert(printavoRoute.includes('searchOrders'), 'by searching for it first');
-});
-
-t.test('the schema probe is admin only and writes nothing', () => {
-  // It dumps field names and one invoice's contents, which is more than a
-  // normal user needs, so it sits behind the same gate as Settings.
-  const probeBlock = printavoRoute.slice(printavoRoute.indexOf('probe'));
-  t.assert(/isAdminSession/.test(probeBlock.slice(0, 400)), 'the probe should require admin');
-  t.assert(printavoRoute.includes('read-only'), 'the probe must not write to Printavo');
-});
-
-t.test('the Printavo route is read-only', () => {
-  t.assert(/req\.method !== "GET"/.test(printavoRoute),
-    'nothing in PromoPro should be able to write back to a Printavo quote');
-});
-
-t.test('reading settings is open, writing them is admin only', () => {
-  // The new-PO form cannot render its required account-manager picker
-  // without this read, so gating it would break the app for the people who
-  // use it most. Writing decides who is copied on outgoing mail.
-  const getIdx = settingsRoute.indexOf('if (req.method === "GET")');
-  const gateIdx = settingsRoute.indexOf('if (!isAdmin)');
-  t.assert(getIdx !== -1 && gateIdx !== -1 && getIdx < gateIdx,
-    'settings GET must be reachable without admin');
-});
-
-t.test('every promopro endpoint has a route file that actually exists', () => {
-  // This is the check that would have caught the Aug 14 outage. All the code
-  // agreed the settings endpoint existed: the seam declared it, the app
-  // called it, the tests passed. The FILE just never got uploaded, so the
-  // app died on mount with a 404 and a message that named none of the three
-  // routes it had tried. Declaring an endpoint and shipping its handler are
-  // two separate acts, and only one of them was being verified.
-  const declared = [...apiJs.matchAll(/(pp\w+):\s*'(\/api\/promopro\/[\w-]+)'/g)]
-    .map((m) => ({ key: m[1], path: m[2] }));
-  t.assert(declared.length >= 4, 'expected several promopro endpoints, found ' + declared.length);
-  declared.forEach(({ key, path: p }) => {
-    const file = 'api' + p.replace('/api', '') + '.js';
-    t.assert(exists(file),
-      'ENDPOINTS.' + key + ' points at ' + p + ' but ' + file + ' does not exist');
-  });
-});
-
-t.test('one missing route degrades a section instead of blanking the app', () => {
-  // Promise.all meant a single 404 rejected everything and the whole app
-  // rendered "could not load". allSettled keeps the rest of the screen alive
-  // and names which part failed.
-  t.assert(app.includes('Promise.allSettled'),
-    'app data loading should use allSettled so one dead route is survivable');
-  t.assert(app.includes('loadErrors'), 'a failed load should be reported, not swallowed');
-});
-
-t.test('the vendor picker is searchable and posts an id, not typed text', () => {
-  t.assert(app.includes('ppVendorSearch'), 'no searchable vendor input');
-  t.assert(app.includes('data-vendorpick'), 'no pickable vendor results');
-  t.assert(/vendorId: \$\('#ppVendor'\)\.value/.test(app),
-    'the PO must post the hidden vendor id, never the typed text');
-  // Typing after a pick has to clear the pick, or the id can be left pointing
-  // at a vendor whose name is no longer in the box.
-  t.assert(/ppVendorSearch'\)?\s*\{[\s\S]{0,240}draftVendorId = ''/.test(app),
-    'typing should clear a previous vendor selection');
-});
-
-t.test('the settings route reads the roster from CrewCore, not a stored copy', () => {
-  t.assert(settingsRoute.includes('lib/crewcore/store.js'), 'settings should read the CrewCore roster');
-  t.assert(settingsRoute.includes('resolveAccountManagers'), 'names should be resolved, not stored');
-});
-
-t.test('a CrewCore outage does not take PromoPro down with it', () => {
-  t.assert(/catch[\s\S]{0,200}rosterUnavailable|rosterUnavailable/.test(settingsRoute),
-    'a failed roster read should degrade to an explained empty list');
-});
-
-t.test('the full roster goes to admins only', () => {
-  // The Settings screen needs everyone; the new-PO form only needs whoever
-  // was chosen. CrewCore is gated for pay and review notes, and this route
-  // touches neither, but there is no reason to hand the whole staff list to
-  // every signed-in user either.
-  t.assert(/if \(isAdmin\) settings\.candidates/.test(settingsRoute),
-    'the candidate roster should be admin-only');
-});
-
-t.test('a failed settings load is never reported as an empty CrewCore roster', () => {
-  // The Aug 14 misdiagnosis: the settings route 404'd because the file was
-  // uploaded as "settings,js" with a comma, and the screen said "No active
-  // employees found in CrewCore". That sent the search at the roster when
-  // the roster had never been read at all.
-  t.assert(app.includes('settingsFailed'), 'a settings-load failure should be tracked distinctly');
-  const idx = app.indexOf('No account managers to choose from');
-  const guard = app.indexOf('if (st.settingsFailed)');
-  t.assert(guard !== -1 && idx !== -1 && guard < idx,
-    'the settings-failed branch must come before the empty-roster message');
-});
-
-t.test('an empty picker names its cause instead of guessing', () => {
-  // Four causes land in the same place and want completely different fixes:
-  // no records, none active, none with an email, or the caller not being
-  // treated as an admin. Guessing sent one round of debugging at CrewCore
-  // when the real problem was the route's admin check.
-  t.assert(settingsRoute.includes('rosterCounts'), 'the route should report what it actually read');
-  t.assert(app.includes('not being treated as an administrator'),
-    'the not-an-admin case needs to be distinguishable from an empty roster');
-});
-
-t.test('no route decides for itself who may own a purchase order', () => {
-  // Two places answering the same question is what caused this, twice.
-  t.assert(posRoute.includes('effectiveAccountManagerIds'),
-    'the purchase-order route should use the shared definition');
-  t.assert(settingsRoute.includes('effectiveAccountManagerIds'),
-    'the settings route should use the same one');
-  t.assert(!/settings\)\.accountManagers\.map/.test(posRoute),
-    'the route must not read accountManagers, which is resolved and never stored');
-});
-
-t.test('every promopro route uses the shell-wide admin test', () => {
-  // Checking the role NAME ("admin") excluded manager and every custom role,
-  // and permsFor(undefined) on a session with no username silently returns a
-  // non-admin. Both are why Settings decided Ryan was not an admin. The rest
-  // of the shell tests data_scope and guards the missing username, so
-  // PromoPro does too, in one place.
-  [['pos', posRoute], ['vendors', vendorsRoute], ['settings', settingsRoute]].forEach(([name, src]) => {
-    t.assert(src.includes('isAdminSession'),
-      'api/promopro/' + name + '.js should use the shared admin check');
-    t.assert(!/perms\.role === "admin"/.test(src),
-      'api/promopro/' + name + '.js still matches the role name literally');
-  });
-});
-
-t.test('the shared admin check accepts a session with no username', () => {
-  const access = fs.readFileSync(path.join(ROOT, 'lib/promopro/access.js'), 'utf8');
-  t.assert(/s\.username \? await getUser/.test(access),
-    'a session carrying only a role must still resolve, same as the working routes');
-  t.assert(access.includes('data_scope === "all"'),
-    'admin should mean data_scope all, not a literal role name');
-});
-
-t.test('saving is refused when settings never loaded', () => {
-  // Otherwise Save posts defaults over whatever was really stored.
-  t.assert(/st\.settingsFailed[\s\S]{0,200}overwrite/.test(app),
-    'save should refuse rather than overwrite unread settings');
-});
-
-t.test('a roster with no emails says so, rather than showing silent grey rows', () => {
-  t.assert(app.includes('Nobody on the roster has an email address yet'),
-    'the all-unselectable case needs its own explanation');
-});
-
-t.test('the size cap rides on the upload token, not on our own decoding', () => {
-  // REWRITTEN Aug 2026. This used to check that MAX_BYTES was read before
-  // Buffer.from(), which mattered while the file was decoded inside a
-  // function. The file no longer passes through one: the cap is now a
-  // property of the token the browser is given, enforced by storage itself,
-  // so an oversized file is refused before a byte is sent rather than after
-  // it has been received and allocated.
-  t.assert(artUploadRoute.includes('maximumSizeInBytes'),
-    'the token must carry a size limit');
-  t.assert(!artRoute.includes('Buffer.from'),
-    'art.js should no longer decode uploads at all');
-});
-
-t.test('art uploads still get an unguessable path', () => {
-  t.assert(artUploadRoute.includes('addRandomSuffix: true'),
-    'a predictable blob path would make every PO art file enumerable');
-});
-
-t.test('artwork is stored private, not public', () => {
-  // CHANGED Aug 2026. This test used to assert the opposite, that the blob
-  // was deliberately left behind on delete, which was the honest description
-  // of the public-URL model: there was no way to revoke a forwarded link, so
-  // pulling the file was worse than leaving it. Private blobs plus signed
-  // links removed that trade, so the old reasoning no longer holds and the
-  // test that pinned it was updated rather than deleted.
-  t.assert(/access:\s*"private"/.test(artUploadRoute),
-    'a public blob URL is permanent and unrevokable once forwarded');
-  t.assert(!/access:\s*"public"/.test(artUploadRoute),
-    'no upload path may fall back to a public blob');
-  t.assert(!/access:\s*"public"/.test(artRoute),
-    'nor may anything left in art.js');
-});
-
-t.test('deleting art really deletes the file', () => {
-  t.assert(/\bdel\(/.test(artRoute),
-    'detaching a file while its URL keeps working is not deleting it');
-});
-
-t.test('adding a vendor is open to PO editors, changing one is not', () => {
-  // The split that makes quick-add possible: creating "SanMar,
-  // orders@sanmar.com" mid-order is data entry, but editing a lead time
-  // changes what counts as late for the whole team.
-  const post = vendorsRoute.indexOf('req.method === "POST"');
-  const gate = vendorsRoute.indexOf('Admin access required');
-  t.assert(post !== -1 && gate !== -1, 'both branches should exist');
-  t.assert(post < gate, 'the admin gate must sit AFTER create, or quick-add 403s');
-  t.assert(/canEditSession/.test(vendorsRoute), 'create still has to check something');
-});
-
-t.test('a non-admin cannot create a pre-blacklisted vendor', () => {
-  t.assert(/blacklisted && !isAdmin/.test(vendorsRoute),
-    'otherwise quick-add becomes a way to put a warning in front of the whole team');
-});
-
-t.test('deleting a purchase order stays admin only', () => {
-  const del = vendorsRoute.indexOf('req.method === "DELETE"');
-  const gate = vendorsRoute.indexOf('Admin access required');
-  t.assert(gate !== -1 && gate < del, 'delete must sit behind the admin gate');
-});
-
-t.test('deleting an order that was emailed takes the PO number, on both sides', () => {
-  // CHANGED Aug 28 2026, deliberately. Delete used to be hidden entirely once
-  // an order had been emailed, on the grounds that it is a document an
-  // outside party may be working from. That is right about the risk and
-  // wrong about who decides: a PO sent to the wrong vendor is a mis-send, and
-  // the record of it is noise that outlives the mistake.
-  //
-  // So the guard is no longer a refusal, it is deliberateness, and it exists
-  // in BOTH places. The screen warns and asks for the number; the route
-  // refuses without it, so nothing can fire a delete at the API having never
-  // seen the warning.
-  const posRouteSrc = read('api/promopro/pos.js');
-  t.assert(/confirmNumberRequired/.test(posRouteSrc), 'the route should refuse without the number');
-  t.assert(/doomed\.lastSentAt/.test(posRouteSrc), 'and only ask for it on an order that was sent');
-  t.assert(/confirmNumber=/.test(app), 'the screen should send the number it made somebody type');
-
-  const deleteHandler = app.slice(app.indexOf("t.id === 'ppDeletePo'"));
-  t.assert(/WAS EMAILED/.test(deleteHandler.slice(0, 900)),
-    'and say plainly that the vendor already has it');
-  t.assert(/cancel instead/.test(deleteHandler.slice(0, 900)),
-    'and point at the option that keeps the record and tells them');
-});
-
-t.test('the UPS account number is not committed to source', () => {
-  // This repository is public. Anything that could be used to bill freight
-  // to P&M belongs in Settings, which lives in the database.
-  const sources = [read('lib/promopro/schema.js'), app, settingsRoute];
-  sources.forEach((src) => {
-    t.assert(!/\b\d{3}-\d{3}\b(?![^<]*placeholder)/.test(src.replace(/1100 South 5th St[^"']*/g, '')),
-      'a freight account number looks like it has been hardcoded');
-  });
-  t.assert(read('lib/promopro/schema.js').includes('DEFAULT_SHIP_TO'),
-    'the shop address is public information and can stay in source');
-});
-
-t.test('confirming the imprints collapses the picker and the invoice banner', () => {
-  // Once the imprints are chosen those controls have done their job, and
-  // leaving them open buries the fields still to be filled under choices
-  // already made.
-  t.assert(app.includes('imprintLocked'), 'no locked state');
-  t.assert(app.includes('ppUseImprints') && app.includes('ppUnlockImprints'),
-    'there must be a way to confirm and a way to go back');
-  t.assert(/st\.picked && !st\.imprintLocked/.test(app),
-    'the "Filling from Printavo invoice" banner should hide once confirmed');
-  t.assert(/st\.imprintLocked \? '' :[\s\S]{0,200}ppSearch/.test(app),
-    'the Printavo search box should hide once confirmed');
-});
-
-t.test('a PO can cover more than one imprint', () => {
-  t.assert(app.includes('type="checkbox" data-imprint'),
-    'imprints should be multi-selectable, not one-of');
-  t.assert(/pickedGroups\.concat/.test(app), 'ticking a second imprint should add to the selection');
-});
-
-t.test('a multi-imprint PO number is editable rather than invented', () => {
-  // One imprint is unambiguous. Two has no established convention here, and
-  // a made-up number on a document a vendor reads is worse than asking.
-  t.assert(app.includes('ppSuffix'), 'the suffix must be editable');
-  t.assert(app.includes("join('+')"), 'a sensible default is fine, deciding silently is not');
-});
-
-t.test('artwork can be attached while creating, not only afterwards', () => {
-  // It used to live only on the detail screen, which you reach by clicking a
-  // PO that does not exist yet. "Create it, then go find it again to attach
-  // the art" is how art ends up never attached.
-  t.assert(app.includes('stagedArt'), 'the create form should hold files before the PO exists');
-  t.assert(app.includes('ppStagePick'), 'the create form needs its own attach control');
-  t.assert(app.includes('uploadArtTo'), 'both paths should share one upload routine');
-});
-
-t.test('a failed art upload never loses the purchase order', () => {
-  // The order is real and correct by then. Rolling it back because an upload
-  // stalled would be far worse than an order with art still to add.
-  const save = app.slice(app.indexOf('async function saveNew'));
-  t.assert(/The order was created, but/.test(save),
-    'a partial art failure should be reported, with the PO kept');
-  t.assert(!/rollback|deletePo/.test(save.slice(0, 2000)), 'the PO must not be undone');
-});
-
-t.test('one bad file does not abandon the rest of the batch', () => {
-  const fn = app.slice(app.indexOf('async function uploadArtTo'));
-  const body = fn.slice(0, fn.indexOf('\n    }'));
-  t.assert(/failed\.push/.test(body), 'a failure should be collected');
-  t.assert(!/\breturn;\s*\n\s*}\s*catch/.test(body),
-    'a failure should carry on to the next file rather than stopping the run');
-});
-
-t.test('line and order totals recompute as you type', () => {
-  // They were written into state and never redrawn, so a cost could be typed
-  // and both figures would sit at $0.00. Updated in place rather than by
-  // re-rendering the table, because re-rendering rebuilds the input being
-  // typed into and drops the caret mid-number.
-  t.assert(app.includes('data-linetotal'), 'the line total cell needs a hook to update');
-  t.assert(app.includes('ppDraftTotal'), 'the order total needs a hook to update');
-  const handler = app.slice(app.indexOf("closest('#ppLinesBody"));
-  t.assert(/cellTotal\.textContent/.test(handler.slice(0, 1200)), 'the line total is never redrawn');
-  t.assert(/grand\.textContent/.test(handler.slice(0, 1200)), 'the order total is never redrawn');
-});
-
-t.test('each line carries an imprint field under the description', () => {
-  t.assert(app.includes('data-f="imprint"'), 'no imprint input on the line');
-  t.assert(app.includes('pp-imprintline'), 'the imprint field should sit under the description');
-});
-
-t.test('no function in the app is defined but never called', () => {
-  // Aug 2026: imprintPickerHtml() was written, wired to state, styled and
-  // tested, and never actually called. A string replacement that was meant
-  // to drop it into the form silently matched nothing, so the picker existed
-  // in the file and never rendered. Every other test passed, because they
-  // all checked that the function EXISTED.
-  //
-  // A helper that appears exactly once is a helper nobody uses.
-  const names = [...app.matchAll(/^\s*(?:async\s+)?function\s+(\w+)\s*\(/gm)].map((m) => m[1]);
-  t.assert(names.length > 5, 'expected to find several functions, found ' + names.length);
-  const orphans = names.filter((n) => {
-    const uses = app.split(new RegExp('\\b' + n + '\\b')).length - 1;
-    return uses < 2;
-  });
-  t.assert(orphans.length === 0,
-    'defined but never called: ' + orphans.join(', '));
-});
-
-t.test('the printed and emailed copies come from one renderer', () => {
-  // A vendor who prints the page and a vendor who reads the email have to be
-  // looking at identical numbers. Two templates would disagree eventually
-  // and nobody would notice until a supplier invoiced against the wrong one.
-  t.assert(printRoute.includes('renderPrintPage'), 'print should use the shared document');
-  t.assert(sendRoute.includes('renderEmailHtml'), 'email should use the shared document');
-  t.assert(doc.includes('renderPoHtml'), 'both wrap one body renderer');
-});
-
-t.test('a send re-checks the order immediately before dispatch', () => {
-  // A PO can sit as a draft for a week. Nothing about it is trusted as still
-  // true at send time, and a send that half works is worse than one that
-  // refuses: the vendor may already be producing.
-  ['no longer exists', 'no order email', 'no lines', 'totals zero', 'no from-address']
-    .forEach((phrase) => {
-      t.assert(sendRoute.includes(phrase), 'the pre-send check is missing: ' + phrase);
-    });
-});
-
-t.test('a vendor hitting Reply reaches a person', () => {
-  // The QuickBooks version sent from quickbooks@notification.intuit.com.
-  t.assert(sendRoute.includes('reply_to'), 'no reply-to is set on the message');
-  t.assert(/replyTo/.test(read('lib/promopro/schema.js')), 'reply-to should be configurable');
-});
-
-t.test('a test send never reaches the vendor', () => {
-  const testBlock = sendRoute.slice(sendRoute.indexOf('const isTest'));
-  t.assert(/isTest[\s\S]{0,300}sender && sender\.email/.test(testBlock),
-    'a test should go to the account manager, not the vendor');
-  t.assert(/Touches no dates and no history/.test(sendRoute),
-    'a test must not advance the pipeline');
-});
-
-t.test('sending sets the submitted date', () => {
-  // Sending IS submitting. Asking someone to also tick a box means the
-  // pipeline can disagree with what actually left the building.
-  t.assert(/if \(!po\.submittedAt\) patch\.submittedAt/.test(sendRoute),
-    'the first send should record the submitted date');
-});
-
-t.test('the printable page needs a session', () => {
-  // A PO carries our costs. Not something to serve on a guessable URL.
-  t.assert(printRoute.includes('requireAuth'), 'print must not be public');
-});
-
-/* ---- architecture ------------------------------------------------------- */
-
-t.test('lib/promopro never imports from api/', () => {
-  ['lib/promopro/schema.js', 'lib/promopro/store.js', 'lib/promopro/vendors.js', 'lib/promopro/printavo-lookup.js']
-    .forEach((f) => {
-      t.assert(exists(f), f + ' is missing');
-      t.assert(!/from\s+["'][^"']*\/api\//.test(read(f)), f + ' imports from api/, which is not allowed');
-    });
-});
-
-t.test('the routes live in a folder, not a flat api/promopro.js', () => {
-  // Vercel treats a file and a same-named folder as a route conflict once the
-  // .js is stripped. WebsiteWidget hit this in August.
-  t.assert(!exists('api/promopro.js'), 'api/promopro.js would conflict with the api/promopro/ folder');
-  t.assert(exists('api/promopro/pos.js'), 'api/promopro/pos.js is missing');
-});
-
-t.test('the store writes only under its own key prefix', () => {
-  t.assert(store.includes('promopro_data'), 'store should use the promopro_data: prefix');
-  t.assert(!/alliteration:/.test(store), 'the store must not touch the shell users/roles keys');
-});
-
-t.test('the Printavo lookup explains why it does not reuse the sync', () => {
-  // The sync deliberately selects ONLY category to stay under Printavo's
-  // query complexity ceiling across thousands of invoices, so it cannot
-  // supply line-item detail. Losing that reasoning would invite someone to
-  // "simplify" this into a broken shared read.
-  t.assert(/complexity/i.test(lookup), 'the complexity-ceiling reason should stay documented here');
-});
-
-/* ---- the real logic ----------------------------------------------------- */
-
-(async () => {
-  const s = await import('../lib/promopro/schema.js');
-  const st = await import('../lib/promopro/store.js');
-
-  /* -- PO numbering -- */
-
-  t.test('the suffix is the imprint number, not a count of our POs', () => {
-    // Corrected Aug 2026. It used to be a running count: first PO on a job
-    // got -1, second got -2. The real rule is the imprint's own number on
-    // the Printavo job, so the promo imprint on 66608 is 66608-9 whether it
-    // is the first PO we raise or the only one. The two rules agree by
-    // accident on a single-imprint job and disagree on every other.
-    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: 9 }), '26-66608-9');
+export async function gql(query, variables, _attempt = 0) {
+  const token = process.env.PRINTAVO_API_TOKEN;
+  const email = process.env.PRINTAVO_EMAIL;
+  if (!token || !email) throw new Error("Printavo is not configured (PRINTAVO_API_TOKEN / PRINTAVO_EMAIL)");
+
+  const r = await fetch(PRINTAVO_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", email, token },
+    body: JSON.stringify({ query, variables: variables || {} }),
   });
 
-  t.test('the imprint number does not depend on what else exists', () => {
-    // A number a vendor already has must never change underneath them
-    // because somebody raised an unrelated PO on the same job.
-    const a = st.numberFor({ year: '26', createdAt: '2026-08-01T00:00:00Z', printavo: { invoiceNumber: '66608', imprintNumber: 9 } });
-    const b = st.numberFor({ year: '26', createdAt: '2026-08-05T00:00:00Z', printavo: { invoiceNumber: '66608', imprintNumber: 3 } });
-    t.equal(a, '26-66608-9');
-    t.equal(b, '26-66608-3');
-  });
-
-  t.test('the suffix can be whatever the buyer confirmed', () => {
-    // Including a two-imprint form. buildPoNumber does not get to decide
-    // what a multi-imprint PO is called.
-    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: '9+10' }), '26-66608-9+10');
-    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608', imprintNumber: 9 }), '26-66608-9');
-  });
-
-  t.test('a PO records every imprint it covers, not just the suffix', () => {
-    // The suffix is a label. Which imprints were actually ordered is data,
-    // and it is what a later reconciliation would need.
-    const r = s.validateNew({
-      vendorId: 'v1', accountManager: 'alexis',
-      lines: [{ description: 'Koozie', qty: 250, unitCost: 1 }],
-      printavo: { invoiceNumber: '66608', imprintNumber: '9+10', imprintNumbers: [9, 10], groupIds: ['g9', 'g10'] },
-    }, ['v1'], ['alexis']);
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.record.printavo.imprintNumbers.join(','), '9,10');
-    t.equal(r.record.printavo.groupIds.length, 2);
-  });
-
-  t.test('no imprint number means no suffix', () => {
-    t.equal(s.buildPoNumber({ year: '26', invoiceNumber: '66608' }), '26-66608');
-  });
-
-  t.test('a manual web order is obviously not a Printavo job', () => {
-    // No invoice number to build from, so an M sequence takes the middle slot
-    // and anyone reading the number can see no Printavo job sits behind it.
-    t.equal(s.buildPoNumber({ year: '26', manualSeq: 14, seq: 1, total: 1 }), '26-M014');
-  });
-
-  t.test('two POs on different jobs never collide', () => {
-    const a = st.numberFor({ year: '26', printavo: { invoiceNumber: '66601', imprintNumber: 1 } });
-    const b = st.numberFor({ year: '26', printavo: { invoiceNumber: '66602', imprintNumber: 1 } });
-    t.assert(a !== b, 'different invoices should give different PO numbers');
-  });
-
-  t.test('two imprints on the same job get different numbers', () => {
-    const a = st.numberFor({ year: '26', printavo: { invoiceNumber: '66608', imprintNumber: 3 } });
-    const b = st.numberFor({ year: '26', printavo: { invoiceNumber: '66608', imprintNumber: 9 } });
-    t.assert(a !== b, 'different imprints on one job must differ');
-  });
-
-  /* -- stage derivation -- */
-
-  t.test('stage is derived from the dates, so the two can never disagree', () => {
-    t.equal(s.currentStage({}), 'draft');
-    t.equal(s.currentStage({ submittedAt: '2026-08-01' }), 'submitted');
-    t.equal(s.currentStage({ submittedAt: '2026-08-01', confirmedAt: '2026-08-02' }), 'confirmed');
-  });
-
-  t.test('a skipped step does not hold the PO back', () => {
-    // Real life back-fills. A PO that got a ship date before anyone recorded
-    // the payment is shipped, not stuck at confirmed.
-    const po = { submittedAt: '2026-08-01', confirmedAt: '2026-08-02', shippedAt: '2026-08-09' };
-    t.equal(s.currentStage(po), 'shipped');
-  });
-
-  t.test('a cancelled PO leaves the pipeline entirely', () => {
-    t.equal(s.currentStage({ submittedAt: '2026-08-01', cancelledAt: '2026-08-03' }), 'cancelled');
-  });
-
-  /* -- the clocks -- */
-
-  const vendor = { id: 'v1', leadDays: 10 };
-
-  t.test('a vendor still inside the chase window is not flagged', () => {
-    const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-12').level, 'ok');
-  });
-
-  t.test('a vendor going quiet past the chase window goes amber', () => {
-    const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-14').level, 'amber');
-  });
-
-  t.test('twice the chase window goes red', () => {
-    const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    t.equal(s.poHealth(po, vendor, '2026-08-17').level, 'red');
-  });
-
-  t.test('the chase window is one shop-wide number, overridable per vendor', () => {
-    // One number somebody can actually answer, not six guesses per supplier.
-    const po = { submittedAt: '2026-08-10', neededBy: '2026-09-30', createdAt: '2026-08-10T00:00:00Z' };
-    const slow = { id: 'v2', leadDays: 10, responseDays: 10 };
-    t.equal(s.poHealth(po, vendor, '2026-08-14', { chaseAfterDays: 3 }).level, 'amber');
-    t.equal(s.poHealth(po, vendor, '2026-08-14', { chaseAfterDays: 10 }).level, 'ok');
-    t.equal(s.poHealth(po, slow, '2026-08-14', { chaseAfterDays: 3 }).level, 'ok');
-  });
-
-  t.test('steps that are OURS never raise a vendor alarm', () => {
-    // Approving art and sending payment are our holdups. Colouring them as
-    // vendor lateness pointed the finger at the wrong party, and no vendor
-    // setting could ever have described them.
-    const ours = { artApprovedAt: '2026-07-01', neededBy: '2026-12-31', createdAt: '2026-07-01T00:00:00Z' };
-    const h = s.poHealth(ours, vendor, '2026-08-14', { chaseAfterDays: 3 });
-    t.assert(!h.reasons.some((r) => /no word/.test(r)),
-      'a step we own should not be reported as vendor silence');
-
-    const theirs = { confirmedAt: '2026-07-01', neededBy: '2026-12-31', createdAt: '2026-07-01T00:00:00Z' };
-    t.assert(s.poHealth(theirs, vendor, '2026-08-14', { chaseAfterDays: 3 }).reasons.some((r) => /no word/.test(r)),
-      'a step the vendor owns should still be chased');
-  });
-
-  t.test('a PO moving along fine can still be flagged as doomed', () => {
-    // The delivery clock is independent of the stage clock. This PO was
-    // submitted yesterday, so nothing is late, but there is no longer enough
-    // lead time left to make the due date. That is the failure the
-    // email-only process never surfaces until the customer calls.
-    const po = { submittedAt: '2026-08-13', neededBy: '2026-08-18', createdAt: '2026-08-13T00:00:00Z' };
-    const h = s.poHealth(po, vendor, '2026-08-14');
-    t.equal(h.level, 'red');
-    t.assert(h.reasons.some((r) => /vendor needs/.test(r)), 'should explain that the lead time no longer fits');
-  });
-
-  t.test('a draft that should already have been ordered is red', () => {
-    const po = { neededBy: '2026-08-18', createdAt: '2026-08-01T00:00:00Z' };
-    const h = s.poHealth(po, vendor, '2026-08-14');
-    t.equal(h.level, 'red');
-    t.assert(h.reasons.some((r) => /ordered/.test(r)), 'should say it is already past the order-by date');
-  });
-
-  t.test('a received PO stops being chased', () => {
-    const po = { submittedAt: '2026-06-01', receivedAt: '2026-06-20', neededBy: '2026-06-15' };
-    t.equal(s.poHealth(po, vendor, '2026-08-14').level, 'done');
-  });
-
-  t.test('order-by backs off both the vendor lead time and the decorating buffer', () => {
-    // Blanks we print need slack on our end; finished goods drop-shipped to
-    // the customer do not, which is why the buffer is per PO.
-    t.equal(s.orderByDate({ neededBy: '2026-09-30' }, vendor), '2026-09-20');
-    t.equal(s.orderByDate({ neededBy: '2026-09-30', decorateBufferDays: 5 }, vendor), '2026-09-15');
-  });
-
-  /* -- item number, shipping -- */
-
-  t.test('a line can carry the vendor item number', () => {
-    const r = s.validateNew({
-      vendorId: 'v1', accountManager: 'alexis',
-      lines: [{ itemNumber: '1234-BLK', description: 'Mug', qty: 10, unitCost: 2 }],
-    }, ['v1'], ['alexis']);
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.record.lines[0].itemNumber, '1234-BLK');
-  });
-
-  t.test('an item number is optional, because manual orders often have none', () => {
-    const r = s.validateNew({
-      vendorId: 'v1', accountManager: 'alexis',
-      lines: [{ description: 'Custom banner', qty: 1, unitCost: 40 }],
-    }, ['v1'], ['alexis']);
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.record.lines[0].itemNumber, '');
-  });
-
-  t.test('the shop address is the default ship-to', () => {
-    t.assert(/Polk City/.test(s.withSettingDefaults({}).defaultShipTo),
-      'a new install should already know where to ship');
-  });
-
-  t.test('shipping instructions default to blank, never to a real account number', () => {
-    // The repo is public. A freight account seeded in source would be
-    // committed the first time anyone deployed.
-    t.equal(s.withSettingDefaults({}).shippingInstructions, '');
-  });
-
-  t.test('a PO keeps its own copy of the shipping instructions', () => {
-    // A PO is a document that went to an outside party. Changing the shop
-    // default later must not rewrite what a vendor was told last month.
-    const r = s.validateNew({
-      vendorId: 'v1', accountManager: 'alexis',
-      shipTo: '1100 South 5th St, Polk City, IA 50226',
-      shippingInstructions: 'Ship via our UPS account',
-      lines: [{ description: 'Mug', qty: 1, unitCost: 2 }],
-    }, ['v1'], ['alexis']);
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.record.shippingInstructions, 'Ship via our UPS account');
-  });
-
-  t.test('a settings change can update both shipping fields', () => {
-    const r = s.validateSettings({ defaultShipTo: 'Somewhere else', shippingInstructions: 'Ground only' });
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.patch.defaultShipTo, 'Somewhere else');
-    t.equal(r.patch.shippingInstructions, 'Ground only');
-  });
-
-  /* -- money -- */
-
-  t.test('line and PO totals agree, because they come from one place', () => {
-    const po = { lines: [{ qty: 12, unitCost: 4.25 }, { qty: 3, unitCost: 10 }] };
-    t.equal(s.lineTotal(po.lines[0]), 51);
-    t.equal(s.poTotal(po), 81);
-  });
-
-  t.test('a PO with no lines totals zero rather than NaN', () => {
-    t.equal(s.poTotal({}), 0);
-    t.equal(s.poTotal({ lines: [] }), 0);
-  });
-
-  /* -- validation -- */
-
-  t.test('a PO must have a vendor, an account manager, and at least one line', () => {
-    const bad = s.validateNew({}, ['v1'], ['alexis']);
-    t.assert(!bad.ok, 'an empty PO should not validate');
-    t.assert(bad.errors.some((e) => /vendor/.test(e)), 'should complain about the vendor');
-    t.assert(bad.errors.some((e) => /account manager/.test(e)), 'should complain about the account manager');
-    t.assert(bad.errors.some((e) => /line/.test(e)), 'should complain about the lines');
-  });
-
-  t.test('the account manager is required, not optional', () => {
-    // A PO with no account manager is a PO nobody owns, which is the exact
-    // failure this app exists to end.
-    const r = s.validateNew({
-      vendorId: 'v1', lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
-    }, ['v1'], ['alexis']);
-    t.assert(!r.ok, 'a PO with no account manager should not validate');
-  });
-
-  t.test('an account manager who is not set up in Settings is rejected', () => {
-    const r = s.validateNew({
-      vendorId: 'v1', accountManager: 'ghost',
-      lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
-    }, ['v1'], ['alexis']);
-    t.assert(!r.ok, 'an unknown account manager should not validate');
-  });
-
-  t.test('the account manager cannot be cleared once set', () => {
-    // Required on create has to mean required forever, or a PO quietly loses
-    // its owner on an unrelated edit.
-    const r = s.validatePatch({ accountManager: '' }, ['v1'], ['alexis']);
-    t.assert(!r.ok, 'blanking the account manager should be refused');
-  });
-
-  t.test('a vendor that is not on the list is rejected', () => {
-    const r = s.validateNew({ vendorId: 'ghost', accountManager: 'alexis', lines: [{ description: 'Mug', qty: 10, unitCost: 2 }] }, ['v1'], ['alexis']);
-    t.assert(!r.ok, 'an unknown vendor should not validate');
-  });
-
-  t.test('a good PO validates and keeps its Printavo link', () => {
-    const r = s.validateNew({
-      vendorId: 'v1',
-      accountManager: 'alexis',
-      lines: [{ description: 'Mug', qty: 10, unitCost: 2.5 }],
-      printavo: { invoiceNumber: '66601', customerName: 'Acme', dueDate: '2026-09-30' },
-    }, ['v1'], ['alexis']);
-    t.assert(r.ok, 'should validate: ' + r.errors.join('; '));
-    t.equal(r.record.printavo.invoiceNumber, '66601');
-    t.equal(r.record.accountManager, 'alexis');
-    t.equal(r.record.lines.length, 1);
-  });
-
-  /* -- who gets copied -- */
-
-  t.test('the CC list is built in one place, so preview and send agree', () => {
-    // A CC list that differs between the preview and the real send is the
-    // kind of bug nobody notices until a customer is copied on something.
-    const settings = {
-      alwaysCc: ['ops@pmapparel.com'],
-      accountManagers: [{ id: 'alexis', name: 'Alexis', email: 'alexis@pmapparel.com' }],
-    };
-    const cc = s.ccListFor({ accountManager: 'alexis' }, { ccEmail: 'rep@vendor.com' }, settings);
-    t.equal(cc.join(','), 'ops@pmapparel.com,alexis@pmapparel.com,rep@vendor.com');
-  });
-
-  t.test('nobody is copied twice, whatever the casing', () => {
-    const settings = {
-      alwaysCc: ['Alexis@PMApparel.com'],
-      accountManagers: [{ id: 'alexis', name: 'Alexis', email: 'alexis@pmapparel.com' }],
-    };
-    t.equal(s.ccListFor({ accountManager: 'alexis' }, {}, settings).length, 1);
-  });
-
-  t.test('a malformed address is dropped rather than sent to', () => {
-    const settings = { alwaysCc: ['not-an-address'], accountManagers: [] };
-    t.equal(s.ccListFor({}, {}, settings).length, 0);
-  });
-
-  t.test('CC addresses can be typed with commas, semicolons or newlines', () => {
-    // People paste all three, and none of them should be "the wrong way".
-    t.equal(s.parseEmailList('a@x.com, b@x.com; c@x.com\nd@x.com').length, 4);
-  });
-
-  t.test('normalizing a settings payload does not throw away what the route attached', () => {
-    // The Aug 14 bug, in one line. withSettingDefaults rebuilt the object
-    // from four known keys, so candidates/rosterCounts/usingDefaults were
-    // deleted the moment the response reached the browser. The server was
-    // returning thirteen employees and six valid addresses; the picker was
-    // empty before anything rendered. A normalizer supplies what is absent,
-    // it does not decide what is allowed through.
-    const fromRoute = {
-      chaseAfterDays: 3,
-      alwaysCc: [],
-      accountManagerIds: ['EMP-00005', 'EMP-00003'],
-      accountManagers: [{ id: 'EMP-00005', name: 'Abby Penton', email: 'abby@pmapparel.com' }],
-      candidates: [{ id: 'EMP-00005', name: 'Abby Penton', selectable: true }],
-      rosterCounts: { total: 13, active: 13, withEmail: 6, adminView: true },
-      usingDefaults: true,
-    };
-    const after = s.withSettingDefaults(fromRoute);
-    t.assert(Array.isArray(after.candidates) && after.candidates.length === 1,
-      'the candidate roster must survive normalizing');
-    t.assert(after.rosterCounts && after.rosterCounts.total === 13,
-      'the roster counts must survive, or an empty picker cannot explain itself');
-    t.equal(after.usingDefaults, true);
-    t.equal(after.accountManagers.length, 1);
-  });
-
-  t.test('normalizing still fills in a completely empty payload', () => {
-    const d = s.withSettingDefaults(null);
-    t.equal(d.chaseAfterDays, 3);
-    t.equal(d.alwaysCc.length, 0);
-    t.equal(d.accountManagerIds.length, 0);
-  });
-
-  t.test('normalizing still repairs bad values rather than passing them through', () => {
-    const d = s.withSettingDefaults({ chaseAfterDays: -4, alwaysCc: 'nope', accountManagerIds: 'nope' });
-    t.equal(d.chaseAfterDays, 3);
-    t.equal(d.alwaysCc.length, 0);
-    t.equal(d.accountManagerIds.length, 0);
-  });
-
-  t.test('settings fall back to sane defaults rather than undefined', () => {
-    const d = s.withSettingDefaults({});
-    t.equal(d.chaseAfterDays, 3);
-    t.equal(d.alwaysCc.length, 0);
-    t.equal(d.accountManagers.length, 0);
-  });
-
-  /* -- account managers come from CrewCore, not a typed list -- */
-
-  const am = await import('../lib/promopro/account-managers.js');
-
-  const roster = [
-    { id: 'e1', name: 'Alexis Davis', email: 'alexis@pmapparel.com', department: 'Sales', status: 'active' },
-    { id: 'e2', name: 'Jacob Whitman', email: 'jacob@pmapparel.com', department: 'Sales', status: 'active' },
-    { id: 'e3', name: 'Margo Niemeyer', email: 'margo@pmapparel.com', department: 'Screen Printing', status: 'active' },
-    { id: 'e4', name: 'No Email', email: '', department: 'Sales', status: 'active' },
-    { id: 'e5', name: 'Former Person', email: 'gone@pmapparel.com', department: 'Sales', status: 'terminated' },
-  ];
-
-  t.test('settings store employee ids only, never names or addresses', () => {
-    // A second copy of the roster is a copy that goes stale. Somebody changes
-    // their address in CrewCore, PromoPro keeps CC-ing the old one, and
-    // nothing tells you.
-    const r = s.validateSettings({ accountManagerIds: ['e1', 'e2'] });
-    t.assert(r.ok, 'should validate: ' + r.errors.join('; '));
-    t.equal(r.patch.accountManagerIds.join(','), 'e1,e2');
-    t.assert(!('accountManagers' in r.patch), 'resolved names must never be written to storage');
-  });
-
-  t.test('names and addresses resolve live from the roster', () => {
-    const resolved = am.resolveAccountManagers(['e1', 'e3'], roster);
-    t.equal(resolved.length, 2);
-    t.equal(resolved[0].email, 'alexis@pmapparel.com');
-    t.equal(resolved[1].name, 'Margo Niemeyer');
-  });
-
-  t.test('an address changed in CrewCore changes here, with no action taken', () => {
-    const moved = roster.map((e) => (e.id === 'e1' ? { ...e, email: 'a.davis@pmapparel.com' } : e));
-    t.equal(am.resolveAccountManagers(['e1'], moved)[0].email, 'a.davis@pmapparel.com');
-  });
-
-  t.test('somebody with no email is shown but cannot be picked', () => {
-    // Picking them would mean a PO whose owner is silently never copied.
-    // Showing them greyed with a reason beats hiding them and having
-    // somebody hunt for a name that should be there.
-    const c = am.candidatesFrom(roster).find((x) => x.id === 'e4');
-    t.assert(c, 'the person with no email should still be listed');
-    t.assert(!c.selectable, 'they should not be selectable');
-    t.assert(/email/i.test(c.reason), 'the reason should say why');
-  });
-
-  t.test('an unselectable person is dropped even if their id was saved', () => {
-    t.equal(am.resolveAccountManagers(['e4'], roster).length, 0);
-  });
-
-  t.test('people who have left the company are not offered', () => {
-    t.assert(!am.candidatesFrom(roster).some((c) => c.id === 'e5'),
-      'a terminated employee should not appear');
-  });
-
-  t.test('first run offers Sales rather than an empty blocking picker', () => {
-    // An empty list blocks every purchase order until somebody visits
-    // Settings, which is a bad first five minutes.
-    const d = am.defaultSelection(roster);
-    t.assert(d.includes('e1') && d.includes('e2'), 'Sales should be offered by default');
-    t.assert(!d.includes('e3'), 'other departments should not be, though they can be added');
-    t.assert(!d.includes('e4'), 'somebody with no email cannot be a default');
-  });
-
-  t.test('the screen and the route agree on who may own a PO', () => {
-    // The Aug 2026 bug: the purchase-order route read
-    // `settings.accountManagers`, which is never stored. It is resolved from
-    // the CrewCore roster on the way OUT of the settings route, so the
-    // stored blob only ever holds `accountManagerIds`. The allowed list was
-    // therefore always empty and every account manager was rejected,
-    // including the one the screen had just offered and Ryan had just
-    // ticked.
-    const stored = { accountManagerIds: ['e1', 'e3'] };
-    const offered = am.resolveAccountManagers(am.effectiveAccountManagerIds(stored, roster), roster).map((a) => a.id);
-    const accepted = am.effectiveAccountManagerIds(stored, roster);
-    t.equal(offered.join(','), 'e1,e3');
-    t.assert(offered.every((id) => accepted.includes(id)),
-      'an account manager the screen offers must be one the route accepts');
-  });
-
-  t.test('before anything is saved, the offered defaults are also accepted', () => {
-    // Otherwise the picker shows Sales on a fresh install and every
-    // submission is refused, which reads as a broken app.
-    const accepted = am.effectiveAccountManagerIds({}, roster);
-    t.assert(accepted.includes('e1') && accepted.includes('e2'),
-      'the first-run Sales default must be accepted, not just displayed');
-    t.equal(accepted.join(','), am.defaultSelection(roster).join(','));
-  });
-
-  t.test('a saved selection wins over the first-run default', () => {
-    // Ticking only Ryan, who is not in Sales, must not silently re-add Sales.
-    const accepted = am.effectiveAccountManagerIds({ accountManagerIds: ['e3'] }, roster);
-    t.equal(accepted.join(','), 'e3');
-  });
-
-  t.test('an id that no longer resolves is dropped, not returned half-formed', () => {
-    t.equal(am.resolveAccountManagers(['ghost'], roster).length, 0);
-  });
-
-  t.test('a nonsense date is rejected rather than stored as garbage', () => {
-    const r = s.validatePatch({ shippedAt: 'sometime next week' }, ['v1']);
-    t.assert(!r.ok, 'an unparseable date should not validate');
-  });
-
-  t.test('clearing a date is allowed, since a date can be entered by mistake', () => {
-    const r = s.validatePatch({ shippedAt: '' }, ['v1']);
-    t.assert(r.ok, 'clearing should be allowed');
-    t.equal(r.patch.shippedAt, null);
-  });
-
-  /* -- the autofill rule that matters most -- */
-
-  const pl = await import('../lib/promopro/printavo-lookup.js');
-
-  t.test('autofill never copies the customer price into our cost', () => {
-    // Printavo holds what we CHARGE. A PO holds what the vendor charges US.
-    // A filled-in wrong number is worse than a blank one, because nobody
-    // checks a field that already looks answered.
-    const inv = pl.normalizeInvoice({
-      id: '1', visualId: 66601, total: 900, customerDueAt: '2026-09-30T00:00:00Z',
-      contact: { fullName: 'Acme' },
-      lineItemGroups: { nodes: [{ id: 'g1', name: 'Front', lineItems: { nodes: [
-        { id: 'l1', description: 'Tee', quantity: 50, color: 'Black', sizes: 'S-XL', price: 18 },
-      ] } }] },
-    });
-    t.equal(inv.lines[0].unitCost, 0);
-    t.equal(inv.lines[0].qty, 50);
-    t.equal(inv.lines[0].description, 'Tee');
-  });
-
-  /* -- clicking a search result must never do nothing -- */
-
-  function fakePrintavo(handler) {
-    // The schema cache lives for ten minutes inside the module, so without
-    // this a fake account answers introspection once and every later test
-    // inherits it.
-    pl._resetSchemaCache();
-    const calls = [];
-    global.fetch = async (url, opts) => {
-      const q = JSON.parse(opts.body).query;
-      calls.push(q);
-      return { ok: true, status: 200, headers: { get: () => null }, json: async () => handler(q, calls.length) };
-    };
-    return calls;
+  if (r.status === 429) {
+    if (_attempt >= 4) throw new Error("Printavo is rate limiting (429) after several retries");
+    const retryAfter = parseInt(r.headers.get("retry-after") || "", 10);
+    const waitMs = Number.isFinite(retryAfter) ? retryAfter * 1000 : Math.min(8000, 1500 * Math.pow(2, _attempt));
+    await new Promise((res) => setTimeout(res, waitMs));
+    return gql(query, variables, _attempt + 1);
   }
 
-  const OK_INVOICE = {
-    id: '1', visualId: 66601, total: 900, customerDueAt: '2026-09-30T00:00:00Z',
-    contact: { fullName: 'Acme Corp' },
-    lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
-      { id: 'l1', description: 'Gildan Tee', quantity: 50 },
-    ] } }] },
-  };
+  if (!r.ok) throw new Error(`Printavo HTTP ${r.status}`);
+  const json = await r.json();
+  if (json.errors) {
+    const msg = json.errors.map((e) => e.message).join(", ");
+    if (/timeout/i.test(msg) && _attempt < 3) {
+      await new Promise((res) => setTimeout(res, 1500 * Math.pow(2, _attempt)));
+      return gql(query, variables, _attempt + 1);
+    }
+    throw new Error(msg);
+  }
+  return json.data;
+}
 
-  await t.test('an unknown line-item field degrades instead of failing the lookup', async () => {
-    // GraphQL validates the whole query first, so ONE field this account
-    // does not have makes the entire request fail and the invoice come back
-    // null. That is what made clicking a search result do nothing: a
-    // speculative styleNumber field was added without checking the schema.
-    process.env.PRINTAVO_API_TOKEN = 'x';
-    process.env.PRINTAVO_EMAIL = 'x@y.com';
-    // The fake account has description and items but NOT itemNumber, so the
-    // top rung fails and `basic` is the one that answers. Kept in step with
-    // LINE_FIELD_SETS: this list used to say `quantity`, which no rung asks
-    // for any more, so every rung failed and the ladder fell all the way to
-    // `minimal`. The assertion below caught it; the harness threw the catch
-    // away (fixed Sep 2, 2026).
-    const supported = new Set(['id', 'description', 'itemNumber', 'items']);
-    fakePrintavo((q) => {
-      const leaf = (q.match(/lineItems \{ nodes \{ ([^}]*)\}/) || [])[1] || '';
-      const asked = leaf.trim().split(/\s+/).filter((w) => /^[a-z]/i.test(w) && w !== 'name');
-      const bad = asked.find((f) => !supported.has(f.replace(/[{}]/g, '')));
-      if (bad) return { errors: [{ message: `Field '${bad}' doesn't exist on type 'LineItem'` }] };
-      return { data: { invoice: OK_INVOICE } };
-    });
-    const r = await pl.getOrder('1');
-    t.assert(r.invoice, 'a reduced field set should still return the invoice');
-    t.equal(r.via, 'basic');
-    t.equal(r.invoice.lines[0].qty, 50);
-    t.equal(r.invoice.customerName, 'Acme Corp');
-  });
+/* ------------------------------------------------------------------ *
+ * A QUOTE IS NOT AN INVOICE
+ *
+ * Printavo keeps the two as separate types with separate root queries. This
+ * file only ever asked `invoices`, so a job that had not been invoiced yet
+ * could not be found AT ALL: searching 66290 answered "Nothing matched"
+ * while the quote sat open in Printavo. The form has always said "Find the
+ * Printavo quote or invoice" and only half of it was true. Worse, the same
+ * search starts working by itself the day the quote gets invoiced, which
+ * makes it look intermittent rather than missing.
+ *
+ * Rather than swap one guess for another, ask the schema once and cache it.
+ * One introspection call answers which roots exist, which arguments they
+ * take, and which fields each type carries, so a quote is queried with the
+ * fields a quote has instead of the ones an invoice has. Guessed field names
+ * have already cost this app two round trips (`styleNumber`, `name` on
+ * Imprint).
+ *
+ * If introspection fails, or answers something unrecognisable, NOTHING is
+ * assumed: every root is attempted and a field error just skips that rung,
+ * which is how the rest of this file already behaves.
+ * ------------------------------------------------------------------ */
 
-  await t.test('a real error stops immediately rather than retrying every field set', async () => {
-    // Retrying an auth failure five times just burns five requests against
-    // Printavo's rate limiter and reports the same thing at the end.
-    process.env.PRINTAVO_API_TOKEN = 'x';
-    process.env.PRINTAVO_EMAIL = 'x@y.com';
-    const calls = fakePrintavo(() => ({ errors: [{ message: 'Not authorized' }] }));
-    const r = await pl.getOrder('1');
-    t.equal(r.invoice, null);
-    // Two: the one-off schema question, then the lookup itself. Not six, and
-    // not twelve now that there are two roots to try.
-    t.equal(calls.length, 2);
-    t.assert(/Not authorized/.test(r.tried[0].error), 'the real reason should be reported');
-  });
+const SCHEMA_TTL_MS = 10 * 60 * 1000;
+let _schema = null;
+let _schemaAt = 0;
+let _schemaInFlight = null;
 
-  await t.test('a failed lookup always carries a reason back to the screen', async () => {
-    process.env.PRINTAVO_API_TOKEN = 'x';
-    process.env.PRINTAVO_EMAIL = 'x@y.com';
-    fakePrintavo(() => ({ data: { invoice: null } }));
-    const r = await pl.getOrder('999');
-    t.equal(r.invoice, null);
-    t.assert(r.tried.length && r.tried[0].error, 'there must be something to show the user');
-  });
+/** Tests call this so one fake account cannot leak into the next. */
+export function _resetSchemaCache() {
+  _schema = null;
+  _schemaAt = 0;
+  _schemaInFlight = null;
+}
 
-  t.test('the app shows the reason instead of returning silently', () => {
-    t.assert(app.includes('Could not load that order'),
-      'a search result that does nothing when clicked is the worst outcome');
-    t.assert(!/const inv = res && res\.invoice;\s*if \(!inv\) return;/.test(app),
-      'the silent return is back');
-  });
+function fieldNamesOf(t) {
+  return ((t && t.fields) || []).map((f) => f && f.name).filter(Boolean);
+}
 
-  /* -- only the promo imprint -- */
+export async function discoverSchema() {
+  if (_schema && Date.now() - _schemaAt < SCHEMA_TTL_MS) return _schema;
+  // One request even if six lookups start at once on a cold function.
+  if (_schemaInFlight) return _schemaInFlight;
 
-  const INVOICE_66608 = {
-    id: 'f76a', visualId: 66608, contact: { fullName: 'Acme' },
-    lineItemGroups: { nodes: [
-      { id: 'g1', position: 1, lineItems: { nodes: [
-        { id: 'a', description: 'Tee', itemNumber: 'G500', items: 100, category: { name: 'T-Shirts' } },
-      ] } },
-      { id: 'g9', position: 9, lineItems: { nodes: [
-        { id: 'b', description: 'Koozie', itemNumber: 'KZ-100', items: 250, category: { name: 'Promotional Products' } },
-      ] } },
-    ] },
-  };
-
-  t.test('lines are grouped by imprint, each carrying its own number', () => {
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    t.equal(inv.groups.length, 2);
-    t.equal(inv.groups[0].imprintNumber, 1);
-    t.equal(inv.groups[1].imprintNumber, 9);
-  });
-
-  t.test('only the promo imprint is offered once categories are known', () => {
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    const promo = pl.promoGroups(inv, ['Promotional Products']);
-    t.equal(promo.groups.length, 1);
-    t.equal(promo.groups[0].imprintNumber, 9);
-    t.equal(promo.groups[0].lines[0].itemNumber, 'KZ-100');
-  });
-
-  t.test('the promo imprint on 66608 numbers the PO 26-66608-9', () => {
-    // The whole point, end to end: pick the invoice, pick the promo imprint,
-    // get the number Ryan actually uses.
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    const g = pl.promoGroups(inv, ['Promotional Products']).groups[0];
-    t.equal(st.numberFor({
-      year: '26',
-      printavo: { invoiceNumber: inv.invoiceNumber, imprintNumber: g.imprintNumber },
-    }), '26-66608-9');
-  });
-
-  t.test('before categories are configured, everything is shown rather than nothing', () => {
-    // Showing every imprint with "tell me which are promo" beats an empty
-    // list that looks broken, and beats guessing and quietly pulling
-    // garments onto a promo PO.
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    const promo = pl.promoGroups(inv, []);
-    t.equal(promo.groups.length, 2);
-    t.equal(promo.matched, false);
-  });
-
-  t.test('the categories on a job are surfaced for ticking', () => {
-    // So nobody has to type a category name exactly right.
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    t.equal(inv.categories.join('|'), 'T-Shirts|Promotional Products');
-  });
-
-  t.test('promo categories are matched without case sensitivity', () => {
-    const inv = pl.normalizeInvoice(INVOICE_66608);
-    t.equal(pl.promoGroups(inv, ['promotional products']).groups.length, 1);
-  });
-
-  t.test('promo categories are stored, not hardcoded', () => {
-    // Category names differ per account and change over time. A guess baked
-    // into code is a guess nobody can correct without a deploy.
-    const r = s.validateSettings({ promoCategories: ['Promotional Products', 'promotional products', 'Drinkware'] });
-    t.assert(r.ok, r.errors.join('; '));
-    t.equal(r.patch.promoCategories.length, 2);
-  });
-
-  t.test('imprint text is fetched separately so a miss costs only the imprint', () => {
-    // One unknown field name fails an entire GraphQL query, and the Imprint
-    // type has not been probed on this account. Keeping it in its own
-    // request means a miss loses the imprint wording and nothing else: the
-    // lines, quantities and item numbers still come through.
-    const src = read('lib/promopro/printavo-lookup.js');
-    t.assert(src.includes('PromoProImprints'), 'imprints should have their own query');
-    t.assert(src.includes('IMPRINT_FIELD_SETS'), 'and their own fallback ladder');
-    t.assert(/No imprint text is a smaller loss/.test(src), 'the reasoning should stay documented');
-  });
-
-  t.test('the imprint query uses fields this account actually has', () => {
-    // Probed Aug 2026: Imprint has `details` and `typeOfWork` (an OBJECT,
-    // needing a sub-selection). It has NO `name`. Every rung of the first
-    // ladder asked for `name`, so all of them failed and the last rung, `id`
-    // alone, "succeeded" carrying no text. A fallback that lands on a rung
-    // with nothing useful on it is not a fallback.
-    const src = read('lib/promopro/printavo-lookup.js');
-    const sets = src.slice(src.indexOf('const IMPRINT_FIELD_SETS'), src.indexOf('function imprintText'));
-    t.assert(!/\bname\b(?!\s*\})/.test(sets.replace(/typeOfWork \{[^}]*\}/g, '').replace(/name: "\w+"/g, '')),
-      'the imprint query still asks for a bare `name`, which does not exist');
-    t.assert(/typeOfWork \{/.test(sets), 'typeOfWork is an object and needs a sub-selection');
-    t.assert(/details/.test(sets), 'details is where the imprint text lives');
-  });
-
-  t.test('every imprint field set can actually produce text', () => {
-    // The specific failure above: a rung that parses but yields nothing.
-    const src = read('lib/promopro/printavo-lookup.js');
-    const sets = src.slice(src.indexOf('const IMPRINT_FIELD_SETS'), src.indexOf('function imprintText'));
-    const rungs = [...sets.matchAll(/fields:\s*"([^"]+)"/g)].map((m) => m[1]);
-    t.assert(rungs.length >= 2, 'expected several rungs, found ' + rungs.length);
-    rungs.forEach((r) => {
-      t.assert(/details|typeOfWork/.test(r),
-        'a rung asking only for ids would succeed and show nothing: "' + r + '"');
-    });
-  });
-
-  await t.test('imprint text reads the way Printavo shows it', async () => {
-    process.env.PRINTAVO_API_TOKEN = 'x';
-    process.env.PRINTAVO_EMAIL = 'x@y.com';
-    global.fetch = async (u, o) => {
-      const q = JSON.parse(o.body).query;
-      if (/PromoProImprints/.test(q)) {
-        // This account has no typeOfWork, so the ladder must step down.
-        if (/typeOfWork \{ id name \}/.test(q)) {
-          return { ok: true, status: 200, headers: { get: () => null },
-            json: async () => ({ errors: [{ message: "Field 'id' doesn't exist on type 'TypeOfWork'" }] }) };
-        }
-        return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ data: { invoice: {
-          id: '1', lineItemGroups: { nodes: [{ id: 'g9', imprints: { nodes: [
-            { id: 'i1', details: '023-185', typeOfWork: { name: 'Laser Engraved' } },
-          ] } }] },
-        } } }) };
+  _schemaInFlight = (async () => {
+    const q = `
+      query PromoProRoots {
+        root: __type(name: "Query") { fields { name args { name } } }
+        quote: __type(name: "Quote") { fields { name } }
+        invoice: __type(name: "Invoice") { fields { name } }
       }
-      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ data: { invoice: {
-        id: '1', visualId: 66608, contact: { fullName: 'Madison Rollefson' },
-        lineItemGroups: { nodes: [{ id: 'g9', position: 9, lineItems: { nodes: [
-          { id: 'b', description: 'Tumbler', itemNumber: 'LTM7066', items: 1 },
-        ] } }] },
-      } } }) };
+    `;
+    let out;
+    try {
+      const data = await gql(q);
+      const fields = (data && data.root && data.root.fields) || [];
+      if (!fields.length) {
+        // A well-formed answer carrying nothing tells us nothing. Unknown,
+        // not "this account has no root queries": the second reading would
+        // refuse to search anything at all.
+        out = { known: false, reason: "introspection returned no root fields", roots: null, typeFields: {} };
+      } else {
+        const roots = {};
+        fields.forEach((f) => {
+          roots[f.name] = ((f && f.args) || []).map((a) => a && a.name).filter(Boolean);
+        });
+        out = {
+          known: true,
+          roots,
+          typeFields: {
+            quote: fieldNamesOf(data && data.quote),
+            invoice: fieldNamesOf(data && data.invoice),
+          },
+        };
+      }
+    } catch (e) {
+      out = { known: false, reason: e.message, roots: null, typeFields: {} };
+    }
+    _schema = out;
+    _schemaAt = Date.now();
+    _schemaInFlight = null;
+    return out;
+  })();
+
+  return _schemaInFlight;
+}
+
+/**
+ * Is this root worth asking? Unknown means YES. Attempting it costs one
+ * request and a field error is already handled; skipping it is how a whole
+ * class of job went missing in the first place.
+ */
+function rootAvailable(schema, name, needsArg) {
+  if (!schema || !schema.known || !schema.roots) return true;
+  const args = schema.roots[name];
+  if (!args) return false;
+  return !needsArg || args.includes(needsArg);
+}
+
+/** Does this type carry this field? Unknown means yes, same reasoning. */
+function typeHas(schema, kind, field) {
+  const known = schema && schema.typeFields && schema.typeFields[kind];
+  if (!Array.isArray(known) || !known.length) return true;
+  return known.includes(field);
+}
+
+/** Has the schema actually told us about this type, or are we guessing? */
+function typeKnown(schema, kind) {
+  const known = schema && schema.typeFields && schema.typeFields[kind];
+  return Array.isArray(known) && known.length > 0;
+}
+
+/**
+ * The header fields a PO needs off a quote or an invoice, asked for only
+ * when the type really has them. GraphQL validates the whole query first, so
+ * one field a Quote does not carry would fail the lookup completely and send
+ * somebody back to typing the order in by hand.
+ */
+function headerSelection(schema, kind) {
+  const parts = ["id", "__typename"];
+  ["visualId", "total", "customerDueAt"].forEach((f) => {
+    if (typeHas(schema, kind, f)) parts.push(f);
+  });
+  if (typeHas(schema, kind, "status")) parts.push("status { id name }");
+  return parts.join(" ");
+}
+
+/**
+ * A GraphQL complaint about an ARGUMENT rather than a field. `quotes` might
+ * not take the same free-text `query` argument `invoices` does, and that
+ * reads as a different message, so it needs its own test or the ladder would
+ * treat a fixable difference as a real outage.
+ */
+function isArgError(message) {
+  return /unknown argument|argument .{0,40}(is not defined|does not exist|not supported)|is not defined by/i
+    .test(String(message || ""));
+}
+
+function isSchemaError(message) {
+  return isFieldError(message) || isArgError(message);
+}
+
+/* ------------------------------------------------------------------ *
+ * NORMALIZING
+ *
+ * Printavo's line items live at
+ *   invoice.lineItemGroups.nodes[].lineItems.nodes[]
+ * (confirmed by the sync's probe-lineitems mode). Field names on the leaf
+ * vary by account configuration, so every read is defensive: take the first
+ * field that exists rather than assuming one name. A missing price is 0, not
+ * a crash, because a quote line with no cost yet is normal.
+ * ------------------------------------------------------------------ */
+
+function firstOf(obj, names) {
+  if (!obj || typeof obj !== "object") return null;
+  for (const n of names) {
+    const v = obj[n];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return null;
+}
+
+function nodesOf(v) {
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  if (Array.isArray(v.nodes)) return v.nodes;
+  if (Array.isArray(v.edges)) return v.edges.map((e) => e && e.node).filter(Boolean);
+  return [];
+}
+
+function textOf(v) {
+  if (v == null) return "";
+  if (typeof v === "object") return String(firstOf(v, ["name", "description", "title"]) || "");
+  return String(v);
+}
+
+/**
+ * The imprint number for each line-item group on a job.
+ *
+ * Printavo orders groups with `position`, and a position of ZERO is a real
+ * first imprint, not a missing value. The old rule read anything not greater
+ * than zero as absent and fell back to the group's place in the list, so a
+ * job whose positions came back 0 and 1 numbered its first imprint 1 by
+ * accident and its second imprint 1 as well. Two cards read "Imprint 1" and
+ * the PO number came out 26-66883-1+1.
+ *
+ * The rule now: the lowest position on the job is imprint 1, and the rest
+ * keep their spacing. Positions 0 and 1 number 1 and 2. Positions 1 and 9
+ * stay 1 and 9, because a gap is real: deleting an imprint in Printavo
+ * leaves the ones after it where they were, and 66608's promo imprint is
+ * genuinely numbered 9 on a job with two groups.
+ *
+ * Two safety nets under that. A group carrying no position at all falls back
+ * to its place in the list, and if any two groups still land on the same
+ * number the whole job is renumbered in order. Two imprints sharing a number
+ * is never right, whatever came back from Printavo, and the number goes on a
+ * document a vendor reads.
+ */
+export function imprintNumbersFor(groups) {
+  const list = groups || [];
+
+  // firstOf answers null for a field that is absent, and Number(null) is
+  // zero, so the raw value is checked BEFORE the conversion. Otherwise a
+  // group carrying no position at all reads as position zero and drags the
+  // whole job's numbering down with it.
+  const positions = list.map((g) => {
+    const raw = firstOf(g, ["position"]);
+    if (raw === null) return null;
+    const p = Number(raw);
+    return Number.isFinite(p) ? p : null;
+  });
+
+  // In order, 1 upwards. The fallback, and what a job with an incomplete
+  // set of positions gets: half-trusted ordering is worse than none.
+  const byOrder = list.map((_, i) => i + 1);
+  if (!positions.length || positions.some((p) => p === null)) return byOrder;
+
+  const shift = Math.min(...positions) < 1 ? 1 - Math.min(...positions) : 0;
+  const numbers = positions.map((p) => p + shift);
+
+  return new Set(numbers).size === numbers.length ? numbers : byOrder;
+}
+
+/**
+ * Turn a Printavo invoice into the shape PromoPro's PO form wants.
+ *
+ * Note what this does NOT do: it does not copy the customer's PRICE onto the
+ * PO. Printavo holds what we charge; a PO holds what the vendor charges us.
+ * Copying the sell price into a cost field would look filled-in and be wrong,
+ * which is worse than blank. unitCost comes back 0 and the buyer types it.
+ */
+export function normalizeInvoice(inv) {
+  if (!inv) return null;
+
+  const rawGroups = nodesOf(inv.lineItemGroups);
+  // Numbered as a set, not one at a time: the number one imprint gets
+  // depends on what the others came back with.
+  const imprintNumbers = imprintNumbersFor(rawGroups);
+
+  const groups = rawGroups.map((g, i) => {
+    const lines = nodesOf(g.lineItems).map((li) => {
+      const description = textOf(firstOf(li, ["description", "product", "style", "name"]));
+      // Confirmed field name on this account.
+      const itemNumber = textOf(firstOf(li, ["itemNumber", "styleNumber", "sku", "productNumber"]));
+      // `items` first: that is what this account calls the quantity. The
+      // others are fallbacks for a differently configured Printavo.
+      const qty = Number(firstOf(li, ["items", "quantity", "qty", "itemQuantity"])) || 0;
+      const color = textOf(firstOf(li, ["color", "colour"]));
+      const category = textOf(firstOf(li, ["category"]));
+
+      return {
+        printavoLineId: li && li.id ? String(li.id) : null,
+        itemNumber: itemNumber && itemNumber !== description ? itemNumber : "",
+        description: description || "Item",
+        qty,
+        // Deliberately zero. Printavo holds what we CHARGE; a PO holds what
+        // the vendor charges US. A filled-in wrong number is worse than a
+        // blank one, because nobody re-checks a field that looks answered.
+        unitCost: 0,
+        detail: color,
+        imprint: "",
+        category,
+        merch: li && li.merch === true,
+      };
+    });
+
+    // The imprint's number on the job, worked out across all the groups
+    // together. See imprintNumbersFor above for why it cannot be decided
+    // from this group alone.
+    const imprintNumber = imprintNumbers[i];
+
+    // Distinct categories present in this imprint. This is what tells promo
+    // apart from garments, and it is surfaced rather than filtered on here:
+    // which categories count as promo is a shop decision that belongs in
+    // Settings, not a guess baked into a lookup.
+    const categories = [];
+    lines.forEach((l) => {
+      if (l.category && !categories.includes(l.category)) categories.push(l.category);
+    });
+
+    return {
+      id: g && g.id ? String(g.id) : `group-${i + 1}`,
+      imprintNumber,
+      categories,
+      anyMerch: lines.some((l) => l.merch),
+      lines,
     };
-    const r = await pl.getOrder('f76a');
-    t.equal(r.invoice.groups[0].imprintText, 'Laser Engraved // 023-185');
-    t.equal(r.invoice.groups[0].lines[0].imprint, 'Laser Engraved // 023-185');
-    t.equal(r.imprintVia, 'typed');
   });
 
-  t.test('autofill reads the field names this account actually has', () => {
-    // Probed Aug 2026 against pmapparel's Printavo. Two surprises worth
-    // locking in: there is no `quantity` field, the quantity is `items`; and
-    // the item number is `itemNumber`, not `styleNumber`. Guessing
-    // `styleNumber` made GraphQL reject the whole query, which is why
-    // clicking a search result did nothing.
-    const inv = pl.normalizeInvoice({
-      id: '1', visualId: 66608, contact: {},
-      lineItemGroups: { nodes: [{ id: 'g1', position: 9, lineItems: { nodes: [
-        { id: 'l1', description: 'Koozie', itemNumber: 'KZ-100', items: 250, color: 'Red',
-          category: { id: 'c1', name: 'Promotional Products' } },
-      ] } }] },
+  // WHO THE JOB IS FOR, kept as two separate facts.
+  //
+  // Printavo hangs an invoice off a CONTACT, a person, and that person hangs
+  // off a CUSTOMER, the company. Asking only for the contact is how "Jill
+  // Stevents" ended up on a pipeline card and an emailed purchase order where
+  // "Hy-Vee" belonged. A vendor reading a PO needs to know which company the
+  // goods are for; the buyer's own name is the smaller fact.
+  //
+  // `customerName` stays as the ONE name to show, company first, so every
+  // screen that already reads it starts showing the company without being
+  // touched. It falls back to the person, because a genuine individual buyer
+  // has no company and a blank name is worse than a personal one.
+  const company = textOf(firstOf((inv.contact && inv.contact.customer) || inv.customer || {}, ["companyName", "company", "name"]));
+  const person = textOf(firstOf(inv.contact || {}, ["fullName", "name"]));
+
+  return {
+    id: inv.id ? String(inv.id) : null,
+    // Which of the two this is. A PO raised off a quote and one raised off
+    // an invoice are the same document to a vendor, but the screen has to be
+    // able to SAY which, because "66290 is only a quote" is a real answer to
+    // "why can I not find it".
+    kind: String(inv.__typename || "").toLowerCase() === "quote" ? "quote" : "invoice",
+    invoiceNumber: inv.visualId != null ? String(inv.visualId) : null,
+    companyName: company,
+    contactName: person,
+    customerName: company || person || "",
+    dueDate: inv.customerDueAt ? String(inv.customerDueAt).slice(0, 10) : null,
+    status: textOf(firstOf(inv.status || {}, ["name"])),
+    total: Number(inv.total) || 0,
+    groups,
+    // Every category on the invoice, so the Settings screen can offer them
+    // as ticks rather than asking anyone to type a category name exactly.
+    categories: groups.reduce((acc, g) => {
+      g.categories.forEach((c) => { if (!acc.includes(c)) acc.push(c); });
+      return acc;
+    }, []),
+    // Kept flat as well, so nothing that already reads inv.lines breaks.
+    lines: groups.reduce((acc, g) => acc.concat(g.lines), []),
+  };
+}
+
+/**
+ * Which imprints on this invoice are promo, according to the shop's own
+ * category list. Returns every group when nothing has been configured yet,
+ * because showing everything with a "tell me which of these are promo"
+ * prompt beats showing an empty list and looking broken.
+ */
+export function promoGroups(invoice, promoCategories) {
+  const groups = (invoice && invoice.groups) || [];
+  const wanted = (promoCategories || []).map((c) => String(c).toLowerCase());
+  if (!wanted.length) return { groups, matched: false };
+  const hit = groups.filter((g) => g.categories.some((c) => wanted.includes(String(c).toLowerCase())));
+  return { groups: hit, matched: true };
+}
+
+/* ------------------------------------------------------------------ *
+ * QUERIES
+ * ------------------------------------------------------------------ */
+
+// LINE-ITEM FIELD SETS, MOST DETAILED FIRST.
+//
+// GraphQL validates the whole query before running it: ONE field name this
+// Printavo account does not have makes the entire request fail, and the
+// invoice comes back null. Line-item leaf names vary by how an account was
+// configured, and there is no way to know from here which ones exist.
+//
+// So rather than guess once and fail completely, try the richest selection
+// and step down on a validation error until one works. Worst case the buyer
+// gets descriptions and quantities and types the rest, which is still far
+// better than a button that does nothing.
+//
+// The set that succeeded is reported back as `via`, so the first real lookup
+// tells us this account's actual shape and the guessing can stop.
+// CONFIRMED against pmapparel's account by the schema probe, Aug 2026.
+// Do not add a field to this list without probing first: GraphQL validates
+// the whole query before running it, so one name this account does not have
+// makes the entire request fail and the invoice comes back empty. That is
+// exactly what `styleNumber` did.
+//
+// Two things worth knowing, both surprising:
+//   - There is NO `quantity` field. The quantity is `items`.
+//   - The item number is `itemNumber`, not `styleNumber` or `sku`.
+//
+// The ladder stays as insurance, but the top rung is now real rather than a
+// guess, so it should never need to step down here.
+const LINE_FIELD_SETS = [
+  { name: "full",    fields: "id description itemNumber items color position price merch category { id name }" },
+  { name: "basic",   fields: "id description itemNumber items" },
+  { name: "minimal", fields: "id description" },
+];
+
+// WHO THE JOB IS FOR, AS A LADDER OF ITS OWN.
+//
+// The company name is not on the invoice. It is on the Customer that the
+// invoice's Contact belongs to, and that nesting has NOT been probed on this
+// account the way the line-item fields were. GraphQL validates the whole
+// query before running it, so one wrong name here would not degrade the
+// company name, it would return no invoice at all and break autofill
+// completely. That is exactly what `styleNumber` did to the line items.
+//
+// So the same trick the line fields already use: ask for the richest shape,
+// step down on a validation error. The LAST rung is the query as it stood
+// before any of this, which makes the worst case "no company name, same as
+// yesterday" rather than a broken lookup.
+//
+// Which rung worked comes back as `partyVia`, so the first real lookup after
+// deploy settles the shape and the ladder can be trimmed to the true one.
+const PARTY_FIELD_SETS = [
+  { name: "company",      fields: "contact { fullName email customer { id companyName } }" },
+  { name: "company-name", fields: "contact { fullName email customer { id name } }" },
+  { name: "contact-only", fields: "contact { fullName email }" },
+];
+
+function orderQuery(root, header, lineFields, partyFields) {
+  return `
+    query PromoProOrder($id: ID!) {
+      ${root}(id: $id) {
+        ${header}
+        ${partyFields}
+        lineItemGroups {
+          nodes {
+            id
+            position
+            lineItems { nodes { ${lineFields} } }
+          }
+        }
+      }
+    }
+  `;
+}
+
+/**
+ * A GraphQL error that means "that field does not exist here", as opposed to
+ * a real failure like a bad id or an outage. Only the former is worth
+ * retrying with fewer fields; retrying an auth error five times just wastes
+ * five requests and hits the rate limiter.
+ */
+function isFieldError(message) {
+  return /doesn't exist|does not exist|Cannot query field|undefinedField|no field/i.test(String(message || ""));
+}
+
+// WHO THE JOB IS FOR, IN THE PICKER TOO.
+//
+// Same reasoning as the detail ladder, smaller: the picker lists jobs by who
+// they are for, and listing them by contact is what sends somebody hunting
+// for a company name that is not on screen. The last rung is the query as it
+// stood before any of this, so an account without the nesting still searches.
+const SEARCH_PARTY_SETS = [
+  "contact { fullName customer { id companyName } }",
+  "contact { fullName customer { id name } }",
+  "contact { fullName }",
+];
+
+// BOTH ROOTS. `quotes` is the one that was missing: a job that has not been
+// invoiced yet exists only there, which is why 66290 could not be found.
+const SEARCH_ROOTS = [
+  { root: "invoices", kind: "invoice" },
+  { root: "quotes", kind: "quote" },
+];
+
+/** One picker row, from either root. */
+function searchRow(row, kind) {
+  const company = textOf(firstOf((row.contact && row.contact.customer) || {}, ["companyName", "company", "name"]));
+  const person = textOf(firstOf(row.contact || {}, ["fullName", "name"]));
+  const typed = String(row.__typename || "").toLowerCase();
+  return {
+    id: row.id ? String(row.id) : null,
+    // Printavo's own word for it when it says one, our root when it does not.
+    kind: typed === "quote" || typed === "invoice" ? typed : kind,
+    invoiceNumber: row.visualId != null ? String(row.visualId) : null,
+    companyName: company,
+    contactName: person,
+    customerName: company || person || "",
+    dueDate: row.customerDueAt ? String(row.customerDueAt).slice(0, 10) : null,
+    status: textOf(firstOf(row.status || {}, ["name"])),
+    total: Number(row.total) || 0,
+  };
+}
+
+/**
+ * One root, asked as richly as the schema allows. With the schema in hand
+ * this is a single request; without it, step down the same way every other
+ * read in this file does.
+ */
+async function searchOneRoot(schema, spec, term, first) {
+  const headers = typeKnown(schema, spec.kind)
+    ? [headerSelection(schema, spec.kind)]
+    : [
+        headerSelection(null, spec.kind),
+        "id __typename visualId total status { id name }",
+        "id __typename visualId",
+      ];
+
+  let lastError = null;
+  for (const header of headers) {
+    for (const party of SEARCH_PARTY_SETS) {
+      const q = `
+        query PromoProSearch($q: String, $first: Int) {
+          ${spec.root}(query: $q, first: $first) {
+            nodes { ${header} ${party} }
+          }
+        }
+      `;
+      try {
+        const data = await gql(q, { q: term, first });
+        return { results: nodesOf(data && data[spec.root]).map((row) => searchRow(row, spec.kind)) };
+      } catch (e) {
+        lastError = e;
+        // A real failure (auth, outage, rate limit) is not something to retry
+        // with fewer fields: it spends requests to learn what the first one
+        // already said.
+        if (!isSchemaError(e.message)) return { error: e.message };
+      }
+    }
+  }
+  return { error: (lastError && lastError.message) || "search failed" };
+}
+
+/**
+ * Search quotes AND invoices by number or customer name. Printavo's `query`
+ * argument is free text, so the front end does not have to decide which kind
+ * of search this is, or which kind of document the number belongs to.
+ *
+ * Returns { results, searched, unavailable } rather than a bare array: an
+ * empty list means opposite things depending on whether both roots answered,
+ * and the screen has to be able to tell "Printavo has no such job" apart
+ * from "half of Printavo did not answer".
+ *
+ * Deliberately asks for NO line-item fields. A picker row only needs enough
+ * to choose from, and every extra field is another chance for one unknown
+ * name to fail the whole query. Detail comes later, in getOrder.
+ */
+export async function searchOrders(term, limit) {
+  const text = String(term || "").trim();
+  const first = Math.min(Number(limit) || 10, 25);
+  if (!text) return { results: [], searched: [], unavailable: [] };
+
+  const schema = await discoverSchema();
+  const searched = [];
+  const unavailable = [];
+  const wanted = [];
+
+  SEARCH_ROOTS.forEach((spec) => {
+    if (rootAvailable(schema, spec.root, "query")) wanted.push(spec);
+    else unavailable.push({ root: spec.root, reason: "this Printavo account has no " + spec.root + " search" });
+  });
+
+  // Independent, so one root having a bad day costs its own results and not
+  // the other's. Invoice results that came back are still worth showing when
+  // the quote search is down; answering "nothing matched" instead is how
+  // somebody comes to trust a wrong answer.
+  const settled = await Promise.all(wanted.map(async (spec) => {
+    try {
+      return { spec, out: await searchOneRoot(schema, spec, text, first) };
+    } catch (e) {
+      return { spec, out: { error: e.message } };
+    }
+  }));
+
+  const results = [];
+  const seen = new Set();
+  settled.forEach(({ spec, out }) => {
+    if (out.error) {
+      unavailable.push({ root: spec.root, reason: out.error });
+      return;
+    }
+    searched.push(spec.root);
+    out.results.forEach((r) => {
+      const key = r.id || r.kind + ":" + r.invoiceNumber;
+      if (seen.has(key)) return;
+      seen.add(key);
+      results.push(r);
     });
-    t.equal(inv.lines[0].itemNumber, 'KZ-100');
-    t.equal(inv.lines[0].qty, 250);
-    t.equal(inv.lines[0].category, 'Promotional Products');
   });
 
-  t.test('the query never asks for a field this account does not have', () => {
-    const src = read('lib/promopro/printavo-lookup.js');
-    // NARROWED Sep 2026. This used to slice from the array to the next
-    // function, which swept up whatever comments happened to sit between
-    // them. It went red the day a comment EXPLAINED the incident it was
-    // written for, which is the opposite of the point: prose about a hazard
-    // is not the hazard. Read the array literal, which is the only thing
-    // that ends up in a query.
-    const start = src.indexOf('const LINE_FIELD_SETS');
-    const sets = src.slice(start, src.indexOf('];', start) + 2);
-    t.assert(/LINE_FIELD_SETS = \[/.test(sets) && sets.length < 800,
-      'the slice should be the array itself, not a chunk of the file');
-    ['styleNumber', 'sku', 'productNumber', 'quantity'].forEach((f) => {
-      t.assert(!new RegExp('\\b' + f + '\\b').test(sets),
-        'the line-item query still asks for "' + f + '", which this account does not have');
-    });
-    t.assert(/\bitemNumber\b/.test(sets) && /\bitems\b/.test(sets),
-      'the query should use the confirmed itemNumber and items fields');
+  // Nothing answered at all is a FAILURE, not an empty result. The two call
+  // for opposite next steps and must never be shown the same way.
+  if (!searched.length) {
+    throw new Error(unavailable.map((u) => u.root + ": " + u.reason).join("; ") || "Printavo search failed");
+  }
+
+  // The number somebody typed is nearly always the one they want, so an exact
+  // match on the job number leads whichever root it came from.
+  results.sort((a, b) => {
+    const ax = a.invoiceNumber === text ? 0 : 1;
+    const bx = b.invoiceNumber === text ? 0 : 1;
+    if (ax !== bx) return ax - bx;
+    return (Number(b.invoiceNumber) || 0) - (Number(a.invoiceNumber) || 0);
   });
 
-  t.test('the customer field sets do not smuggle in an unprobed name either', () => {
-    // Same rule, applied to the ladder added when the company name went onto
-    // the purchase order. Its bottom rung has to stay the selection that is
-    // already known to work on this account.
-    const src = read('lib/promopro/printavo-lookup.js');
-    const start = src.indexOf('const PARTY_FIELD_SETS');
-    const sets = src.slice(start, src.indexOf('];', start) + 2);
-    ['organization', 'accountName', 'businessName'].forEach((f) => {
-      t.assert(!new RegExp('\\b' + f + '\\b').test(sets),
-        'the customer query asks for "' + f + '", which has never been probed');
-    });
-    t.assert(/contact \{ fullName email \}/.test(sets),
-      'the last rung must be the selection that already works');
-  });
+  return { results, searched, unavailable };
+}
 
-  t.test('the item number never just repeats the description', () => {
-    // When Printavo has no style field, "style" falls through to the same
-    // text as the description. Two identical columns on a PO is noise.
-    const inv = pl.normalizeInvoice({
-      id: '1', visualId: 1, contact: {},
-      lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [
-        { id: 'l1', description: 'G500', quantity: 5, style: 'G500' },
-      ] } }] },
-    });
-    t.equal(inv.lines[0].itemNumber, '');
-  });
+/* ------------------------------------------------------------------ *
+ * IMPRINTS
+ *
+ * Printavo shows an imprint as a labelled block: "IMPRINT #66608-9" with the
+ * work underneath, e.g. "Laser Engraved // 023-185". That text is what the
+ * vendor needs on the PO, and it also confirms the numbering: Printavo's own
+ * label for that imprint is 66608-9.
+ *
+ * Fetched in a SEPARATE request from the line items, deliberately. One
+ * unknown field name fails an entire GraphQL query, and the Imprint type's
+ * fields have not been probed on this account. Keeping it apart means a
+ * miss costs the imprint text and nothing else: the lines, quantities and
+ * item numbers still come through.
+ * ------------------------------------------------------------------ */
 
-  t.test('autofill survives an invoice with no line items', () => {
-    const inv = pl.normalizeInvoice({ id: '1', visualId: 70000, contact: {}, lineItemGroups: { nodes: [] } });
-    t.equal(inv.lines.length, 0);
-    t.equal(inv.invoiceNumber, '70000');
-  });
+// CONFIRMED by probe, Aug 2026. Imprint on this account has `details`
+// (String) and `typeOfWork` (an OBJECT, so it needs a sub-selection). There
+// is NO `name` field, which is what my first guess asked for: every rung of
+// the old ladder named it, so all of them failed and the last rung, `id`
+// alone, "succeeded" while carrying no text at all. A fallback that lands on
+// a rung with nothing useful on it is not a fallback.
+const IMPRINT_FIELD_SETS = [
+  { name: "full",    fields: "id details typeOfWork { id name }" },
+  { name: "typed",   fields: "id details typeOfWork { name }" },
+  { name: "details", fields: "id details" },
+];
 
-  t.test('autofill degrades rather than throwing on unexpected field names', () => {
-    // Printavo leaf field names vary by account configuration. A blank
-    // description the buyer types over beats a crash.
-    const inv = pl.normalizeInvoice({
-      id: '1', visualId: 70001, contact: {},
-      lineItemGroups: { nodes: [{ id: 'g1', lineItems: { nodes: [{ id: 'l1' }] } }] },
-    });
-    t.equal(inv.lines.length, 1);
-    t.assert(typeof inv.lines[0].description === 'string', 'description should still be a string');
+/** One readable line from whatever the imprint carries. */
+function imprintText(im) {
+  const bits = [];
+  // typeOfWork is an object; textOf pulls its name. This is the "Laser
+  // Engraved" half of what Printavo shows.
+  const type = textOf(firstOf(im, ["typeOfWork", "type"]));
+  const details = textOf(firstOf(im, ["details", "description", "notes"]));
+  [type, details].forEach((b) => {
+    if (b && !bits.includes(b)) bits.push(b);
   });
+  return bits.join(" // ");
+}
 
-  process.exit(t.report());
-})();
+/**
+ * Imprint text per line-item group, keyed by group id. Never throws: an
+ * empty map just means the PO carries no imprint description, which is a
+ * degraded result rather than a failure.
+ */
+export async function getImprints(id, root) {
+  const from = root || "invoice";
+  for (const set of IMPRINT_FIELD_SETS) {
+    const q = `
+      query PromoProImprints($id: ID!) {
+        ${from}(id: $id) {
+          id
+          lineItemGroups { nodes { id imprints { nodes { ${set.fields} } } } }
+        }
+      }
+    `;
+    try {
+      const data = await gql(q, { id: String(id) });
+      const out = {};
+      nodesOf(data && data[from] && data[from].lineItemGroups).forEach((g) => {
+        const texts = nodesOf(g.imprints).map(imprintText).filter(Boolean);
+        if (texts.length) out[String(g.id)] = texts.join(" / ");
+      });
+      return { imprints: out, via: set.name };
+    } catch (e) {
+      if (!isFieldError(e.message)) return { imprints: {}, via: null, error: e.message };
+    }
+  }
+  return { imprints: {}, via: null };
+}
+
+// The two roots that hand back one document by id, invoices first: most POs
+// are raised off an invoiced job, and a search result says which it is
+// anyway.
+const DETAIL_ROOTS = [
+  { root: "invoice", kind: "invoice" },
+  { root: "quote", kind: "quote" },
+];
+
+/**
+ * One root, both ladders. Answers the finished result, a stop (a real
+ * failure worth reporting rather than working around), or null meaning
+ * "not this one, try the other".
+ */
+async function getFromRoot(schema, spec, id, tried) {
+  const header = headerSelection(schema, spec.kind);
+
+  // Two ladders, party outside lines. A field error cannot say WHICH part of
+  // the query it objected to, so the inner ladder is exhausted before blaming
+  // the outer one. Normally the top rung of each works and this is one
+  // request.
+  for (const party of PARTY_FIELD_SETS) {
+    for (const set of LINE_FIELD_SETS) {
+      try {
+        const data = await gql(orderQuery(spec.root, header, set.fields, party.fields), { id: String(id) });
+        const raw = data && data[spec.root];
+        if (!raw) {
+          // A quote id asked of `invoice` comes back empty. That is the normal
+          // way to learn which of the two it is, so it moves on to the other
+          // root instead of reporting a dead end the way it used to.
+          tried.push({ root: spec.root, set: set.name, party: party.name, error: "Printavo returned no " + spec.root + " for that id" });
+          return null;
+        }
+
+        const invoice = normalizeInvoice(raw);
+        if (!raw.__typename) invoice.kind = spec.kind;
+
+        // Best effort. No imprint text is a smaller loss than no order.
+        const im = await getImprints(id, spec.root);
+        invoice.groups.forEach((g) => {
+          const text = im.imprints[g.id] || "";
+          g.imprintText = text;
+          g.lines.forEach((l) => { l.imprint = text; });
+        });
+
+        return { invoice, kind: invoice.kind, via: set.name, partyVia: party.name, imprintVia: im.via, tried };
+      } catch (e) {
+        tried.push({ root: spec.root, set: set.name, party: party.name, error: e.message });
+        // Anything other than an unknown field is a real problem. Stop
+        // everything, not just this rung: retrying an auth error six times
+        // spends six requests to learn what the first one said.
+        if (!isSchemaError(e.message)) return { invoice: null, via: null, partyVia: null, tried };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * One order, quote or invoice, WITH line items. This is what autofill calls.
+ *
+ * `kind` is the hint off the search result, so the right root is asked first
+ * and the other is only a fallback. Getting it wrong costs one extra request,
+ * not a failure.
+ *
+ * Returns { invoice, kind, via, tried } so a caller can say WHY nothing came
+ * back instead of just handing over a null.
+ */
+export async function getOrder(id, kind) {
+  const tried = [];
+  const schema = await discoverSchema();
+
+  let roots = DETAIL_ROOTS.filter((r) => rootAvailable(schema, r.root, "id"));
+  if (String(kind || "").toLowerCase() === "quote") {
+    roots = roots.slice().sort((a, b) => (a.kind === "quote" ? -1 : b.kind === "quote" ? 1 : 0));
+  }
+  if (!roots.length) {
+    return { invoice: null, via: null, partyVia: null, tried: [{ error: "This Printavo account exposes neither an invoice nor a quote by id" }] };
+  }
+
+  for (const spec of roots) {
+    const res = await getFromRoot(schema, spec, id, tried);
+    if (res) return res;
+  }
+
+  return { invoice: null, via: null, partyVia: null, tried };
+}
+
+/* ------------------------------------------------------------------ *
+ * SCHEMA PROBE
+ *
+ * Read-only. Answers three questions that cannot be guessed from here:
+ *   1. what a line item on THIS account is actually called field by field
+ *      (so the item number stops being a guess)
+ *   2. what a line item GROUP carries (so imprints can be numbered)
+ *   3. what the real data looks like for one invoice
+ *
+ * Same __type introspection api/printavo-sync.js already uses for its
+ * probe-* modes. Nothing here writes anything.
+ * ------------------------------------------------------------------ */
+
+const SCALARS = new Set(["String", "Int", "Float", "Boolean", "ID", "ISO8601DateTime"]);
+
+// Types worth expanding one level when they appear as a field. Anything not
+// listed is skipped rather than guessed at.
+const PROBE_TYPES = [
+  "LineItem", "LineItemGroup", "Category", "Product",
+  "LineItemSizeCount", "Imprint", "ImprintConnection", "TypeOfWork", "Personalization",
+];
+
+export async function probeTypes(names) {
+  const out = {};
+  for (const typeName of (names || PROBE_TYPES)) {
+    try {
+      const data = await gql(`query{__type(name:"${typeName}"){fields{name type{name kind ofType{name kind ofType{name kind}}}}}}`);
+      const t = data && data.__type;
+      if (!t) { out[typeName] = { error: "type not found" }; continue; }
+      out[typeName] = (t.fields || []).map((f) => {
+        // Unwrap NON_NULL / LIST wrappers to find the real type name.
+        let ty = f.type;
+        let depth = 0;
+        while (ty && !ty.name && ty.ofType && depth < 3) { ty = ty.ofType; depth++; }
+        return { name: f.name, type: (ty && ty.name) || (f.type && f.type.kind) || "?" };
+      });
+    } catch (e) {
+      out[typeName] = { error: e.message };
+    }
+  }
+  return out;
+}
+
+/** Scalar field names for a probed type. */
+function scalarsOf(types, typeName) {
+  const fields = (types && types[typeName]) || [];
+  if (!Array.isArray(fields)) return [];
+  return fields.filter((f) => SCALARS.has(f.type)).map((f) => f.name);
+}
+
+/**
+ * Build a selection for a type using only fields the probe confirmed, and
+ * expand a known object field one level using ITS scalars.
+ *
+ * This is why the first probe failed: it asked for `sizes` and
+ * `enabledColumns` bare, and GraphQL refuses an object field with no
+ * sub-selection. Building the query FROM the schema rather than from a guess
+ * means that cannot happen again.
+ */
+function selectionFor(types, typeName, expand) {
+  const fields = (types && types[typeName]) || [];
+  if (!Array.isArray(fields)) return "id";
+  const parts = [];
+  fields.forEach((f) => {
+    if (SCALARS.has(f.type)) { parts.push(f.name); return; }
+    if (expand && expand[f.name]) {
+      const sub = scalarsOf(types, f.type);
+      if (sub.length) parts.push(`${f.name} { ${sub.join(" ")} }`);
+    }
+  });
+  return parts.length ? parts.join(" ") : "id";
+}
+
+/**
+ * Everything on one invoice, using ONLY confirmed field names, with object
+ * fields expanded one level. Read-only.
+ */
+export async function probeInvoice(id, types) {
+  const itemSel = selectionFor(types, "LineItem", {
+    category: true, product: true, sizes: true,
+  });
+  const groupSel = selectionFor(types, "LineItemGroup", {});
+  const imprintScalars = scalarsOf(types, "Imprint");
+  const imprintSel = imprintScalars.length
+    ? ` imprints { nodes { ${imprintScalars.join(" ")} } }`
+    : "";
+
+  const q = `
+    query PromoProProbe($id: ID!) {
+      invoice(id: $id) {
+        id
+        visualId
+        lineItemGroups {
+          nodes {
+            ${groupSel}${imprintSel}
+            lineItems { nodes { ${itemSel} } }
+          }
+        }
+      }
+    }
+  `;
+  const data = await gql(q, { id: String(id) });
+  return { invoice: data && data.invoice, query: q };
+}
