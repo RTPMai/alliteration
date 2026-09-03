@@ -39,22 +39,44 @@
  *      strengths, growth areas, dates. An admin can edit or delete from
  *      there; an employee reads their own and can do neither.
  *
- * Seven views: Dashboard (admin: anniversaries + headline numbers;
+ * TWO ADDITIONS, Sep 2026, both Ryan's calls, and they are opposites:
+ *
+ *   DOCUMENTATION. A place to write up an issue or a problem with somebody,
+ *   sitting inside the Reviews screen because that is where anyone would
+ *   look for it, and NOT VISIBLE TO THE PERSON IT IS ABOUT. It is not a
+ *   view of its own: it is a tab inside Reviews, drawn only for an admin,
+ *   over its own endpoint and its own storage. api/crewcore/docs.js refuses
+ *   a non-admin caller on every method including GET, before it reads
+ *   anything, so there is no filter anywhere that has to remember to keep
+ *   an entry away from the employee. See the note above validateDoc() in
+ *   lib/crewcore/schema.js for why it is not a flag on a review.
+ *
+ *   KUDOS. A way to hand out credit, from a manager or between employees,
+ *   and the one screen in this app that a self-serve account can WRITE to.
+ *   Shop-wide: everybody with CrewCore reads the same feed, because praise
+ *   only two people can see is a private message. Nobody can give
+ *   themselves kudos (refused on the server), there is no edit, and only
+ *   the author or an admin can remove one — never the recipient.
+ *
+ * Nine views: Dashboard (admin: anniversaries + headline numbers;
  * self-serve: your profile and where you stand), Roster (admin only; full
  * list + add/edit), Time Clock (admin: whole team, correctable; self-serve:
  * your own hours, read-only, and only if you punch), Stipend (both: your
  * allotment, spend log, and remaining balance; admin also logs new spend
- * entries for anyone), Reviews (admin: full history + add/edit/delete;
- * self-serve: read-only own history), Handbook (everyone; read-only),
- * Settings (admin only; hidden from self-serve rails by lib/users.js's
- * per-view tabs).
+ * entries for anyone), Samples (SanMar sample drops and picks), Kudos
+ * (everyone; read and write), Reviews (admin: full history + add/edit/delete
+ * plus the documentation tab; self-serve: read-only own history), Handbook
+ * (everyone; read-only), Settings (admin only; hidden from self-serve rails
+ * by lib/users.js's per-view tabs).
  */
 
 import { ENDPOINTS } from '../js/api.js';
 // The stipend year math is shared with the API route and the store so a
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
-import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin,
+  DOC_CATEGORIES, DOC_LEVELS, docsFor, isFormalDoc,
+  KUDOS_TAGS, KUDOS_MAX_LENGTH, kudosFor, canDeleteKudos } from '../lib/crewcore/schema.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -446,6 +468,51 @@ export default {
   .tc-pinstate{font-size:11.5px;font-weight:700;margin-top:5px}
   .tc-pinstate.set{color:var(--success-dk)}
   .tc-pinstate.unset{color:var(--warn-dk)}
+
+  /* Tabs WITHIN one view. Reviews holds two different files on one screen
+     (the review history and the documentation of issues), which is where
+     anybody would look for either. The rail has one Reviews button; this is
+     the switch once you are inside it. */
+  .cc-tabs{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid var(--line)}
+  .cc-tab{
+    background:transparent;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;
+    padding:9px 13px;font-family:inherit;font-size:13px;font-weight:700;
+    color:var(--muted);cursor:pointer;
+  }
+  .cc-tab:hover{color:var(--ink)}
+  .cc-tab.on{color:var(--ink);border-bottom-color:var(--accent)}
+  .cc-tab .n{font-weight:600;color:var(--faint);margin-left:6px}
+
+  /* Documentation. The banner is not decoration: it is the one line that
+     says out loud who can read this, on the screen where somebody is about
+     to write something they would not say in front of the person. */
+  .cc-doc-warn{
+    background:var(--warn-tint);border:1px solid var(--warn);border-radius:var(--radius-md);
+    padding:11px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--ink);
+  }
+  .chip.formal{background:var(--danger-tint);color:var(--danger-dk)}
+  .chip.note{background:var(--line-soft);color:var(--muted)}
+
+  /* Kudos */
+  .cc-kudos{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px}
+  .cc-kudo{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:15px 17px;position:relative;
+  }
+  .cc-kudo.mine{border-color:var(--accent)}
+  .cc-kudo .to{font-size:14.5px;font-weight:800;letter-spacing:-.01em;padding-right:22px}
+  .cc-kudo .msg{font-size:13.5px;line-height:1.55;margin:9px 0 11px;white-space:pre-wrap}
+  .cc-kudo .from{font-size:12px;color:var(--muted)}
+  .cc-kudo-x{
+    position:absolute;top:11px;right:12px;border:0;background:transparent;
+    color:var(--faint);cursor:pointer;font-size:16px;line-height:1;font-family:inherit;
+  }
+  .cc-kudo-x:hover{color:var(--danger)}
+  .cc-tag{
+    display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;
+    background:var(--accent-tint);color:var(--accent-deep);
+  }
+  .cc-count{font-size:12px;color:var(--muted);margin-bottom:12px}
   `,
 
   template: `
@@ -491,6 +558,21 @@ export default {
     // Which review is open, if any. Reviews are a list until a row is
     // clicked; the same key drives the admin and the self-serve detail.
     this._reviewDetailId = null;
+
+    // The Reviews screen holds two files for an admin: the review history
+    // and the documentation of issues. 'reviews' or 'docs', and it is only
+    // ever anything but 'reviews' for an admin — a self-serve caller has no
+    // second tab to switch to and no endpoint behind it if they tried.
+    this._reviewTab = 'reviews';
+    this._docs = [];
+    this._docDetailId = null;
+    this._docPerson = '';        // '' means everybody
+
+    this._kudos = [];
+    this._kudosPeople = [];      // names only, from the kudos endpoint
+    this._kudosNames = {};       // id -> name, for resolving the feed
+    this._kudosMe = null;        // { username, employee_id, is_admin }
+    this._kudosFilter = 'all';   // all | mine | given
     this._handbook = null;
     // Figures for the self-serve Dashboard, each loaded independently so one
     // failing fetch costs one card rather than the whole screen.
@@ -520,6 +602,26 @@ export default {
   async _loadReviews() {
     const payload = await this._ctx.api.get(ENDPOINTS.ccReviews);
     this._reviews = payload.reviews || [];
+  },
+
+  /**
+   * Documentation. Admin only, and the fetch is guarded here as well as on
+   * the server: a self-serve caller has no reason to make a request that can
+   * only ever come back 403, and an unexplained red line in their console is
+   * a support question waiting to happen.
+   */
+  async _loadDocs() {
+    if (!this._isAdmin) { this._docs = []; return; }
+    const payload = await this._ctx.api.get(ENDPOINTS.ccDocs);
+    this._docs = payload.docs || [];
+  },
+
+  async _loadKudos() {
+    const payload = await this._ctx.api.get(ENDPOINTS.ccKudos);
+    this._kudos = payload.kudos || [];
+    this._kudosPeople = payload.people || [];
+    this._kudosNames = payload.names || {};
+    this._kudosMe = payload.me || null;
   },
 
   async _loadHandbook() {
@@ -571,7 +673,12 @@ export default {
       title.textContent = 'Dashboard.';
       if (isAdmin) {
         sub.textContent = 'Anniversaries and headline numbers.';
+        // Kudos in its own try, like every card on the self-serve dashboard:
+        // one endpoint having a bad day costs one number, not the screen.
+        try { await this._loadKudos(); }
+        catch (e) { console.error('CrewCore dashboard: kudos', e); this._kudos = []; }
         body.innerHTML = this._renderDashboard();
+        this._wireDashboardAdmin();
         return;
       }
       sub.textContent = 'Your profile and where you stand.';
@@ -671,14 +778,34 @@ export default {
       // stipend detail follows. In-place refreshes go through
       // _refreshReviews(), which keeps whichever review is open.
       this._reviewDetailId = null;
+      this._docDetailId = null;
+      // And always on the review history rather than whichever tab was open
+      // last time. Documentation is the more sensitive half; a stale tab is
+      // not the thing to leave on screen.
+      this._reviewTab = 'reviews';
       await this._loadReviews();
+      // Documentation loads alongside, admin only, so the tab can carry its
+      // count without a second wait when it is clicked. Its own try: a
+      // failure there must not cost the review history, which is the half
+      // everybody opens this screen for.
       if (isAdmin) {
-        actions.innerHTML = `<button class="cc-btn" id="ccAddReviewBtn">Log a review</button>`;
-        const btn = $('#ccAddReviewBtn');
-        if (btn) btn.onclick = () => this._openReviewForm();
+        try { await this._loadDocs(); }
+        catch (e) { console.error('CrewCore: documentation', e); this._docs = []; }
       }
-      body.innerHTML = this._renderReviews();
-      this._wireReviews();
+      this._paintReviewScreen();
+      return;
+    }
+
+    if (view === 'kudos') {
+      title.textContent = 'Kudos.';
+      sub.textContent = 'Credit where it is due, from anybody to anybody.';
+      this._kudosFilter = 'all';
+      await this._loadKudos();
+      actions.innerHTML = `<button class="cc-btn" id="ccAddKudosBtn">Give kudos</button>`;
+      const kb = $('#ccAddKudosBtn');
+      if (kb) kb.onclick = () => this._openKudosForm();
+      body.innerHTML = this._renderKudos();
+      this._wireKudos();
       return;
     }
 
@@ -723,12 +850,25 @@ export default {
     const active = this._employees.filter((e) => e.status === 'active');
     const totalStipendAllotted = active.reduce((sum, e) => sum + (Number(e.apparel_stipend) || 0), 0);
 
+    // Kudos handed out this calendar month. A month rather than a year
+    // because the question this card answers is whether the thing is being
+    // used, and a year-to-date figure in November says yes long after
+    // everybody stopped.
+    const thisMonth = new Date().toISOString().slice(0, 7);
+    const kudosThisMonth = (this._kudos || [])
+      .filter((k) => String(k.created_at || '').slice(0, 7) === thisMonth).length;
+
     return `
-      <div class="cc-grid">
+      <div class="cc-grid" id="ccAdminCards">
         <div class="cc-card">
           <h3>Team</h3>
           <div class="big">${active.length}</div>
           <div class="note">active employees</div>
+        </div>
+        <div class="cc-card tap" data-go="kudos">
+          <h3>Kudos this month</h3>
+          <div class="big">${kudosThisMonth}</div>
+          <div class="note">${kudosThisMonth ? 'handed out so far' : 'nothing yet this month'}</div>
         </div>
         <div class="cc-card">
           <h3>Apparel stipends</h3>
@@ -783,7 +923,7 @@ export default {
    * which of four things broke. A failed card is simply not drawn.
    */
   async _loadSelfDashboard() {
-    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null };
+    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null, kudos: null, lastKudos: null };
     this._selfCards = cards;
     if (!this._own) return;
 
@@ -824,6 +964,16 @@ export default {
       await this._loadHandbook();
       cards.handbook = this._handbook;
     } catch (e) { console.error('CrewCore dashboard: handbook', e); }
+
+    try {
+      await this._loadKudos();
+      // Counted for the year, not for all time: a running lifetime total
+      // turns into a length-of-service number rather than a recent one, and
+      // the stipend card next to it is already a this-year figure.
+      const mine = kudosFor(this._kudos, { to: this._own.id, year: new Date().getFullYear() });
+      cards.kudos = mine.length;
+      cards.lastKudos = mine[0] || null;   // the feed arrives newest first
+    } catch (e) { console.error('CrewCore dashboard: kudos', e); }
   },
 
   _renderDashboardSelf() {
@@ -869,6 +1019,17 @@ export default {
           : 'nothing on the calendar'}</div>
       </div>`);
 
+    if (c.kudos !== null && c.kudos !== undefined) {
+      cards.push(`
+        <div class="cc-card tap" data-go="kudos">
+          <h3>Kudos</h3>
+          <div class="big">${c.kudos}</div>
+          <div class="note">${c.lastKudos
+            ? 'latest from ' + esc(c.lastKudos.from_name || 'a colleague')
+            : 'none yet this year'}</div>
+        </div>`);
+    }
+
     if (c.handbook) {
       const ok = c.handbook.acknowledged === true;
       cards.push(`
@@ -888,6 +1049,25 @@ export default {
           : `${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
       </p>` : ''}
     `;
+  },
+
+  /**
+   * Same shortcut behaviour the self-serve cards have. Kept as its own
+   * function rather than folded into _wireDashboardSelf(): the two
+   * dashboards are two different screens that happen to share a card
+   * component, and one wiring function reaching into both grids would tie
+   * them together for no reason.
+   */
+  _wireDashboardAdmin() {
+    const grid = this._root.querySelector('#ccAdminCards');
+    if (!grid) return;
+    grid.querySelectorAll('[data-go]').forEach((card) => {
+      card.onclick = () => {
+        const view = card.dataset.go;
+        if (this._ctx && typeof this._ctx.go === 'function') this._ctx.go(view);
+        else this.showView(view);
+      };
+    });
   },
 
   _wireDashboardSelf() {
@@ -2133,18 +2313,347 @@ export default {
     };
   },
 
-  /** Redraw the reviews body from what is already loaded. */
-  _paintReviews() {
-    const body = this._root.querySelector('#ccBody');
+  /* ---------------- The Reviews screen: two files, one place ----------------
+   *
+   * An admin opens Reviews to two different things: the one-on-one history,
+   * and the documentation of issues. They are separate records over separate
+   * endpoints (see api/crewcore/docs.js for why), but they are the same
+   * question asked about the same person, so putting them behind two rail
+   * buttons would mean picking the wrong one half the time.
+   *
+   * A self-serve employee has no tab strip at all. There is nothing to
+   * switch to: documentation is not theirs to read, and the endpoint behind
+   * it refuses them anyway.
+   */
+
+  /** Draw the whole screen: tab strip, header button, and the active tab. */
+  _paintReviewScreen() {
+    const root = this._root;
+    const body = root.querySelector('#ccBody');
+    const actions = root.querySelector('#ccHdActions');
     if (!body) return;
-    body.innerHTML = this._renderReviews();
+    const isAdmin = this._isAdmin;
+    const onDocs = isAdmin && this._reviewTab === 'docs';
+
+    body.innerHTML = (isAdmin ? `
+      <div class="cc-tabs">
+        <button class="cc-tab${onDocs ? '' : ' on'}" data-tab="reviews">
+          Review history<span class="n">${this._reviews.length}</span>
+        </button>
+        <button class="cc-tab${onDocs ? ' on' : ''}" data-tab="docs">
+          Documentation<span class="n">${this._docs.length}</span>
+        </button>
+      </div>` : '') + `<div id="ccTabBody"></div>`;
+
+    // The header button follows the tab. One button that means two things
+    // depending on what is showing underneath it is how somebody logs a
+    // review into a person's documentation file by accident.
+    if (actions) {
+      actions.innerHTML = !isAdmin ? '' : (onDocs
+        ? `<button class="cc-btn" id="ccAddDocBtn">Add documentation</button>`
+        : `<button class="cc-btn" id="ccAddReviewBtn">Log a review</button>`);
+      const rb = root.querySelector('#ccAddReviewBtn');
+      if (rb) rb.onclick = () => this._openReviewForm();
+      const db = root.querySelector('#ccAddDocBtn');
+      if (db) db.onclick = () => this._openDocForm();
+    }
+
+    body.querySelectorAll('[data-tab]').forEach((btn) => {
+      btn.onclick = () => {
+        this._reviewTab = btn.dataset.tab;
+        // Switching tabs closes whatever was open on the other one, so
+        // coming back lands on a list rather than on a record somebody
+        // opened ten minutes ago.
+        this._reviewDetailId = null;
+        this._docDetailId = null;
+        this._paintReviewScreen();
+      };
+    });
+
+    this._paintReviewTab();
+  },
+
+  /** Redraw just the active tab's body from what is already loaded. */
+  _paintReviewTab() {
+    const holder = this._root.querySelector('#ccTabBody');
+    if (!holder) return;
+    if (this._isAdmin && this._reviewTab === 'docs') {
+      holder.innerHTML = this._renderDocs();
+      this._wireDocs();
+      return;
+    }
+    holder.innerHTML = this._renderReviews();
     this._wireReviews();
   },
 
-  /** Refetch, then redraw — keeping whichever review is open. */
+  /** Redraw the reviews body from what is already loaded. */
+  _paintReviews() {
+    this._paintReviewTab();
+  },
+
+  /**
+   * Refetch, then redraw — keeping whichever review is open. The whole
+   * screen is repainted rather than just the tab body, because a review
+   * added or deleted changes the count printed on the tab itself.
+   */
   async _refreshReviews() {
     await this._loadReviews();
-    this._paintReviews();
+    this._paintReviewScreen();
+  },
+
+  /* ---------------- Documentation ---------------- */
+
+  /**
+   * Issues and problems, admin only. Same list-then-detail shape as reviews
+   * and the stipend log, for the same reason: an entry is several paragraphs
+   * and a list showing all of it is unreadable at ten entries.
+   */
+  _renderDocs() {
+    // Belt and braces. The tab is only drawn for an admin and the route
+    // refuses anybody else, but this function must never render an entry to
+    // a caller who should not have one.
+    if (!this._isAdmin) {
+      return `<div class="cc-locked"><h2>Admin access required</h2></div>`;
+    }
+    const warn = `
+      <div class="cc-doc-warn">
+        <strong>Administrators only.</strong>
+        Nothing on this tab is visible to the person it is about, or to anybody
+        else without the Admin flag. Employees see their review history and
+        nothing else on this screen.
+      </div>`;
+    return warn + (this._docDetailId ? this._renderDocDetail() : this._renderDocList());
+  },
+
+  _renderDocList() {
+    const people = this._employees.slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    const rows = docsFor(this._docs, this._docPerson || null, null);
+
+    const toolbar = `
+      <div class="cc-toolbar">
+        <select class="cc-filt" id="ccDocPerson">
+          <option value="">Everybody</option>
+          ${people.map((e) => {
+            const n = docsFor(this._docs, e.id, null).length;
+            return `<option value="${esc(e.id)}"${this._docPerson === e.id ? ' selected' : ''}>${esc(e.name)}${n ? ' (' + n + ')' : ''}</option>`;
+          }).join('')}
+        </select>
+      </div>`;
+
+    if (!rows.length) {
+      return toolbar + `<div class="cc-empty">${this._docPerson
+        ? 'Nothing on file for ' + esc(this._nameForEmployee(this._docPerson)) + '.'
+        : 'Nothing documented yet.'}</div>`;
+    }
+
+    // Newest first. The store already sorts on date, but the screen holds
+    // whatever a refresh last handed it, so the order is asserted here too.
+    const sorted = rows.slice()
+      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+    return toolbar + `
+      <div class="cc-list">
+        ${sorted.map((d) => `
+          <div class="cc-row tap" data-doc="${esc(d.id)}">
+            <div>
+              <div class="who">${esc(this._nameForEmployee(d.employee_id))}</div>
+              <div class="meta">
+                ${fmtDate(d.date)}
+                ${d.category ? ' · ' + esc(d.category) : ''}
+                <span class="chip ${isFormalDoc(d) ? 'formal' : 'note'}" style="margin-left:6px">${esc(d.level || 'note')}</span>
+              </div>
+              ${d.summary ? `<div class="meta cc-clamp" style="margin-top:4px">${esc(d.summary)}</div>` : ''}
+            </div>
+            <div class="cc-rowacts"><span class="cc-chev">›</span></div>
+          </div>
+        `).join('')}
+      </div>`;
+  },
+
+  _renderDocDetail() {
+    const d = this._docs.find((x) => x.id === this._docDetailId);
+    if (!d) {
+      // Deleted, or a refresh came back without it. Fall back to the list
+      // rather than draw an empty shell.
+      this._docDetailId = null;
+      return this._renderDocList();
+    }
+    const block = (label, value) => (String(value || '').trim()
+      ? `<div class="cc-section">
+           <h2>${esc(label)}</h2>
+           <div class="cc-prose">${esc(value)}</div>
+         </div>`
+      : '');
+
+    return `
+      <div class="cc-back">
+        <button class="cc-btn sm ghost" id="ccDocBack">Back to documentation</button>
+        <span class="grow" style="flex:1"></span>
+        <button class="cc-btn sm ghost" id="ccDocEdit">Edit</button>
+        <button class="cc-btn sm ghost danger" id="ccDocDelete">Delete</button>
+      </div>
+
+      <div class="cc-profile-hd">
+        <div class="cc-avatar">${esc(String(this._nameForEmployee(d.employee_id) || '?')
+          .trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</div>
+        <div>
+          <h2>${esc(this._nameForEmployee(d.employee_id))}</h2>
+          <div class="sub">${esc(d.summary || 'Documentation')}</div>
+        </div>
+      </div>
+
+      <div class="cc-field-grid" style="margin-bottom:24px">
+        <div class="cc-field"><label>Date</label><div class="v">${fmtDate(d.date) || '—'}</div></div>
+        <div class="cc-field"><label>What it is about</label><div class="v">${esc(d.category || '—')}</div></div>
+        <div class="cc-field"><label>Level</label><div class="v">
+          <span class="chip ${isFormalDoc(d) ? 'formal' : 'note'}">${esc(d.level || 'note')}</span></div></div>
+        <div class="cc-field"><label>Follow up</label><div class="v">${d.follow_up_date ? fmtDate(d.follow_up_date) : '—'}</div></div>
+        <div class="cc-field"><label>Others present</label><div class="v">${esc(d.others_present || '—')}</div></div>
+        <div class="cc-field"><label>Written by</label><div class="v">${esc(d.created_by || '—')}${
+          d.created_at ? ', ' + fmtDate(String(d.created_at).slice(0, 10)) : ''}</div></div>
+      </div>
+
+      ${block('What happened', d.details)}
+      ${block('Action taken', d.action_taken)}
+      ${!String(d.details || '').trim() && !String(d.action_taken || '').trim()
+        ? `<div class="cc-empty">Only the one line above was written up on this one.</div>` : ''}
+    `;
+  },
+
+  _wireDocs() {
+    const root = this._root;
+    if (!root) return;
+
+    const person = root.querySelector('#ccDocPerson');
+    if (person) person.onchange = () => {
+      this._docPerson = person.value;
+      this._paintReviewTab();
+    };
+
+    root.querySelectorAll('[data-doc]').forEach((row) => {
+      row.onclick = () => {
+        this._docDetailId = row.dataset.doc;
+        this._paintReviewTab();
+      };
+    });
+
+    const back = root.querySelector('#ccDocBack');
+    if (back) back.onclick = () => { this._docDetailId = null; this._paintReviewTab(); };
+
+    const edit = root.querySelector('#ccDocEdit');
+    if (edit) edit.onclick = () => {
+      const d = this._docs.find((x) => x.id === this._docDetailId);
+      if (d) this._openDocForm(d);
+    };
+
+    const del = root.querySelector('#ccDocDelete');
+    if (del) del.onclick = async () => {
+      const d = this._docs.find((x) => x.id === this._docDetailId);
+      if (!d) return;
+      if (!confirm('Delete this documentation on ' + this._nameForEmployee(d.employee_id) +
+        ' from ' + fmtDate(d.date) + '? This cannot be undone.')) return;
+      try {
+        await this._ctx.api.request(ENDPOINTS.ccDocs + '?id=' + encodeURIComponent(d.id), { method: 'DELETE' });
+        this._docDetailId = null;
+        await this._refreshDocs();
+      } catch (e) {
+        alert((e.body && e.body.error) || e.message || 'Could not delete that entry.');
+      }
+    };
+  },
+
+  /** Refetch documentation, then repaint the whole screen so the tab count moves. */
+  async _refreshDocs() {
+    await this._loadDocs();
+    this._paintReviewScreen();
+  },
+
+  /**
+   * Write a new entry, or correct one that exists. One form either way, the
+   * same rule the review form follows.
+   *
+   * On edit the employee cannot be changed. Moving an entry from one
+   * person's file to another's is not a correction, and the server pins the
+   * field regardless of what the browser sends.
+   */
+  _openDocForm(doc) {
+    const editing = !!(doc && doc.id);
+    const root = this._root;
+    const holder = root.querySelector('#ccTabBody') || root.querySelector('#ccBody');
+    const wrap = document.createElement('div');
+    const val = (k) => esc((doc && doc[k]) || '');
+    const today = new Date().toISOString().slice(0, 10);
+
+    wrap.innerHTML = `
+      <div class="cc-form">
+        <h3>${editing ? 'Edit documentation' : 'Add documentation'}</h3>
+        <div class="hint">Only administrators can read this. The person it is about cannot.</div>
+        <div class="cc-form-grid">
+          <div class="full"><label>Employee</label>
+            ${editing
+              ? `<input value="${esc(this._nameForEmployee(doc.employee_id))}" disabled>`
+              : `<select id="dEmp">${this._employees.slice()
+                    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+                    .map((e) => `<option value="${esc(e.id)}"${this._docPerson === e.id ? ' selected' : ''}>${esc(e.name)}</option>`).join('')}</select>`}
+          </div>
+          <div><label>Date</label><input id="dDate" type="date" value="${editing ? val('date') : today}"></div>
+          <div><label>What it is about</label>
+            <select id="dCat">${DOC_CATEGORIES.map((c) =>
+              `<option value="${esc(c)}"${(doc && doc.category) === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
+          </div>
+          <div><label>Level</label>
+            <select id="dLevel">${DOC_LEVELS.map((l) =>
+              `<option value="${esc(l)}"${(doc && doc.level) === l ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
+          </div>
+          <div><label>Follow up date</label><input id="dFollow" type="date" value="${val('follow_up_date')}"></div>
+          <div class="full"><label>One line: what happened</label><input id="dSummary" value="${val('summary')}"></div>
+          <div class="full"><label>The full write-up</label><textarea id="dDetails" rows="5">${val('details')}</textarea></div>
+          <div><label>Action taken</label><textarea id="dAction" rows="3">${val('action_taken')}</textarea></div>
+          <div><label>Others present</label><input id="dOthers" value="${val('others_present')}"></div>
+        </div>
+        <div class="cc-err" id="dErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="dCancel">Cancel</button>
+          <button class="cc-btn" id="dSubmit">Save</button>
+        </div>
+      </div>
+    `;
+    holder.prepend(wrap);
+    const $ = (sel) => wrap.querySelector(sel);
+    const err = $('#dErr');
+
+    $('#dCancel').onclick = () => wrap.remove();
+    $('#dSubmit').onclick = async () => {
+      const payload = {
+        employee_id: editing ? doc.employee_id : ($('#dEmp') ? $('#dEmp').value : ''),
+        date: $('#dDate').value,
+        category: $('#dCat').value,
+        level: $('#dLevel').value,
+        summary: $('#dSummary').value,
+        details: $('#dDetails').value,
+        action_taken: $('#dAction').value,
+        others_present: $('#dOthers').value,
+        follow_up_date: $('#dFollow').value
+      };
+      try {
+        if (editing) {
+          await this._ctx.api.request(ENDPOINTS.ccDocs + '?id=' + encodeURIComponent(doc.id), { method: 'PATCH', body: payload });
+          wrap.remove();
+          // Stay on the entry that was just corrected, so the change shows
+          // where it was made rather than back on a list.
+          this._docDetailId = doc.id;
+        } else {
+          await this._ctx.api.request(ENDPOINTS.ccDocs, { method: 'POST', body: payload });
+          wrap.remove();
+          this._docDetailId = null;
+        }
+        await this._refreshDocs();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
+      }
+    };
   },
 
   /**
@@ -2159,7 +2668,10 @@ export default {
   _openReviewForm(review) {
     const editing = !!(review && review.id);
     const root = this._root;
-    const body = root.querySelector('#ccBody');
+    // Into the tab body, not #ccBody: prepending to the outer container
+    // would put the form above the tab strip, which reads as belonging to
+    // the screen rather than to the file being written into.
+    const body = root.querySelector('#ccTabBody') || root.querySelector('#ccBody');
     const wrap = document.createElement('div');
     const val = (k) => esc((review && review[k]) || '');
     wrap.innerHTML = `
@@ -2215,6 +2727,195 @@ export default {
         }
       } catch (e) {
         err.hidden = false; err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
+      }
+    };
+  },
+
+  /* ---------------- Kudos ----------------
+   *
+   * The one screen in this app anybody can write to. A manager giving
+   * credit and one employee thanking another are the same record, so there
+   * is no admin half and no self-serve half here: everybody sees the same
+   * feed and the same button.
+   *
+   * Names come from the kudos endpoint rather than from the roster, because
+   * a self-serve employee cannot open the roster. What it hands back is ids
+   * and names only.
+   */
+
+  _renderKudos() {
+    const me = this._kudosMe || {};
+    const mineId = me.employee_id || null;
+
+    const all = this._kudos || [];
+    const rows = this._kudosFilter === 'mine'
+      ? kudosFor(all, { to: mineId })
+      : (this._kudosFilter === 'given'
+        ? all.filter((k) => String(k.from_username || '').toLowerCase() === String(me.username || '').toLowerCase())
+        : all);
+
+    // "For me" only appears for somebody with an employee record to receive
+    // kudos against. An admin account with no record of its own would get a
+    // tab that is always empty and always will be.
+    const tabs = `
+      <div class="cc-tabs">
+        <button class="cc-tab${this._kudosFilter === 'all' ? ' on' : ''}" data-kfilter="all">
+          Everyone<span class="n">${all.length}</span>
+        </button>
+        ${mineId ? `<button class="cc-tab${this._kudosFilter === 'mine' ? ' on' : ''}" data-kfilter="mine">
+          For me<span class="n">${kudosFor(all, { to: mineId }).length}</span>
+        </button>` : ''}
+        <button class="cc-tab${this._kudosFilter === 'given' ? ' on' : ''}" data-kfilter="given">
+          I gave
+        </button>
+      </div>`;
+
+    if (!rows.length) {
+      const empty = this._kudosFilter === 'mine'
+        ? 'Nothing addressed to you yet.'
+        : (this._kudosFilter === 'given'
+          ? 'You have not given any kudos yet. The button up top is how.'
+          : 'No kudos yet. Somebody has to go first.');
+      return tabs + `<div class="cc-empty">${esc(empty)}</div>`;
+    }
+
+    return tabs + `
+      <div class="cc-kudos">
+        ${rows.map((k) => {
+          // Prefer the live roster name, fall back to the name stored when
+          // it was written. Somebody renamed on the roster should read as
+          // their current name, and somebody no longer on it should still
+          // read as a name rather than an id.
+          const to = this._kudosNames[k.to_employee_id] || k.to_name || k.to_employee_id;
+          const canDelete = canDeleteKudos(k, { username: me.username, isAdmin: me.is_admin === true });
+          const forMe = mineId && k.to_employee_id === mineId;
+          return `
+            <div class="cc-kudo${forMe ? ' mine' : ''}">
+              ${canDelete ? `<button class="cc-kudo-x" data-kdel="${esc(k.id)}" title="Remove this">×</button>` : ''}
+              <div class="to">${esc(to)}</div>
+              ${k.tag ? `<div style="margin-top:6px"><span class="cc-tag">${esc(k.tag)}</span></div>` : ''}
+              <div class="msg">${esc(k.message || '')}</div>
+              <div class="from">from ${esc(k.from_name || 'somebody')}${
+                k.created_at ? ' · ' + fmtDate(String(k.created_at).slice(0, 10)) : ''}</div>
+            </div>`;
+        }).join('')}
+      </div>`;
+  },
+
+  _wireKudos() {
+    const root = this._root;
+    if (!root) return;
+
+    root.querySelectorAll('[data-kfilter]').forEach((btn) => {
+      btn.onclick = () => {
+        this._kudosFilter = btn.dataset.kfilter;
+        this._paintKudos();
+      };
+    });
+
+    root.querySelectorAll('[data-kdel]').forEach((btn) => {
+      btn.onclick = async () => {
+        if (!confirm('Remove this kudos? It disappears for everybody.')) return;
+        try {
+          await this._ctx.api.request(ENDPOINTS.ccKudos + '?id=' + encodeURIComponent(btn.dataset.kdel), { method: 'DELETE' });
+          await this._refreshKudos();
+        } catch (e) {
+          alert((e.body && e.body.error) || e.message || 'Could not remove that kudos.');
+        }
+      };
+    });
+  },
+
+  _paintKudos() {
+    const body = this._root.querySelector('#ccBody');
+    if (!body) return;
+    body.innerHTML = this._renderKudos();
+    this._wireKudos();
+  },
+
+  async _refreshKudos() {
+    await this._loadKudos();
+    this._paintKudos();
+  },
+
+  /**
+   * Give kudos. No edit form to share with, deliberately: a kudos is two
+   * lines about a colleague, and if it is wrong it gets removed and written
+   * again rather than carrying an edit trail heavier than the record.
+   *
+   * Your own name is not in the picker, because the endpoint hands back
+   * everybody EXCEPT you. The server refuses a self-addressed one anyway;
+   * this just means nobody has to be told no.
+   */
+  _openKudosForm() {
+    const root = this._root;
+    const body = root.querySelector('#ccBody');
+    const people = this._kudosPeople || [];
+    const wrap = document.createElement('div');
+
+    if (!people.length) {
+      wrap.innerHTML = `
+        <div class="cc-form">
+          <h3>Give kudos</h3>
+          <div class="hint">There is nobody else on the roster yet, so there is
+            nobody to give kudos to. An administrator adds people under Roster.</div>
+          <div class="cc-form-actions">
+            <button class="cc-btn ghost" id="kCancel">Close</button>
+          </div>
+        </div>`;
+      body.prepend(wrap);
+      wrap.querySelector('#kCancel').onclick = () => wrap.remove();
+      return;
+    }
+
+    wrap.innerHTML = `
+      <div class="cc-form">
+        <h3>Give kudos</h3>
+        <div class="hint">Everybody with CrewCore can read this, which is the point.
+          It cannot be edited later, only removed.</div>
+        <div class="cc-form-grid">
+          <div><label>Who</label>
+            <select id="kTo">${people.map((pp) =>
+              `<option value="${esc(pp.id)}">${esc(pp.name)}</option>`).join('')}</select>
+          </div>
+          <div><label>What for (optional)</label>
+            <select id="kTag">
+              <option value="">No label</option>
+              ${KUDOS_TAGS.map((tg) => `<option value="${esc(tg)}">${esc(tg)}</option>`).join('')}
+            </select>
+          </div>
+          <div class="full"><label>What they did</label>
+            <textarea id="kMsg" rows="4" maxlength="${KUDOS_MAX_LENGTH}"></textarea>
+          </div>
+        </div>
+        <div class="cc-err" id="kErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="kCancel">Cancel</button>
+          <button class="cc-btn" id="kSubmit">Post it</button>
+        </div>
+      </div>
+    `;
+    body.prepend(wrap);
+    const $ = (sel) => wrap.querySelector(sel);
+    const err = $('#kErr');
+
+    $('#kCancel').onclick = () => wrap.remove();
+    $('#kSubmit').onclick = async () => {
+      const payload = {
+        to_employee_id: $('#kTo').value,
+        tag: $('#kTag').value,
+        message: $('#kMsg').value
+      };
+      try {
+        await this._ctx.api.request(ENDPOINTS.ccKudos, { method: 'POST', body: payload });
+        wrap.remove();
+        // Land on the whole feed, not on whichever tab was open: a kudos you
+        // just gave somebody else would be invisible on "For me".
+        this._kudosFilter = 'all';
+        await this._refreshKudos();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || (e.body && e.body.error) || e.message || 'Could not post that.';
       }
     };
   },
