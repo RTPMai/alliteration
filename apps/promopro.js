@@ -1,3 +1,4 @@
+// PUT IN: apps/promopro.js
 // apps/promopro.js
 /**
  * PromoPro — purchase orders to vendors, and where each one stands.
@@ -27,7 +28,7 @@ import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, MANUAL_STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
-  repliedSinceSend, replyCount
+  repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 
@@ -125,6 +126,21 @@ export default {
       border: 1px solid var(--line); border-radius: 999px;
       font-size: 11px; font-weight: 700; color: var(--muted);
     }
+
+    /* No purchase order behind this one. Deliberately quieter than a health
+       colour: it is a fact about the record, not a problem with it. Filled
+       rather than outlined so it does not read as another "replied" pill. */
+    .pp-nopo {
+      display: inline-block; margin-left: 6px; padding: 1px 6px;
+      background: var(--line); border-radius: 999px;
+      font-size: 11px; font-weight: 700; color: var(--muted);
+      vertical-align: middle;
+    }
+
+    /* Sits with the fields it changes the meaning of, so it needs the room a
+       field gets rather than sitting flush against the row above. */
+    .pp-check { font-size: 13px; font-weight: 600; color: var(--muted); cursor: pointer; }
+    .pp-check input { margin-right: 4px; vertical-align: middle; }
 
     /* A number that is also a way to get to that order. Reads as text, not as
        a control, because it sits inside a sentence. */
@@ -543,7 +559,7 @@ export default {
               const p = x.po;
               const why = x.health.reasons.length ? x.health.reasons[0] : '';
               return '<button class="pp-card pp-h-' + x.health.level + '" data-po="' + esc(p.id) + '">' +
-                '<div class="po">' + esc(p.poNumber || 'Draft') +
+                '<div class="po">' + esc(p.poNumber || 'Draft') + outsourcedTag(p) +
                   (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
                 '</div>' +
                 '<div class="cust">' + esc(custName(p)) + '</div>' +
@@ -614,10 +630,9 @@ export default {
         '</tr></thead><tbody>' +
         rows.map((p) => {
           const h = health(p);
-          const stageDef = STAGES.find((s) => s.key === h.stage);
           const due = p.neededBy || (p.printavo && p.printavo.dueDate) || '';
           return '<tr data-po="' + esc(p.id) + '">' +
-            '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong>' +
+            '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong>' + outsourcedTag(p) +
               // "Did they come back to us" is the question this list is
               // scanned for, so it is answered here rather than one click in.
               (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
@@ -625,7 +640,7 @@ export default {
             '<td>' + esc(custName(p)) + '</td>' +
             '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
             '<td>' + esc(amName(p.accountManager)) + '</td>' +
-            '<td><span class="pp-pill">' + esc(stageDef ? stageDef.label : h.stage) + '</span></td>' +
+            '<td><span class="pp-pill">' + esc(stageLabel(h.stage, p)) + '</span></td>' +
             '<td>' + esc(due) + '</td>' +
             '<td class="num">' + money(poTotal(p)) + '</td>' +
             '<td class="pp-h-' + h.level + '"><span class="why">' + esc(h.reasons[0] || (h.level === 'done' ? 'Complete' : 'On track')) + '</span></td>' +
@@ -661,9 +676,55 @@ export default {
      * reorder. One reader, so the form itself never has to know which of the
      * two it is drawing.
      */
+    /**
+     * The mark that says this one has no purchase order behind it.
+     *
+     * It goes everywhere the number is shown, because the number itself is
+     * built the same way a PO number is: the record lives in the same list,
+     * so without a mark on the row it reads as a PO.
+     */
+    function outsourcedTag(po) {
+      return isOutsourced(po)
+        ? '<span class="pp-nopo" title="Outsourced work. No purchase order was raised and nothing is emailed.">No PO</span>'
+        : '';
+    }
+
     function pf(key, fallback) {
       const v = st.prefill ? st.prefill[key] : undefined;
       return (v === undefined || v === null || v === '') ? fallback : v;
+    }
+
+    /**
+     * KEEP WHAT IS ALREADY TYPED WHEN THE FORM REDRAWS.
+     *
+     * renderForm() rebuilds the whole panel, and every field above the lines
+     * reads its value from pf(). So anything that redraws mid-fill, adding a
+     * line, removing one, ticking the outsourced box, used to hand back a
+     * blank Needed by and empty notes. Nobody loses a line that way, which
+     * is why it went unnoticed: they lose the sentence they just wrote.
+     *
+     * Harvesting into st.prefill rather than into a second store, because
+     * pf() is already the one reader the form draws from and a second one
+     * would be two answers to "what is in this box".
+     */
+    function harvestForm() {
+      const val = (sel) => { const el = $(sel); return el ? el.value : undefined; };
+      const box = $('#ppOutsourced');
+      const got = {
+        accountManager: val('#ppAm'),
+        neededBy: val('#ppNeededBy'),
+        decorateBufferDays: val('#ppBuffer'),
+        shipTo: val('#ppShipTo'),
+        shippingInstructions: val('#ppShipVia'),
+        notes: val('#ppNotes'),
+      };
+      st.prefill = st.prefill || {};
+      Object.keys(got).forEach((k) => {
+        // undefined means the field is not on screen right now, which is not
+        // the same as somebody having cleared it.
+        if (got[k] !== undefined) st.prefill[k] = got[k];
+      });
+      if (box) st.prefill.outsourced = box.checked === true;
     }
 
     function renderForm() {
@@ -741,9 +802,30 @@ export default {
           '<div class="pp-field"><label>Decorating buffer (days)</label><input id="ppBuffer" type="number" min="0" value="' + esc(pf('decorateBufferDays', 0)) + '"></div>' +
         '</div>' +
 
+        // NO PURCHASE ORDER NEEDED.
+        //
+        // Sits with the vendor and the account manager rather than down by
+        // the buttons, because it changes what the rest of the form means:
+        // there is nothing to email, so the artwork note and the create
+        // buttons below both read differently once it is ticked. Re-rendered
+        // on change for that reason.
+        '<label class="pp-check" style="display:block;margin-bottom:12px">' +
+          '<input type="checkbox" id="ppOutsourced"' + (pf('outsourced', false) === true ? ' checked' : '') + '> ' +
+          'No purchase order needed. This is work we are sending out.' +
+        '</label>' +
+        (pf('outsourced', false) === true
+          ? '<div class="pp-notice">' +
+              '<strong>Outsourced job.</strong> Nothing gets emailed and no purchase order is raised. ' +
+              'It still sits in the pipeline with its own clock, still counts toward what we spend with this vendor, ' +
+              'and you can still print a sheet to send with the work.' +
+            '</div>'
+          : '') +
+
         // Shown before sending, not after. Who gets copied on an email to an
         // outside party is worth seeing while you can still change it.
-        '<div id="ppCcPreview" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>' +
+        (pf('outsourced', false) === true
+          ? ''
+          : '<div id="ppCcPreview" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>') +
 
         '<table class="pp-lines"><thead><tr>' +
           '<th>Item #</th><th>Description</th><th>Detail</th><th>Qty</th><th>Our cost</th><th class="num">Line total</th><th></th>' +
@@ -773,7 +855,9 @@ export default {
               ' will be copied across. Anything you add here goes on as well. '
             : '') +
           'Optional now, and you can always add more later from the order itself. ' +
-          'Anyone with the link can open these without signing in, which is how the vendor gets them.' +
+          (pf('outsourced', false) === true
+            ? 'Nothing is emailed on an outsourced job, so these are here for us and for the printed sheet.'
+            : 'Anyone with the link can open these without signing in, which is how the vendor gets them.') +
         '</div>' +
         '<div id="ppStagedArt">' + stagedArtHtml() + '</div>' +
         '<div style="margin-top:8px">' +
@@ -786,8 +870,13 @@ export default {
           // Creating and sending is one job, and it was two buttons on two
           // screens: create, find the order again, open it, press send. The
           // second step is where orders sat for a day.
-          '<button class="pp-btn" id="ppSaveSend">Create and send to the vendor</button>' +
-          '<button class="pp-btn ghost" id="ppSave">' + (st.reorderOf ? 'Create reorder, do not send' : 'Create without sending') + '</button>' +
+          // Nothing to send on an outsourced job, so the button that sends is
+          // not offered at all and the one that remains stops calling itself
+          // the option that does not send.
+          (pf('outsourced', false) === true
+            ? '<button class="pp-btn" id="ppSave">' + (st.reorderOf ? 'Create the reorder' : 'Create the job') + '</button>'
+            : '<button class="pp-btn" id="ppSaveSend">Create and send to the vendor</button>' +
+              '<button class="pp-btn ghost" id="ppSave">' + (st.reorderOf ? 'Create reorder, do not send' : 'Create without sending') + '</button>') +
           '<button class="pp-btn ghost" id="ppCancel">Cancel</button>' +
         '</div>' +
         '<div class="pp-err" id="ppFormErr" hidden></div>' +
@@ -1361,7 +1450,7 @@ export default {
         return '<button class="pp-step-btn' + (val ? ' done' : '') + '" ' +
           'data-stagetick="' + esc(s.dateField) + '"' + (canEdit ? '' : ' disabled') +
           ' title="' + (val ? 'Press to clear' : 'Press to mark it done today') + '">' +
-          '<span class="k">' + esc(s.label) + '</span>' +
+          '<span class="k">' + esc(stageLabel(s.key, po)) + '</span>' +
           '<span class="v">' + (val ? esc(val) : (canEdit ? 'Mark done' : '&mdash;')) + '</span>' +
         '</button>';
       }).join('') + '</div>';
@@ -1374,7 +1463,7 @@ export default {
       const dates = st.showDates
         ? '<div class="pp-trail">' + STAGES.filter((s) => s.dateField).map((s) =>
             '<div class="pp-step' + (po[s.dateField] ? ' done' : '') + '">' +
-              '<div class="k">' + esc(s.label) + '</div>' +
+              '<div class="k">' + esc(stageLabel(s.key, po)) + '</div>' +
               '<input type="date" data-datefield="' + esc(s.dateField) + '" value="' + esc(po[s.dateField] || '') + '"' +
                 (canEdit ? '' : ' disabled') + '>' +
             '</div>').join('') +
@@ -1455,7 +1544,7 @@ export default {
 
       wrap.innerHTML = '<div class="pp-detail">' +
         '<div class="pp-hd"><div>' +
-          '<h1 style="font-size:22px">' + esc(po.poNumber || 'Draft') + '</h1>' +
+          '<h1 style="font-size:22px">' + esc(po.poNumber || 'Draft') + outsourcedTag(po) + '</h1>' +
           '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; ' +
             esc(custName(po)) + (custContact(po) ? ' (' + esc(custContact(po)) + ')' : '') +
             (po.printavo ? ' &middot; Printavo ' +
@@ -1524,26 +1613,35 @@ export default {
                     'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
                   '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
                   '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
-                  ((po.art || []).length
-                    ? '<div class="pp-hint" style="margin-top:6px">Goes out attached to the order. ' +
-                      'Anything too big to attach becomes a link that expires. ' +
-                      '<button class="pp-linkish" id="ppArtRevoke">Withdraw sent links</button></div>'
-                    : '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. It goes out with the order.</div>') +
+                  (isOutsourced(po)
+                    ? '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. ' +
+                      'Nothing is emailed on an outsourced job, so these are for us and for the printed sheet.</div>'
+                    : (po.art || []).length
+                      ? '<div class="pp-hint" style="margin-top:6px">Goes out attached to the order. ' +
+                        'Anything too big to attach becomes a link that expires. ' +
+                        '<button class="pp-linkish" id="ppArtRevoke">Withdraw sent links</button></div>'
+                      : '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. It goes out with the order.</div>') +
                 '</div>'
               : '') +
           '</div>' +
         '</div>' +
 
-        '<div class="pp-sect">Send this order</div>' +
-        (po.lastSentAt
-          ? '<div class="pp-hint" style="margin-bottom:8px">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
-            ' to ' + esc(po.sentTo || '') +
-            (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') + '</div>'
-          : '<div class="pp-hint" style="margin-bottom:8px">Not sent yet.</div>') +
+        // AN OUTSOURCED JOB HAS NOTHING TO SEND, so this whole section stops
+        // being about sending. The print button stays: a sheet to travel with
+        // the work is the one piece of paper this kind of job does want, and
+        // it prints headed OUTSOURCED JOB rather than PURCHASE ORDER.
+        '<div class="pp-sect">' + (isOutsourced(po) ? 'Paperwork' : 'Send this order') + '</div>' +
+        (isOutsourced(po)
+          ? '<div class="pp-hint" style="margin-bottom:8px">No purchase order was raised for this one, so nothing is emailed to the vendor.</div>'
+          : po.lastSentAt
+            ? '<div class="pp-hint" style="margin-bottom:8px">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
+              ' to ' + esc(po.sentTo || '') +
+              (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') + '</div>'
+            : '<div class="pp-hint" style="margin-bottom:8px">Not sent yet.</div>') +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
           '<button class="pp-btn ghost" id="ppPrint">Print or save as PDF</button>' +
-          (canEdit ? '<button class="pp-btn ghost" id="ppSendTest">Send a test to me</button>' : '') +
-          (canEdit ? '<button class="pp-btn" id="ppSend">' + (po.lastSentAt ? 'Send again' : 'Send to vendor') + '</button>' : '') +
+          (canEdit && !isOutsourced(po) ? '<button class="pp-btn ghost" id="ppSendTest">Send a test to me</button>' : '') +
+          (canEdit && !isOutsourced(po) ? '<button class="pp-btn" id="ppSend">' + (po.lastSentAt ? 'Send again' : 'Send to vendor') + '</button>' : '') +
         '</div>' +
         '<div id="ppSendMsg" class="pp-hint" style="margin-top:6px"></div>' +
 
@@ -2400,12 +2498,14 @@ export default {
       if (t.id === 'ppUnlockImprints') { st.imprintLocked = false; renderForm(); return; }
 
       if (t.id === 'ppAddLine') {
+        harvestForm();
         st.draftLines.push({ itemNumber: '', description: '', imprint: '', detail: '', qty: 1, unitCost: 0 });
         renderForm();
         return;
       }
 
       if (t.dataset && t.dataset.rmline !== undefined) {
+        harvestForm();
         st.draftLines.splice(Number(t.dataset.rmline), 1);
         renderForm();
         return;
@@ -2467,11 +2567,27 @@ export default {
         // never hears about is not a cancellation: they may be cutting
         // garments against that number right now.
         if (!undo) {
+          // An outsourced job was never emailed, so the question cannot
+          // promise the vendor will be told. Asking "and email the vendor to
+          // say so?" on one would be asking somebody to agree to something
+          // that is not going to happen, and they would stop reading it.
+          const outsourced = isOutsourced(open);
           if (!window.confirm(
-            'Cancel ' + (open.poNumber || 'this order') + ' and email the vendor to say so?\n\n' +
-            'They are told not to produce or ship against it. The order stays on the record and stops being chased.'
+            outsourced
+              ? 'Cancel ' + (open.poNumber || 'this job') + '?\n\n' +
+                'Nothing is emailed, because no purchase order was sent for this one. ' +
+                'Tell the shop yourself. It stays on the record and stops being chased.'
+              : 'Cancel ' + (open.poNumber || 'this order') + ' and email the vendor to say so?\n\n' +
+                'They are told not to produce or ship against it. The order stays on the record and stops being chased.'
           )) return;
-          const note = window.prompt('Anything to add for the vendor? Leave blank for none.', '') || '';
+          // One prompt, worded for the case. Two calls would read the same on
+          // screen and would be a second thing to keep in step.
+          const note = window.prompt(
+            outsourced
+              ? 'Anything to record about why? Leave blank for none.'
+              : 'Anything to add for the vendor? Leave blank for none.',
+            ''
+          ) || '';
           try {
             const res = await ctx.api.post(ENDPOINTS.ppSend, { poId: st.openPoId, cancel: true, note });
             if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
@@ -2483,7 +2599,7 @@ export default {
             if (msg) {
               msg.textContent = res.emailed
                 ? 'Cancelled, and the vendor was emailed at ' + (res.to || []).join(', ')
-                : (res.warning || 'Cancelled, but the vendor could not be emailed.');
+                : (res.note || res.warning || 'Cancelled, but the vendor could not be emailed.');
             }
           } catch (e) {
             if (err) { err.textContent = e.message || 'Could not cancel that.'; err.hidden = false; }
@@ -2738,6 +2854,15 @@ export default {
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
 
+      // Ticking it changes what the buttons below say and whether a CC line
+      // is worth showing, so the form redraws. Harvest first or the redraw
+      // takes everything typed above with it.
+      if (e.target.id === 'ppOutsourced') {
+        harvestForm();
+        renderForm();
+        renderCcPreview();
+      }
+
       if (e.target.dataset && e.target.dataset.imprint) {
         const gid = e.target.dataset.imprint;
         st.pickedGroups = e.target.checked
@@ -2876,6 +3001,9 @@ export default {
         shippingInstructions: po.shippingInstructions || '',
         notes: po.notes || '',
         decorateBufferDays: Number(po.decorateBufferDays) || 0,
+        // Sending the same work back to the same contract shop is the common
+        // reorder here, and it did not need a purchase order the first time.
+        outsourced: isOutsourced(po),
       };
       st.reorderOf = {
         id: po.id,
@@ -2941,6 +3069,9 @@ export default {
         shipTo: $('#ppShipTo').value,
         shippingInstructions: $('#ppShipVia').value,
         notes: $('#ppNotes').value,
+        // Read off the box rather than off st.prefill, so what is ticked on
+        // screen at the moment Create is pressed is what gets saved.
+        outsourced: !!($('#ppOutsourced') && $('#ppOutsourced').checked),
         lines: st.draftLines,
         printavo: st.picked ? {
           id: st.picked.id,
