@@ -1,3 +1,4 @@
+// PUT IN: test/crewcore-sanmar.test.cjs
 /**
  * SanMar product feed: pricing, parsing and failure behaviour.
  *
@@ -310,4 +311,8 @@ const ERRORED = `<S:Envelope><S:Body><return><errorOccured>true</errorOccured>
     t.assert(xml.includes('<sanMarCustomerNumber>71892</sanMarCustomerNumber>'));
     t.assert(xml.includes('getProductInfoByStyleColorSize'));
   });
+
+  // Without this the file prints its results and exits 0, so every check in
+  // it is decorative: a real failure would never turn the suite red.
+  process.exit(t.report());
 })();

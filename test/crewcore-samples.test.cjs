@@ -1,3 +1,4 @@
+// PUT IN: test/crewcore-samples.test.cjs
 /**
  * SanMar sample drops: pick resolution, the stipend entry, and the sheet.
  *
@@ -219,4 +220,8 @@ const STYLE = {
     const sum = [...totals.values()].reduce((a, v) => a + v.total, 0);
     t.equal(Math.round(sum * 100) / 100, m.buildExport(PICKS, nameFor).total);
   });
+
+  // Without this the file prints its results and exits 0, so every check in
+  // it is decorative: a real failure would never turn the suite red.
+  process.exit(t.report());
 })();

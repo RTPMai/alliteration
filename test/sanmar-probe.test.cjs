@@ -1,3 +1,4 @@
+// PUT IN: test/sanmar-probe.test.cjs
 /**
  * SanMar probe: response reading and the credential gate.
  *
@@ -154,4 +155,8 @@ const SAMPLE = `<S:Envelope xmlns:S="http://schemas.xmlsoap.org/soap/envelope/">
     t.assert(!/error: e[,}\s]/.test(route),
       'return the error MESSAGE, not the error object, or the request goes with it');
   });
+
+  // Without this the file prints its results and exits 0, so every check in
+  // it is decorative: a real failure would never turn the suite red.
+  process.exit(t.report());
 })();
