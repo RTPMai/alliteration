@@ -29,7 +29,7 @@ import { isCrewCoreAdmin } from '../lib/crewcore/schema.js';
  * "and every screen in it". See the long note in allowedViews().
  */
 const SELF_SERVE_VIEWS = {
-  crewcore: ['dashboard', 'timeclock', 'stipend', 'reviews', 'handbook'],
+  crewcore: ['dashboard', 'timeclock', 'stipend', 'kudos', 'reviews', 'handbook'],
 };
 
 export const APPS = [
@@ -214,6 +214,14 @@ export const APPS = [
       // SanMar sample drops. Sits next to Stipend because a pick draws that
       // person's apparel allotment the moment it is made.
       ['samples', 'Samples'],
+      // KUDOS, Sep 2026. The one screen in this app anybody can WRITE to:
+      // a manager giving credit and one employee thanking another are the
+      // same record. Everybody with CrewCore reads the same feed, which is
+      // the point — praise only two people can see is a private message.
+      // Note that DOCUMENTATION, its opposite number, is deliberately NOT a
+      // view: it is drawn inside Reviews and is admin-only, so keeping it
+      // off this list means it can never appear in a rail at all.
+      ['kudos', 'Kudos'],
       ['reviews', 'Reviews'],
       ['handbook', 'Handbook'],
       ['settings', 'Settings']

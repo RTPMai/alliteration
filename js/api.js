@@ -251,6 +251,13 @@ export const ENDPOINTS = {
   ccEmployees:     '/api/crewcore/employees',
   ccStipend:       '/api/crewcore/stipend',
   ccReviews:       '/api/crewcore/reviews',
+  // Documentation of issues and problems. Drawn inside the Reviews screen,
+  // but a separate endpoint over separate storage: the route refuses any
+  // non-admin caller on every method including GET, so no filter anywhere
+  // has to remember to keep an entry away from the person it is about.
+  ccDocs:          '/api/crewcore/docs',
+  // Kudos. The one CrewCore route anybody with the app can WRITE to.
+  ccKudos:         '/api/crewcore/kudos',
   ccHandbook:      '/api/crewcore/handbook',
   ccSettings:      '/api/crewcore/settings',
   // SanMar sample drops. Already live by prefix ('/api/crewcore/' above), so
@@ -656,6 +663,30 @@ const MOCK_DATA = {
     reviews: [
       { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
     ]
+  }),
+  // Documentation. MOCK_USER is admin, which is the only caller this
+  // endpoint ever answers — a self-serve account gets a 403 from the real
+  // route, and there is no offline shape for that on purpose.
+  [ENDPOINTS.ccDocs]: () => ({
+    docs: [
+      { id: 'DOC-00001', employee_id: 'EMP-00001', date: '2026-08-18', category: 'Attendance', level: 'verbal warning', summary: 'Third late start in two weeks', details: 'Arrived 25 minutes into the shift with the press already loaded. Talked it through at the end of the day.', action_taken: 'Verbal warning, agreed to text ahead if running late.', others_present: '', follow_up_date: '2026-09-18', created_by: 'ryan' }
+    ]
+  }),
+  [ENDPOINTS.ccKudos]: () => ({
+    kudos: [
+      { id: 'KUD-00002', to_employee_id: 'EMP-00002', to_name: 'Margo Niemeyer', from_username: 'alexis', from_name: 'Alexis Davis', from_employee_id: 'EMP-00005', tag: 'Customer save', message: 'Re-ran 200 shirts overnight so the Ankeny order still shipped on time.', created_at: '2026-08-30T14:02:00.000Z' },
+      { id: 'KUD-00001', to_employee_id: 'EMP-00005', to_name: 'Alexis Davis', from_username: 'ryan', from_name: 'Ryan Toney', from_employee_id: null, tag: 'Went the extra mile', message: 'Drove the samples out to Grimes herself rather than let the meeting slip a week.', created_at: '2026-08-24T20:15:00.000Z' }
+    ],
+    people: [
+      { id: 'EMP-00001', name: 'Kim Taylor' }, { id: 'EMP-00002', name: 'Margo Niemeyer' },
+      { id: 'EMP-00003', name: 'Jacob Whitman' }, { id: 'EMP-00004', name: 'Amanda Clark' },
+      { id: 'EMP-00005', name: 'Alexis Davis' }
+    ],
+    names: {
+      'EMP-00001': 'Kim Taylor', 'EMP-00002': 'Margo Niemeyer', 'EMP-00003': 'Jacob Whitman',
+      'EMP-00004': 'Amanda Clark', 'EMP-00005': 'Alexis Davis'
+    },
+    me: { username: 'ryan', employee_id: null, is_admin: true }
   }),
   [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true, clock_enabled: true, week_start_day: 0, overtime_after_hours: 40, clock_round_minutes: 0, clock_kiosk_token: '' } }),
   [ENDPOINTS.ccTimecards]: () => ({
