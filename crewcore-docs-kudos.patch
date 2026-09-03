@@ -1,0 +1,2659 @@
+From ef6b79ce02a0d4218b5397752309f00ccf2d4b51 Mon Sep 17 00:00:00 2001
+From: Claude <claude@local>
+Date: Thu, 3 Sep 2026 16:37:47 +0000
+Subject: [PATCH] CrewCore: employee documentation (admin only) and kudos
+
+---
+ api/crewcore/docs.js         | 130 ++++++
+ api/crewcore/kudos.js        | 150 +++++++
+ apps/crewcore.js             | 741 ++++++++++++++++++++++++++++++++++-
+ js/api.js                    |  31 ++
+ js/registry.js               |  10 +-
+ lib/crewcore/schema.js       | 224 +++++++++++
+ lib/crewcore/store.js        |  95 +++++
+ lib/help/content.js          |  35 +-
+ lib/users.js                 |   9 +-
+ test/crewcore-docs.test.cjs  | 466 ++++++++++++++++++++++
+ test/crewcore-kudos.test.cjs | 486 +++++++++++++++++++++++
+ 11 files changed, 2353 insertions(+), 24 deletions(-)
+ create mode 100644 api/crewcore/docs.js
+ create mode 100644 api/crewcore/kudos.js
+ create mode 100644 test/crewcore-docs.test.cjs
+ create mode 100644 test/crewcore-kudos.test.cjs
+
+diff --git a/api/crewcore/docs.js b/api/crewcore/docs.js
+new file mode 100644
+index 0000000..e8558c5
+--- /dev/null
++++ b/api/crewcore/docs.js
+@@ -0,0 +1,130 @@
++// api/crewcore/docs.js — employee documentation: issues and problems.
++//
++// ADMIN ONLY, EVERY METHOD, INCLUDING GET. This is the one route in CrewCore
++// with no self-serve half at all, and that is the whole feature: an entry
++// here must never reach the person it is about.
++//
++// The gate is therefore the FIRST thing after auth, before any method
++// branch and before any read. Compare api/crewcore/reviews.js and
++// api/crewcore/stipend.js, which both check isAdmin inside GET and then
++// again before writes: they have a legitimate own-record answer to give, so
++// the shape of the check follows the shape of the answer. Here there is no
++// own-record answer, so there is nothing to branch on. A future edit adding
++// a GET branch cannot accidentally serve documentation to an employee,
++// because the handler has already returned by then.
++//
++// Documentation also lives under its own KV index rather than as a flagged
++// review, so there is no filter anywhere that has to remember to strip it.
++// See the note above validateDoc() in lib/crewcore/schema.js.
++//
++// GET    -> every entry, or one person's with ?employee_id=
++// POST   -> write a new entry
++// PATCH  -> correct one (partial; only the fields sent change)
++// DELETE -> remove one
++//
++// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
++
++import { requireAuth } from "../../lib/session.js";
++import { getUser } from "../../lib/users.js";
++import { validateDoc, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
++import {
++  listDocs, getDoc, saveDoc, deleteDoc,
++} from "../../lib/crewcore/store.js";
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++async function isAdminCaller(sess) {
++  const user = sess.username ? await getUser(sess.username) : null;
++  return isCrewCoreAdmin({
++    superuser: user && user.superuser,
++    roleName: user ? user.role : sess.role,
++  });
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    // THE GATE. Nothing below this line runs for anybody who is not a
++    // CrewCore admin, on any method.
++    if (!(await isAdminCaller(sess))) {
++      return res.status(403).json({ error: "Admin access required" });
++    }
++
++    if (req.method === "GET") {
++      const empId = req.query && req.query.employee_id;
++      let docs = await listDocs();
++      if (empId) docs = docs.filter((d) => d.employee_id === empId);
++      return res.status(200).json({ docs });
++    }
++
++    if (req.method === "POST") {
++      const body = parseBody(req);
++      const { ok, errors, record } = validateDoc(body);
++      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
++
++      record.created_by = sess.username;
++      record.created_at = new Date().toISOString();
++      record.updated_at = record.created_at;
++
++      const doc = await saveDoc(record);
++      return res.status(201).json({ ok: true, doc });
++    }
++
++    if (req.method === "PATCH" || req.method === "PUT") {
++      const body = parseBody(req);
++      const id = (req.query && req.query.id) || body.id;
++      if (!id) return res.status(400).json({ error: "Missing entry id" });
++
++      const existing = await getDoc(id);
++      if (!existing) return res.status(404).json({ error: "Entry not found" });
++
++      const { ok, errors, record } = validateDoc(body, { partial: true });
++      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
++
++      // Merge onto what is stored so untouched fields survive, and pin the
++      // identity fields so a body cannot re-point an entry at another id or
++      // rewrite who first wrote it. Same shape as the stipend PATCH.
++      //
++      // employee_id is pinned too: moving an entry from one person's file to
++      // another's is not a correction. It is a delete and a re-write, and it
++      // should look like one.
++      const merged = {
++        ...existing,
++        ...record,
++        id: existing.id,
++        employee_id: existing.employee_id,
++        created_by: existing.created_by,
++        created_at: existing.created_at,
++        updated_at: new Date().toISOString(),
++        updated_by: sess.username,
++      };
++
++      const doc = await saveDoc(merged);
++      return res.status(200).json({ ok: true, doc });
++    }
++
++    if (req.method === "DELETE") {
++      const id = (req.query && req.query.id) || parseBody(req).id;
++      if (!id) return res.status(400).json({ error: "Missing entry id" });
++      const existing = await getDoc(id);
++      if (!existing) return res.status(404).json({ error: "Entry not found" });
++      await deleteDoc(id);
++      return res.status(200).json({ ok: true, deleted: id });
++    }
++
++    res.setHeader("Allow", "GET, POST, PATCH, PUT, DELETE");
++    return res.status(405).json({ error: "Method not allowed" });
++  } catch (e) {
++    console.error("crewcore/docs route error:", e);
++    return res.status(500).json({ error: e.message });
++  }
++}
+diff --git a/api/crewcore/kudos.js b/api/crewcore/kudos.js
+new file mode 100644
+index 0000000..4764e1f
+--- /dev/null
++++ b/api/crewcore/kudos.js
+@@ -0,0 +1,150 @@
++// api/crewcore/kudos.js — kudos: credit handed out across the shop.
++//
++// The opposite of api/crewcore/docs.js in every respect that matters, and
++// deliberately so:
++//
++// GET    -> anyone signed in with CrewCore access. The whole feed, plus the
++//           names needed to write one and enough about the caller for the
++//           screen to know what it may offer. Praise only the two people
++//           involved can see is a private message, not kudos.
++// POST   -> anyone signed in. A manager giving credit and one employee
++//           thanking another are the same record; the app has no reason to
++//           tell them apart.
++// DELETE -> the author, or an admin. NOT the recipient — see canDeleteKudos()
++//           in lib/crewcore/schema.js.
++//
++// There is no PATCH. A kudos is a couple of lines about a colleague; if it is
++// wrong it gets deleted and written again, which is cheaper than an edit
++// trail on something this small.
++//
++// WHY THIS ROUTE HANDS BACK NAMES. A self-serve employee cannot open the
++// roster (admin only since Aug 2026), so without a name list here they would
++// have nobody to pick. What is returned is names and ids ONLY, of people who
++// have not been terminated, never the department, rate, stipend or anything
++// else on an employee record. Everybody in the building already knows who
++// works here, and the kiosk at /clock lists the same names to anyone standing
++// in front of it.
++//
++// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
++
++import { requireAuth } from "../../lib/session.js";
++import { getUser } from "../../lib/users.js";
++import { validateKudos, canDeleteKudos, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
++import {
++  listKudos, getKudos, saveKudos, deleteKudos,
++  listEmployees, getEmployee, getEmployeeByUsername,
++} from "../../lib/crewcore/store.js";
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++async function callerScope(sess) {
++  const user = sess.username ? await getUser(sess.username) : null;
++  return {
++    user,
++    isAdmin: isCrewCoreAdmin({
++      superuser: user && user.superuser,
++      roleName: user ? user.role : sess.role,
++    }),
++  };
++}
++
++/** Display name for the caller, preferring the account's own name field. */
++function callerName(sess, user, ownEmployee) {
++  return String((user && user.name) || (ownEmployee && ownEmployee.name) || sess.username || "").trim();
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    const { user, isAdmin } = await callerScope(sess);
++    // An admin account may well have no employee record of its own. That is
++    // fine for giving kudos (the author is recorded by username) and simply
++    // means nothing is filtered out of the picker for them.
++    const own = await getEmployeeByUsername(sess.username);
++
++    if (req.method === "GET") {
++      const kudos = await listKudos();
++      const roster = await listEmployees();
++
++      // Names only. Terminated employees are left out of the picker but
++      // stay resolvable in the feed below, so an old kudos to somebody who
++      // has since left still reads as their name rather than an id.
++      const people = roster
++        .filter((e) => e.status !== "terminated")
++        .filter((e) => !(own && e.id === own.id))
++        .map((e) => ({ id: e.id, name: e.name }));
++
++      const names = {};
++      roster.forEach((e) => { names[e.id] = e.name; });
++
++      return res.status(200).json({
++        kudos,
++        people,
++        names,
++        me: {
++          username: sess.username,
++          employee_id: own ? own.id : null,
++          is_admin: isAdmin,
++        },
++      });
++    }
++
++    if (req.method === "POST") {
++      const body = parseBody(req);
++      const { ok, errors, record } = validateKudos(body);
++      if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
++
++      const target = await getEmployee(record.to_employee_id);
++      if (!target) return res.status(400).json({ error: "That person is not on the roster" });
++      if (target.status === "terminated") {
++        return res.status(400).json({ error: "That person no longer works here" });
++      }
++
++      // NO SELF-KUDOS. Refused here rather than left to the picker not
++      // offering your own name: the screen is not the gate anywhere else in
++      // this app either.
++      if (own && own.id === target.id) {
++        return res.status(400).json({ error: "Kudos go to somebody else, not yourself" });
++      }
++
++      record.to_name = target.name;
++      record.from_username = sess.username;
++      record.from_name = callerName(sess, user, own);
++      record.from_employee_id = own ? own.id : null;
++      record.created_at = new Date().toISOString();
++
++      const kudos = await saveKudos(record);
++      return res.status(201).json({ ok: true, kudos });
++    }
++
++    if (req.method === "DELETE") {
++      const id = (req.query && req.query.id) || parseBody(req).id;
++      if (!id) return res.status(400).json({ error: "Missing kudos id" });
++
++      const existing = await getKudos(id);
++      if (!existing) return res.status(404).json({ error: "Kudos not found" });
++
++      if (!canDeleteKudos(existing, { username: sess.username, isAdmin })) {
++        return res.status(403).json({ error: "Only whoever wrote it, or an admin, can remove a kudos" });
++      }
++
++      await deleteKudos(id);
++      return res.status(200).json({ ok: true, deleted: id });
++    }
++
++    res.setHeader("Allow", "GET, POST, DELETE");
++    return res.status(405).json({ error: "Method not allowed" });
++  } catch (e) {
++    console.error("crewcore/kudos route error:", e);
++    return res.status(500).json({ error: e.message });
++  }
++}
+diff --git a/apps/crewcore.js b/apps/crewcore.js
+index da662b8..4ca82c0 100644
+--- a/apps/crewcore.js
++++ b/apps/crewcore.js
+@@ -39,22 +39,44 @@
+  *      strengths, growth areas, dates. An admin can edit or delete from
+  *      there; an employee reads their own and can do neither.
+  *
+- * Seven views: Dashboard (admin: anniversaries + headline numbers;
++ * TWO ADDITIONS, Sep 2026, both Ryan's calls, and they are opposites:
++ *
++ *   DOCUMENTATION. A place to write up an issue or a problem with somebody,
++ *   sitting inside the Reviews screen because that is where anyone would
++ *   look for it, and NOT VISIBLE TO THE PERSON IT IS ABOUT. It is not a
++ *   view of its own: it is a tab inside Reviews, drawn only for an admin,
++ *   over its own endpoint and its own storage. api/crewcore/docs.js refuses
++ *   a non-admin caller on every method including GET, before it reads
++ *   anything, so there is no filter anywhere that has to remember to keep
++ *   an entry away from the employee. See the note above validateDoc() in
++ *   lib/crewcore/schema.js for why it is not a flag on a review.
++ *
++ *   KUDOS. A way to hand out credit, from a manager or between employees,
++ *   and the one screen in this app that a self-serve account can WRITE to.
++ *   Shop-wide: everybody with CrewCore reads the same feed, because praise
++ *   only two people can see is a private message. Nobody can give
++ *   themselves kudos (refused on the server), there is no edit, and only
++ *   the author or an admin can remove one — never the recipient.
++ *
++ * Nine views: Dashboard (admin: anniversaries + headline numbers;
+  * self-serve: your profile and where you stand), Roster (admin only; full
+  * list + add/edit), Time Clock (admin: whole team, correctable; self-serve:
+  * your own hours, read-only, and only if you punch), Stipend (both: your
+  * allotment, spend log, and remaining balance; admin also logs new spend
+- * entries for anyone), Reviews (admin: full history + add/edit/delete;
+- * self-serve: read-only own history), Handbook (everyone; read-only),
+- * Settings (admin only; hidden from self-serve rails by lib/users.js's
+- * per-view tabs).
++ * entries for anyone), Samples (SanMar sample drops and picks), Kudos
++ * (everyone; read and write), Reviews (admin: full history + add/edit/delete
++ * plus the documentation tab; self-serve: read-only own history), Handbook
++ * (everyone; read-only), Settings (admin only; hidden from self-serve rails
++ * by lib/users.js's per-view tabs).
+  */
+ 
+ import { ENDPOINTS } from '../js/api.js';
+ // The stipend year math is shared with the API route and the store so a
+ // balance is never computed twice in two places. lib/crewcore/schema.js has
+ // no imports of its own, so it is safe to pull into the browser.
+-import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin } from '../lib/crewcore/schema.js';
++import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin,
++  DOC_CATEGORIES, DOC_LEVELS, docsFor, isFormalDoc,
++  KUDOS_TAGS, KUDOS_MAX_LENGTH, kudosFor, canDeleteKudos } from '../lib/crewcore/schema.js';
+ 
+ const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
+ const STIPEND_CATEGORIES = ['apparel', 'other'];
+@@ -446,6 +468,51 @@ export default {
+   .tc-pinstate{font-size:11.5px;font-weight:700;margin-top:5px}
+   .tc-pinstate.set{color:var(--success-dk)}
+   .tc-pinstate.unset{color:var(--warn-dk)}
++
++  /* Tabs WITHIN one view. Reviews holds two different files on one screen
++     (the review history and the documentation of issues), which is where
++     anybody would look for either. The rail has one Reviews button; this is
++     the switch once you are inside it. */
++  .cc-tabs{display:flex;gap:4px;margin-bottom:18px;border-bottom:1px solid var(--line)}
++  .cc-tab{
++    background:transparent;border:0;border-bottom:2px solid transparent;margin-bottom:-1px;
++    padding:9px 13px;font-family:inherit;font-size:13px;font-weight:700;
++    color:var(--muted);cursor:pointer;
++  }
++  .cc-tab:hover{color:var(--ink)}
++  .cc-tab.on{color:var(--ink);border-bottom-color:var(--accent)}
++  .cc-tab .n{font-weight:600;color:var(--faint);margin-left:6px}
++
++  /* Documentation. The banner is not decoration: it is the one line that
++     says out loud who can read this, on the screen where somebody is about
++     to write something they would not say in front of the person. */
++  .cc-doc-warn{
++    background:var(--warn-tint);border:1px solid var(--warn);border-radius:var(--radius-md);
++    padding:11px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--ink);
++  }
++  .chip.formal{background:var(--danger-tint);color:var(--danger-dk)}
++  .chip.note{background:var(--line-soft);color:var(--muted)}
++
++  /* Kudos */
++  .cc-kudos{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:14px}
++  .cc-kudo{
++    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
++    padding:15px 17px;position:relative;
++  }
++  .cc-kudo.mine{border-color:var(--accent)}
++  .cc-kudo .to{font-size:14.5px;font-weight:800;letter-spacing:-.01em;padding-right:22px}
++  .cc-kudo .msg{font-size:13.5px;line-height:1.55;margin:9px 0 11px;white-space:pre-wrap}
++  .cc-kudo .from{font-size:12px;color:var(--muted)}
++  .cc-kudo-x{
++    position:absolute;top:11px;right:12px;border:0;background:transparent;
++    color:var(--faint);cursor:pointer;font-size:16px;line-height:1;font-family:inherit;
++  }
++  .cc-kudo-x:hover{color:var(--danger)}
++  .cc-tag{
++    display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:99px;
++    background:var(--accent-tint);color:var(--accent-deep);
++  }
++  .cc-count{font-size:12px;color:var(--muted);margin-bottom:12px}
+   `,
+ 
+   template: `
+@@ -491,6 +558,21 @@ export default {
+     // Which review is open, if any. Reviews are a list until a row is
+     // clicked; the same key drives the admin and the self-serve detail.
+     this._reviewDetailId = null;
++
++    // The Reviews screen holds two files for an admin: the review history
++    // and the documentation of issues. 'reviews' or 'docs', and it is only
++    // ever anything but 'reviews' for an admin — a self-serve caller has no
++    // second tab to switch to and no endpoint behind it if they tried.
++    this._reviewTab = 'reviews';
++    this._docs = [];
++    this._docDetailId = null;
++    this._docPerson = '';        // '' means everybody
++
++    this._kudos = [];
++    this._kudosPeople = [];      // names only, from the kudos endpoint
++    this._kudosNames = {};       // id -> name, for resolving the feed
++    this._kudosMe = null;        // { username, employee_id, is_admin }
++    this._kudosFilter = 'all';   // all | mine | given
+     this._handbook = null;
+     // Figures for the self-serve Dashboard, each loaded independently so one
+     // failing fetch costs one card rather than the whole screen.
+@@ -522,6 +604,26 @@ export default {
+     this._reviews = payload.reviews || [];
+   },
+ 
++  /**
++   * Documentation. Admin only, and the fetch is guarded here as well as on
++   * the server: a self-serve caller has no reason to make a request that can
++   * only ever come back 403, and an unexplained red line in their console is
++   * a support question waiting to happen.
++   */
++  async _loadDocs() {
++    if (!this._isAdmin) { this._docs = []; return; }
++    const payload = await this._ctx.api.get(ENDPOINTS.ccDocs);
++    this._docs = payload.docs || [];
++  },
++
++  async _loadKudos() {
++    const payload = await this._ctx.api.get(ENDPOINTS.ccKudos);
++    this._kudos = payload.kudos || [];
++    this._kudosPeople = payload.people || [];
++    this._kudosNames = payload.names || {};
++    this._kudosMe = payload.me || null;
++  },
++
+   async _loadHandbook() {
+     if (this._handbook) return; // static content, fetch once per mount
+     const payload = await this._ctx.api.get(ENDPOINTS.ccHandbook);
+@@ -571,7 +673,12 @@ export default {
+       title.textContent = 'Dashboard.';
+       if (isAdmin) {
+         sub.textContent = 'Anniversaries and headline numbers.';
++        // Kudos in its own try, like every card on the self-serve dashboard:
++        // one endpoint having a bad day costs one number, not the screen.
++        try { await this._loadKudos(); }
++        catch (e) { console.error('CrewCore dashboard: kudos', e); this._kudos = []; }
+         body.innerHTML = this._renderDashboard();
++        this._wireDashboardAdmin();
+         return;
+       }
+       sub.textContent = 'Your profile and where you stand.';
+@@ -671,14 +778,34 @@ export default {
+       // stipend detail follows. In-place refreshes go through
+       // _refreshReviews(), which keeps whichever review is open.
+       this._reviewDetailId = null;
++      this._docDetailId = null;
++      // And always on the review history rather than whichever tab was open
++      // last time. Documentation is the more sensitive half; a stale tab is
++      // not the thing to leave on screen.
++      this._reviewTab = 'reviews';
+       await this._loadReviews();
++      // Documentation loads alongside, admin only, so the tab can carry its
++      // count without a second wait when it is clicked. Its own try: a
++      // failure there must not cost the review history, which is the half
++      // everybody opens this screen for.
+       if (isAdmin) {
+-        actions.innerHTML = `<button class="cc-btn" id="ccAddReviewBtn">Log a review</button>`;
+-        const btn = $('#ccAddReviewBtn');
+-        if (btn) btn.onclick = () => this._openReviewForm();
++        try { await this._loadDocs(); }
++        catch (e) { console.error('CrewCore: documentation', e); this._docs = []; }
+       }
+-      body.innerHTML = this._renderReviews();
+-      this._wireReviews();
++      this._paintReviewScreen();
++      return;
++    }
++
++    if (view === 'kudos') {
++      title.textContent = 'Kudos.';
++      sub.textContent = 'Credit where it is due, from anybody to anybody.';
++      this._kudosFilter = 'all';
++      await this._loadKudos();
++      actions.innerHTML = `<button class="cc-btn" id="ccAddKudosBtn">Give kudos</button>`;
++      const kb = $('#ccAddKudosBtn');
++      if (kb) kb.onclick = () => this._openKudosForm();
++      body.innerHTML = this._renderKudos();
++      this._wireKudos();
+       return;
+     }
+ 
+@@ -723,13 +850,26 @@ export default {
+     const active = this._employees.filter((e) => e.status === 'active');
+     const totalStipendAllotted = active.reduce((sum, e) => sum + (Number(e.apparel_stipend) || 0), 0);
+ 
++    // Kudos handed out this calendar month. A month rather than a year
++    // because the question this card answers is whether the thing is being
++    // used, and a year-to-date figure in November says yes long after
++    // everybody stopped.
++    const thisMonth = new Date().toISOString().slice(0, 7);
++    const kudosThisMonth = (this._kudos || [])
++      .filter((k) => String(k.created_at || '').slice(0, 7) === thisMonth).length;
++
+     return `
+-      <div class="cc-grid">
++      <div class="cc-grid" id="ccAdminCards">
+         <div class="cc-card">
+           <h3>Team</h3>
+           <div class="big">${active.length}</div>
+           <div class="note">active employees</div>
+         </div>
++        <div class="cc-card tap" data-go="kudos">
++          <h3>Kudos this month</h3>
++          <div class="big">${kudosThisMonth}</div>
++          <div class="note">${kudosThisMonth ? 'handed out so far' : 'nothing yet this month'}</div>
++        </div>
+         <div class="cc-card">
+           <h3>Apparel stipends</h3>
+           <div class="big">${fmtMoney(totalStipendAllotted)}</div>
+@@ -783,7 +923,7 @@ export default {
+    * which of four things broke. A failed card is simply not drawn.
+    */
+   async _loadSelfDashboard() {
+-    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null };
++    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null, kudos: null, lastKudos: null };
+     this._selfCards = cards;
+     if (!this._own) return;
+ 
+@@ -824,6 +964,16 @@ export default {
+       await this._loadHandbook();
+       cards.handbook = this._handbook;
+     } catch (e) { console.error('CrewCore dashboard: handbook', e); }
++
++    try {
++      await this._loadKudos();
++      // Counted for the year, not for all time: a running lifetime total
++      // turns into a length-of-service number rather than a recent one, and
++      // the stipend card next to it is already a this-year figure.
++      const mine = kudosFor(this._kudos, { to: this._own.id, year: new Date().getFullYear() });
++      cards.kudos = mine.length;
++      cards.lastKudos = mine[0] || null;   // the feed arrives newest first
++    } catch (e) { console.error('CrewCore dashboard: kudos', e); }
+   },
+ 
+   _renderDashboardSelf() {
+@@ -869,6 +1019,17 @@ export default {
+           : 'nothing on the calendar'}</div>
+       </div>`);
+ 
++    if (c.kudos !== null && c.kudos !== undefined) {
++      cards.push(`
++        <div class="cc-card tap" data-go="kudos">
++          <h3>Kudos</h3>
++          <div class="big">${c.kudos}</div>
++          <div class="note">${c.lastKudos
++            ? 'latest from ' + esc(c.lastKudos.from_name || 'a colleague')
++            : 'none yet this year'}</div>
++        </div>`);
++    }
++
+     if (c.handbook) {
+       const ok = c.handbook.acknowledged === true;
+       cards.push(`
+@@ -890,6 +1051,25 @@ export default {
+     `;
+   },
+ 
++  /**
++   * Same shortcut behaviour the self-serve cards have. Kept as its own
++   * function rather than folded into _wireDashboardSelf(): the two
++   * dashboards are two different screens that happen to share a card
++   * component, and one wiring function reaching into both grids would tie
++   * them together for no reason.
++   */
++  _wireDashboardAdmin() {
++    const grid = this._root.querySelector('#ccAdminCards');
++    if (!grid) return;
++    grid.querySelectorAll('[data-go]').forEach((card) => {
++      card.onclick = () => {
++        const view = card.dataset.go;
++        if (this._ctx && typeof this._ctx.go === 'function') this._ctx.go(view);
++        else this.showView(view);
++      };
++    });
++  },
++
+   _wireDashboardSelf() {
+     const grid = this._root.querySelector('#ccSelfCards');
+     if (!grid) return;
+@@ -2133,18 +2313,347 @@ export default {
+     };
+   },
+ 
+-  /** Redraw the reviews body from what is already loaded. */
+-  _paintReviews() {
+-    const body = this._root.querySelector('#ccBody');
++  /* ---------------- The Reviews screen: two files, one place ----------------
++   *
++   * An admin opens Reviews to two different things: the one-on-one history,
++   * and the documentation of issues. They are separate records over separate
++   * endpoints (see api/crewcore/docs.js for why), but they are the same
++   * question asked about the same person, so putting them behind two rail
++   * buttons would mean picking the wrong one half the time.
++   *
++   * A self-serve employee has no tab strip at all. There is nothing to
++   * switch to: documentation is not theirs to read, and the endpoint behind
++   * it refuses them anyway.
++   */
++
++  /** Draw the whole screen: tab strip, header button, and the active tab. */
++  _paintReviewScreen() {
++    const root = this._root;
++    const body = root.querySelector('#ccBody');
++    const actions = root.querySelector('#ccHdActions');
+     if (!body) return;
+-    body.innerHTML = this._renderReviews();
++    const isAdmin = this._isAdmin;
++    const onDocs = isAdmin && this._reviewTab === 'docs';
++
++    body.innerHTML = (isAdmin ? `
++      <div class="cc-tabs">
++        <button class="cc-tab${onDocs ? '' : ' on'}" data-tab="reviews">
++          Review history<span class="n">${this._reviews.length}</span>
++        </button>
++        <button class="cc-tab${onDocs ? ' on' : ''}" data-tab="docs">
++          Documentation<span class="n">${this._docs.length}</span>
++        </button>
++      </div>` : '') + `<div id="ccTabBody"></div>`;
++
++    // The header button follows the tab. One button that means two things
++    // depending on what is showing underneath it is how somebody logs a
++    // review into a person's documentation file by accident.
++    if (actions) {
++      actions.innerHTML = !isAdmin ? '' : (onDocs
++        ? `<button class="cc-btn" id="ccAddDocBtn">Add documentation</button>`
++        : `<button class="cc-btn" id="ccAddReviewBtn">Log a review</button>`);
++      const rb = root.querySelector('#ccAddReviewBtn');
++      if (rb) rb.onclick = () => this._openReviewForm();
++      const db = root.querySelector('#ccAddDocBtn');
++      if (db) db.onclick = () => this._openDocForm();
++    }
++
++    body.querySelectorAll('[data-tab]').forEach((btn) => {
++      btn.onclick = () => {
++        this._reviewTab = btn.dataset.tab;
++        // Switching tabs closes whatever was open on the other one, so
++        // coming back lands on a list rather than on a record somebody
++        // opened ten minutes ago.
++        this._reviewDetailId = null;
++        this._docDetailId = null;
++        this._paintReviewScreen();
++      };
++    });
++
++    this._paintReviewTab();
++  },
++
++  /** Redraw just the active tab's body from what is already loaded. */
++  _paintReviewTab() {
++    const holder = this._root.querySelector('#ccTabBody');
++    if (!holder) return;
++    if (this._isAdmin && this._reviewTab === 'docs') {
++      holder.innerHTML = this._renderDocs();
++      this._wireDocs();
++      return;
++    }
++    holder.innerHTML = this._renderReviews();
+     this._wireReviews();
+   },
+ 
+-  /** Refetch, then redraw — keeping whichever review is open. */
++  /** Redraw the reviews body from what is already loaded. */
++  _paintReviews() {
++    this._paintReviewTab();
++  },
++
++  /**
++   * Refetch, then redraw — keeping whichever review is open. The whole
++   * screen is repainted rather than just the tab body, because a review
++   * added or deleted changes the count printed on the tab itself.
++   */
+   async _refreshReviews() {
+     await this._loadReviews();
+-    this._paintReviews();
++    this._paintReviewScreen();
++  },
++
++  /* ---------------- Documentation ---------------- */
++
++  /**
++   * Issues and problems, admin only. Same list-then-detail shape as reviews
++   * and the stipend log, for the same reason: an entry is several paragraphs
++   * and a list showing all of it is unreadable at ten entries.
++   */
++  _renderDocs() {
++    // Belt and braces. The tab is only drawn for an admin and the route
++    // refuses anybody else, but this function must never render an entry to
++    // a caller who should not have one.
++    if (!this._isAdmin) {
++      return `<div class="cc-locked"><h2>Admin access required</h2></div>`;
++    }
++    const warn = `
++      <div class="cc-doc-warn">
++        <strong>Administrators only.</strong>
++        Nothing on this tab is visible to the person it is about, or to anybody
++        else without the Admin flag. Employees see their review history and
++        nothing else on this screen.
++      </div>`;
++    return warn + (this._docDetailId ? this._renderDocDetail() : this._renderDocList());
++  },
++
++  _renderDocList() {
++    const people = this._employees.slice()
++      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
++    const rows = docsFor(this._docs, this._docPerson || null, null);
++
++    const toolbar = `
++      <div class="cc-toolbar">
++        <select class="cc-filt" id="ccDocPerson">
++          <option value="">Everybody</option>
++          ${people.map((e) => {
++            const n = docsFor(this._docs, e.id, null).length;
++            return `<option value="${esc(e.id)}"${this._docPerson === e.id ? ' selected' : ''}>${esc(e.name)}${n ? ' (' + n + ')' : ''}</option>`;
++          }).join('')}
++        </select>
++      </div>`;
++
++    if (!rows.length) {
++      return toolbar + `<div class="cc-empty">${this._docPerson
++        ? 'Nothing on file for ' + esc(this._nameForEmployee(this._docPerson)) + '.'
++        : 'Nothing documented yet.'}</div>`;
++    }
++
++    // Newest first. The store already sorts on date, but the screen holds
++    // whatever a refresh last handed it, so the order is asserted here too.
++    const sorted = rows.slice()
++      .sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
++
++    return toolbar + `
++      <div class="cc-list">
++        ${sorted.map((d) => `
++          <div class="cc-row tap" data-doc="${esc(d.id)}">
++            <div>
++              <div class="who">${esc(this._nameForEmployee(d.employee_id))}</div>
++              <div class="meta">
++                ${fmtDate(d.date)}
++                ${d.category ? ' · ' + esc(d.category) : ''}
++                <span class="chip ${isFormalDoc(d) ? 'formal' : 'note'}" style="margin-left:6px">${esc(d.level || 'note')}</span>
++              </div>
++              ${d.summary ? `<div class="meta cc-clamp" style="margin-top:4px">${esc(d.summary)}</div>` : ''}
++            </div>
++            <div class="cc-rowacts"><span class="cc-chev">›</span></div>
++          </div>
++        `).join('')}
++      </div>`;
++  },
++
++  _renderDocDetail() {
++    const d = this._docs.find((x) => x.id === this._docDetailId);
++    if (!d) {
++      // Deleted, or a refresh came back without it. Fall back to the list
++      // rather than draw an empty shell.
++      this._docDetailId = null;
++      return this._renderDocList();
++    }
++    const block = (label, value) => (String(value || '').trim()
++      ? `<div class="cc-section">
++           <h2>${esc(label)}</h2>
++           <div class="cc-prose">${esc(value)}</div>
++         </div>`
++      : '');
++
++    return `
++      <div class="cc-back">
++        <button class="cc-btn sm ghost" id="ccDocBack">Back to documentation</button>
++        <span class="grow" style="flex:1"></span>
++        <button class="cc-btn sm ghost" id="ccDocEdit">Edit</button>
++        <button class="cc-btn sm ghost danger" id="ccDocDelete">Delete</button>
++      </div>
++
++      <div class="cc-profile-hd">
++        <div class="cc-avatar">${esc(String(this._nameForEmployee(d.employee_id) || '?')
++          .trim().split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase())}</div>
++        <div>
++          <h2>${esc(this._nameForEmployee(d.employee_id))}</h2>
++          <div class="sub">${esc(d.summary || 'Documentation')}</div>
++        </div>
++      </div>
++
++      <div class="cc-field-grid" style="margin-bottom:24px">
++        <div class="cc-field"><label>Date</label><div class="v">${fmtDate(d.date) || '—'}</div></div>
++        <div class="cc-field"><label>What it is about</label><div class="v">${esc(d.category || '—')}</div></div>
++        <div class="cc-field"><label>Level</label><div class="v">
++          <span class="chip ${isFormalDoc(d) ? 'formal' : 'note'}">${esc(d.level || 'note')}</span></div></div>
++        <div class="cc-field"><label>Follow up</label><div class="v">${d.follow_up_date ? fmtDate(d.follow_up_date) : '—'}</div></div>
++        <div class="cc-field"><label>Others present</label><div class="v">${esc(d.others_present || '—')}</div></div>
++        <div class="cc-field"><label>Written by</label><div class="v">${esc(d.created_by || '—')}${
++          d.created_at ? ', ' + fmtDate(String(d.created_at).slice(0, 10)) : ''}</div></div>
++      </div>
++
++      ${block('What happened', d.details)}
++      ${block('Action taken', d.action_taken)}
++      ${!String(d.details || '').trim() && !String(d.action_taken || '').trim()
++        ? `<div class="cc-empty">Only the one line above was written up on this one.</div>` : ''}
++    `;
++  },
++
++  _wireDocs() {
++    const root = this._root;
++    if (!root) return;
++
++    const person = root.querySelector('#ccDocPerson');
++    if (person) person.onchange = () => {
++      this._docPerson = person.value;
++      this._paintReviewTab();
++    };
++
++    root.querySelectorAll('[data-doc]').forEach((row) => {
++      row.onclick = () => {
++        this._docDetailId = row.dataset.doc;
++        this._paintReviewTab();
++      };
++    });
++
++    const back = root.querySelector('#ccDocBack');
++    if (back) back.onclick = () => { this._docDetailId = null; this._paintReviewTab(); };
++
++    const edit = root.querySelector('#ccDocEdit');
++    if (edit) edit.onclick = () => {
++      const d = this._docs.find((x) => x.id === this._docDetailId);
++      if (d) this._openDocForm(d);
++    };
++
++    const del = root.querySelector('#ccDocDelete');
++    if (del) del.onclick = async () => {
++      const d = this._docs.find((x) => x.id === this._docDetailId);
++      if (!d) return;
++      if (!confirm('Delete this documentation on ' + this._nameForEmployee(d.employee_id) +
++        ' from ' + fmtDate(d.date) + '? This cannot be undone.')) return;
++      try {
++        await this._ctx.api.request(ENDPOINTS.ccDocs + '?id=' + encodeURIComponent(d.id), { method: 'DELETE' });
++        this._docDetailId = null;
++        await this._refreshDocs();
++      } catch (e) {
++        alert((e.body && e.body.error) || e.message || 'Could not delete that entry.');
++      }
++    };
++  },
++
++  /** Refetch documentation, then repaint the whole screen so the tab count moves. */
++  async _refreshDocs() {
++    await this._loadDocs();
++    this._paintReviewScreen();
++  },
++
++  /**
++   * Write a new entry, or correct one that exists. One form either way, the
++   * same rule the review form follows.
++   *
++   * On edit the employee cannot be changed. Moving an entry from one
++   * person's file to another's is not a correction, and the server pins the
++   * field regardless of what the browser sends.
++   */
++  _openDocForm(doc) {
++    const editing = !!(doc && doc.id);
++    const root = this._root;
++    const holder = root.querySelector('#ccTabBody') || root.querySelector('#ccBody');
++    const wrap = document.createElement('div');
++    const val = (k) => esc((doc && doc[k]) || '');
++    const today = new Date().toISOString().slice(0, 10);
++
++    wrap.innerHTML = `
++      <div class="cc-form">
++        <h3>${editing ? 'Edit documentation' : 'Add documentation'}</h3>
++        <div class="hint">Only administrators can read this. The person it is about cannot.</div>
++        <div class="cc-form-grid">
++          <div class="full"><label>Employee</label>
++            ${editing
++              ? `<input value="${esc(this._nameForEmployee(doc.employee_id))}" disabled>`
++              : `<select id="dEmp">${this._employees.slice()
++                    .sort((a, b) => String(a.name).localeCompare(String(b.name)))
++                    .map((e) => `<option value="${esc(e.id)}"${this._docPerson === e.id ? ' selected' : ''}>${esc(e.name)}</option>`).join('')}</select>`}
++          </div>
++          <div><label>Date</label><input id="dDate" type="date" value="${editing ? val('date') : today}"></div>
++          <div><label>What it is about</label>
++            <select id="dCat">${DOC_CATEGORIES.map((c) =>
++              `<option value="${esc(c)}"${(doc && doc.category) === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}</select>
++          </div>
++          <div><label>Level</label>
++            <select id="dLevel">${DOC_LEVELS.map((l) =>
++              `<option value="${esc(l)}"${(doc && doc.level) === l ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select>
++          </div>
++          <div><label>Follow up date</label><input id="dFollow" type="date" value="${val('follow_up_date')}"></div>
++          <div class="full"><label>One line: what happened</label><input id="dSummary" value="${val('summary')}"></div>
++          <div class="full"><label>The full write-up</label><textarea id="dDetails" rows="5">${val('details')}</textarea></div>
++          <div><label>Action taken</label><textarea id="dAction" rows="3">${val('action_taken')}</textarea></div>
++          <div><label>Others present</label><input id="dOthers" value="${val('others_present')}"></div>
++        </div>
++        <div class="cc-err" id="dErr" hidden></div>
++        <div class="cc-form-actions">
++          <button class="cc-btn ghost" id="dCancel">Cancel</button>
++          <button class="cc-btn" id="dSubmit">Save</button>
++        </div>
++      </div>
++    `;
++    holder.prepend(wrap);
++    const $ = (sel) => wrap.querySelector(sel);
++    const err = $('#dErr');
++
++    $('#dCancel').onclick = () => wrap.remove();
++    $('#dSubmit').onclick = async () => {
++      const payload = {
++        employee_id: editing ? doc.employee_id : ($('#dEmp') ? $('#dEmp').value : ''),
++        date: $('#dDate').value,
++        category: $('#dCat').value,
++        level: $('#dLevel').value,
++        summary: $('#dSummary').value,
++        details: $('#dDetails').value,
++        action_taken: $('#dAction').value,
++        others_present: $('#dOthers').value,
++        follow_up_date: $('#dFollow').value
++      };
++      try {
++        if (editing) {
++          await this._ctx.api.request(ENDPOINTS.ccDocs + '?id=' + encodeURIComponent(doc.id), { method: 'PATCH', body: payload });
++          wrap.remove();
++          // Stay on the entry that was just corrected, so the change shows
++          // where it was made rather than back on a list.
++          this._docDetailId = doc.id;
++        } else {
++          await this._ctx.api.request(ENDPOINTS.ccDocs, { method: 'POST', body: payload });
++          wrap.remove();
++          this._docDetailId = null;
++        }
++        await this._refreshDocs();
++      } catch (e) {
++        err.hidden = false;
++        err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
++      }
++    };
+   },
+ 
+   /**
+@@ -2159,7 +2668,10 @@ export default {
+   _openReviewForm(review) {
+     const editing = !!(review && review.id);
+     const root = this._root;
+-    const body = root.querySelector('#ccBody');
++    // Into the tab body, not #ccBody: prepending to the outer container
++    // would put the form above the tab strip, which reads as belonging to
++    // the screen rather than to the file being written into.
++    const body = root.querySelector('#ccTabBody') || root.querySelector('#ccBody');
+     const wrap = document.createElement('div');
+     const val = (k) => esc((review && review[k]) || '');
+     wrap.innerHTML = `
+@@ -2219,6 +2731,195 @@ export default {
+     };
+   },
+ 
++  /* ---------------- Kudos ----------------
++   *
++   * The one screen in this app anybody can write to. A manager giving
++   * credit and one employee thanking another are the same record, so there
++   * is no admin half and no self-serve half here: everybody sees the same
++   * feed and the same button.
++   *
++   * Names come from the kudos endpoint rather than from the roster, because
++   * a self-serve employee cannot open the roster. What it hands back is ids
++   * and names only.
++   */
++
++  _renderKudos() {
++    const me = this._kudosMe || {};
++    const mineId = me.employee_id || null;
++
++    const all = this._kudos || [];
++    const rows = this._kudosFilter === 'mine'
++      ? kudosFor(all, { to: mineId })
++      : (this._kudosFilter === 'given'
++        ? all.filter((k) => String(k.from_username || '').toLowerCase() === String(me.username || '').toLowerCase())
++        : all);
++
++    // "For me" only appears for somebody with an employee record to receive
++    // kudos against. An admin account with no record of its own would get a
++    // tab that is always empty and always will be.
++    const tabs = `
++      <div class="cc-tabs">
++        <button class="cc-tab${this._kudosFilter === 'all' ? ' on' : ''}" data-kfilter="all">
++          Everyone<span class="n">${all.length}</span>
++        </button>
++        ${mineId ? `<button class="cc-tab${this._kudosFilter === 'mine' ? ' on' : ''}" data-kfilter="mine">
++          For me<span class="n">${kudosFor(all, { to: mineId }).length}</span>
++        </button>` : ''}
++        <button class="cc-tab${this._kudosFilter === 'given' ? ' on' : ''}" data-kfilter="given">
++          I gave
++        </button>
++      </div>`;
++
++    if (!rows.length) {
++      const empty = this._kudosFilter === 'mine'
++        ? 'Nothing addressed to you yet.'
++        : (this._kudosFilter === 'given'
++          ? 'You have not given any kudos yet. The button up top is how.'
++          : 'No kudos yet. Somebody has to go first.');
++      return tabs + `<div class="cc-empty">${esc(empty)}</div>`;
++    }
++
++    return tabs + `
++      <div class="cc-kudos">
++        ${rows.map((k) => {
++          // Prefer the live roster name, fall back to the name stored when
++          // it was written. Somebody renamed on the roster should read as
++          // their current name, and somebody no longer on it should still
++          // read as a name rather than an id.
++          const to = this._kudosNames[k.to_employee_id] || k.to_name || k.to_employee_id;
++          const canDelete = canDeleteKudos(k, { username: me.username, isAdmin: me.is_admin === true });
++          const forMe = mineId && k.to_employee_id === mineId;
++          return `
++            <div class="cc-kudo${forMe ? ' mine' : ''}">
++              ${canDelete ? `<button class="cc-kudo-x" data-kdel="${esc(k.id)}" title="Remove this">×</button>` : ''}
++              <div class="to">${esc(to)}</div>
++              ${k.tag ? `<div style="margin-top:6px"><span class="cc-tag">${esc(k.tag)}</span></div>` : ''}
++              <div class="msg">${esc(k.message || '')}</div>
++              <div class="from">from ${esc(k.from_name || 'somebody')}${
++                k.created_at ? ' · ' + fmtDate(String(k.created_at).slice(0, 10)) : ''}</div>
++            </div>`;
++        }).join('')}
++      </div>`;
++  },
++
++  _wireKudos() {
++    const root = this._root;
++    if (!root) return;
++
++    root.querySelectorAll('[data-kfilter]').forEach((btn) => {
++      btn.onclick = () => {
++        this._kudosFilter = btn.dataset.kfilter;
++        this._paintKudos();
++      };
++    });
++
++    root.querySelectorAll('[data-kdel]').forEach((btn) => {
++      btn.onclick = async () => {
++        if (!confirm('Remove this kudos? It disappears for everybody.')) return;
++        try {
++          await this._ctx.api.request(ENDPOINTS.ccKudos + '?id=' + encodeURIComponent(btn.dataset.kdel), { method: 'DELETE' });
++          await this._refreshKudos();
++        } catch (e) {
++          alert((e.body && e.body.error) || e.message || 'Could not remove that kudos.');
++        }
++      };
++    });
++  },
++
++  _paintKudos() {
++    const body = this._root.querySelector('#ccBody');
++    if (!body) return;
++    body.innerHTML = this._renderKudos();
++    this._wireKudos();
++  },
++
++  async _refreshKudos() {
++    await this._loadKudos();
++    this._paintKudos();
++  },
++
++  /**
++   * Give kudos. No edit form to share with, deliberately: a kudos is two
++   * lines about a colleague, and if it is wrong it gets removed and written
++   * again rather than carrying an edit trail heavier than the record.
++   *
++   * Your own name is not in the picker, because the endpoint hands back
++   * everybody EXCEPT you. The server refuses a self-addressed one anyway;
++   * this just means nobody has to be told no.
++   */
++  _openKudosForm() {
++    const root = this._root;
++    const body = root.querySelector('#ccBody');
++    const people = this._kudosPeople || [];
++    const wrap = document.createElement('div');
++
++    if (!people.length) {
++      wrap.innerHTML = `
++        <div class="cc-form">
++          <h3>Give kudos</h3>
++          <div class="hint">There is nobody else on the roster yet, so there is
++            nobody to give kudos to. An administrator adds people under Roster.</div>
++          <div class="cc-form-actions">
++            <button class="cc-btn ghost" id="kCancel">Close</button>
++          </div>
++        </div>`;
++      body.prepend(wrap);
++      wrap.querySelector('#kCancel').onclick = () => wrap.remove();
++      return;
++    }
++
++    wrap.innerHTML = `
++      <div class="cc-form">
++        <h3>Give kudos</h3>
++        <div class="hint">Everybody with CrewCore can read this, which is the point.
++          It cannot be edited later, only removed.</div>
++        <div class="cc-form-grid">
++          <div><label>Who</label>
++            <select id="kTo">${people.map((pp) =>
++              `<option value="${esc(pp.id)}">${esc(pp.name)}</option>`).join('')}</select>
++          </div>
++          <div><label>What for (optional)</label>
++            <select id="kTag">
++              <option value="">No label</option>
++              ${KUDOS_TAGS.map((tg) => `<option value="${esc(tg)}">${esc(tg)}</option>`).join('')}
++            </select>
++          </div>
++          <div class="full"><label>What they did</label>
++            <textarea id="kMsg" rows="4" maxlength="${KUDOS_MAX_LENGTH}"></textarea>
++          </div>
++        </div>
++        <div class="cc-err" id="kErr" hidden></div>
++        <div class="cc-form-actions">
++          <button class="cc-btn ghost" id="kCancel">Cancel</button>
++          <button class="cc-btn" id="kSubmit">Post it</button>
++        </div>
++      </div>
++    `;
++    body.prepend(wrap);
++    const $ = (sel) => wrap.querySelector(sel);
++    const err = $('#kErr');
++
++    $('#kCancel').onclick = () => wrap.remove();
++    $('#kSubmit').onclick = async () => {
++      const payload = {
++        to_employee_id: $('#kTo').value,
++        tag: $('#kTag').value,
++        message: $('#kMsg').value
++      };
++      try {
++        await this._ctx.api.request(ENDPOINTS.ccKudos, { method: 'POST', body: payload });
++        wrap.remove();
++        // Land on the whole feed, not on whichever tab was open: a kudos you
++        // just gave somebody else would be invisible on "For me".
++        this._kudosFilter = 'all';
++        await this._refreshKudos();
++      } catch (e) {
++        err.hidden = false;
++        err.textContent = (e.body && e.body.details && e.body.details.join(', ')) || (e.body && e.body.error) || e.message || 'Could not post that.';
++      }
++    };
++  },
++
+   /* ---------------- Handbook ---------------- */
+ 
+   _renderHandbook() {
+diff --git a/js/api.js b/js/api.js
+index 73e8ef5..7a5d0b7 100644
+--- a/js/api.js
++++ b/js/api.js
+@@ -251,6 +251,13 @@ export const ENDPOINTS = {
+   ccEmployees:     '/api/crewcore/employees',
+   ccStipend:       '/api/crewcore/stipend',
+   ccReviews:       '/api/crewcore/reviews',
++  // Documentation of issues and problems. Drawn inside the Reviews screen,
++  // but a separate endpoint over separate storage: the route refuses any
++  // non-admin caller on every method including GET, so no filter anywhere
++  // has to remember to keep an entry away from the person it is about.
++  ccDocs:          '/api/crewcore/docs',
++  // Kudos. The one CrewCore route anybody with the app can WRITE to.
++  ccKudos:         '/api/crewcore/kudos',
+   ccHandbook:      '/api/crewcore/handbook',
+   ccSettings:      '/api/crewcore/settings',
+   // SanMar sample drops. Already live by prefix ('/api/crewcore/' above), so
+@@ -657,6 +664,30 @@ const MOCK_DATA = {
+       { id: 'REV-00001', employee_id: 'EMP-00003', review_date: '2026-06-15', reviewer_name: 'Ryan Toney', summary: 'Strong quarter, marketing initiatives gaining traction.', strengths: 'Client relationships, trend research', growth_areas: 'Delegating routine follow-ups', next_review_date: '2026-12-15' }
+     ]
+   }),
++  // Documentation. MOCK_USER is admin, which is the only caller this
++  // endpoint ever answers — a self-serve account gets a 403 from the real
++  // route, and there is no offline shape for that on purpose.
++  [ENDPOINTS.ccDocs]: () => ({
++    docs: [
++      { id: 'DOC-00001', employee_id: 'EMP-00001', date: '2026-08-18', category: 'Attendance', level: 'verbal warning', summary: 'Third late start in two weeks', details: 'Arrived 25 minutes into the shift with the press already loaded. Talked it through at the end of the day.', action_taken: 'Verbal warning, agreed to text ahead if running late.', others_present: '', follow_up_date: '2026-09-18', created_by: 'ryan' }
++    ]
++  }),
++  [ENDPOINTS.ccKudos]: () => ({
++    kudos: [
++      { id: 'KUD-00002', to_employee_id: 'EMP-00002', to_name: 'Margo Niemeyer', from_username: 'alexis', from_name: 'Alexis Davis', from_employee_id: 'EMP-00005', tag: 'Customer save', message: 'Re-ran 200 shirts overnight so the Ankeny order still shipped on time.', created_at: '2026-08-30T14:02:00.000Z' },
++      { id: 'KUD-00001', to_employee_id: 'EMP-00005', to_name: 'Alexis Davis', from_username: 'ryan', from_name: 'Ryan Toney', from_employee_id: null, tag: 'Went the extra mile', message: 'Drove the samples out to Grimes herself rather than let the meeting slip a week.', created_at: '2026-08-24T20:15:00.000Z' }
++    ],
++    people: [
++      { id: 'EMP-00001', name: 'Kim Taylor' }, { id: 'EMP-00002', name: 'Margo Niemeyer' },
++      { id: 'EMP-00003', name: 'Jacob Whitman' }, { id: 'EMP-00004', name: 'Amanda Clark' },
++      { id: 'EMP-00005', name: 'Alexis Davis' }
++    ],
++    names: {
++      'EMP-00001': 'Kim Taylor', 'EMP-00002': 'Margo Niemeyer', 'EMP-00003': 'Jacob Whitman',
++      'EMP-00004': 'Amanda Clark', 'EMP-00005': 'Alexis Davis'
++    },
++    me: { username: 'ryan', employee_id: null, is_admin: true }
++  }),
+   [ENDPOINTS.ccSettings]: () => ({ settings: { default_stipend_front_office: 250, default_stipend_production: 150, self_serve_enabled: true, clock_enabled: true, week_start_day: 0, overtime_after_hours: 40, clock_round_minutes: 0, clock_kiosk_token: '' } }),
+   [ENDPOINTS.ccTimecards]: () => ({
+     scope: 'all', timezone: 'America/Chicago', week_start_day: 0,
+diff --git a/js/registry.js b/js/registry.js
+index 35b10d7..236a81a 100644
+--- a/js/registry.js
++++ b/js/registry.js
+@@ -29,7 +29,7 @@ import { isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+  * "and every screen in it". See the long note in allowedViews().
+  */
+ const SELF_SERVE_VIEWS = {
+-  crewcore: ['dashboard', 'timeclock', 'stipend', 'reviews', 'handbook'],
++  crewcore: ['dashboard', 'timeclock', 'stipend', 'kudos', 'reviews', 'handbook'],
+ };
+ 
+ export const APPS = [
+@@ -214,6 +214,14 @@ export const APPS = [
+       // SanMar sample drops. Sits next to Stipend because a pick draws that
+       // person's apparel allotment the moment it is made.
+       ['samples', 'Samples'],
++      // KUDOS, Sep 2026. The one screen in this app anybody can WRITE to:
++      // a manager giving credit and one employee thanking another are the
++      // same record. Everybody with CrewCore reads the same feed, which is
++      // the point — praise only two people can see is a private message.
++      // Note that DOCUMENTATION, its opposite number, is deliberately NOT a
++      // view: it is drawn inside Reviews and is admin-only, so keeping it
++      // off this list means it can never appear in a rail at all.
++      ['kudos', 'Kudos'],
+       ['reviews', 'Reviews'],
+       ['handbook', 'Handbook'],
+       ['settings', 'Settings']
+diff --git a/lib/crewcore/schema.js b/lib/crewcore/schema.js
+index bddf08e..6313998 100644
+--- a/lib/crewcore/schema.js
++++ b/lib/crewcore/schema.js
+@@ -37,6 +37,12 @@ export const keys = {
+   stipendIndex:   () => `${KEY_PREFIX}:stipend_index`,
+   review:         (id) => `${KEY_PREFIX}:review:${id}`,
+   reviewIndex:    () => `${KEY_PREFIX}:review_index`,
++  // Documentation of issues and problems. A SEPARATE index from reviews on
++  // purpose — see the long note above validateDoc().
++  doc:            (id) => `${KEY_PREFIX}:doc:${id}`,
++  docIndex:       () => `${KEY_PREFIX}:doc_index`,
++  kudos:          (id) => `${KEY_PREFIX}:kudos:${id}`,
++  kudosIndex:     () => `${KEY_PREFIX}:kudos_index`,
+   settings:       () => `${KEY_PREFIX}:settings`,
+ };
+ 
+@@ -491,6 +497,224 @@ export function validateReview(input, { partial = false } = {}) {
+   return { ok: true, record: rec };
+ }
+ 
++// ---- Documentation (issues and problems) ---------------------------------
++//
++// Sep 2026, Ryan's call: a place to write up an issue or a problem with an
++// employee, kept alongside the review history because that is where anybody
++// would look for it, and NOT visible to the person it is about.
++//
++// WHY THIS IS ITS OWN RECORD TYPE AND ITS OWN INDEX, rather than a review
++// with a `private: true` flag on it:
++//
++// The reviews route already answers a self-serve caller with their own
++// review history. Storing documentation in the same index would make that
++// answer depend on a filter remembering to strip it, forever, in every
++// future edit to that route, the dashboard card that reads the newest
++// review, and anything that reports on reviews later. One forgotten filter
++// and a written warning is on the screen of the person it was written
++// about. There is no filter to forget here: the records live under a
++// different key, and api/crewcore/docs.js refuses a non-admin caller before
++// it reads anything at all, on every method including GET.
++//
++// The screen still shows both under Reviews, which is what was asked for.
++// Two stores, one place to read them.
++
++// What the entry is ABOUT. Deliberately separate from how formal it is:
++// "attendance" and "written warning" answer two different questions, and
++// one enum trying to answer both ends up with a row for every pairing.
++export const DOC_CATEGORIES = [
++  "Attendance", "Performance", "Conduct", "Safety", "Quality",
++  "Customer issue", "Policy", "Other",
++];
++
++// How formal it is, in escalation order. "note" is the ordinary case: most
++// of what gets written down is a thing that happened, not a warning. The
++// order is the useful part — a person's file read newest first should make
++// an escalation obvious.
++export const DOC_LEVELS = [
++  "note", "verbal warning", "written warning", "final warning", "performance plan",
++];
++
++/**
++ * Entries scoped to a person and/or a year. Same shape and same reasoning as
++ * spendsFor(): a null employeeId means everyone, a null year means every
++ * year, and an entry with an unusable date is left out of a year filter
++ * rather than quietly counted into the current one.
++ */
++export function docsFor(docs, employeeId, year) {
++  let rows = Array.isArray(docs) ? docs.filter(Boolean) : [];
++  if (employeeId) rows = rows.filter((d) => d.employee_id === employeeId);
++  if (year != null) {
++    rows = rows.filter((d) => {
++      const y = parseInt(String((d && d.date) || "").slice(0, 4), 10);
++      return Number.isFinite(y) && y === Number(year);
++    });
++  }
++  return rows;
++}
++
++/**
++ * Whether an entry is a formal step rather than a note. Used to mark a row,
++ * and shared so the list, a person's file and anything that counts later all
++ * agree on what "formal" means. Same pattern as isOverStipend().
++ */
++export function isFormalDoc(doc) {
++  const level = String((doc && doc.level) || "note").trim().toLowerCase();
++  return DOC_LEVELS.includes(level) && level !== "note";
++}
++
++export function validateDoc(input, { partial = false } = {}) {
++  const errors = [];
++  const rec = {};
++
++  if (!partial && !input.employee_id) errors.push("employee_id is required");
++  else if (input.employee_id !== undefined) rec.employee_id = String(input.employee_id);
++
++  if (!partial && !input.date) errors.push("date is required");
++  else if (input.date !== undefined) rec.date = String(input.date || "");
++
++  // A one-line heading. Required, because a list of entries with no headings
++  // is a list nobody can scan, and the whole point of the file is being able
++  // to read it back later.
++  if (input.summary !== undefined) {
++    const s = String(input.summary || "").trim();
++    if (!s && !partial) errors.push("summary is required");
++    else if (!s && partial) errors.push("summary cannot be emptied");
++    else rec.summary = s;
++  } else if (!partial) {
++    errors.push("summary is required");
++  }
++
++  if (input.category !== undefined) {
++    if (input.category && !DOC_CATEGORIES.includes(input.category)) {
++      errors.push(`category must be one of: ${DOC_CATEGORIES.join(", ")}`);
++    } else {
++      rec.category = input.category || "Other";
++    }
++  } else if (!partial) {
++    rec.category = "Other";
++  }
++
++  if (input.level !== undefined) {
++    if (input.level && !DOC_LEVELS.includes(input.level)) {
++      errors.push(`level must be one of: ${DOC_LEVELS.join(", ")}`);
++    } else {
++      rec.level = input.level || "note";
++    }
++  } else if (!partial) {
++    rec.level = "note";
++  }
++
++  if (input.details !== undefined) rec.details = String(input.details || "").trim();
++  else if (!partial) rec.details = "";
++
++  if (input.action_taken !== undefined) rec.action_taken = String(input.action_taken || "").trim();
++  else if (!partial) rec.action_taken = "";
++
++  // Who else was in the room. Free text rather than a picker: a customer, a
++  // temp, or somebody's parent is not on the roster, and a field that can
++  // only hold employees would get left blank instead.
++  if (input.others_present !== undefined) rec.others_present = String(input.others_present || "").trim();
++  else if (!partial) rec.others_present = "";
++
++  if (input.follow_up_date !== undefined) rec.follow_up_date = String(input.follow_up_date || "");
++  else if (!partial) rec.follow_up_date = "";
++
++  if (errors.length) return { ok: false, errors };
++  return { ok: true, record: rec };
++}
++
++// ---- Kudos ----------------------------------------------------------------
++//
++// Sep 2026, Ryan's call: a way to hand out credit, either from a manager or
++// between employees. The mirror image of documentation in every respect that
++// matters:
++//
++//   * Documentation is admin-write, admin-read. Kudos is anyone-write,
++//     everyone-read. Praise that only the two people involved can see is a
++//     private message, not kudos.
++//   * Nobody can give themselves kudos. Refused on the server, the same way
++//     reports_to refuses self-reference, rather than left to the screen not
++//     offering your own name in the picker.
++//   * There is no edit. A kudos is two lines somebody wrote about a
++//     colleague; an edit history on it is heavier than the thing itself. If
++//     it is wrong, the author or an admin deletes it and it can be written
++//     again.
++
++export const KUDOS_TAGS = [
++  "Teamwork", "Went the extra mile", "Quality work", "Customer save",
++  "Safety", "Attitude", "Training someone",
++];
++
++export const KUDOS_MAX_LENGTH = 600;
++
++export function validateKudos(input) {
++  const errors = [];
++  const rec = {};
++
++  if (!input || !input.to_employee_id) errors.push("to_employee_id is required");
++  else rec.to_employee_id = String(input.to_employee_id);
++
++  const msg = String((input && input.message) || "").trim();
++  if (!msg) errors.push("message is required");
++  else if (msg.length > KUDOS_MAX_LENGTH) {
++    errors.push(`message must be ${KUDOS_MAX_LENGTH} characters or fewer`);
++  } else {
++    rec.message = msg;
++  }
++
++  if (input && input.tag !== undefined && input.tag !== null && input.tag !== "") {
++    if (!KUDOS_TAGS.includes(input.tag)) {
++      errors.push(`tag must be one of: ${KUDOS_TAGS.join(", ")}`);
++    } else {
++      rec.tag = input.tag;
++    }
++  } else {
++    rec.tag = "";
++  }
++
++  if (errors.length) return { ok: false, errors };
++  return { ok: true, record: rec };
++}
++
++/** The calendar year a kudos was written, or null if its stamp is unusable. */
++export function kudosYear(k) {
++  const y = parseInt(String((k && k.created_at) || "").slice(0, 4), 10);
++  return Number.isFinite(y) ? y : null;
++}
++
++/**
++ * Kudos scoped by who received them, who gave them, and/or which year. Every
++ * filter is optional; passing nothing back gives the whole feed. One reader
++ * for the feed, the "for me" tab, the dashboard count and the tests, so a
++ * count on one screen cannot disagree with the list on another.
++ */
++export function kudosFor(list, { to = null, from = null, year = null } = {}) {
++  let rows = Array.isArray(list) ? list.filter(Boolean) : [];
++  if (to) rows = rows.filter((k) => k.to_employee_id === to);
++  if (from) rows = rows.filter((k) => k.from_employee_id === from);
++  if (year != null) rows = rows.filter((k) => kudosYear(k) === Number(year));
++  return rows;
++}
++
++/**
++ * Who may remove a kudos: the person who wrote it, or a CrewCore admin.
++ *
++ * NOT the recipient. Somebody being thanked in front of the shop should not
++ * be able to quietly delete the record of it, and an unwanted one is a
++ * conversation with an admin rather than a delete button.
++ *
++ * The comparison is on the author's USERNAME, not their employee id, so it
++ * still works for an admin account with no employee record of its own.
++ */
++export function canDeleteKudos(kudos, { username, isAdmin } = {}) {
++  if (!kudos) return false;
++  if (isAdmin === true) return true;
++  const author = norm(kudos.from_username);
++  const caller = norm(username);
++  return !!author && author === caller;
++}
++
+ // ---- Kept for schema compatibility (PTO removed from the app surface) -----
+ // See the v2 comment at the top of this file. Not imported by any route or
+ // UI file as of this version.
+diff --git a/lib/crewcore/store.js b/lib/crewcore/store.js
+index 9b3bdd6..54b7cb7 100644
+--- a/lib/crewcore/store.js
++++ b/lib/crewcore/store.js
+@@ -227,6 +227,101 @@ export async function deleteReview(id) {
+   return true;
+ }
+ 
++// ---- Documentation ---------------------------------------------------------
++// Issues and problems written up against an employee. Its own index, NOT
++// reviews' — see the note above validateDoc() in schema.js for why the
++// separation is the safety property rather than a tidiness preference.
++// Nothing here is ever read for a self-serve caller; api/crewcore/docs.js
++// refuses one before it calls any of these.
++
++export async function listDocIds() {
++  const ids = await getRaw(keys.docIndex());
++  return Array.isArray(ids) ? ids : [];
++}
++
++export async function getDoc(id) {
++  return getRaw(keys.doc(id));
++}
++
++export async function listDocs() {
++  const ids = await listDocIds();
++  const rows = await Promise.all(ids.map((id) => getDoc(id)));
++  // Newest first: a person's file is read to find out what happened lately.
++  return rows.filter(Boolean).sort((a, b) => String(b.date).localeCompare(String(a.date)));
++}
++
++export async function saveDoc(record) {
++  const ids = await listDocIds();
++  if (!record.id) record.id = nextId("DOC", ids);
++  if (!ids.includes(record.id)) {
++    ids.push(record.id);
++    await setRaw(keys.docIndex(), ids);
++  }
++  await setRaw(keys.doc(record.id), record);
++  return record;
++}
++
++export async function updateDoc(id, patch) {
++  const existing = await getDoc(id);
++  if (!existing) return null;
++  const merged = { ...existing, ...patch, id: existing.id, updated_at: new Date().toISOString() };
++  await setRaw(keys.doc(id), merged);
++  return merged;
++}
++
++export async function deleteDoc(id) {
++  const ids = await listDocIds();
++  const next = ids.filter((x) => x !== id);
++  if (next.length === ids.length) return false;
++  await setRaw(keys.docIndex(), next);
++  await setRaw(keys.doc(id), null);
++  return true;
++}
++
++// ---- Kudos -----------------------------------------------------------------
++// Shop-wide by design: everybody with CrewCore access reads the same feed.
++// Anyone can write one, nobody can edit one, and only the author or an admin
++// can remove one (canDeleteKudos in schema.js).
++
++export async function listKudosIds() {
++  const ids = await getRaw(keys.kudosIndex());
++  return Array.isArray(ids) ? ids : [];
++}
++
++export async function getKudos(id) {
++  return getRaw(keys.kudos(id));
++}
++
++export async function listKudos() {
++  const ids = await listKudosIds();
++  const rows = await Promise.all(ids.map((id) => getKudos(id)));
++  // Sorted on created_at, not on the index order. The index is the order
++  // things were written, which is usually the same and is not guaranteed to
++  // be once anything is deleted and re-added.
++  return rows.filter(Boolean)
++    .sort((a, b) => String(b.created_at || "").localeCompare(String(a.created_at || "")));
++}
++
++export async function saveKudos(record) {
++  const ids = await listKudosIds();
++  if (!record.id) record.id = nextId("KUD", ids);
++  if (!ids.includes(record.id)) {
++    ids.push(record.id);
++    await setRaw(keys.kudosIndex(), ids);
++  }
++  await setRaw(keys.kudos(record.id), record);
++  return record;
++}
++
++export async function deleteKudos(id) {
++  const ids = await listKudosIds();
++  const next = ids.filter((x) => x !== id);
++  if (next.length === ids.length) return false;
++  await setRaw(keys.kudosIndex(), next);
++  await setRaw(keys.kudos(id), null);
++  return true;
++}
++
+ // ---- Settings ------------------------------------------------------------
+ 
+ export async function getSettings() {
+diff --git a/lib/help/content.js b/lib/help/content.js
+index e615ae8..cbed80e 100644
+--- a/lib/help/content.js
++++ b/lib/help/content.js
+@@ -270,11 +270,13 @@ edit rights. Deleting is administrators only.`,
+     keywords: ["employee", "hr", "staff", "team", "roster", "clock",
+       "punch", "timecard", "hours", "overtime", "stipend", "apparel",
+       "review", "one on one", "handbook", "pay", "rate", "pto",
+-      "reports to", "manager"],
++      "reports to", "manager", "kudos", "praise", "credit", "recognition",
++      "thank", "documentation", "write up", "written warning", "discipline",
++      "incident", "problem", "issue"],
+     body: `CrewCore is employee management: the roster, the time clock, apparel
+ stipends, review history, and the employee handbook.
+ 
+-EIGHT SCREENS. Dashboard, Roster, Time Clock, Stipend, Samples, Reviews,
++NINE SCREENS. Dashboard, Roster, Time Clock, Stipend, Samples, Kudos, Reviews,
+ Handbook, Settings. Roster here means employees. In BackBone the same word means
+ customers, which is worth knowing when somebody says "check the roster".
+ 
+@@ -327,6 +329,35 @@ server; nothing the browser sends can price a line.
+ EXPORT CSV on a drop produces the sheet that goes back to SanMar, one line per
+ pick, grouped by person.
+ 
++KUDOS is credit handed out in public. Anybody with CrewCore can give it, to
++anybody else on the roster, and everybody reads the same feed. That is
++deliberate: praise only two people can see is a private message, not kudos. It
++is the one screen in this app a self-serve employee can write to.
++
++Nobody can give themselves kudos; the server refuses it rather than relying on
++the picker leaving your own name out. There is no editing one. Whoever wrote it
++can remove it, and so can an administrator, but the person it was written about
++cannot: somebody being thanked in front of the shop should not be able to
++quietly delete the record of it, and an unwanted one is a conversation rather
++than a delete button.
++
++DOCUMENTATION is the opposite of kudos and lives on the Reviews screen, as a
++second tab next to the review history. It is where an issue or a problem gets
++written up: the date, what it was about, how formal it is (a note, a verbal
++warning, a written warning, a final warning, a performance plan), the write-up,
++what was done about it, who else was present, and a follow-up date.
++
++DOCUMENTATION IS ADMINISTRATORS ONLY, INCLUDING FROM THE PERSON IT IS ABOUT.
++An employee opening Reviews sees their own review history and no second tab.
++This is not a hidden button: the entries are stored separately from reviews and
++the route behind them refuses anybody without the Admin flag on every request,
++so nothing anywhere has to remember to filter them out.
++
++REVIEWS AND DOCUMENTATION ARE DIFFERENT THINGS. A review is a conversation the
++employee took part in and can read back. Documentation is a record kept about
++them. They sit on one screen because that is where anybody would look for
++either, not because they are the same kind of note.
++
+ REPORTS TO is the field that says who somebody's manager is. It is what the
+ "My team" tab in Notifications reads to work out whose work to show a manager.
+ 
+diff --git a/lib/users.js b/lib/users.js
+index b782fb2..8d45400 100644
+--- a/lib/users.js
++++ b/lib/users.js
+@@ -39,6 +39,7 @@ const CREWCORE_SELF_VIEWS = [
+   "crewcore:timeclock",
+   "crewcore:stipend",
+   "crewcore:samples",
++  "crewcore:kudos",
+   "crewcore:reviews",
+   "crewcore:handbook",
+ ];
+@@ -142,7 +143,13 @@ export const DEFAULT_ROLES = {
+     // "crewcore:timeclock" is granted here but is STRIPPED at runtime for
+     // anyone whose employee record has clock_enabled false — see permsFor()
+     // below. Salaried staff who never punch have no hours to read.
+-    tabs: ["crewcore:dashboard", "crewcore:timeclock", "crewcore:stipend", "crewcore:samples", "crewcore:reviews", "crewcore:handbook", "stitchsense:guess"],
++    //
++    // "crewcore:kudos" is the only WRITE this role has anywhere in the
++    // shell, added Sep 2026. Employees giving each other credit was the
++    // point of the feature, so a read-only version of it would be pointless.
++    // What can be written is one short message addressed to somebody else on
++    // the roster; api/crewcore/kudos.js refuses a self-addressed one.
++    tabs: ["crewcore:dashboard", "crewcore:timeclock", "crewcore:stipend", "crewcore:samples", "crewcore:kudos", "crewcore:reviews", "crewcore:handbook", "stitchsense:guess"],
+     data_scope: "own",
+     can_edit: false,
+     can_export: false,
+diff --git a/test/crewcore-docs.test.cjs b/test/crewcore-docs.test.cjs
+new file mode 100644
+index 0000000..c4ef958
+--- /dev/null
++++ b/test/crewcore-docs.test.cjs
+@@ -0,0 +1,466 @@
++/**
++ * CrewCore documentation (Sep 2026).
++ *
++ * Ryan's ask: somewhere to write up an issue or a problem with an employee,
++ * kept with the review history, and NOT VISIBLE TO THE PERSON IT IS ABOUT.
++ *
++ * That last clause is the whole feature, so most of this file is about it,
++ * and it is tested by CALLING THE ROUTE — a real handler, a real signed
++ * session cookie, a fake Upstash underneath — rather than by reading the
++ * source for the word "isAdmin". Grepping for a gate proves the letters are
++ * there, not that a request is refused. Same lesson as
++ * test/route-imports.test.cjs, and the stakes here are a written warning
++ * appearing on the screen of the person it was written about.
++ *
++ * Two properties are checked separately, because they fail separately:
++ *
++ *   1. A non-admin caller is REFUSED. Every method, including GET.
++ *   2. A non-admin request never READS a documentation key at all. The
++ *      refusal happens before storage is touched, so a future edit that
++ *      adds a GET branch cannot serve an entry by accident. Asserted by
++ *      recording which keys the fake storage was asked for.
++ *
++ * And one property about the neighbours: the reviews route, which DOES have
++ * a self-serve answer, must not have gained a documentation entry in it.
++ */
++
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++
++/* ---- fake Upstash ------------------------------------------------------ *
++ * Reads and writes, since these tests POST and PATCH. Every key read is
++ * recorded: test 2 above is an assertion about what was NOT asked for.
++ * ----------------------------------------------------------------------- */
++
++const kv = new Map();
++const reads = [];
++const P = 'alliteration:';
++const CC = 'crewcore_data';
++
++global.fetch = async (url, opts) => {
++  const raw = String(url);
++  const setM = raw.match(/\/set\/(.+)$/);
++  if (setM && opts && opts.method === 'POST') {
++    kv.set(decodeURIComponent(setM[1]), opts.body);
++    return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
++  }
++  const key = decodeURIComponent((raw.match(/\/get\/(.+)$/) || [])[1] || '');
++  reads.push(key);
++  return { ok: true, status: 200, json: async () => ({ result: kv.has(key) ? kv.get(key) : null }) };
++};
++
++process.env.KV_REST_API_URL = 'https://fake-upstash.test';
++process.env.KV_REST_API_TOKEN = 'fake-token';
++process.env.SESSION_SECRET = 'test-secret-for-crewcore-docs';
++
++function seed() {
++  kv.clear();
++  reads.length = 0;
++  kv.set(P + 'users', JSON.stringify({
++    ryan:  { username: 'ryan',  name: 'Ryan',  role: 'admin' },
++    sasha: { username: 'sasha', name: 'Sasha', role: 'employee' },
++    // A custom role with CrewCore ticked. This is the shape that reached the
++    // whole app in Aug 2026 through data_scope, and it must not reach
++    // documentation now.
++    amanda: { username: 'amanda', name: 'Amanda', role: 'office' },
++  }));
++  kv.set(P + 'roles', JSON.stringify({
++    office: { name: 'office', label: 'Office', apps: ['crewcore'], data_scope: 'all', can_edit: true },
++  }));
++  kv.set(CC + ':employee_index', JSON.stringify(['EMP-1', 'EMP-2']));
++  kv.set(CC + ':employee:EMP-1', JSON.stringify({
++    id: 'EMP-1', name: 'Sasha', username: 'sasha', status: 'active', clock_enabled: true,
++  }));
++  kv.set(CC + ':employee:EMP-2', JSON.stringify({
++    id: 'EMP-2', name: 'Dana', username: 'dana', status: 'active', clock_enabled: true,
++  }));
++}
++
++/* ---- a real request ---------------------------------------------------- */
++
++async function makeCookie(session) {
++  const s = await import(path.join(ROOT, 'lib/session.js'));
++  let header = null;
++  s.setSessionCookie({ setHeader: (k, v) => { if (k === 'Set-Cookie') header = v; } }, session);
++  // setSessionCookie joins its parts with "; " — the token is the first one.
++  return String(header).split('; ')[0];
++}
++
++function fakeRes() {
++  const res = {
++    statusCode: null, body: null, headers: {},
++    setHeader(k, v) { this.headers[k] = v; },
++    status(code) { this.statusCode = code; return this; },
++    json(payload) { this.body = payload; return this; },
++    end() { return this; },
++  };
++  return res;
++}
++
++async function call(handler, { as, method = 'GET', query = {}, body = null }) {
++  const cookie = await makeCookie(as);
++  const req = { method, query, body, headers: { cookie } };
++  const res = fakeRes();
++  await handler(req, res);
++  return res;
++}
++
++const ADMIN = { username: 'ryan', name: 'Ryan', role: 'admin' };
++const EMPLOYEE = { username: 'sasha', name: 'Sasha', role: 'employee' };
++const CUSTOM = { username: 'amanda', name: 'Amanda', role: 'office' };
++
++async function check(name, fn) {
++  let err = null;
++  try { await fn(); } catch (e) { err = e; }
++  t.test(name, () => { if (err) throw err; });
++}
++
++(async () => {
++  const schema = await import(path.join(ROOT, 'lib/crewcore/schema.js'));
++  const store = await import(path.join(ROOT, 'lib/crewcore/store.js'));
++  const docsRoute = (await import(path.join(ROOT, 'api/crewcore/docs.js'))).default;
++  const reviewsRoute = (await import(path.join(ROOT, 'api/crewcore/reviews.js'))).default;
++  const reg = await import(path.join(ROOT, 'js/registry.js'));
++
++  const { validateDoc, docsFor, isFormalDoc, DOC_CATEGORIES, DOC_LEVELS, keys } = schema;
++
++  /* ---- 1. THE POINT: an employee cannot read documentation ------------- */
++
++  await check('a self-serve employee is refused on GET', async () => {
++    seed();
++    await store.saveDoc({
++      employee_id: 'EMP-1', date: '2026-08-18', summary: 'Third late start',
++      category: 'Attendance', level: 'verbal warning', created_by: 'ryan',
++    });
++
++    const res = await call(docsRoute, { as: EMPLOYEE });
++    t.equal(res.statusCode, 403, 'an employee reading documentation must be refused');
++    t.assert(!res.body.docs, 'and must not be handed a docs array at all, empty or otherwise');
++  });
++
++  await check('the entry the employee was refused is genuinely on file', async () => {
++    // Guards against the test above passing because nothing exists to leak.
++    const res = await call(docsRoute, { as: ADMIN });
++    t.equal(res.statusCode, 200, 'an admin reads it fine');
++    t.equal(res.body.docs.length, 1, 'there is a real entry behind that 403');
++    t.equal(res.body.docs[0].employee_id, 'EMP-1', 'and it is about the person who was refused');
++  });
++
++  await check('the refusal happens before any documentation key is read', async () => {
++    // The stronger half. A route that reads first and filters after is one
++    // edit away from serving what it read; this asserts the gate sits in
++    // front of storage, not behind it.
++    seed();
++    await store.saveDoc({ employee_id: 'EMP-1', date: '2026-08-18', summary: 'On file' });
++    reads.length = 0;
++
++    const res = await call(docsRoute, { as: EMPLOYEE });
++    t.equal(res.statusCode, 403, 'refused');
++    const touched = reads.filter((k) => k.startsWith(CC + ':doc'));
++    t.equal(touched.length, 0,
++      'no documentation key may be read for a non-admin caller, got: ' + touched.join(', '));
++    t.assert(reads.length > 0, 'it did read something (the user record), so the recorder works');
++  });
++
++  await check('a custom role with CrewCore ticked is refused too', async () => {
++    // data_scope "all" is the default on any role created in Settings. It
++    // reached the whole app once. It must not reach this.
++    const res = await call(docsRoute, { as: CUSTOM });
++    t.equal(res.statusCode, 403, 'a custom role is not a CrewCore admin');
++  });
++
++  await check('every write method is refused for a non-admin, not just GET', async () => {
++    seed();
++    const existing = await store.saveDoc({ employee_id: 'EMP-1', date: '2026-08-18', summary: 'On file' });
++
++    for (const method of ['POST', 'PATCH', 'PUT', 'DELETE']) {
++      const res = await call(docsRoute, {
++        as: EMPLOYEE, method,
++        query: { id: existing.id },
++        body: { employee_id: 'EMP-2', date: '2026-09-01', summary: 'Written by an employee' },
++      });
++      t.equal(res.statusCode, 403, method + ' must be refused for a non-admin');
++    }
++    const after = await store.listDocs();
++    t.equal(after.length, 1, 'nothing was written and nothing was deleted');
++    t.equal(after[0].summary, 'On file', 'and the existing entry is untouched');
++  });
++
++  await check('an unauthenticated request gets 401, not a list', async () => {
++    const res = fakeRes();
++    await docsRoute({ method: 'GET', query: {}, headers: {} }, res);
++    t.equal(res.statusCode, 401, 'no cookie, no answer');
++  });
++
++  /* ---- 2. documentation is not smuggled through the reviews route ------ */
++
++  await check('an employee reading their reviews gets reviews only', async () => {
++    seed();
++    await store.saveReview({
++      id: 'REV-1', employee_id: 'EMP-1', review_date: '2026-06-15',
++      reviewer_name: 'Ryan', summary: 'Good quarter',
++    });
++    await store.saveDoc({
++      employee_id: 'EMP-1', date: '2026-08-18', summary: 'Third late start',
++      level: 'written warning',
++    });
++
++    const res = await call(reviewsRoute, { as: EMPLOYEE });
++    t.equal(res.statusCode, 200, 'their own review history is theirs to read');
++    t.equal(res.body.reviews.length, 1, 'one review, not two records');
++    t.equal(res.body.reviews[0].id, 'REV-1', 'and it is the review');
++    const asText = JSON.stringify(res.body);
++    t.assert(!asText.includes('late start'),
++      'no documentation text may appear anywhere in the reviews payload');
++    t.assert(!asText.includes('written warning'),
++      'nor a documentation level');
++  });
++
++  await check('the two record types live under different keys', async () => {
++    // The structural reason the test above cannot regress: there is no shared
++    // index for a filter to have to exclude anything from.
++    t.assert(keys.doc('X') !== keys.review('X'), 'a doc and a review cannot collide');
++    t.assert(keys.docIndex() !== keys.reviewIndex(), 'and they are indexed separately');
++    t.assert(keys.docIndex().startsWith('crewcore_data:'), 'still inside CrewCore storage');
++  });
++
++  await check('documentation is not a registry view, so no rail can draw it', async () => {
++    const cc = reg.APPS.find((a) => a.id === 'crewcore');
++    const viewKeys = cc.views.map(([k]) => k);
++    ['docs', 'documentation', 'doc'].forEach((k) => {
++      t.assert(!viewKeys.includes(k), 'documentation must not be a view: found "' + k + '"');
++    });
++    // Nor reachable by asking for it: allowedViews only ever returns
++    // registered views.
++    const wide = { role: 'office', superuser: false, tabs: ['crewcore'] };
++    t.assert(!reg.allowedViews(wide, 'crewcore').some((v) => /doc/i.test(v)),
++      'nothing documentation-shaped may reach a non-admin rail');
++  });
++
++  /* ---- 3. what an admin can do ----------------------------------------- */
++
++  await check('an admin writes an entry and it comes back with who wrote it', async () => {
++    seed();
++    const res = await call(docsRoute, {
++      as: ADMIN, method: 'POST',
++      body: {
++        employee_id: 'EMP-1', date: '2026-08-18', summary: 'Third late start in two weeks',
++        category: 'Attendance', level: 'verbal warning',
++        details: 'Arrived 25 minutes in.', action_taken: 'Verbal warning.',
++      },
++    });
++    t.equal(res.statusCode, 201, 'created');
++    t.equal(res.body.doc.created_by, 'ryan', 'the author is taken from the session, not the body');
++    t.assert(res.body.doc.created_at, 'and stamped');
++    t.assert(/^DOC-\d{5}$/.test(res.body.doc.id), 'with its own id series, got ' + res.body.doc.id);
++  });
++
++  await check('?employee_id= narrows the list to one person', async () => {
++    await call(docsRoute, {
++      as: ADMIN, method: 'POST',
++      body: { employee_id: 'EMP-2', date: '2026-08-20', summary: 'Different person' },
++    });
++    const all = await call(docsRoute, { as: ADMIN });
++    t.equal(all.body.docs.length, 2, 'two entries on file');
++    const one = await call(docsRoute, { as: ADMIN, query: { employee_id: 'EMP-2' } });
++    t.equal(one.body.docs.length, 1, 'filtered to one');
++    t.equal(one.body.docs[0].employee_id, 'EMP-2', 'and it is the right one');
++  });
++
++  await check('a correction cannot move an entry onto somebody else', async () => {
++    // Moving a write-up from one person's file to another's is not a
++    // correction. It is a delete and a re-write, and it should look like one.
++    seed();
++    const made = await store.saveDoc({
++      employee_id: 'EMP-1', date: '2026-08-18', summary: 'Third late start',
++      created_by: 'ryan', created_at: '2026-08-18T12:00:00.000Z',
++    });
++    const res = await call(docsRoute, {
++      as: ADMIN, method: 'PATCH', query: { id: made.id },
++      body: { employee_id: 'EMP-2', created_by: 'somebody-else', summary: 'Corrected wording' },
++    });
++    t.equal(res.statusCode, 200, 'the correction itself is allowed');
++    t.equal(res.body.doc.summary, 'Corrected wording', 'the field that was meant to change did');
++    t.equal(res.body.doc.employee_id, 'EMP-1', 'but it is still on the same person s file');
++    t.equal(res.body.doc.created_by, 'ryan', 'and still says who wrote it');
++    t.equal(res.body.doc.created_at, '2026-08-18T12:00:00.000Z', 'with its original stamp');
++    t.equal(res.body.doc.updated_by, 'ryan', 'plus who corrected it');
++  });
++
++  await check('a correction leaves untouched fields alone', async () => {
++    seed();
++    const made = await store.saveDoc({
++      employee_id: 'EMP-1', date: '2026-08-18', summary: 'Late start',
++      details: 'The long version', action_taken: 'Talked it through', level: 'note',
++    });
++    const res = await call(docsRoute, {
++      as: ADMIN, method: 'PATCH', query: { id: made.id }, body: { level: 'written warning' },
++    });
++    t.equal(res.body.doc.details, 'The long version', 'the write-up survives a one-field patch');
++    t.equal(res.body.doc.action_taken, 'Talked it through', 'so does the action');
++    t.equal(res.body.doc.level, 'written warning', 'and the escalation landed');
++  });
++
++  await check('deleting takes the entry out of the index, not just the key', async () => {
++    seed();
++    const made = await store.saveDoc({ employee_id: 'EMP-1', date: '2026-08-18', summary: 'Late start' });
++    const res = await call(docsRoute, { as: ADMIN, method: 'DELETE', query: { id: made.id } });
++    t.equal(res.statusCode, 200, 'deleted');
++    t.equal((await store.listDocIds()).length, 0, 'the index no longer lists it');
++    t.equal((await store.listDocs()).length, 0, 'and the list is empty');
++  });
++
++  await check('a missing entry is a 404 rather than a silent success', async () => {
++    const res = await call(docsRoute, { as: ADMIN, method: 'DELETE', query: { id: 'DOC-99999' } });
++    t.equal(res.statusCode, 404, 'nothing to delete');
++  });
++
++  /* ---- 4. the record shape --------------------------------------------- */
++
++  t.test('an entry needs a person, a date and one line saying what happened', () => {
++    const r = validateDoc({});
++    t.assert(!r.ok, 'an empty entry must not validate');
++    ['employee_id', 'date', 'summary'].forEach((f) => {
++      t.assert(r.errors.some((e) => e.includes(f)), 'missing ' + f + ' should be reported');
++    });
++  });
++
++  t.test('a summary of nothing but spaces is not a summary', () => {
++    const r = validateDoc({ employee_id: 'EMP-1', date: '2026-08-18', summary: '   ' });
++    t.assert(!r.ok, 'whitespace must not pass as a heading');
++  });
++
++  t.test('the ordinary case needs no category or level chosen', () => {
++    // Most of what gets written down is a thing that happened, not a warning.
++    const r = validateDoc({ employee_id: 'EMP-1', date: '2026-08-18', summary: 'Broke a screen' });
++    t.assert(r.ok, 'should validate');
++    t.equal(r.record.category, 'Other', 'category defaults');
++    t.equal(r.record.level, 'note', 'and a level of note, not a warning');
++  });
++
++  t.test('an invented category or level is refused', () => {
++    t.assert(!validateDoc({ employee_id: 'E', date: '2026-01-01', summary: 'x', category: 'Vibes' }).ok,
++      'a category off the list must be refused');
++    t.assert(!validateDoc({ employee_id: 'E', date: '2026-01-01', summary: 'x', level: 'fired' }).ok,
++      'so must a level');
++  });
++
++  t.test('a patch cannot blank out the summary it is meant to correct', () => {
++    const r = validateDoc({ summary: '' }, { partial: true });
++    t.assert(!r.ok, 'clearing the one readable line would leave an unreadable list');
++  });
++
++  t.test('a patch of one field carries only that field', () => {
++    const r = validateDoc({ level: 'final warning' }, { partial: true });
++    t.assert(r.ok, 'should validate');
++    t.equal(Object.keys(r.record).length, 1, 'nothing else may be invented into the patch');
++    t.equal(r.record.level, 'final warning');
++  });
++
++  t.test('category and level answer two different questions', () => {
++    // One enum trying to hold both ends up needing a row per pairing.
++    DOC_CATEGORIES.forEach((c) => {
++      t.assert(!DOC_LEVELS.includes(c), 'category "' + c + '" must not also be a level');
++    });
++    t.equal(DOC_LEVELS[0], 'note', 'the levels read in escalation order, starting at note');
++    t.assert(DOC_LEVELS.indexOf('written warning') > DOC_LEVELS.indexOf('verbal warning'),
++      'a written warning comes after a verbal one');
++  });
++
++  t.test('a note is not formal; every warning is', () => {
++    t.equal(isFormalDoc({ level: 'note' }), false, 'a note is the ordinary case');
++    t.equal(isFormalDoc({}), false, 'and so is a record with no level at all');
++    ['verbal warning', 'written warning', 'final warning', 'performance plan'].forEach((l) => {
++      t.equal(isFormalDoc({ level: l }), true, l + ' is a formal step');
++    });
++    t.equal(isFormalDoc({ level: 'whatever' }), false, 'an unrecognised level is not promoted to formal');
++    t.equal(isFormalDoc(null), false, 'and nothing is not formal');
++  });
++
++  t.test('scoping by person and year matches the stipend rules', () => {
++    const rows = [
++      { id: 'a', employee_id: 'EMP-1', date: '2026-08-18' },
++      { id: 'b', employee_id: 'EMP-1', date: '2025-02-01' },
++      { id: 'c', employee_id: 'EMP-2', date: '2026-03-03' },
++      { id: 'd', employee_id: 'EMP-1', date: '' },
++    ];
++    t.equal(docsFor(rows, 'EMP-1', null).length, 3, 'everything on one person');
++    t.equal(docsFor(rows, null, 2026).length, 2, 'everybody, one year');
++    t.equal(docsFor(rows, 'EMP-1', 2026).length, 1, 'both filters');
++    t.equal(docsFor(rows, null, null).length, 4, 'no filters is everything');
++    t.assert(!docsFor(rows, 'EMP-1', 2026).some((r) => r.id === 'd'),
++      'an entry with an unusable date is left out of a year rather than counted into it');
++    t.equal(docsFor(null, 'EMP-1', 2026).length, 0, 'and nothing in is nothing out');
++  });
++
++  /* ---- 5. the screen actually draws ------------------------------------ *
++   * The app module is imported and its render functions are CALLED against
++   * a hand-built state, rather than read for the strings they contain. A
++   * render function that throws on a field name typo passes every source
++   * match ever written about it.
++   * -------------------------------------------------------------------- */
++
++  const screen = (await import(path.join(ROOT, 'apps/crewcore.js'))).default;
++
++  function state(over) {
++    return Object.assign(Object.create(screen), {
++      _isAdmin: true,
++      _employees: [{ id: 'EMP-1', name: 'Sasha Lee' }, { id: 'EMP-2', name: 'Dana Ray' }],
++      _own: null,
++      _reviews: [],
++      _kudos: [],
++      _docPerson: '',
++      _docDetailId: null,
++      _docs: [{
++        id: 'DOC-00001', employee_id: 'EMP-1', date: '2026-08-18',
++        summary: 'Third late start', category: 'Attendance', level: 'verbal warning',
++        details: 'The long version', action_taken: 'Verbal warning',
++        others_present: '', follow_up_date: '2026-09-18',
++        created_by: 'ryan', created_at: '2026-08-18T12:00:00.000Z',
++      }],
++    }, over || {});
++  }
++
++  const clean = (html, where) => {
++    t.assert(typeof html === 'string' && html.length, where + ' drew nothing');
++    t.assert(!/undefined|NaN|\[object Object\]/.test(html),
++      where + ' leaked a placeholder into the markup');
++  };
++
++  t.test('the documentation list draws, with the warning and the level chip', () => {
++    const html = state()._renderDocs();
++    clean(html, 'the documentation list');
++    t.assert(/Administrators only/.test(html),
++      'the screen must say out loud who can read this');
++    t.assert(/chip formal/.test(html), 'a warning is marked as a formal step');
++    t.assert(/Sasha Lee/.test(html), 'and the row names the person');
++  });
++
++  t.test('an entry opens', () => {
++    const html = state({ _docDetailId: 'DOC-00001' })._renderDocs();
++    clean(html, 'the documentation detail');
++    t.assert(/The long version/.test(html), 'the write-up is on the page');
++    t.assert(/ccDocDelete/.test(html), 'with the admin actions');
++  });
++
++  t.test('the screen refuses to draw an entry for a non-admin', () => {
++    // The route is the real gate. This is the belt: even handed a state with
++    // entries in it, the render must not put one on screen.
++    const html = state({ _isAdmin: false })._renderDocs();
++    t.assert(/Admin access required/.test(html), 'it says no');
++    t.assert(!/Third late start/.test(html), 'and draws no entry text whatsoever');
++  });
++
++  t.test('an empty file and a filtered-to-nobody file both draw', () => {
++    clean(state({ _docs: [] })._renderDocs(), 'the empty documentation list');
++    clean(state({ _docPerson: 'EMP-2' })._renderDocs(), 'a filter matching nothing');
++  });
++
++  const code = t.report();
++  process.exit(code !== 0 ? code : (process.exitCode || 0));
++})().catch((e) => {
++  console.log('  FAIL crewcore-docs could not run: ' + (e && e.stack || e));
++  process.exit(1);
++});
+diff --git a/test/crewcore-kudos.test.cjs b/test/crewcore-kudos.test.cjs
+new file mode 100644
+index 0000000..f686024
+--- /dev/null
++++ b/test/crewcore-kudos.test.cjs
+@@ -0,0 +1,486 @@
++/**
++ * CrewCore kudos (Sep 2026).
++ *
++ * Ryan's ask: a way to give kudos to employees, and for employees to give
++ * each other kudos. The second half is the interesting one, because it makes
++ * this the only screen in CrewCore a self-serve account can write to, in the
++ * app that holds pay rates and review notes. So the route is CALLED here,
++ * with real signed sessions over a fake Upstash, rather than read for the
++ * shape of its checks.
++ *
++ * Four rules get their own tests because each one is a decision somebody
++ * could reasonably have made the other way:
++ *
++ *   1. Everybody reads the same feed. Praise only two people can see is a
++ *      private message, not kudos.
++ *   2. Nobody gives themselves kudos. Refused on the server, not merely
++ *      left out of the picker.
++ *   3. The recipient cannot delete one. Being thanked in front of the shop
++ *      is not something the person thanked gets to quietly erase.
++ *   4. Handing an employee a name list is deliberate and narrow: ids and
++ *      names, nothing else off an employee record, because they cannot open
++ *      the roster and would otherwise have nobody to pick.
++ */
++
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++
++/* ---- fake Upstash (reads and writes) ---------------------------------- */
++
++const kv = new Map();
++const P = 'alliteration:';
++const CC = 'crewcore_data';
++
++global.fetch = async (url, opts) => {
++  const raw = String(url);
++  const setM = raw.match(/\/set\/(.+)$/);
++  if (setM && opts && opts.method === 'POST') {
++    kv.set(decodeURIComponent(setM[1]), opts.body);
++    return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
++  }
++  const key = decodeURIComponent((raw.match(/\/get\/(.+)$/) || [])[1] || '');
++  return { ok: true, status: 200, json: async () => ({ result: kv.has(key) ? kv.get(key) : null }) };
++};
++
++process.env.KV_REST_API_URL = 'https://fake-upstash.test';
++process.env.KV_REST_API_TOKEN = 'fake-token';
++process.env.SESSION_SECRET = 'test-secret-for-crewcore-kudos';
++
++function seed() {
++  kv.clear();
++  kv.set(P + 'users', JSON.stringify({
++    // An admin with NO employee record of their own, which is the real shape
++    // for an owner account.
++    ryan:  { username: 'ryan',  name: 'Ryan Toney', role: 'admin' },
++    sasha: { username: 'sasha', name: 'Sasha',      role: 'employee' },
++    dana:  { username: 'dana',  name: 'Dana',       role: 'employee' },
++  }));
++  kv.set(CC + ':employee_index', JSON.stringify(['EMP-1', 'EMP-2', 'EMP-3']));
++  kv.set(CC + ':employee:EMP-1', JSON.stringify({
++    id: 'EMP-1', name: 'Sasha', username: 'sasha', status: 'active',
++    hourly_rate: 24, apparel_stipend: 150, notes: 'admin only note',
++  }));
++  kv.set(CC + ':employee:EMP-2', JSON.stringify({
++    id: 'EMP-2', name: 'Dana', username: 'dana', status: 'active', hourly_rate: 26,
++  }));
++  kv.set(CC + ':employee:EMP-3', JSON.stringify({
++    id: 'EMP-3', name: 'Gone Fishing', username: null, status: 'terminated',
++  }));
++}
++
++async function makeCookie(session) {
++  const s = await import(path.join(ROOT, 'lib/session.js'));
++  let header = null;
++  s.setSessionCookie({ setHeader: (k, v) => { if (k === 'Set-Cookie') header = v; } }, session);
++  return String(header).split('; ')[0];
++}
++
++function fakeRes() {
++  return {
++    statusCode: null, body: null, headers: {},
++    setHeader(k, v) { this.headers[k] = v; },
++    status(code) { this.statusCode = code; return this; },
++    json(payload) { this.body = payload; return this; },
++    end() { return this; },
++  };
++}
++
++async function call(handler, { as, method = 'GET', query = {}, body = null }) {
++  const cookie = await makeCookie(as);
++  const res = fakeRes();
++  await handler({ method, query, body, headers: { cookie } }, res);
++  return res;
++}
++
++const ADMIN = { username: 'ryan', name: 'Ryan Toney', role: 'admin' };
++const SASHA = { username: 'sasha', name: 'Sasha', role: 'employee' };
++const DANA = { username: 'dana', name: 'Dana', role: 'employee' };
++
++async function check(name, fn) {
++  let err = null;
++  try { await fn(); } catch (e) { err = e; }
++  t.test(name, () => { if (err) throw err; });
++}
++
++(async () => {
++  const schema = await import(path.join(ROOT, 'lib/crewcore/schema.js'));
++  const store = await import(path.join(ROOT, 'lib/crewcore/store.js'));
++  const route = (await import(path.join(ROOT, 'api/crewcore/kudos.js'))).default;
++  const users = await import(path.join(ROOT, 'lib/users.js'));
++  const reg = await import(path.join(ROOT, 'js/registry.js'));
++
++  const {
++    validateKudos, kudosFor, kudosYear, canDeleteKudos, KUDOS_TAGS, KUDOS_MAX_LENGTH,
++  } = schema;
++
++  /* ---- 1. an employee can give another employee kudos ------------------ */
++
++  await check('an employee posts kudos about a colleague', async () => {
++    seed();
++    const res = await call(route, {
++      as: SASHA, method: 'POST',
++      body: { to_employee_id: 'EMP-2', tag: 'Teamwork', message: '  Stayed late to finish the Ankeny run.  ' },
++    });
++    t.equal(res.statusCode, 201, 'a self-serve employee may write one');
++    t.equal(res.body.kudos.to_employee_id, 'EMP-2', 'addressed to the colleague');
++    t.equal(res.body.kudos.from_username, 'sasha', 'the author comes off the session, not the body');
++    t.equal(res.body.kudos.from_employee_id, 'EMP-1', 'and is linked to their own record');
++    t.equal(res.body.kudos.message, 'Stayed late to finish the Ankeny run.', 'trimmed');
++    t.assert(/^KUD-\d{5}$/.test(res.body.kudos.id), 'its own id series, got ' + res.body.kudos.id);
++  });
++
++  await check('everybody reads the same feed, which is the point', async () => {
++    // Written by Sasha ABOUT Dana. Both of them, and the admin, must see it.
++    for (const who of [SASHA, DANA, ADMIN]) {
++      const res = await call(route, { as: who });
++      t.equal(res.statusCode, 200, who.username + ' can read the feed');
++      t.equal(res.body.kudos.length, 1, who.username + ' sees the kudos');
++    }
++  });
++
++  await check('an admin with no employee record can still give kudos', async () => {
++    const res = await call(route, {
++      as: ADMIN, method: 'POST',
++      body: { to_employee_id: 'EMP-1', message: 'Drove the samples out to Grimes herself.' },
++    });
++    t.equal(res.statusCode, 201, 'an unlinked admin account is not blocked');
++    t.equal(res.body.kudos.from_employee_id, null, 'there is no record to link to');
++    t.equal(res.body.kudos.from_username, 'ryan', 'but the author is recorded, so they can remove it');
++    t.equal(res.body.kudos.from_name, 'Ryan Toney', 'and named from their account');
++  });
++
++  await check('an unauthenticated request gets 401', async () => {
++    const res = fakeRes();
++    await route({ method: 'GET', query: {}, headers: {} }, res);
++    t.equal(res.statusCode, 401, 'the feed is internal, not public');
++  });
++
++  /* ---- 2. no self-kudos ------------------------------------------------ */
++
++  await check('nobody can give themselves kudos', async () => {
++    seed();
++    const res = await call(route, {
++      as: SASHA, method: 'POST',
++      body: { to_employee_id: 'EMP-1', message: 'I was great today.' },
++    });
++    t.equal(res.statusCode, 400, 'refused by the server, not just absent from the picker');
++    t.equal((await store.listKudos()).length, 0, 'and nothing was stored');
++  });
++
++  await check('your own name is not in the list you pick from', async () => {
++    const res = await call(route, { as: SASHA });
++    const ids = res.body.people.map((pp) => pp.id);
++    t.assert(!ids.includes('EMP-1'), 'Sasha must not be offered Sasha');
++    t.assert(ids.includes('EMP-2'), 'but her colleague is there');
++  });
++
++  await check('somebody who has left is not in the list, and cannot be given kudos', async () => {
++    const res = await call(route, { as: SASHA });
++    t.assert(!res.body.people.map((pp) => pp.id).includes('EMP-3'),
++      'a terminated employee is not offered');
++    const post = await call(route, {
++      as: SASHA, method: 'POST',
++      body: { to_employee_id: 'EMP-3', message: 'Thanks for everything.' },
++    });
++    t.equal(post.statusCode, 400, 'and is refused if asked for directly');
++  });
++
++  await check('kudos to somebody who is not on the roster is refused', async () => {
++    const res = await call(route, {
++      as: SASHA, method: 'POST',
++      body: { to_employee_id: 'EMP-99', message: 'Nice work.' },
++    });
++    t.equal(res.statusCode, 400, 'an id nobody holds is not a recipient');
++  });
++
++  /* ---- 3. the name list is names, and nothing else --------------------- */
++
++  await check('the picker hands back ids and names only, never pay or notes', async () => {
++    seed();
++    const res = await call(route, { as: SASHA });
++    t.assert(res.body.people.length > 0, 'there is a list to check');
++    res.body.people.forEach((pp) => {
++      t.equal(Object.keys(pp).sort().join(','), 'id,name',
++        'a person in the picker carries exactly id and name, got: ' + Object.keys(pp).join(','));
++    });
++    const asText = JSON.stringify(res.body);
++    t.assert(!asText.includes('hourly_rate') && !asText.includes('admin only note'),
++      'nothing else off an employee record may ride along');
++    t.assert(!/\b24\b/.test(JSON.stringify(res.body.people)), 'no rate figures in the picker');
++  });
++
++  await check('a name lookup still resolves somebody who has since left', async () => {
++    // Left out of the PICKER, kept in the lookup, so an old kudos reads as a
++    // name rather than an id.
++    const res = await call(route, { as: SASHA });
++    t.equal(res.body.names['EMP-3'], 'Gone Fishing', 'the feed can still name them');
++  });
++
++  await check('the caller is told who they are, so the screen knows what to offer', async () => {
++    const mine = await call(route, { as: SASHA });
++    t.equal(mine.body.me.employee_id, 'EMP-1', 'their own record, for the "for me" tab');
++    t.equal(mine.body.me.is_admin, false, 'and that they are not an admin');
++    const boss = await call(route, { as: ADMIN });
++    t.equal(boss.body.me.employee_id, null, 'an unlinked admin has no record');
++    t.equal(boss.body.me.is_admin, true, 'but is an admin');
++  });
++
++  /* ---- 4. who can remove one ------------------------------------------- */
++
++  await check('the author can remove their own kudos', async () => {
++    seed();
++    const made = await call(route, {
++      as: SASHA, method: 'POST', body: { to_employee_id: 'EMP-2', message: 'Wrong person, sorry.' },
++    });
++    const res = await call(route, { as: SASHA, method: 'DELETE', query: { id: made.body.kudos.id } });
++    t.equal(res.statusCode, 200, 'whoever wrote it can take it back');
++    t.equal((await store.listKudosIds()).length, 0, 'and it leaves the index, not just the key');
++  });
++
++  await check('the recipient cannot remove one written about them', async () => {
++    seed();
++    const made = await call(route, {
++      as: SASHA, method: 'POST', body: { to_employee_id: 'EMP-2', message: 'Saved the Grimes order.' },
++    });
++    const res = await call(route, { as: DANA, method: 'DELETE', query: { id: made.body.kudos.id } });
++    t.equal(res.statusCode, 403, 'being thanked is not the same as owning the record of it');
++    t.equal((await store.listKudos()).length, 1, 'and it is still there');
++  });
++
++  await check('an admin can remove anybody\'s', async () => {
++    const all = await store.listKudos();
++    const res = await call(route, { as: ADMIN, method: 'DELETE', query: { id: all[0].id } });
++    t.equal(res.statusCode, 200, 'an unwanted one is a conversation with an admin');
++    t.equal((await store.listKudos()).length, 0, 'gone');
++  });
++
++  await check('there is no editing a kudos', async () => {
++    seed();
++    const made = await call(route, {
++      as: SASHA, method: 'POST', body: { to_employee_id: 'EMP-2', message: 'Original wording.' },
++    });
++    const res = await call(route, {
++      as: SASHA, method: 'PATCH', query: { id: made.body.kudos.id }, body: { message: 'Rewritten.' },
++    });
++    t.equal(res.statusCode, 405, 'delete and write it again instead');
++    t.equal(res.headers.Allow, 'GET, POST, DELETE', 'and the route says what it does allow');
++    const stored = await store.getKudos(made.body.kudos.id);
++    t.equal(stored.message, 'Original wording.', 'nothing was changed');
++  });
++
++  await check('removing one that does not exist is a 404', async () => {
++    const res = await call(route, { as: ADMIN, method: 'DELETE', query: { id: 'KUD-99999' } });
++    t.equal(res.statusCode, 404, 'not a silent success');
++  });
++
++  /* ---- the delete rule on its own -------------------------------------- */
++
++  t.test('canDeleteKudos: the author or an admin, nobody else', () => {
++    const k = { id: 'KUD-1', from_username: 'sasha', to_employee_id: 'EMP-2' };
++    t.equal(canDeleteKudos(k, { username: 'sasha', isAdmin: false }), true, 'the author');
++    t.equal(canDeleteKudos(k, { username: 'dana', isAdmin: true }), true, 'an admin');
++    t.equal(canDeleteKudos(k, { username: 'dana', isAdmin: false }), false, 'the recipient must not');
++    t.equal(canDeleteKudos(k, { username: 'someone', isAdmin: false }), false, 'nor a bystander');
++  });
++
++  t.test('canDeleteKudos matches the author case and space insensitively', () => {
++    const k = { from_username: 'Sasha ' };
++    t.equal(canDeleteKudos(k, { username: 'sasha', isAdmin: false }), true,
++      'a username stored before slugging must not lose its author');
++  });
++
++  t.test('canDeleteKudos: only a literal true is an admin', () => {
++    const k = { from_username: 'sasha' };
++    [1, 'true', 'yes', {}, [], 'false'].forEach((v) => {
++      t.equal(canDeleteKudos(k, { username: 'dana', isAdmin: v }), false,
++        'truthy value ' + JSON.stringify(v) + ' must not stand in for admin');
++    });
++  });
++
++  t.test('a kudos with no author is not deletable by a caller with no username', () => {
++    // Two blanks must not compare equal, or a broken record becomes
++    // everybody's to delete.
++    t.equal(canDeleteKudos({ from_username: '' }, { username: '', isAdmin: false }), false,
++      'empty must not match empty');
++    t.equal(canDeleteKudos({}, { username: undefined, isAdmin: false }), false, 'nor undefined');
++    t.equal(canDeleteKudos(null, { username: 'sasha', isAdmin: true }), false, 'and nothing is not deletable');
++  });
++
++  /* ---- the record shape ------------------------------------------------ */
++
++  t.test('a kudos needs somebody to be about and something to say', () => {
++    const r = validateKudos({});
++    t.assert(!r.ok, 'an empty one must not validate');
++    t.assert(r.errors.some((e) => e.includes('to_employee_id')), 'a recipient is required');
++    t.assert(r.errors.some((e) => e.includes('message')), 'so is a message');
++  });
++
++  t.test('a message of nothing but spaces is not a message', () => {
++    t.assert(!validateKudos({ to_employee_id: 'EMP-1', message: '   \n  ' }).ok,
++      'whitespace must not pass');
++  });
++
++  t.test('a message longer than the cap is refused rather than cut off', () => {
++    const long = 'x'.repeat(KUDOS_MAX_LENGTH + 1);
++    const r = validateKudos({ to_employee_id: 'EMP-1', message: long });
++    t.assert(!r.ok, 'over the cap must be refused');
++    const atCap = validateKudos({ to_employee_id: 'EMP-1', message: 'x'.repeat(KUDOS_MAX_LENGTH) });
++    t.assert(atCap.ok, 'exactly at the cap is fine, the boundary is inclusive');
++  });
++
++  t.test('the label is optional and an invented one is refused', () => {
++    const none = validateKudos({ to_employee_id: 'EMP-1', message: 'Nice work.' });
++    t.assert(none.ok, 'no label should validate');
++    t.equal(none.record.tag, '', 'and record an empty label rather than undefined');
++    t.assert(validateKudos({ to_employee_id: 'EMP-1', message: 'x', tag: KUDOS_TAGS[0] }).ok,
++      'a label off the list is fine');
++    t.assert(!validateKudos({ to_employee_id: 'EMP-1', message: 'x', tag: 'Vibes' }).ok,
++      'one off it is not');
++  });
++
++  t.test('kudosFor filters by recipient, author and year, in any combination', () => {
++    const rows = [
++      { id: 'a', to_employee_id: 'EMP-1', from_employee_id: 'EMP-2', created_at: '2026-08-01T00:00:00.000Z' },
++      { id: 'b', to_employee_id: 'EMP-1', from_employee_id: 'EMP-3', created_at: '2025-08-01T00:00:00.000Z' },
++      { id: 'c', to_employee_id: 'EMP-2', from_employee_id: 'EMP-1', created_at: '2026-02-01T00:00:00.000Z' },
++      { id: 'd', to_employee_id: 'EMP-1', from_employee_id: 'EMP-2', created_at: '' },
++    ];
++    t.equal(kudosFor(rows, { to: 'EMP-1' }).length, 3, 'everything one person received');
++    t.equal(kudosFor(rows, { from: 'EMP-2' }).length, 2, 'everything one person gave');
++    t.equal(kudosFor(rows, { year: 2026 }).length, 2, 'one year');
++    t.equal(kudosFor(rows, { to: 'EMP-1', year: 2026 }).length, 1, 'both');
++    t.equal(kudosFor(rows, {}).length, 4, 'no filters is the whole feed');
++    t.equal(kudosFor(rows).length, 4, 'and so is no argument at all');
++    t.assert(!kudosFor(rows, { year: 2026 }).some((r) => r.id === 'd'),
++      'an unusable stamp is left out of a year rather than counted into this one');
++    t.equal(kudosFor(null, { to: 'EMP-1' }).length, 0, 'nothing in, nothing out');
++  });
++
++  t.test('kudosYear reads the stamp, or admits it cannot', () => {
++    t.equal(kudosYear({ created_at: '2026-08-30T14:02:00.000Z' }), 2026);
++    t.equal(kudosYear({ created_at: '' }), null, 'a blank stamp is not this year');
++    t.equal(kudosYear({}), null, 'nor is a missing one');
++    t.equal(kudosYear(null), null, 'nor nothing');
++  });
++
++  /* ---- the rail and the grants ----------------------------------------- */
++
++  await check('the self-serve role is granted Kudos', async () => {
++    t.assert(users.DEFAULT_ROLES.employee.tabs.includes('crewcore:kudos'),
++      'the employee role needs the view or the feature is admin-only by accident');
++    seed();
++    const perms = await users.permsFor('sasha');
++    t.assert(perms.tabs.includes('crewcore:kudos'),
++      'and it has to survive into the permissions the shell actually reads');
++  });
++
++  await check('a role with CrewCore ticked and no tabs list gets Kudos too', async () => {
++    // The self-serve CEILING, not a grant. A custom role made in Settings
++    // carries no tabs list, and the ceiling is what it falls back to.
++    seed();
++    kv.set(P + 'roles', JSON.stringify({
++      office: { name: 'office', label: 'Office', apps: ['crewcore'], data_scope: 'all', can_edit: true },
++    }));
++    kv.set(P + 'users', JSON.stringify({
++      amanda: { username: 'amanda', name: 'Amanda', role: 'office' },
++    }));
++    const perms = await users.permsFor('amanda');
++    t.assert(perms.tabs.includes('crewcore:kudos'), 'kudos is inside the ceiling');
++    t.assert(!perms.tabs.includes('crewcore:roster'), 'and the ceiling still holds everywhere else');
++    t.assert(!perms.tabs.includes('crewcore:settings'), 'including CrewCore settings');
++  });
++
++  t.test('Kudos is a registered view and reaches a non-admin rail', () => {
++    const cc = reg.APPS.find((a) => a.id === 'crewcore');
++    t.assert(cc.views.some(([k, label]) => k === 'kudos' && label === 'Kudos'),
++      'the registry needs the view for the rail to draw it');
++    const wide = { role: 'office', superuser: false, tabs: ['crewcore'] };
++    t.assert(reg.allowedViews(wide, 'crewcore').includes('kudos'),
++      'a non-admin must be able to reach it');
++    const admin = { role: 'admin', superuser: false, tabs: ['crewcore'] };
++    t.assert(reg.allowedViews(admin, 'crewcore').includes('kudos'), 'and so must an admin');
++  });
++
++  const api = await import(path.join(ROOT, 'js/api.js'));
++
++  t.test('the seam knows both endpoints', () => {
++    t.equal(api.ENDPOINTS.ccKudos, '/api/crewcore/kudos', 'apps call this through ctx.api');
++    t.equal(api.ENDPOINTS.ccDocs, '/api/crewcore/docs', 'and the documentation one');
++  });
++
++  /* ---- the feed actually draws ------------------------------------------ */
++
++  const screen = (await import(path.join(ROOT, 'apps/crewcore.js'))).default;
++
++  function state(over) {
++    return Object.assign(Object.create(screen), {
++      _isAdmin: false,
++      _employees: [],
++      _own: { id: 'EMP-1', name: 'Sasha' },
++      _kudosNames: { 'EMP-1': 'Sasha Lee', 'EMP-2': 'Dana Ray' },
++      _kudosPeople: [{ id: 'EMP-2', name: 'Dana Ray' }],
++      _kudosMe: { username: 'sasha', employee_id: 'EMP-1', is_admin: false },
++      _kudosFilter: 'all',
++      _kudos: [{
++        id: 'KUD-00001', to_employee_id: 'EMP-2', to_name: 'Dana Ray',
++        from_username: 'sasha', from_name: 'Sasha Lee', from_employee_id: 'EMP-1',
++        tag: 'Teamwork', message: 'Stayed late to finish the Ankeny run.',
++        created_at: '2026-08-30T14:02:00.000Z',
++      }],
++    }, over || {});
++  }
++
++  const clean = (html, where) => {
++    t.assert(typeof html === 'string' && html.length, where + ' drew nothing');
++    t.assert(!/undefined|NaN|\[object Object\]/.test(html),
++      where + ' leaked a placeholder into the markup');
++  };
++
++  t.test('the feed draws, with the label and the author', () => {
++    const html = state()._renderKudos();
++    clean(html, 'the kudos feed');
++    t.assert(/Dana Ray/.test(html), 'addressed to the recipient by their current name');
++    t.assert(/Teamwork/.test(html), 'the label shows');
++    t.assert(/from Sasha Lee/.test(html), 'and who wrote it');
++  });
++
++  t.test('the author is offered a remove button; a bystander is not', () => {
++    t.assert(/data-kdel/.test(state()._renderKudos()),
++      'whoever wrote it can take it back');
++    const stranger = state({ _kudosMe: { username: 'kim', employee_id: 'EMP-4', is_admin: false } });
++    t.assert(!/data-kdel/.test(stranger._renderKudos()),
++      'somebody else must not be offered a delete on it');
++  });
++
++  t.test('every tab draws, including the empty ones', () => {
++    ['all', 'mine', 'given'].forEach((f) => {
++      clean(state({ _kudosFilter: f })._renderKudos(), 'the "' + f + '" tab');
++      clean(state({ _kudosFilter: f, _kudos: [] })._renderKudos(), 'the empty "' + f + '" tab');
++    });
++  });
++
++  t.test('an account with no employee record gets no "For me" tab', () => {
++    // It could only ever be empty: there is no record for a kudos to be
++    // addressed to.
++    const html = state({ _kudosMe: { username: 'ryan', employee_id: null, is_admin: true } })._renderKudos();
++    clean(html, 'the feed for an unlinked admin');
++    t.assert(!/data-kfilter="mine"/.test(html), 'the tab must not be drawn');
++    t.assert(/data-kfilter="all"/.test(html), 'but the feed still is');
++  });
++
++  t.test('a recipient who has left the roster still reads as a name', () => {
++    const html = state({
++      _kudosNames: {},
++      _kudos: [{ id: 'K', to_employee_id: 'EMP-3', to_name: 'Gone Fishing', message: 'Thanks.', from_name: 'Ryan' }],
++    })._renderKudos();
++    t.assert(/Gone Fishing/.test(html), 'the stored name is the fallback, not the id');
++  });
++
++  const code = t.report();
++  process.exit(code !== 0 ? code : (process.exitCode || 0));
++})().catch((e) => {
++  console.log('  FAIL crewcore-kudos could not run: ' + (e && e.stack || e));
++  process.exit(1);
++});
+-- 
+2.43.0
+
