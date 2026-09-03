@@ -456,7 +456,7 @@ export const SHELL_APPS = [
 export const SITE_APPS = [
   {
     id: 'stickies',
-    name: 'Sticky Notes',
+    name: 'StickySituations',
     role: 'What still needs building',
     accent: '#C9A227',
     views: [['board', 'Board']],

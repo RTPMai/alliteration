@@ -1,5 +1,8 @@
 /**
- * apps/stickies.js — Sticky Notes (Site Work section).
+ * apps/stickies.js — StickySituations (Site Work section).
+ *
+ * Named Sticky Notes until Sep 2026. The id stays `stickies`: it is baked into
+ * saved links and the KV keyspace, and nobody reads a key.
  *
  * The digital version of the post-it wall on Ryan's desk: what still needs
  * building in Alliteration itself. Deliberately NOT Notifications. That list
@@ -20,6 +23,7 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
+import { SIZE_LABELS, noteText, boardText } from '../lib/sitework/schema.js';
 
 const COLORS = [
   ['yellow', 'Yellow'],
@@ -29,14 +33,13 @@ const COLORS = [
   ['grey', 'Grey'],
 ];
 
-const SIZES = [
-  ['unknown', 'No idea'],
-  ['small', 'Small'],
-  ['medium', 'Medium'],
-  ['large', 'Large'],
-];
+// Display order, not the schema's order: "No idea" is first because it is the
+// answer for a note somebody just thought of, and the first option is what a
+// new note gets. The labels come from the schema so a size is called the same
+// thing on the board, in the dropdown and in a copied note.
+const SIZES = ['unknown', 'small', 'medium', 'large'].map((v) => [v, SIZE_LABELS[v]]);
 
-const SIZE_LABEL = Object.fromEntries(SIZES);
+const SIZE_LABEL = SIZE_LABELS;
 
 function esc(s) {
   return String(s == null ? '' : s)
@@ -97,6 +100,9 @@ export default {
   @media(max-width:800px){.sk-board{columns:2}}
   @media(max-width:520px){.sk-board{columns:1}}
 
+  /* The whole card used to be draggable="true", which is why you could not
+     select the words on a note: the browser starts a drag instead of a
+     selection. Dragging now belongs to the grip alone, so the text is text. */
   .sk-note{
     break-inside:avoid;-webkit-column-break-inside:avoid;
     display:inline-block;width:100%;margin:0 0 14px;
@@ -104,8 +110,15 @@ export default {
     border:1px solid var(--paper-edge);
     border-radius:3px;padding:12px 13px 10px;
     box-shadow:var(--shadow-card);
-    cursor:grab;
+    cursor:default;user-select:text;-webkit-user-select:text;
   }
+  .sk-note[draggable="true"]{cursor:grabbing}
+  .sk-grip{
+    flex:none;border:0;background:none;padding:0 2px;margin-top:1px;
+    color:inherit;opacity:.35;font-size:13px;line-height:1;cursor:grab;
+    font-family:inherit;
+  }
+  .sk-grip:hover{opacity:.75}
   .sk-note.dragging{opacity:.4}
   .sk-note.drop-before{box-shadow:-4px 0 0 var(--accent),var(--shadow-card)}
   .sk-note.drop-after{box-shadow:4px 0 0 var(--accent),var(--shadow-card)}
@@ -184,7 +197,7 @@ export default {
     <div class="sk-wrap">
       <div class="sk-hd">
         <div>
-          <h1>Sticky Notes</h1>
+          <h1>StickySituations</h1>
           <div class="sub">What still needs building in Alliteration. Not team work: hand-offs and assignments live in Notifications.</div>
         </div>
         <button class="sk-btn primary" id="skNewBtn">Add a note</button>
@@ -256,6 +269,7 @@ export default {
       }
 
       html += '<div class="sk-spacer"></div>' +
+        '<button class="sk-chip" id="skCopyAll">Copy showing</button>' +
         '<label class="sk-showdone"><input type="checkbox" id="skShowDone"' + (showDone ? ' checked' : '') + '> Show done</label>';
 
       $('#skBar').innerHTML = html;
@@ -265,6 +279,56 @@ export default {
       });
       const sd = $('#skShowDone');
       if (sd) sd.addEventListener('change', () => { showDone = sd.checked; render(); });
+
+      // Whatever is on screen under the current filter, as one block of text.
+      // Copies what you can see rather than the whole board, because the
+      // filter is how you already said which notes you meant.
+      const ca = $('#skCopyAll');
+      if (ca) ca.addEventListener('click', async () => {
+        const list = visibleNotes();
+        if (!list.length) { msg('Nothing showing to copy.', 'err'); return; }
+        const ok = await copyText(boardText(list, appNameFor));
+        msg(ok
+          ? 'Copied ' + list.length + ' note' + (list.length === 1 ? '' : 's') + '.'
+          : 'The browser would not let me reach the clipboard.', ok ? 'ok' : 'err');
+      });
+    }
+
+    /* ---- copying ------------------------------------------------------- */
+
+    // noteText() and boardText() live in lib/sitework/schema.js so the tests
+    // can call them for real. All this layer supplies is the app's name, which
+    // is registry data the schema must not reach for.
+    const appNameFor = (n) => {
+      const a = n && n.appId ? appMeta(n.appId) : null;
+      return a ? a.name : '';
+    };
+
+    // navigator.clipboard needs a secure context and can be refused outright,
+    // so the old textarea trick stays as the fallback. Returning false rather
+    // than throwing lets the caller say "could not copy" instead of nothing
+    // happening for no visible reason.
+    async function copyText(text) {
+      try {
+        if (navigator.clipboard && window.isSecureContext) {
+          await navigator.clipboard.writeText(text);
+          return true;
+        }
+      } catch (e) { /* fall through to the textarea */ }
+      try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '-1000px';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        document.body.removeChild(ta);
+        return !!ok;
+      } catch (e) {
+        return false;
+      }
     }
 
     /* ---- board --------------------------------------------------------- */
@@ -278,16 +342,19 @@ export default {
         '<span class="sk-id">' + esc(n.id) + '</span>';
 
       return '' +
-        '<div class="sk-note' + (done ? ' done' : '') + '" data-id="' + esc(n.id) + '" data-color="' + esc(n.color || 'yellow') + '" draggable="true">' +
+        '<div class="sk-note' + (done ? ' done' : '') + '" data-id="' + esc(n.id) + '" data-color="' + esc(n.color || 'yellow') + '" draggable="false">' +
           '<div class="sk-top">' +
             '<input type="checkbox" class="sk-check" data-toggle="' + esc(n.id) + '"' + (done ? ' checked' : '') +
               ' title="' + (done ? 'Put it back' : 'Mark done') + '">' +
             '<div class="sk-title">' + esc(n.title) + '</div>' +
+            '<button class="sk-grip" data-grip="' + esc(n.id) + '" title="Drag to reorder" ' +
+              'aria-label="Drag to reorder">\u283F</button>' +
           '</div>' +
           (n.detail ? '<div class="sk-detail">' + esc(n.detail) + '</div>' : '') +
           '<div class="sk-tags">' + tags + '</div>' +
           '<div class="sk-acts">' +
             '<button data-edit="' + esc(n.id) + '">Edit</button>' +
+            '<button data-copy="' + esc(n.id) + '">Copy</button>' +
             '<button data-del="' + esc(n.id) + '">Delete</button>' +
           '</div>' +
         '</div>';
@@ -337,6 +404,17 @@ export default {
         b.addEventListener('click', () => openForm(b.dataset.edit));
       });
 
+      board.querySelectorAll('[data-copy]').forEach((b) => {
+        b.addEventListener('click', async () => {
+          const n = notes.find((x) => x.id === b.dataset.copy);
+          if (!n) return;
+          const ok = await copyText(noteText(n, appNameFor(n)));
+          const was = b.textContent;
+          b.textContent = ok ? 'Copied' : 'Could not copy';
+          setTimeout(() => { b.textContent = was; }, 1400);
+        });
+      });
+
       board.querySelectorAll('[data-del]').forEach((b) => {
         b.addEventListener('click', async () => {
           const id = b.dataset.del;
@@ -354,6 +432,19 @@ export default {
 
       // Drag to reorder. Position is saved for the whole board in one PATCH
       // rather than one per card, so a single gesture is a single write.
+      // Dragging is armed by the grip and disarmed the moment it ends, so the
+      // rest of the card stays selectable text the whole time.
+      board.querySelectorAll('[data-grip]').forEach((g) => {
+        const card = g.closest('.sk-note');
+        if (!card) return;
+        const arm = () => card.setAttribute('draggable', 'true');
+        const disarm = () => card.setAttribute('draggable', 'false');
+        g.addEventListener('mousedown', arm);
+        g.addEventListener('touchstart', arm, { passive: true });
+        g.addEventListener('mouseup', disarm);
+        card.addEventListener('dragend', disarm);
+      });
+
       board.querySelectorAll('.sk-note').forEach((el) => {
         el.addEventListener('dragstart', (e) => {
           dragId = el.dataset.id;

@@ -1,4 +1,4 @@
-// api/sitework.js — Sticky Notes route (Site Work section).
+// api/sitework.js — StickySituations route (Site Work section).
 //
 // Site Work is the list of what still needs doing to Alliteration itself, kept
 // separate from Notifications (the team's hand-off list) on purpose. Access is

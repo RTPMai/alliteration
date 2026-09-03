@@ -22,6 +22,7 @@
 import { loadEngine } from '../js/giving-engine.js';
 import { loadDial } from '../js/giving-dial.js';
 import { ENDPOINTS } from '../js/api.js';
+import { buildLedgerCsv } from '../lib/giving-summary.js';
 
 export default {
   id: 'givinggauge',
@@ -264,6 +265,32 @@ export default {
   .tool-btn:disabled{opacity:.6;cursor:default}
   .tool-msg{font-size:12.5px;color:var(--muted)}
 
+  /* ---------- add by hand ---------- */
+  .mf{
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:18px 20px;margin-bottom:18px;
+  }
+  .mf h2{font-size:15px;font-weight:700;margin:0 0 4px}
+  .mf .mf-intro{font-size:12.5px;color:var(--muted);margin:0 0 16px;max-width:70ch}
+  .mf-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+  .mf-f{display:flex;flex-direction:column;gap:4px}
+  .mf-f.wide{grid-column:1/-1}
+  .mf-f span{font-size:11px;font-weight:700;letter-spacing:.05em;text-transform:uppercase;color:var(--muted)}
+  .mf-f input,.mf-f select,.mf-f textarea{
+    border:1px solid var(--line);border-radius:var(--radius-sm);padding:8px 10px;
+    font-family:inherit;font-size:13.5px;color:var(--ink);background:var(--card);width:100%;
+  }
+  .mf-f textarea{resize:vertical;min-height:52px}
+  .mf-f input:focus,.mf-f select:focus,.mf-f textarea:focus{
+    outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-tint);
+  }
+  .mf-sec{margin-top:18px;padding-top:16px;border-top:1px solid var(--line)}
+  .mf-sec h3{font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 4px}
+  .mf-sec .hint{font-size:12.5px;color:var(--faint);margin:0 0 12px;max-width:70ch}
+  .mf-acts{display:flex;gap:10px;align-items:center;margin-top:18px}
+  .mf-msg{font-size:12.5px;color:var(--muted)}
+  .mf-msg.err{color:var(--danger)}
+
   /* ---------- decision ---------- */
   .decide{position:sticky;bottom:0;background:var(--bg);padding:12px 0 0}
   .spend{margin-top:10px;padding:12px;border:1px solid var(--line-soft);border-radius:var(--r-sm);background:var(--card)}
@@ -290,6 +317,12 @@ export default {
   .gv-sec h2{font-size:13px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);margin:0 0 12px}
   .gv-bars{display:flex;flex-direction:column;gap:8px}
   .gv-bar{display:grid;grid-template-columns:88px 1fr 100px;align-items:center;gap:10px;font-size:12.5px}
+  .gv-bars.wide .gv-bar{grid-template-columns:minmax(150px,240px) 1fr 100px}
+  .gv-bar .lbl.wide{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gv-sec-hd{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin:0 0 12px}
+  .gv-sec-hd h2{margin:0}
+  .gv-sec-hd .note{font-size:12px;color:var(--faint)}
+  .gv-cnt{color:var(--faint);font-size:11.5px;margin-left:6px}
   .gv-bar .lbl{color:var(--muted)}
   .gv-bar .track{height:16px;background:var(--line-soft);border-radius:3px;overflow:hidden}
   .gv-bar .fill{height:100%;background:var(--accent);border-radius:3px}
@@ -350,10 +383,12 @@ export default {
         </div>
         <div class="tools">
           <span class="tool-msg" id="importMsg"></span>
+          <button class="tool-btn" id="manualBtn">Add manually</button>
           <button class="tool-btn" id="rematchBtn">Match &amp; refresh</button>
           <button class="tool-btn" id="importBtn">Import from Jotform</button>
         </div>
       </div>
+      <div id="manualForm" hidden></div>
       <div class="filters" id="filters"></div>
       <div class="queue" id="queue"></div>
     </div>
@@ -1312,10 +1347,184 @@ export default {
     // hiding the button is a courtesy rather than the control.
     var rematchBtn = $('#rematchBtn');
 
+    var manualBtn = $('#manualBtn');
+
     var role = ctx.user && ctx.user.role;
     if (role !== 'admin' && role !== 'manager') {
       if (importBtn) importBtn.style.display = 'none';
       if (rematchBtn) rematchBtn.style.display = 'none';
+      if (manualBtn) manualBtn.style.display = 'none';
+    }
+
+    /* ---------------- add a request by hand ---------------- */
+
+    // Not every request arrives on the Jotform. A school calls, somebody asks
+    // at the counter, or a donation from two years ago needs to be on the
+    // books so the Giving totals are not a partial picture. This puts it in
+    // the same queue, scored by the same engine.
+    //
+    // The decision block at the bottom is what makes a historical donation
+    // one save instead of three: approve it and record what it cost on the way
+    // in. Left alone, it lands as pending like anything else.
+    function manualFormHtml() {
+      var today = new Date().toISOString().slice(0, 10);
+      function field(name, label, attrs, wide) {
+        return '<label class="mf-f' + (wide ? ' wide' : '') + '"><span>' + esc(label) + '</span>' +
+          '<input data-mf="' + name + '" ' + (attrs || '') + '></label>';
+      }
+      function area(name, label, placeholder) {
+        return '<label class="mf-f wide"><span>' + esc(label) + '</span>' +
+          '<textarea data-mf="' + name + '" rows="2" placeholder="' + esc(placeholder || '') + '"></textarea></label>';
+      }
+      function select(name, label, options, blank) {
+        return '<label class="mf-f"><span>' + esc(label) + '</span><select data-mf="' + name + '">' +
+          '<option value="">' + esc(blank) + '</option>' +
+          options.map(function (o) {
+            return '<option value="' + esc(o[0]) + '">' + esc(shortLabel(o[1])) + '</option>';
+          }).join('') +
+        '</select></label>';
+      }
+
+      return '' +
+        '<div class="mf">' +
+          '<h2>Add a request by hand</h2>' +
+          '<p class="mf-intro">For anything that did not come through the Jotform: a phone ' +
+            'call, a walk-in, or a donation already made that belongs on the books. It is ' +
+            'scored the same way and matched against the roster the same way.</p>' +
+
+          '<div class="mf-grid">' +
+            field('orgName', 'Organization *', 'placeholder="Who is asking"', true) +
+            field('contactName', 'Contact name', '') +
+            field('email', 'Email', 'type="email"') +
+            field('phone', 'Phone', '') +
+            field('eventName', 'Event name', '') +
+            field('eventType', 'Type of event', 'placeholder="Fundraiser, tournament..."') +
+            field('eventDate', 'Event date', 'type="date"') +
+            field('city', 'City', '') +
+            field('state', 'State', 'maxlength="2" placeholder="IA"') +
+            field('pieceCount', 'Pieces requested', 'inputmode="numeric" placeholder="24"') +
+            field('attendance', 'Expected attendance', 'inputmode="numeric"') +
+            select('orgType', 'Organization type', ORG_OPTIONS, 'Not classified') +
+            select('missionFit', 'Mission fit', MISSION_OPTIONS, 'Not classified') +
+            field('merchandise', 'Merchandise asked for', 'placeholder="T-shirts, hats"', true) +
+            area('description', 'What is it for', 'The event, and what the merchandise does for it') +
+          '</div>' +
+
+          '<div class="mf-sec">' +
+            '<h3>Already decided?</h3>' +
+            '<p class="hint">Leave this alone and the request lands in the queue as pending. ' +
+              'Set it to approved and fill in the cost to record a donation that has already ' +
+              'gone out.</p>' +
+            '<div class="mf-grid">' +
+              '<label class="mf-f"><span>Decision</span><select data-mf="decisionStatus">' +
+                '<option value="">Leave pending</option>' +
+                '<option value="approved">Approved</option>' +
+                '<option value="declined">Declined</option>' +
+              '</select></label>' +
+              field('retailValue', 'Retail value', 'inputmode="decimal" placeholder="0.00"') +
+              field('cost', 'Our cost', 'inputmode="decimal" placeholder="0.00"') +
+              field('fulfilledAt', 'Date given', 'type="date" value="' + today + '"') +
+              area('decisionNote', 'Note', 'Anything worth knowing about the decision') +
+            '</div>' +
+          '</div>' +
+
+          '<div class="mf-acts">' +
+            '<button class="btn btn-green" id="mfSave">Add request</button>' +
+            '<button class="tool-btn" id="mfCancel">Cancel</button>' +
+            '<span class="mf-msg" id="mfMsg"></span>' +
+          '</div>' +
+        '</div>';
+    }
+
+    function closeManualForm() {
+      var slot = $('#manualForm');
+      if (!slot) return;
+      slot.hidden = true;
+      slot.innerHTML = '';
+    }
+
+    async function saveManual() {
+      var slot = $('#manualForm');
+      var btn = $('#mfSave');
+      var msgEl = $('#mfMsg');
+      var read = function (name) {
+        var el = slot.querySelector('[data-mf="' + name + '"]');
+        return el ? String(el.value || '').trim() : '';
+      };
+
+      var request = {};
+      ['orgName', 'contactName', 'email', 'phone', 'eventName', 'eventType',
+       'eventDate', 'city', 'state', 'pieceCount', 'attendance', 'merchandise',
+       'description', 'orgType', 'missionFit'].forEach(function (k) {
+        var v = read(k);
+        if (v) request[k] = v;
+      });
+
+      if (!request.orgName) {
+        msgEl.textContent = 'An organization name is needed.';
+        msgEl.className = 'mf-msg err';
+        return;
+      }
+
+      var payload = { request: request };
+
+      var status = read('decisionStatus');
+      if (status) {
+        payload.decision = { status: status, note: read('decisionNote') };
+        // A donation entered after the fact is dated when it went out, not
+        // today, or every backdated record piles into this month's total.
+        var given = read('fulfilledAt');
+        if (given) payload.decision.decidedAt = given;
+      }
+
+      if (status === 'approved') {
+        var retail = read('retailValue');
+        var cost = read('cost');
+        var given2 = read('fulfilledAt');
+        if (retail || cost || given2) {
+          payload.fulfillment = {};
+          if (retail) payload.fulfillment.retailValue = retail;
+          if (cost) payload.fulfillment.cost = cost;
+          if (given2) payload.fulfillment.fulfilledAt = given2;
+          if (read('decisionNote')) payload.fulfillment.notes = read('decisionNote');
+        }
+      }
+
+      btn.disabled = true;
+      msgEl.className = 'mf-msg';
+      msgEl.textContent = 'Saving...';
+
+      try {
+        var out = await ctx.api.post(ENDPOINTS.ggRequests + '?action=manual', payload);
+        closeManualForm();
+        // Reload rather than pushing the new row in by hand: the server has
+        // scored it, matched it against the roster and may have classified it,
+        // and a locally-built copy would be missing all of that.
+        var fresh = await ctx.api.get(ENDPOINTS.ggRequests);
+        ctx.data = Array.isArray(fresh) ? fresh : ((fresh && fresh.requests) || []);
+        renderQueue();
+        importMsg.textContent = 'Added ' + ((out && out.request && out.request.id) || 'the request');
+        if (out && out.request && out.request.id) openPanel(out.request.id);
+      } catch (err) {
+        console.error('[givinggauge] manual add failed:', err);
+        btn.disabled = false;
+        msgEl.className = 'mf-msg err';
+        msgEl.textContent = (err && err.message) ? err.message : 'Could not add that request';
+      }
+    }
+
+    if (manualBtn) {
+      manualBtn.addEventListener('click', function () {
+        var slot = $('#manualForm');
+        if (!slot) return;
+        if (!slot.hidden) { closeManualForm(); return; }
+        slot.innerHTML = manualFormHtml();
+        slot.hidden = false;
+        $('#mfCancel').addEventListener('click', closeManualForm);
+        $('#mfSave').addEventListener('click', saveManual);
+        var first = slot.querySelector('[data-mf="orgName"]');
+        if (first) first.focus();
+      });
     }
 
     // Re-run roster matching across the whole queue. New requests match on
@@ -1381,6 +1590,7 @@ export default {
     /* ---------------- giving summary view ---------------- */
 
     var givingMeasure = 'cost';
+    var lastSummary = null;
 
     function usd(n) {
       return '$' + Number(n || 0).toLocaleString(undefined, { maximumFractionDigits: 0 });
@@ -1392,18 +1602,46 @@ export default {
       return d.toLocaleString(undefined, { month: 'short', year: '2-digit' });
     }
 
-    function bars(rows, pick) {
+    function bars(rows, pick, opts) {
+      var o = opts || {};
       var max = rows.reduce(function (m, r) { return Math.max(m, pick(r)); }, 0);
       if (!max) return '<div class="gv-none">Nothing recorded yet.</div>';
-      return '<div class="gv-bars">' + rows.map(function (r) {
+      return '<div class="gv-bars' + (o.wide ? ' wide' : '') + '">' + rows.map(function (r) {
         var v = pick(r);
         var pct = max > 0 ? Math.round((v / max) * 100) : 0;
         return '<div class="gv-bar">' +
-          '<span class="lbl">' + esc(r.label) + '</span>' +
+          '<span class="lbl' + (o.wide ? ' wide' : '') + '" title="' + esc(r.label) + '">' + esc(r.label) +
+            (o.counts && r.count ? '<span class="gv-cnt">' + r.count + '</span>' : '') + '</span>' +
           '<span class="track"><span class="fill" style="width:' + pct + '%"></span></span>' +
           '<span class="amt">' + usd(v) + '</span>' +
         '</div>';
       }).join('') + '</div>';
+    }
+
+    // The classification vocabularies are declared once, up in the classify
+    // card. Reused here so a cause is called the same thing on both screens.
+    function labelMapFrom(options) {
+      var out = {};
+      options.forEach(function (o) { out[o[0]] = o[1]; });
+      return out;
+    }
+
+    // Mission fit labels carry an explanation after an em dash for the
+    // reviewer, which is too long for a bar. Cut to the name.
+    function shortLabel(text) {
+      return String(text || '').split(/\s+[\u2014-]\s+/)[0];
+    }
+
+    function causeLabel(key, map) {
+      if (!key || key === 'unclassified') return 'Not classified';
+      return shortLabel(map[key] || key);
+    }
+
+    function dateLabel(iso) {
+      if (!iso) return '';
+      var d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso).slice(0, 10);
+      return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
     }
 
     async function renderGiving() {
@@ -1423,6 +1661,8 @@ export default {
         body.innerHTML = '<div class="gv-none">Could not load the summary.</div>';
         return;
       }
+
+      lastSummary = sum;
 
       var key = givingMeasure === 'retail' ? 'retail' : 'cost';
       var thisYear = String(new Date().getFullYear());
@@ -1466,6 +1706,41 @@ export default {
           }).join('')
         : '<tr><td colspan="5" class="gv-none">No donations attached to a client yet.</td></tr>';
 
+      // Cause and mission fit are human classifications and plenty of older
+      // rows never got one. Say how many rather than letting "Not classified"
+      // sit in the chart as if it were a cause.
+      var classifyNote = sum.unclassified
+        ? '<span class="note">' + sum.unclassified + ' of ' + sum.allTime.count +
+          ' not classified yet</span>'
+        : '';
+
+      var orgLabels = labelMapFrom(ORG_OPTIONS);
+      var missionLabels = labelMapFrom(MISSION_OPTIONS);
+
+      // Twenty is enough to see the shape. The full list is in the CSV.
+      var orgs = sum.orgs.slice(0, 20);
+      var causes = sum.causes.map(function (c) {
+        return { label: causeLabel(c.key, orgLabels), count: c.count, retail: c.retail, cost: c.cost };
+      });
+      var missions = sum.missions.map(function (m) {
+        return { label: causeLabel(m.key, missionLabels), count: m.count, retail: m.retail, cost: m.cost };
+      });
+
+      var ledgerRows = sum.ledger.length
+        ? sum.ledger.map(function (r) {
+            var where = [r.city, r.state].filter(Boolean).join(', ');
+            return '<tr>' +
+              '<td>' + esc(dateLabel(r.date)) + '</td>' +
+              '<td>' + esc(r.org || '(no name)') +
+                (r.event ? '<div class="gv-none" style="padding:0">' + esc(r.event) + '</div>' : '') + '</td>' +
+              '<td>' + esc(causeLabel(r.orgType, orgLabels)) + '</td>' +
+              '<td>' + esc(where) + '</td>' +
+              '<td class="num">' + usd(r.retail) + '</td>' +
+              '<td class="num">' + usd(r.cost) + '</td>' +
+            '</tr>';
+          }).join('')
+        : '<tr><td colspan="6" class="gv-none">Nothing recorded yet.</td></tr>';
+
       body.innerHTML =
         warn +
         '<div class="gv-kpis">' +
@@ -1483,6 +1758,24 @@ export default {
         '<div class="gv-sec"><h2>By year</h2>' +
           bars(years, function (r) { return r[key]; }) + '</div>' +
 
+        '<div class="gv-sec">' +
+          '<div class="gv-sec-hd"><h2>Where it went</h2>' +
+            '<span class="note">' + orgs.length + ' organisation' + (orgs.length === 1 ? '' : 's') +
+              (sum.orgs.length > orgs.length ? ', top ' + orgs.length + ' shown' : '') + '</span>' +
+          '</div>' +
+          bars(orgs, function (r) { return r[key]; }, { wide: true, counts: true }) +
+        '</div>' +
+
+        '<div class="gv-sec">' +
+          '<div class="gv-sec-hd"><h2>By cause</h2>' + classifyNote + '</div>' +
+          bars(causes, function (r) { return r[key]; }, { wide: true, counts: true }) +
+        '</div>' +
+
+        '<div class="gv-sec">' +
+          '<div class="gv-sec-hd"><h2>By mission fit</h2></div>' +
+          bars(missions, function (r) { return r[key]; }, { wide: true, counts: true }) +
+        '</div>' +
+
         '<div class="gv-sec"><h2>By client</h2>' +
           '<table class="gv-tbl">' +
             '<thead><tr>' +
@@ -1492,7 +1785,43 @@ export default {
             '</tr></thead>' +
             '<tbody>' + clientRows + '</tbody>' +
           '</table>' +
+        '</div>' +
+
+        '<div class="gv-sec">' +
+          '<div class="gv-sec-hd"><h2>Every donation</h2>' +
+            '<button class="tool-btn" id="givingCsv">Download CSV</button>' +
+          '</div>' +
+          '<table class="gv-tbl">' +
+            '<thead><tr>' +
+              '<th>Date</th><th>Organisation</th><th>Cause</th><th>Where</th>' +
+              '<th class="num">Retail</th><th class="num">Our cost</th>' +
+            '</tr></thead>' +
+            '<tbody>' + ledgerRows + '</tbody>' +
+          '</table>' +
         '</div>';
+
+      var csvBtn = $('#givingCsv');
+      if (csvBtn) csvBtn.addEventListener('click', downloadLedger);
+    }
+
+    // The CSV is built from the same summary the screen just drew, so the file
+    // and the page can never disagree about what was given away.
+    function downloadLedger() {
+      if (!lastSummary) return;
+      var csv = buildLedgerCsv(lastSummary.ledger, {
+        orgType: labelMapFrom(ORG_OPTIONS),
+        missionFit: labelMapFrom(MISSION_OPTIONS)
+      });
+      // A BOM, or Excel opens accented org names as mojibake.
+      var blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = 'giving-' + new Date().toISOString().slice(0, 10) + '.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
     }
 
     // Exposed so showView can render on first visit to the tab.

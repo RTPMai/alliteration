@@ -5,12 +5,14 @@
 //   PATCH  /api/giving-requests?id=REQ-1   record a decision or a classification
 //   POST   /api/giving-requests?action=backfill
 //                                          pull existing Jotform submissions
+//   POST   /api/giving-requests?action=manual
+//                                          a request typed in by hand
 //
 // Everything here requires a signed-in session. The public webhook lives in
 // api/giving-intake.js and can only create.
 
 import { requireAuth } from "../lib/session.js";
-import { listRequests, getRequest, updateRequest, buildRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
+import { listRequests, getRequest, updateRequest, buildRequest, buildManualRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
 import { applyClassification } from "../lib/giving-classify.js";
 import { summarise } from "../lib/giving-summary.js";
@@ -95,6 +97,54 @@ export default async function handler(req, res) {
         ok: true, matched, already, unmatched, repaired,
         recovered, total: rows.length
       });
+    }
+
+    // A request that never came through the Jotform: a phone call, a walk-in,
+    // or a donation from before the form existed that belongs on the books.
+    // It runs through the same builder, the same roster match and the same
+    // classifier as an imported one, so it is scored on identical terms.
+    if (req.method === "POST" && action === "manual") {
+      if (sess.role !== "admin" && sess.role !== "manager") {
+        return res.status(403).json({ error: "Adding a request requires admin or manager" });
+      }
+
+      const row = buildManualRequest(body.request || body, {
+        submittedAt: body.submittedAt || undefined,
+        enteredBy: sess.name || sess.username
+      });
+
+      await attachAccount(row);
+      applyClassification(row);
+
+      // Optionally decided on the way in. Somebody entering a donation from
+      // last spring already knows the answer, and making them save it twice is
+      // how half of them end up sitting in the queue as pending forever.
+      const decision = body.decision || {};
+      if (decision.status === "approved" || decision.status === "declined") {
+        row.status = decision.status;
+        row.decidedBy = sess.name || sess.username;
+        row.decidedAt = decision.decidedAt || new Date().toISOString();
+        // Entered after the fact and marked as such, so an override on a
+        // backdated record is not read as somebody ignoring the engine today.
+        row.override = true;
+        if (decision.note) row.note = String(decision.note);
+      }
+
+      await saveRequest(row);
+
+      // Spend goes through updateRequest so the money parsing, the recordedBy
+      // stamp and the fulfilled-date default all live in one place.
+      const spend = body.fulfillment || {};
+      const hasSpend = spend.retailValue !== undefined || spend.cost !== undefined ||
+                       spend.notes !== undefined || spend.fulfilledAt !== undefined;
+      if (hasSpend && row.status === "approved") {
+        const saved = await updateRequest(row.id, {
+          fulfillment: Object.assign({}, spend, { recordedBy: sess.name || sess.username })
+        });
+        return res.status(200).json({ ok: true, request: saved });
+      }
+
+      return res.status(200).json({ ok: true, request: row });
     }
 
     if (req.method === "POST" && action === "backfill") {

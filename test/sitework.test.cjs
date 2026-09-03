@@ -1,5 +1,5 @@
 /**
- * Site Work / Sticky Notes tests (Aug 18, 2026).
+ * Site Work / StickySituations tests (Aug 18, 2026; renamed Sep 2026).
  *
  * Site Work is a THIRD rail section, alongside Apps and Shared. It exists
  * because Notifications is the team's hand-off list and this is the list of
@@ -27,7 +27,8 @@ Promise.all([
   import(path.join(ROOT, 'lib/sitework/schema.js')),
   import(path.join(ROOT, 'js/registry.js')),
 ]).then(([schema, reg]) => {
-  const { validateNew, validatePatch, COLORS, SIZES, STATUSES, keys, DEFAULT_COLOR } = schema;
+  const { validateNew, validatePatch, COLORS, SIZES, STATUSES, keys, DEFAULT_COLOR,
+          SIZE_LABELS, noteText, boardText } = schema;
   const { APPS, SITE_APPS, SHELL_APPS, canAccess, getApp } = reg;
 
   const APP_IDS = APPS.map((a) => a.id);
@@ -272,6 +273,97 @@ Promise.all([
     const route = read('api/sitework.js');
     t.equal(/notifications/i.test(route.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '')), false,
       'the route must not touch notifications outside its comments');
+  });
+
+  /* ---- the name ---------------------------------------------------------
+   * Renamed from Sticky Notes to StickySituations, Sep 2026. The id stayed
+   * `stickies`: it is in saved links, the KV keyspace and every test above.
+   * Renaming the id would orphan every note on the board.
+   * ---------------------------------------------------------------------- */
+
+  t.test('the screen is called StickySituations and the id did not move', () => {
+    t.equal(SITE_APPS[0].name, 'StickySituations', 'the rail label is the new name');
+    t.equal(SITE_APPS[0].id, 'stickies', 'the id must NOT be renamed with the label');
+    t.assert(/<h1>StickySituations<\/h1>/.test(read('apps/stickies.js')),
+      'the panel heading should match the rail');
+    t.assert(/StickySituations/.test(read('lib/help/content.js')),
+      'the help bot must know the new name or it answers about a screen nobody has');
+  });
+
+  /* ---- copying a note out ---------------------------------------------- */
+
+  t.test('a note copies as its title, its detail, then its tags', () => {
+    const text = noteText({
+      id: 'S-0005', title: 'Merged Printavo clients still show separately',
+      detail: 'KBS, CRS and Kitchen Bath Solutions were merged in Printavo.',
+      appId: 'backbone', size: 'medium', status: 'open',
+    }, 'BackBone');
+
+    const parts = text.split('\n\n');
+    t.equal(parts.length, 3, 'title, detail and tail, blank line between each');
+    t.equal(parts[0], 'Merged Printavo clients still show separately', 'the title leads');
+    t.assert(/Kitchen Bath/.test(parts[1]), 'the detail comes second');
+    t.assert(/BackBone/.test(parts[2]), 'the app tag is in the tail');
+    t.assert(/Medium/.test(parts[2]), 'the size is spelled the way the board spells it');
+    t.assert(/S-0005/.test(parts[2]), 'the id must survive the copy or a pasted note is unfindable');
+  });
+
+  t.test('a note with nothing but a title copies without blank padding', () => {
+    const text = noteText({ id: 'S-0009', title: 'favicon', size: 'unknown', status: 'open' }, '');
+    t.equal(text, 'favicon\n\nS-0009', 'no empty detail line, no app tag, no size');
+  });
+
+  t.test('a done note says so, an open one does not', () => {
+    t.assert(/Done/.test(noteText({ id: 'S-1', title: 'x', status: 'done' }, '')),
+      'a copied note should not read as still outstanding');
+    t.equal(/Done/.test(noteText({ id: 'S-1', title: 'x', status: 'open' }, '')), false,
+      'open is the normal case and needs no label');
+  });
+
+  t.test('noteText survives a half-built note rather than throwing', () => {
+    t.equal(noteText(null, ''), '', 'null is empty text, not an exception');
+    t.equal(noteText({}, ''), '', 'a note with no fields copies as nothing');
+    t.equal(noteText({ title: 'x', size: 'nonsense' }, ''), 'x',
+      'an unknown size is dropped, not printed raw');
+  });
+
+  t.test('several notes copy as one block with a divider between them', () => {
+    const rows = [
+      { id: 'S-1', title: 'one' },
+      { id: 'S-2', title: 'two' },
+    ];
+    const text = boardText(rows, () => '');
+    t.assert(text.indexOf('----') > 0, 'the notes need a divider or they read as one note');
+    t.equal(text.split('----').length, 2, 'one divider between two notes, none trailing');
+    t.equal(boardText([], () => ''), '', 'nothing showing copies as nothing');
+  });
+
+  /* ---- the drag no longer eats the selection ---------------------------- *
+   * The whole card was draggable="true", which is why you could not drag over
+   * the words on a note to select them: the browser starts a drag instead of a
+   * selection. That is the bug behind "let me copy and paste a sticky".
+   * ---------------------------------------------------------------------- */
+
+  t.test('the card is not draggable until the grip says so', () => {
+    const panel = read('apps/stickies.js');
+    t.equal(/class="sk-note[^']*draggable="true"/.test(panel), false,
+      'a permanently draggable card cannot have its text selected');
+    t.assert(/draggable="false"/.test(panel), 'the card ships undraggable');
+    t.assert(/data-grip=/.test(panel), 'there must be a grip to drag by');
+    t.assert(/setAttribute\('draggable', 'true'\)/.test(panel),
+      'the grip arms the drag');
+    t.assert(/setAttribute\('draggable', 'false'\)/.test(panel),
+      'and something must disarm it, or the card stays unselectable after one drag');
+    t.assert(/dragstart/.test(panel), 'reordering must still work');
+  });
+
+  t.test('the clipboard has a fallback rather than failing silently', () => {
+    const panel = read('apps/stickies.js');
+    t.assert(/navigator\.clipboard/.test(panel), 'use the real clipboard API first');
+    t.assert(/execCommand\('copy'\)/.test(panel),
+      'and fall back, because the clipboard API is refused outside a secure context');
+    t.assert(/Could not copy|would not let me/.test(panel),
+      'a refused copy must say so: nothing happening looks like a broken button');
   });
 
   process.exit(t.report());
