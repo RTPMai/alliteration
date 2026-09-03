@@ -37,6 +37,9 @@
  */
 
 import { ENDPOINTS } from '../../js/api.js';
+// The checking sheet is built by the same module that does the scoring, so the
+// spreadsheet and the screen can never describe a pair differently.
+import { buildSuggestionsCsv } from '../../lib/backbone-merge.js';
 
 export async function start(ctx) {
   const root = ctx.root;
@@ -6340,6 +6343,10 @@ export async function start(ctx) {
     const el = $id("mergeSuggestions");
     if (!el) return;
 
+    // The sheet is only offered once there is something on it.
+    const csvBtn = $id("mergeCsvBtn");
+    if (csvBtn) csvBtn.style.display = mergeSuggestions.length ? "" : "none";
+
     if (!mergeSuggestions.length) {
       el.innerHTML = "";
       return;
@@ -6574,6 +6581,32 @@ export async function start(ctx) {
     } catch (e) {
       mergeError(e.message);
     }
+  }
+
+  /**
+   * The scan as a spreadsheet, for whoever actually deals with the customer.
+   *
+   * Built from the same list on screen, so the sheet and the page cannot
+   * disagree. It carries both Printavo ids, both ZIPs and a contact on each
+   * side, because somebody checking this against Printavo needs something to
+   * check WITH: a name and a revenue figure are not enough to tell two real
+   * companies apart. The last four columns are empty on purpose, so it comes
+   * back with answers on it.
+   */
+  function downloadMergeSheet() {
+    if (!mergeSuggestions.length) return;
+    const csv = buildSuggestionsCsv(mergeSuggestions);
+    // A BOM, or Excel opens an accented company name as mojibake.
+    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "possible-duplicate-clients-" + new Date().toISOString().slice(0, 10) + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+    mergeStatus("Sheet downloaded. " + mergeSuggestions.length + " pairs to check.");
   }
 
   async function loadMerges(withSuggestions) {
@@ -10555,6 +10588,8 @@ export async function start(ctx) {
       loadMerges(true);
     });
     if (manual) manual.addEventListener("click", openManualMergePicker);
+    const csvBtn = $id("mergeCsvBtn");
+    if (csvBtn) csvBtn.addEventListener("click", downloadMergeSheet);
     // The list of existing merges loads on mount so Settings always says what
     // is merged. The SCAN is on a button: it compares thousands of records and
     // nobody needs it on every page load.

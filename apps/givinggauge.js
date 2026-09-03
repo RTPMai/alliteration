@@ -469,9 +469,13 @@ export default {
         matched.forEach(function (r) {
           var fresh = accounts[String(r.account.customerId)];
           if (!fresh) return;
+          // 'name' is refreshed as well, so a client that has since been
+          // merged in BackBone shows the name a human chose for the merged
+          // record rather than whichever of the old records this request
+          // happened to match.
           ['tier', 'lifetimeRevenue', 'ytdRevenue', 'priorYtdRevenue',
            'orderCount', 'daysSinceLastOrder', 'medianGapDays', 'isFirstYear',
-           'trendingStrong', 'owner'].forEach(function (k) {
+           'trendingStrong', 'owner', 'name'].forEach(function (k) {
             if (fresh[k] !== undefined) r.account[k] = fresh[k];
           });
         });

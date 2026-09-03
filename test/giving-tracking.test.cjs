@@ -198,6 +198,78 @@ Promise.all([
     t.equal(pantry.orgType, null, 'and an unclassified cause stays null in the data');
   });
 
+  /* ---- merged clients ----------------------------------------------------
+   * BackBone can hold one company as two Printavo records, and a merge folds
+   * them. A donation request matched BEFORE that merge still names the old
+   * record, so without folding here the client table shows one company on two
+   * lines with its giving split between them: the same splitting the merge
+   * exists to end, reappearing one screen over.
+   * ---------------------------------------------------------------------- */
+
+  t.test('a client merged in BackBone is one line here, not two', () => {
+    const split = [
+      approved({
+        id: 'REQ-M1',
+        request: { orgName: 'KBS' },
+        account: { found: true, customerId: '2', name: 'KBS', lifetimeRevenue: 12000 },
+        fulfillment: { retailValue: 200, cost: 100, fulfilledAt: '2026-03-01' },
+      }),
+      approved({
+        id: 'REQ-M2',
+        request: { orgName: 'Kitchen Bath Solutions' },
+        account: { found: true, customerId: '1', name: 'Kitchen Bath Solutions', lifetimeRevenue: 50000 },
+        fulfillment: { retailValue: 400, cost: 300, fulfilledAt: '2026-04-01' },
+      }),
+    ];
+
+    const unmerged = summarise(split, { measure: 'cost' });
+    t.equal(unmerged.clients.length, 2, 'two records, two lines, which is the state today');
+
+    const mergeOf = {
+      1: { primaryId: '1', name: 'Kitchen Bath Solutions' },
+      2: { primaryId: '1', name: 'Kitchen Bath Solutions' },
+    };
+    const merged = summarise(split, { measure: 'cost', mergeOf });
+    t.equal(merged.clients.length, 1, 'one company, one line');
+    t.equal(merged.clients[0].cost, 400, 'and the giving adds up across both records');
+    t.equal(merged.clients[0].count, 2, 'both gifts counted against the one client');
+  });
+
+  t.test('the merged line uses the name the human chose', () => {
+    const rows = [approved({
+      id: 'REQ-M3',
+      request: { orgName: 'KBS' },
+      account: { found: true, customerId: '2', name: 'KBS', lifetimeRevenue: 12000 },
+      fulfillment: { cost: 100, fulfilledAt: '2026-03-01' },
+    })];
+    const merged = summarise(rows, {
+      mergeOf: { 2: { primaryId: '1', name: 'Kitchen Bath Solutions' } },
+    });
+    t.equal(merged.clients[0].name, 'Kitchen Bath Solutions',
+      'not whichever of the old records this request happened to match');
+    t.equal(merged.clients[0].customerId, '1', 'and it points at the record that still exists');
+  });
+
+  t.test('with nothing merged the client table is exactly as it was', () => {
+    const before = summarise(rows, { measure: 'cost' });
+    const after = summarise(rows, { measure: 'cost', mergeOf: {} });
+    t.equal(after.clients.length, before.clients.length, 'no merges, no change');
+    t.equal(after.clients[0].name, before.clients[0].name, 'same names');
+  });
+
+  t.test('the summary route hands the merge map in', () => {
+    const route = read('api/giving-requests.js');
+    t.assert(/mergeNameMap/.test(route),
+      'the summary must know about merges or the client table splits a merged client');
+    // Anchored on the summary branch itself. Slicing to the first mention of
+    // "rematch" would land on a comment near the top of the file and hand back
+    // an empty string, which passes for the wrong reason.
+    const start = route.indexOf('action === "summary"');
+    const branch = route.slice(start, route.indexOf('if (id)', start));
+    t.assert(branch.length > 0, 'the summary branch should be findable');
+    t.assert(/mergeOf/.test(branch), 'and pass the map to summarise');
+  });
+
   /* ---- the CSV ---------------------------------------------------------- */
 
   t.test('the CSV has a header row and one line per donation', () => {

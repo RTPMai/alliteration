@@ -33,6 +33,8 @@ import { listRequests, getRequest, updateRequest, buildRequest, buildManualReque
 import { isConfigured } from "../lib/kv.js";
 import { applyClassification } from "../lib/giving-classify.js";
 import { summarise } from "../lib/giving-summary.js";
+import { readMergeGroups } from "../lib/backbone-store.js";
+import { mergeNameMap } from "../lib/backbone-merge.js";
 
 const JOTFORM_API = "https://api.jotform.com";
 
@@ -73,9 +75,13 @@ export default async function handler(req, res) {
       // list branches, both of which return.
       if (action === "summary") {
         const rows = await listRequests();
+        // Clients BackBone holds as more than one record are one line here
+        // too. A request matched before a merge still names the old record.
+        const mergeOf = mergeNameMap(await readMergeGroups());
         return res.status(200).json(summarise(rows, {
           measure: (req.query && req.query.measure) || "cost",
-          basis: (req.query && req.query.basis) || "lifetime"
+          basis: (req.query && req.query.basis) || "lifetime",
+          mergeOf
         }));
       }
 

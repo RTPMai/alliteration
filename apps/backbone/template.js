@@ -470,6 +470,7 @@ export default `
         <div id="mergeList"></div>
         <div class="merge-tools">
           <button class="btn btn-green" id="mergeScanBtn">Scan for duplicates</button>
+          <button class="btn" id="mergeCsvBtn" style="display:none">Download checking sheet</button>
           <button class="btn" id="mergeManualBtn">Merge two records by name</button>
           <span class="save-status" id="mergeStatus" style="margin-left:10px"></span>
         </div>

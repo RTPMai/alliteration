@@ -37,8 +37,28 @@ import(path.join(ROOT, 'lib/backbone-merge.js')).then((m) => {
   const {
     normaliseName, acronymOf, scorePair, suggestDuplicates,
     foldRoster, mergeCustomerRows, memberIndex, validateGroup,
-    restoreAbsorbed, pairKey,
+    restoreAbsorbed, pairKey, buildSuggestionsCsv, SUGGESTION_COLUMNS,
+    resolveCustomerId, mergeNameMap, resolveAskedIds,
   } = m;
+
+  /** Split a CSV line the way a spreadsheet does, respecting quotes. */
+  function parseCsvLine(line) {
+    const out = [];
+    let cur = '';
+    let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (inQ) {
+        if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; }
+        else if (c === '"') inQ = false;
+        else cur += c;
+      } else if (c === '"') inQ = true;
+      else if (c === ',') { out.push(cur); cur = ''; }
+      else cur += c;
+    }
+    out.push(cur);
+    return out;
+  }
 
   /* ---- fixtures --------------------------------------------------------- */
 
@@ -287,6 +307,100 @@ import(path.join(ROOT, 'lib/backbone-merge.js')).then((m) => {
       'and blocking must not lose the pair it exists to find');
   });
 
+  /* ---- the checking sheet ------------------------------------------------
+   * The scan is a question, and the person who can answer it is whoever deals
+   * with that customer. The sheet has to survive being opened in Excel, and it
+   * has to carry enough to check a pair against Printavo: a name and a revenue
+   * figure are not enough to tell two real companies apart.
+   * ---------------------------------------------------------------------- */
+
+  t.test('the sheet has one row per pair under a header that lines up', () => {
+    const out = suggestDuplicates(ROSTER.synced, {});
+    const lines = buildSuggestionsCsv(out).trim().split('\r\n');
+    t.equal(lines.length, out.length + 1, 'a header and one line per pair');
+    t.equal(parseCsvLine(lines[0]).length, SUGGESTION_COLUMNS.length,
+      'the header must parse to the declared column count');
+    lines.slice(1).forEach((l, i) => {
+      t.equal(parseCsvLine(l).length, SUGGESTION_COLUMNS.length,
+        'row ' + (i + 1) + ' is a different width from the header');
+    });
+  });
+
+  t.test('a header cell containing a comma does not split the header', () => {
+    // "If yes, which name should we use?" has a comma in it. Unquoted, the
+    // header gains a column while every data row stays the right width, and
+    // the sheet opens misaligned by one from that point on.
+    const header = parseCsvLine(buildSuggestionsCsv([]).trim());
+    t.assert(header.indexOf('If yes, which name should we use?') >= 0,
+      'the question must survive as one cell, got ' + header.length + ' columns');
+  });
+
+  t.test('the sheet carries what somebody needs to check it in Printavo', () => {
+    const out = suggestDuplicates(ROSTER.synced, {});
+    const cells = parseCsvLine(buildSuggestionsCsv(out).trim().split('\r\n')[1]);
+    const header = parseCsvLine(buildSuggestionsCsv([]).trim());
+    const at = (name) => cells[header.indexOf(name)];
+
+    t.assert(at('A: Printavo ID'), 'the id is the lookup key in Printavo');
+    t.assert(at('B: Printavo ID'), 'for both records');
+    t.assert(at('A: Printavo ID') !== at('B: Printavo ID'), 'and they are two different records');
+    t.assert(at('A: Name'), 'the name as Printavo spells it');
+    t.assert(at('Why we think so').length > 0, 'and the evidence, or it cannot be judged');
+  });
+
+  t.test('the sheet ends in blank columns to write the answer in', () => {
+    const out = suggestDuplicates(ROSTER.synced, {});
+    const header = parseCsvLine(buildSuggestionsCsv([]).trim());
+    const cells = parseCsvLine(buildSuggestionsCsv(out).trim().split('\r\n')[1]);
+    ['Same company? (yes/no)', 'Checked by', 'Notes'].forEach((col) => {
+      const i = header.indexOf(col);
+      t.assert(i >= 0, 'missing the ' + col + ' column');
+      t.equal(cells[i], '', col + ' must be empty: it is for them to fill in, not for us to guess');
+    });
+  });
+
+  t.test('all the reasons make it onto one line', () => {
+    const csv = buildSuggestionsCsv([{
+      confidence: 'high',
+      reasons: ['One reason', 'Another reason'],
+      rows: [{ customer_id: '1', company_name: 'A' }, { customer_id: '2', company_name: 'B' }],
+    }]);
+    t.equal(csv.split('\r\n').filter(Boolean).length, 2,
+      'a newline inside a cell would make one pair look like two rows');
+    t.assert(/One reason; Another reason/.test(csv), 'both reasons are there');
+  });
+
+  t.test('a company name starting with = cannot run as a formula', () => {
+    const csv = buildSuggestionsCsv([{
+      confidence: 'low', reasons: ['x'],
+      rows: [{ customer_id: '1', company_name: '=cmd|calc' }, { customer_id: '2', company_name: 'B' }],
+    }]);
+    const header = parseCsvLine(buildSuggestionsCsv([]).trim());
+    const cells = parseCsvLine(csv.trim().split('\r\n')[1]);
+    t.equal(cells[header.indexOf('A: Name')], "'=cmd|calc",
+      'names come from Printavo, so they are prefixed rather than trusted');
+  });
+
+  t.test('money keeps its cents and an empty scan still gives a usable sheet', () => {
+    const csv = buildSuggestionsCsv([{
+      confidence: 'high', reasons: ['x'],
+      rows: [{ customer_id: '1', company_name: 'A', total_revenue: 12.5 },
+             { customer_id: '2', company_name: 'B', total_revenue: 0 }],
+    }]);
+    t.assert(/12\.50/.test(csv), 'a revenue figure is not rounded to a whole dollar');
+    t.equal(buildSuggestionsCsv([]).trim(), SUGGESTION_COLUMNS.map(function (c) {
+      return /[",]/.test(c) ? '"' + c.replace(/"/g, '""') + '"' : c;
+    }).join(','), 'headers only, not an empty file');
+  });
+
+  t.test('the screen builds the sheet from the shared function', () => {
+    const main = read('apps/backbone/main.js');
+    t.assert(/buildSuggestionsCsv/.test(main),
+      'the sheet and the page must come from one place or they can disagree');
+    t.equal(/function buildSuggestionsCsv/.test(main), false, 'and not a second copy in the app');
+    t.assert(/mergeCsvBtn/.test(read('apps/backbone/template.js')), 'the button needs its markup');
+  });
+
   /* ---- folding: the money ----------------------------------------------- */
 
   t.test('a merged client counts once, with everything added up', () => {
@@ -379,6 +493,55 @@ import(path.join(ROOT, 'lib/backbone-merge.js')).then((m) => {
     const folded = foldRoster(ROSTER, []);
     t.equal(folded.synced.length, 4, 'nothing removed');
     t.equal(folded.synced[0].merged, undefined, 'and nothing marked');
+  });
+
+  /* ---- ids stored on other records ---------------------------------------
+   * A customer id saved months ago on some OTHER record (a donation request's
+   * matched account, an error record) still names whichever Printavo record it
+   * matched at the time. Once that record is absorbed the folded roster no
+   * longer contains it, and a lookup by that id finds nothing at all. Nothing
+   * errors; the caller just keeps whatever figures it already had, which is
+   * the stale-snapshot bug GivingGauge already fixed once.
+   * ---------------------------------------------------------------------- */
+
+  t.test('an absorbed id resolves to the record that still exists', () => {
+    t.equal(resolveCustomerId('2', [GROUP]), '1', 'the member points at its primary');
+    t.equal(resolveCustomerId('1', [GROUP]), '1', 'the primary is already itself');
+    t.equal(resolveCustomerId('9', [GROUP]), '9', 'an unmerged record is untouched');
+    t.equal(resolveCustomerId('2', []), '2', 'and with no merges nothing moves');
+  });
+
+  t.test('the name map covers the primary as well as the members', () => {
+    const map = mergeNameMap([GROUP]);
+    t.equal(map['2'].name, 'Kitchen Bath Solutions', 'a member gets the chosen name');
+    t.assert(map['1'],
+      'the PRIMARY must be in the map too: matched directly, it would otherwise show its own ' +
+      'Printavo name while a sibling shows the chosen one, and the two would disagree on screen');
+    t.equal(map['1'].primaryId, '1', 'pointing at itself');
+    t.equal(Object.keys(mergeNameMap([])).length, 0, 'no merges, empty map');
+    t.equal(Object.keys(mergeNameMap(null)).length, 0, 'and null does not throw');
+  });
+
+  t.test('an asked-for id is looked up under the record that holds the data now', () => {
+    const out = resolveAskedIds(['2', '9'], [GROUP]);
+    t.equal(out[0].target, '1', 'the absorbed id points at the primary, or the lookup finds nothing');
+    t.equal(out[0].merged, true, 'and it is marked as having moved');
+    t.equal(out[0].name, 'Kitchen Bath Solutions', 'carrying the chosen name');
+    t.equal(out[1].target, '9', 'an unmerged id is untouched');
+    t.equal(out[1].merged, false, 'and not marked');
+  });
+
+  t.test('the answer comes back under the id the caller asked for', () => {
+    const out = resolveAskedIds(['2'], [GROUP]);
+    t.equal(out[0].asked, '2',
+      'keyed by the resolved id instead, the caller looks up 2, finds nothing, ' +
+      'and silently keeps the figures it already had');
+  });
+
+  t.test('the refresh route uses it rather than looking ids up raw', () => {
+    const src = read('api/customer-match.js');
+    t.assert(/resolveAskedIds/.test(src), 'the route must resolve before looking up');
+    t.assert(/accounts\[r\.asked\]/.test(src), 'and answer under the asked-for id');
   });
 
   /* ---- the write-back guard --------------------------------------------- */

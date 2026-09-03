@@ -14,7 +14,8 @@
 // confidence and the final match is a human's to confirm.
 
 import { requireAuth } from "../lib/session.js";
-import { readRoster, isConfigured } from "../lib/backbone-store.js";
+import { readRoster, readMergeGroups, isConfigured } from "../lib/backbone-store.js";
+import { resolveAskedIds } from "../lib/backbone-merge.js";
 // The matching logic lives in lib/ so the intake path can match automatically
 // too. This endpoint stays the human-facing "suggest candidates" surface.
 import { similarity, confidenceOf, toAccount } from "../lib/customer-match.js";
@@ -51,13 +52,32 @@ export default async function handler(req, res) {
         return res.status(200).json({ accounts: {} });
       }
       const enrichment = data.enrichment || {};
-      const wanted = new Set(String(ids).split(",").map((s) => s.trim()).filter(Boolean));
+      const asked = String(ids).split(",").map((s) => s.trim()).filter(Boolean);
+
+      // AN ASKED-FOR ID MAY HAVE BEEN MERGED AWAY. A donation matched to a
+      // record months ago still names that record; if it has since been
+      // absorbed, the folded roster does not contain it and the lookup would
+      // find nothing. The caller would then keep the figures it already had,
+      // silently, which is exactly the stale-snapshot bug GivingGauge already
+      // fixed once. So the id is resolved to the record that is really there,
+      // and the answer is returned under the id that was ASKED FOR, because
+      // that is the key the caller will look it up by.
+      const byId = {};
+      data.synced.forEach((c) => { byId[String(c.customer_id)] = c; });
+
       const accounts = {};
-      data.synced.forEach((c) => {
-        const cid = String(c.customer_id);
-        if (!wanted.has(cid)) return;
+      resolveAskedIds(asked, await readMergeGroups()).forEach((r) => {
+        const row = byId[r.target];
+        if (!row) return;
         // Score 1: this is a confirmed id lookup, not a fuzzy name guess.
-        accounts[cid] = toAccount(c, enrichment[c.customer_id], 1);
+        const account = toAccount(row, enrichment[row.customer_id], 1);
+        // The name a human chose for the merged client, not whichever of the
+        // Printavo records this request happened to match.
+        if (r.merged) {
+          if (r.name) account.name = r.name;
+          account.mergedInto = r.target;
+        }
+        accounts[r.asked] = account;
       });
       return res.status(200).json({ accounts });
     } catch (e) {
