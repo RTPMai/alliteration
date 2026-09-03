@@ -1,3 +1,4 @@
+// PUT IN: api/promopro/send.js
 // api/promopro/send.js — email a purchase order to its vendor.
 //
 // POST { poId, test: true|false }
@@ -39,7 +40,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getVendors, getSettings } from "../../lib/promopro/store.js";
-import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail, captureState } from "../../lib/promopro/schema.js";
+import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail, captureState, isOutsourced } from "../../lib/promopro/schema.js";
 import { renderEmailHtml, renderEmailText } from "../../lib/promopro/document.js";
 import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme/resend-client.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
@@ -48,6 +49,14 @@ import { buildAttachments } from "../../lib/promopro/attachments.js";
 import { reconcileArt } from "../../lib/promopro/art-reconcile.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
 import { resolveAccountManagers, effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
+
+/**
+ * Not an error, a way out of the try block that wraps the cancellation email.
+ * Distinguishable from a real send failure so an outsourced job is not
+ * reported as "the vendor could not be emailed", which would send somebody
+ * off to chase a message that was never meant to go.
+ */
+class SkipEmail extends Error {}
 
 function parseBody(req) {
   let b = req.body;
@@ -82,6 +91,26 @@ export default async function handler(req, res) {
 
     const po = await getPo(poId);
     if (!po) return res.status(404).json({ error: "Purchase order not found" });
+
+    // OUTSOURCED WORK IS NOT EMAILED, and this is the check that means it.
+    // The screen hides the button, but a hidden button is a suggestion: a
+    // stale tab, a deep link or a script would still reach this route, and
+    // what would arrive at the vendor is a document headed PURCHASE ORDER
+    // for work nobody raised one for. Refused before the test branch too,
+    // because a test send renders the same document.
+    //
+    // CANCELLING IS EXEMPT, because cancelling is not only an email. It is
+    // how an order leaves the pipeline and stops being chased, and an
+    // outsourced job needs that as much as a purchase order does. It runs
+    // below with the email step skipped rather than refused here, which
+    // would have left these orders with no way to be called off at all.
+    if (isOutsourced(po) && body.cancel !== true) {
+      return res.status(400).json({
+        error: "This is outsourced work with no purchase order, so there is nothing to email. " +
+          "Print it if the job needs a sheet to travel with it, or untick \"no purchase order needed\" on the order to raise a real one.",
+        outsourced: true,
+      });
+    }
 
     const [vendors, storedSettings, employees] = await Promise.all([
       getVendors(),
@@ -161,9 +190,15 @@ export default async function handler(req, res) {
     // costs total zero would leave the vendor working on a dead order.
     if (body.cancel === true) {
       const blockers = [];
-      if (!vendor) blockers.push("the vendor on this PO no longer exists");
-      else if (!looksLikeEmail(vendor.email)) blockers.push("that vendor has no order email set");
-      if (!looksLikeEmail(fromAddress)) blockers.push("no from-address is set in Settings");
+      // On an outsourced job there is nobody to email, so a missing vendor
+      // address or from-address cannot stop the cancellation. Blocking it on
+      // those would be refusing to call off a job because of a mailbox that
+      // was never going to be used.
+      if (!isOutsourced(po)) {
+        if (!vendor) blockers.push("the vendor on this PO no longer exists");
+        else if (!looksLikeEmail(vendor.email)) blockers.push("that vendor has no order email set");
+        if (!looksLikeEmail(fromAddress)) blockers.push("no from-address is set in Settings");
+      }
       if (blockers.length) {
         return res.status(400).json({ error: blockers.join("; "), problems: blockers });
       }
@@ -194,7 +229,12 @@ export default async function handler(req, res) {
 
       let emailed = false;
       let emailError = "";
+      // Nothing was ever sent, so there is nothing to retract. Skipped rather
+      // than attempted and swallowed: a vendor who never received a purchase
+      // order should not get an email telling them one is cancelled.
+      const tellVendor = !isOutsourced(po);
       try {
+        if (!tellVendor) throw new SkipEmail();
         await sendOne({
           from: `${settings.brandName || "P&M Apparel"} <${fromAddress}>`,
           to: [vendor.email],
@@ -211,17 +251,23 @@ export default async function handler(req, res) {
         });
         emailed = true;
       } catch (e) {
-        emailError = (e && e.message) || String(e);
-        console.error("promopro/send could not email a cancellation:", emailError);
+        if (e instanceof SkipEmail) {
+          emailError = "";
+        } else {
+          emailError = (e && e.message) || String(e);
+          console.error("promopro/send could not email a cancellation:", emailError);
+        }
       }
 
       const cancelHistory = Array.isArray(po.history) ? po.history.slice() : [];
       cancelHistory.push({
         at,
         by: String(sess.username || "").toLowerCase(),
-        what: emailed
-          ? `cancelled, vendor emailed at ${vendor.email}`
-          : `cancelled, the vendor could NOT be emailed (${emailError})`,
+        what: !tellVendor
+          ? "cancelled, no vendor email because this is outsourced work with no purchase order"
+          : emailed
+            ? `cancelled, vendor emailed at ${vendor.email}`
+            : `cancelled, the vendor could NOT be emailed (${emailError})`,
       });
 
       const cancelled = await updatePo(poId, {
@@ -237,9 +283,13 @@ export default async function handler(req, res) {
         emailed,
         to: emailed ? [vendor.email] : [],
         cc: emailed ? ccCancel : [],
-        warning: emailed
+        warning: emailed || !tellVendor
           ? ""
           : `The order is cancelled, but the vendor could not be emailed: ${emailError} Tell them another way.`,
+        // Said in words rather than left to be inferred from an empty warning.
+        // "Cancelled and nobody was told" is a thing somebody needs to act on
+        // by picking up the phone.
+        note: tellVendor ? "" : "Cancelled. Nothing was emailed, because no purchase order was ever sent for this one.",
       });
     }
 
