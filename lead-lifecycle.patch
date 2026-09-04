@@ -1,0 +1,2279 @@
+diff --git a/api/archive-reasons.js b/api/archive-reasons.js
+new file mode 100644
+index 0000000..000e38c
+--- /dev/null
++++ b/api/archive-reasons.js
+@@ -0,0 +1,88 @@
++// PUT IN: api/archive-reasons.js
++// api/archive-reasons.js — the fixed list of reasons a lead or client can be
++// archived under.
++//
++// GET   -> the list, plus whether the caller may edit it.
++// PUT   -> replace the list. Admin only.
++//
++// WHO CAN READ. Anyone signed in. Every archive screen needs the list to draw
++// its dropdown, so gating the read would break archiving for everyone but
++// admins while pretending to be a permissions rule.
++//
++// WHO CAN WRITE. Admin only, and deliberately NOT `data_scope === "all"`.
++// data_scope is a sales visibility setting that defaults to "all" on any newly
++// created role, so treating it as an admin signal hands the list to whoever
++// happened to get a role made for an unrelated reason. Same trap CrewCore hit.
++//
++// EDITING THE LIST NEVER REWRITES RECORDS. The reason is copied onto the record
++// when it is archived. Removing "Not a fit" from the list stops it being chosen
++// again; it does not blank the reason on the forty leads already archived under
++// it. History has to stay readable after a settings change.
++//
++// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
++
++import { requireAuth } from "../lib/session.js";
++import { permsFor } from "../lib/users.js";
++import { getArchiveReasons, saveArchiveReasons } from "../lib/backbone/archive-store.js";
++import { DEFAULT_ARCHIVE_REASONS, normalizeReasons } from "../lib/backbone/archive.js";
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++async function canEdit(sess) {
++  const perms = await permsFor(sess.username);
++  if (!perms) return false;
++  if (perms.superuser === true) return true;
++  return perms.role === "admin";
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    if (req.method === "GET") {
++      return res.status(200).json({
++        reasons: await getArchiveReasons(),
++        defaults: DEFAULT_ARCHIVE_REASONS,
++        canEdit: await canEdit(sess),
++      });
++    }
++
++    if (req.method === "PUT" || req.method === "POST") {
++      if (!(await canEdit(sess))) {
++        return res.status(403).json({
++          error: "Editing the archive reason list is admin only: it changes the choices everyone gets.",
++        });
++      }
++      const body = parseBody(req);
++      if (!Array.isArray(body.reasons)) {
++        return res.status(400).json({ error: "Expected { reasons: [...] }" });
++      }
++      // A list that cleans down to nothing is refused rather than quietly
++      // replaced with the defaults, so somebody who deletes every row is told
++      // what happened instead of finding the seeded list back tomorrow.
++      const cleaned = normalizeReasons(body.reasons);
++      const askedForEmpty = body.reasons.every((r) => !String(r == null ? "" : r).trim());
++      if (askedForEmpty) {
++        return res.status(400).json({
++          error: "The list cannot be empty. Archiving requires a reason, so there has to be at least one to pick.",
++        });
++      }
++      const saved = await saveArchiveReasons(cleaned);
++      return res.status(200).json({ ok: true, reasons: saved });
++    }
++
++    res.setHeader("Allow", "GET, PUT");
++    return res.status(405).json({ error: "Method not allowed" });
++  } catch (e) {
++    console.error("archive-reasons error:", e);
++    return res.status(500).json({ error: e.message });
++  }
++}
+diff --git a/api/archived-clients.js b/api/archived-clients.js
+new file mode 100644
+index 0000000..49fe482
+--- /dev/null
++++ b/api/archived-clients.js
+@@ -0,0 +1,109 @@
++// PUT IN: api/archived-clients.js
++// api/archived-clients.js — archive and restore customers on the BackBone roster.
++//
++// GET   -> every client archive stamp, keyed by customer id.
++// POST  -> { customer_id, reason, note }  archive one
++//          { customer_id, restore: true } put one back
++//
++// WHY THIS IS ITS OWN RECORD AND NOT A FLAG ON THE CUSTOMER.
++// The roster is rebuilt from Printavo by the sync. Anything written onto a
++// synced row is erased by the next reconcile, so an archive written there would
++// last until the following morning and then quietly undo itself. Stamps live
++// here and are folded onto the roster WHEN IT IS READ, which is exactly how
++// merges already survive a reconcile.
++//
++// THE REASON IS CHECKED HERE, NOT ONLY IN THE BROWSER. The list is the point of
++// the feature; a route that took any string would make the list a suggestion.
++//
++// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
++
++import { requireAuth } from "../lib/session.js";
++import { permsFor } from "../lib/users.js";
++import { getArchiveReasons, getClientArchives, setClientArchive } from "../lib/backbone/archive-store.js";
++import { archiveRecord, restoreRecord } from "../lib/backbone/archive.js";
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++// Archiving a customer hides them from every AM's roster at once, so it is not
++// a per-person view preference. Same gate as the reason list, and for the same
++// reason data_scope is not consulted.
++async function canArchive(sess) {
++  const perms = await permsFor(sess.username);
++  if (!perms) return false;
++  if (perms.superuser === true) return true;
++  return perms.role === "admin";
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    if (req.method === "GET") {
++      return res.status(200).json({
++        clients: await getClientArchives(),
++        canArchive: await canArchive(sess),
++      });
++    }
++
++    if (req.method === "POST") {
++      if (!(await canArchive(sess))) {
++        return res.status(403).json({
++          error: "Archiving a client is admin only: it takes them off the roster for the whole team.",
++        });
++      }
++
++      const body = parseBody(req);
++      const id = String(body.customer_id == null ? "" : body.customer_id).trim();
++      if (!id) return res.status(400).json({ error: "A customer_id is required." });
++
++      if (body.restore === true) {
++        const existing = (await getClientArchives())[id];
++        if (!existing) {
++          // Already back on the roster. Saying so beats a 404 that reads like
++          // a broken button on a screen that just refreshed.
++          return res.status(200).json({ ok: true, restored: false, note: "That client was not archived." });
++        }
++        // restoreRecord is called for its history entry; the stamp itself is
++        // removed from the map rather than stored as a cleared object, so a
++        // restored client leaves no row behind in the archive.
++        const trail = restoreRecord(existing, { by: sess.username });
++        await setClientArchive(id, null);
++        return res.status(200).json({ ok: true, restored: true, history: trail.archive_history });
++      }
++
++      const reasons = await getArchiveReasons();
++      let stamp;
++      try {
++        // Only the stamp fields are stored, never a copy of the customer. A
++        // stored copy would be a second, staler roster the moment Printavo
++        // changed anything about them.
++        const prior = (await getClientArchives())[id] || {};
++        stamp = archiveRecord(prior, {
++          reason: body.reason,
++          reasons,
++          by: sess.username,
++          note: body.note,
++        });
++      } catch (e) {
++        return res.status(400).json({ error: e.message, reasons });
++      }
++
++      await setClientArchive(id, stamp);
++      return res.status(200).json({ ok: true, customer_id: id, stamp });
++    }
++
++    res.setHeader("Allow", "GET, POST");
++    return res.status(405).json({ error: "Method not allowed" });
++  } catch (e) {
++    console.error("archived-clients error:", e);
++    return res.status(500).json({ error: e.message });
++  }
++}
+diff --git a/api/leads-save.js b/api/leads-save.js
+index 41afcfe..52075ee 100644
+--- a/api/leads-save.js
++++ b/api/leads-save.js
+@@ -7,6 +7,7 @@
+ 
+ import { requireAuth } from "../lib/session.js";
+ import { KEYS, kvSet, isConfigured } from "../lib/backbone-store.js";
++import { assignLeadNumbers, isArchived } from "../lib/backbone/archive.js";
+ 
+ export default async function handler(req, res) {
+   res.setHeader("Cache-Control", "no-store");
+@@ -33,10 +34,39 @@ export default async function handler(req, res) {
+     return res.status(400).json({ error: "Expected { leads: [...] }" });
+   }
+ 
++  // AN ARCHIVED LEAD MUST SAY WHY. Checked here and not only on the screen,
++  // because the screen is one of several ways a lead can reach this route and
++  // a blank reason is the exact outcome the fixed list exists to prevent.
++  //
++  // Membership of the CURRENT list is deliberately not re-checked. A reason
++  // retired from the list months after the fact would otherwise make every
++  // later save of that lead fail, which would turn a settings edit into an
++  // outage. The list is enforced at the moment of archiving; from then on the
++  // record simply has to carry a reason.
++  const unexplained = leads.filter((l) => isArchived(l) && !String(l.archive_reason || "").trim());
++  if (unexplained.length) {
++    return res.status(400).json({
++      error: `${unexplained.length} archived lead(s) have no reason. Archiving requires one.`,
++    });
++  }
++
++  // NUMBERS ARE ISSUED HERE, NEVER IN THE BROWSER. Two people with the pipeline
++  // open would each compute the same "next" number and the second save would
++  // quietly take the first one's. The server sees the whole list at once.
++  const numbered = assignLeadNumbers(leads);
++
+   try {
+     // kvSet throws on a non-2xx, so a failed write cannot be reported as success.
+-    await kvSet(KEYS.leads, { leads, savedAt: new Date().toISOString() });
+-    return res.status(200).json({ ok: true, count: leads.length });
++    await kvSet(KEYS.leads, { leads: numbered.leads, savedAt: new Date().toISOString() });
++    // The count, not the list. The first save after this ships numbers every
++    // lead in the pipeline at once, and echoing a few thousand records back
++    // just to deliver a field each would be a needlessly large response. The
++    // browser reloads instead when `numbered` is not zero.
++    return res.status(200).json({
++      ok: true,
++      count: numbered.leads.length,
++      numbered: numbered.assigned,
++    });
+   } catch (e) {
+     console.error("leads-save error:", e);
+     return res.status(500).json({ error: e.message });
+diff --git a/apps/backbone/main.js b/apps/backbone/main.js
+index 9081994..27649aa 100644
+--- a/apps/backbone/main.js
++++ b/apps/backbone/main.js
+@@ -1,3 +1,4 @@
++// PUT IN: apps/backbone/main.js
+ /**
+  * BackBone — application code.
+  *
+@@ -40,6 +41,12 @@ import { ENDPOINTS } from '../../js/api.js';
+ // The checking sheet is built by the same module that does the scoring, so the
+ // spreadsheet and the screen can never describe a pair differently.
+ import { buildSuggestionsCsv } from '../../lib/backbone-merge.js';
++// Archiving. The SAME module the routes import, so the screen and the server
++// cannot disagree about what counts as archived or which reasons are allowed.
++import {
++  DEFAULT_ARCHIVE_REASONS, DISQUALIFIED_REASON, resolveReason,
++  isArchived, archiveRecord, restoreRecord,
++} from '../../lib/backbone/archive.js';
+ 
+ export async function start(ctx) {
+   const root = ctx.root;
+@@ -4044,7 +4051,10 @@ export async function start(ctx) {
+   }
+ 
+   function getRows() {
+-    let rows = state.synced.map(function(c) {
++    // ARCHIVED CLIENTS ARE OFF THE ROSTER. The stamp is ours, held separately
++    // and folded in on read, because anything written onto a synced row is
++    // erased by the next Printavo reconcile.
++    let rows = state.synced.filter(function(c) { return !isClientArchived(c.customer_id); }).map(function(c) {
+       const rEnrich = state.enrichment[c.customer_id] || {};
+       const industry = rEnrich.industry || "";
+       const explicitAM = rEnrich.account_manager || "";
+@@ -4078,8 +4088,11 @@ export async function start(ctx) {
+ 
+   function render() {
+     if (!$id("kpiTotal")) return;
+-    setText("kpiTotal", state.synced.length);
+-    setText("kpiEnriched", state.synced.filter(hasEnrichment).length);
++    // Counting archived customers here while the table below hides them is how
++    // two numbers on one screen end up disagreeing and nobody trusts either.
++    const activeSynced = state.synced.filter(function(c) { return !isClientArchived(c.customer_id); });
++    setText("kpiTotal", activeSynced.length);
++    setText("kpiEnriched", activeSynced.filter(hasEnrichment).length);
+     setText("lastUpdated", state.lastSynced
+       ? "Last refresh: " + new Date(state.lastSynced).toLocaleString()
+       : "");
+@@ -5744,7 +5757,23 @@ export async function start(ctx) {
+     const enrichment = state.enrichment[customerId] || {};
+ 
+     $id("detailTitle").textContent = rec.company_name;
++
++    // Archiving a client hides them from every AM at once, so it is admin only
++    // and the button simply is not offered otherwise.
++    const cArchived = isClientArchived(customerId);
++    const cArcBtn = $id("archiveClientBtn");
++    const cResBtn = $id("restoreClientBtn");
++    if (cArcBtn) cArcBtn.style.display = (canArchiveClients && !cArchived) ? "" : "none";
++    if (cResBtn) cResBtn.style.display = (canArchiveClients && cArchived) ? "" : "none";
++
+     $id("syncedGrid").innerHTML =
++      (cArchived
++        ? '<div class="archive-banner" style="grid-column:1/-1"><b>Archived</b> \u00b7 ' +
++          '<span class="archive-reason-pill">' +
++          escapeHtml((clientArchiveStamp(customerId) || {}).archive_reason || "no reason recorded") +
++          '</span><div class="archive-note" style="margin-top:6px">Hidden from the roster. ' +
++          'Their Printavo history is untouched.</div></div>'
++        : "") +
+       '<div><span class="field-lbl">Customer ID</span>' + rec.customer_id + '</div>' +
+       '<div><span class="field-lbl">Total revenue</span>' + fmtMoney(rec.total_revenue) + '</div>' +
+       '<div><span class="field-lbl">Invoice count</span>' + rec.invoice_count + '</div>' +
+@@ -6939,6 +6968,43 @@ export async function start(ctx) {
+     populateLeadIndustryDropdown();
+     populateMarketingInitiativeDropdown();
+     renderLeadsPage();
++    backfillLeadNumbers();
++  }
++
++  /**
++   * The first load after this ships finds every lead unnumbered. One save hands
++   * the whole pipeline its numbers, server side, and we reload to pick them up.
++   *
++   * Numbers are NOT computed here. Two people with the pipeline open would each
++   * work out the same "next" number and the second save would take the first
++   * one's. The server sees the whole list at once, so it is the only place that
++   * can issue them safely.
++   */
++  let leadNumberBackfillDone = false;
++  async function backfillLeadNumbers() {
++    if (leadNumberBackfillDone) return;
++    if (!state_leads.length) return;
++    if (state_leads.every(function(l) { return l.lead_no; })) {
++      leadNumberBackfillDone = true;
++      return;
++    }
++    leadNumberBackfillDone = true;   // one attempt, not a loop on a failing save
++    try {
++      const d = await saveLeads();
++      if (d && d.numbered) {
++        const again = await api.get(ENDPOINTS.bbLeadsData);
++        if (again && Array.isArray(again.leads) && again.leads.length) {
++          state_leads = again.leads;
++          state_leads.forEach(function(l) { l.status = normalizeLeadStatus(l.status); });
++          renderLeadsPage();
++          renderArchivePage();
++        }
++      }
++    } catch (e) {
++      // Nothing is broken if this does not run: leads just show a dash in the
++      // Lead # column until the next save. Not worth an alert.
++      console.warn("[backbone] lead number backfill did not complete:", e && e.message);
++    }
+   }
+ 
+   async function saveLeads() {
+@@ -7173,6 +7239,10 @@ export async function start(ctx) {
+   }
+ 
+   const LEADS_COLUMNS = [
++    // S-0002. lead_id is random and unreadable out loud; lead_no is the handle
++    // people actually use in a hand-off or on the phone. Sorted as a string,
++    // which is why it is zero padded.
++    { key: "lead_no", label: "Lead #", numeric: false },
+     { key: "company_name", label: "Company", numeric: false },
+     { key: "email", label: "Contact", numeric: true },
+     { key: "source_type", label: "Source", numeric: false },
+@@ -7187,7 +7257,11 @@ export async function start(ctx) {
+   // ignoreStage=true is used by the funnel itself, so its counts reflect the search box
+   // but never collapse to only the stage you're currently standing in.
+   function getLeadsRows(ignoreStage) {
+-    let rows = state_leads.map(function(l) {
++    // ARCHIVED LEADS ARE NOT ON THE WORKING LIST. This one filter is what makes
++    // archiving and disqualifying mean anything: a disqualified lead that stays
++    // here is a lead every AM has to decide about again every week. They are all
++    // still on the Archived screen, and restoring puts one straight back.
++    let rows = state_leads.filter(function(l) { return !isArchived(l); }).map(function(l) {
+       const q = l.qualification;
+       const score = q ? q.qualification_scoring.total_score : null;
+       const tier = q ? q.qualification_scoring.qualification_tier : "";
+@@ -7229,6 +7303,7 @@ export async function start(ctx) {
+       rows = rows.filter(function(r) { return (r.am_sort || "").toLowerCase() === me; });
+     }
+     const colMap = {
++      lead_no: "lead_no",
+       company_name: "company_name", email: "email_sort", source_type: "source_type", status: "status",
+       score: "score_sort", tier: "tier_sort", am: "am_sort", followup: "followup_sort", created: "created_sort"
+     };
+@@ -8075,6 +8150,10 @@ export async function start(ctx) {
+     if (delCnt) delCnt.textContent = n;
+     const delBtn = $id("bulkDeleteBtn");
+     if (delBtn) delBtn.disabled = n === 0;
++    const arcCnt = $id("bulkArchiveCount");
++    if (arcCnt) arcCnt.textContent = n;
++    const arcBtn = $id("bulkArchiveBtn");
++    if (arcBtn) arcBtn.disabled = n === 0;
+   }
+ 
+   // --- AM Leaderboard ----------------------------------------------------------
+@@ -8322,6 +8401,12 @@ export async function start(ctx) {
+     }, 0) || 1;
+     const poolTotal = pool.length || 1;
+ 
++    // ARCHIVED IS COUNTED BESIDE THE FUNNEL, NOT INSIDE IT. Every percentage
++    // here is a share of the live pipeline. Folding a growing archive into the
++    // denominator would make each stage's share shrink every time somebody
++    // tidied up, which reads as the pipeline going backwards when it has not.
++    const archivedCount = state_leads.filter(isArchived).length;
++
+     el.innerHTML = FUNNEL_STAGES.map(function(s, i) {
+       const list = buckets[s.name];
+       const n = list.length;
+@@ -8354,7 +8439,27 @@ export async function start(ctx) {
+           '<div class="fnl-bar"><div class="fnl-fill" style="width:' + fill + '%"></div></div>' +
+           '<div class="fnl-sub" title="' + String(sub).replace(/"/g, "&quot;") + '">' + sub + '</div>' +
+         '</button>' + chev;
+-    }).join("");
++    }).join("") +
++      // Not a funnel stage and not clickable to filter: it opens the Archived
++      // screen, because these leads are not on this list at all.
++      (archivedCount
++        ? '<div class="funnel-chev">\u276F</div>' +
++          '<button type="button" class="funnel-stage is-empty" id="funnelArchived" style="--fnl:var(--muted)"' +
++          ' title="Leads taken off the working list. Opens the Archived screen.">' +
++            '<div class="fnl-top"><span class="fnl-name">Archived</span></div>' +
++            '<div class="fnl-count">' + archivedCount + '</div>' +
++            '<div class="fnl-sub">Off the working list</div>' +
++          '</button>'
++        : "");
++
++    const archBtn = $id("funnelArchived");
++    if (archBtn) archBtn.addEventListener("click", function() {
++      // ctx.go is the shell's in-app view change; it keeps the rail and the URL
++      // in step. Falling back to showView alone would leave the rail highlighting
++      // Leads while the Archived page was on screen.
++      if (typeof ctx.go === "function") ctx.go("archive");
++      else showView("archive");
++    });
+ 
+     el.querySelectorAll(".funnel-stage").forEach(function(btn) {
+       btn.addEventListener("click", function() { setLeadsStageFilter(btn.dataset.stage); });
+@@ -8441,6 +8546,9 @@ export async function start(ctx) {
+         ? '<button id="bulkDeleteBtn" class="btn btn-danger btn-sm"' + disabled + ' title="Admin cleanup only — leads normally exit as Reach Back Out, Won, or Lost">' +
+           'Delete (<span id="bulkDeleteCount">0</span>)</button>'
+         : '') +
++      '<button id="bulkArchiveBtn" class="btn btn-gray btn-sm"' + disabled +
++        ' title="Take the selected leads off the working list. Not a delete: each keeps its stage and can be restored.">' +
++        'Archive (<span id="bulkArchiveCount">0</span>)</button>' +
+       '<button id="emailSelectedBtn" class="btn btn-green" disabled>' +
+         'Email selected to AM (<span id="selectedCount">0</span>)</button>' +
+       '<button id="copyDraftBtn" class="btn btn-gray" title="Use this if no mail client opened">' +
+@@ -8456,6 +8564,7 @@ export async function start(ctx) {
+       const checked = selectedLeadIds.has(l.lead_id) ? " checked" : "";
+       html += '<tr class="row" data-lead-id="' + l.lead_id + '">' +
+         '<td style="text-align:center"><input type="checkbox" class="lead-select" data-lead-id="' + l.lead_id + '"' + checked + '/></td>' +
++        '<td><span class="lead-no">' + (l.lead_no || "\u2014") + '</span></td>' +
+         '<td class="company-cell">' + l.company_name + '</td>' +
+         '<td>' + leadContactTag(d.contact) + '</td>' +
+         '<td>' + (l.source_type || "—") + '</td>' +
+@@ -8516,6 +8625,11 @@ export async function start(ctx) {
+     if (delBtn) delBtn.addEventListener("click", handleBulkDeleteLeads);
+     const delCount = $id("bulkDeleteCount");
+     if (delCount) delCount.textContent = selectedLeadIds.size;
++
++    const arcBtn = $id("bulkArchiveBtn");
++    if (arcBtn) arcBtn.addEventListener("click", openArchiveSelectedModal);
++    const arcCount = $id("bulkArchiveCount");
++    if (arcCount) arcCount.textContent = selectedLeadIds.size;
+   }
+ 
+   // Delete every checked lead in one save. Rolls back cleanly if the save fails.
+@@ -8791,8 +8905,24 @@ export async function start(ctx) {
+     resetDeleteLeadBtn();
+     const delBtn = $id("deleteLeadBtn");
+     if (delBtn) delBtn.style.display = CAN_DELETE_LEADS ? "" : "none";
+-    $id("leadDetailTitle").textContent = lead.company_name;
++    $id("leadDetailTitle").textContent =
++      (lead.lead_no ? lead.lead_no + "  " : "") + lead.company_name;
+     $id("leadStatusSelect").value = lead.status;
++
++    // An archived lead must never read as a live one. Archive and Restore swap
++    // rather than sitting side by side, so there is only ever one right button.
++    const archived = isArchived(lead);
++    const arcBtn = $id("archiveLeadBtn");
++    const resBtn = $id("restoreLeadBtn");
++    if (arcBtn) arcBtn.style.display = archived ? "none" : "";
++    if (resBtn) resBtn.style.display = archived ? "" : "none";
++    // Changing the stage of an archived lead would silently edit a record that
++    // is not on any working list. Restore first.
++    const stSel = $id("leadStatusSelect");
++    if (stSel) {
++      stSel.disabled = archived;
++      stSel.title = archived ? "Restore the lead before changing its stage." : "";
++    }
+     try {
+       renderLeadDetailBody(lead);
+     } catch (err) {
+@@ -9065,13 +9195,30 @@ export async function start(ctx) {
+     return out;
+   }
+ 
++  // Shown on an archived lead so the panel can never be mistaken for a live
++  // one. It says the reason, who and when, because "why is this gone" is the
++  // question the fixed list exists to answer.
++  function leadArchiveBanner(lead) {
++    if (!isArchived(lead)) return "";
++    return '<div class="archive-banner">' +
++      '<b>Archived</b> \u00b7 <span class="archive-reason-pill">' +
++        escapeHtml(lead.archive_reason || "no reason recorded") + '</span>' +
++      '<div class="archive-note" style="margin-top:6px">' +
++        'By ' + escapeHtml(lead.archived_by || "unknown") +
++        ' on ' + fmtDate(String(lead.archived_at || "").slice(0, 10)) +
++        (lead.archive_note ? ' \u00b7 ' + escapeHtml(lead.archive_note) : "") +
++        '<br/>Still standing at <b>' + escapeHtml(lead.status) + '</b>. ' +
++        'Restore puts it back exactly there.' +
++      '</div></div>';
++  }
++
+   function renderLeadDetailBody(lead) {
+     const body = $id("leadDetailBody");
+     const q = lead.qualification;
+     const intake = buildIntakeEditForm(lead);
+ 
+     if (!q) {
+-      body.innerHTML = leadContactBanner(lead) + intake + '<div class="empty-state">Not qualified yet. Click "Run / re-run AI qualification" below — it researches the company via web search, typically takes 15-30 seconds.</div>';
++      body.innerHTML = leadArchiveBanner(lead) + leadContactBanner(lead) + intake + '<div class="empty-state">Not qualified yet. Click "Run / re-run AI qualification" below — it researches the company via web search, typically takes 15-30 seconds.</div>';
+       $id("saveLeadIntakeBtn").addEventListener("click", handleSaveLeadIntake);
+       return;
+     }
+@@ -9211,7 +9358,7 @@ export async function start(ctx) {
+       v2DetailSections(q) +
+       '</details>';
+ 
+-    body.innerHTML = leadContactBanner(lead) + intake + rundown + nextSteps + contacts + details;
++    body.innerHTML = leadArchiveBanner(lead) + leadContactBanner(lead) + intake + rundown + nextSteps + contacts + details;
+     $id("saveLeadIntakeBtn").addEventListener("click", handleSaveLeadIntake);
+   }
+ 
+@@ -9241,9 +9388,21 @@ export async function start(ctx) {
+       const noContact = backfillLeadContactFromQual(lead);
+       if (lead.status === "New") setLeadStatus(lead, "Qualified");
+       $id("leadStatusSelect").value = lead.status;
++      // A Disqualified score takes the lead off the working list by itself.
++      // Told, never silent: an archive nobody was told about looks like a lead
++      // that vanished.
++      const autoArchived = autoArchiveDisqualified([lead]);
+       await saveLeads();
+       renderLeadDetailBody(lead);
+       renderLeadsPage();
++      renderArchivePage();
++      if (autoArchived) {
++        alert("The research came back Disqualified, so this lead has been archived and taken " +
++          "off the working list. It is on the Archived screen and can be restored from there.");
++        $id("leadDetailOverlay").classList.remove("open");
++        activeLeadId = null;
++        return;
++      }
+       if (noContact) warnNoContactAfterQual(lead);
+     } catch (e) {
+       alert("Qualification request failed: " + e.message);
+@@ -9291,10 +9450,19 @@ export async function start(ctx) {
+     const noContact = backfillLeadContactFromQual(lead);
+     if (lead.status === "New") setLeadStatus(lead, "Qualified");
+     $id("leadStatusSelect").value = lead.status;
++    const autoArchived = autoArchiveDisqualified([lead]);
+     await saveLeads();
+     box.value = "";
+     renderLeadDetailBody(lead);
+     renderLeadsPage();
++    renderArchivePage();
++    if (autoArchived) {
++      alert("That qualification is Disqualified, so this lead has been archived and taken off " +
++        "the working list. It is on the Archived screen and can be restored from there.");
++      $id("leadDetailOverlay").classList.remove("open");
++      activeLeadId = null;
++      return;
++    }
+     if (noContact) warnNoContactAfterQual(lead);
+   }
+ 
+@@ -9485,6 +9653,9 @@ export async function start(ctx) {
+ 
+     btn.disabled = true;
+     const created = [], skippedRoster = [], skippedLead = [], noName = [];
++    // The records themselves, not just their names: the disqualified check
++    // below needs the qualification that came in with each one.
++    const createdRecs = [];
+     try {
+       for (const q of list) {
+         if (!q || typeof q !== "object") { noName.push("(not an object)"); continue; }
+@@ -9505,14 +9676,22 @@ export async function start(ctx) {
+           return l.company_name && normalizeCo(l.company_name) === key;
+         });
+         if (dupLead) { skippedLead.push(name); continue; }
+-        state_leads.push(leadRecordFromQual(q, name));
++        const rec = leadRecordFromQual(q, name);
++        state_leads.push(rec);
++        createdRecs.push(rec);
+         created.push(name);
+       }
++      // A batch usually carries a few already-disqualified leads. They are
++      // imported and then archived rather than dropped, so the record of having
++      // looked at that company still exists and nobody researches it twice.
++      const autoArchived = autoArchiveDisqualified(createdRecs);
+       if (created.length) await saveLeads();
+       box.value = "";
+       renderLeadsPage();
++      renderArchivePage();
+ 
+       const bits = ["Imported " + created.length + " of " + list.length + " leads from the batch."];
++      if (autoArchived) bits.push(autoArchived + " came back Disqualified and went straight to Archived, so they are not on the working list.");
+       if (skippedLead.length) bits.push("Already in the pipeline, skipped: " + skippedLead.join(", ") + ".");
+       if (skippedRoster.length) bits.push("Already Roster customers, skipped: " + skippedRoster.join(", ") + ".");
+       if (noName.length) bits.push("No usable company name, skipped: " + noName.join(", ") + ".");
+@@ -10495,6 +10674,458 @@ export async function start(ctx) {
+   // The RAIL drives navigation now, so there are no .nav-btn elements to wire.
+   // This is what the shell calls on every route change; it owns only what each
+   // page does on entry, which the old click handler did too.
++  /* ------------------------------------------------------------------ *
++   * ARCHIVING (leads and clients) + the Archived Manager
++   *
++   * Archive is a FLAG BESIDE the status, never a status of its own. The lead
++   * keeps the stage it was standing in and its whole history, so a restore
++   * puts it back exactly there instead of guessing. It also has to answer for
++   * CLIENTS, which have no lead status at all, and one mechanism covering both
++   * is why there is one Archived screen rather than two that drift apart.
++   *
++   * The reason list is a setting, fetched once. Nothing here invents a reason:
++   * resolveReason() in lib/backbone/archive.js is the only judge, and the
++   * server asks it again, because anything sent to a browser can be edited in
++   * that browser.
++   * ------------------------------------------------------------------ */
++
++  let archiveReasons = DEFAULT_ARCHIVE_REASONS.slice();
++  let canEditArchiveReasons = false;
++  // Client stamps, keyed by customer id. Held separately from state.synced
++  // because the roster is rebuilt from Printavo and must not carry our flags.
++  let clientArchives = {};
++  let canArchiveClients = false;
++  let archiveTab = "leads";
++  let archiveSearchQuery = "";
++  let archiveReasonFilter = "";
++
++  async function loadArchiveReasons() {
++    try {
++      const d = await api.get(ENDPOINTS.bbArchiveReasons);
++      if (d && Array.isArray(d.reasons) && d.reasons.length) archiveReasons = d.reasons;
++      canEditArchiveReasons = !!(d && d.canEdit);
++    } catch (e) {
++      // The seeded defaults are already in hand. A failed fetch must not leave
++      // the dropdown empty, which would read as a broken screen and block
++      // archiving entirely.
++      console.warn("[backbone] archive reasons did not load; using defaults:", e && e.message);
++    }
++    paintArchiveReasonControls();
++  }
++
++  async function loadClientArchives() {
++    try {
++      const d = await api.get(ENDPOINTS.bbArchivedClients);
++      // Same rule as the leads list: only an explicit answer may empty this.
++      if (d && d.clients && typeof d.clients === "object") clientArchives = d.clients;
++      canArchiveClients = !!(d && d.canArchive);
++    } catch (e) {
++      console.warn("[backbone] client archives did not load:", e && e.message);
++    }
++  }
++
++  function isClientArchived(customerId) {
++    return !!(clientArchives[String(customerId)] && clientArchives[String(customerId)].archived_at);
++  }
++
++  function clientArchiveStamp(customerId) {
++    return clientArchives[String(customerId)] || null;
++  }
++
++  /* ---- the archive modal ------------------------------------------------ */
++
++  // What the modal is currently pointed at. Cleared on close so a stale target
++  // can never be archived by a second click.
++  let archiveTarget = null;
++
++  function paintArchiveReasonControls() {
++    const sel = $id("archiveReasonSelect");
++    if (sel) {
++      sel.innerHTML = '<option value="">Choose a reason\u2026</option>' +
++        archiveReasons.map(function(r) {
++          return '<option value="' + escapeHtml(r) + '">' + escapeHtml(r) + '</option>';
++        }).join("");
++    }
++    // The Archived Manager's filter offers every reason on the list PLUS any
++    // reason still sitting on a record but since removed from the list, so a
++    // retired reason does not become unfilterable.
++    const filt = $id("archiveReasonFilter");
++    if (filt) {
++      const used = {};
++      state_leads.forEach(function(l) { if (isArchived(l) && l.archive_reason) used[l.archive_reason] = true; });
++      Object.keys(clientArchives).forEach(function(k) {
++        const r = clientArchives[k] && clientArchives[k].archive_reason;
++        if (r) used[r] = true;
++      });
++      archiveReasons.forEach(function(r) { delete used[r]; });
++      const extras = Object.keys(used).sort();
++      const keep = filt.value;
++      filt.innerHTML = '<option value="">All reasons</option>' +
++        archiveReasons.concat(extras).map(function(r) {
++          return '<option value="' + escapeHtml(r) + '">' + escapeHtml(r) + '</option>';
++        }).join("");
++      filt.value = keep;
++    }
++    const box = $id("archiveReasonsBox");
++    if (box && !box.value) box.value = archiveReasons.join("\n");
++    const saveBtn = $id("archiveReasonsSaveBtn");
++    if (saveBtn) {
++      saveBtn.disabled = !canEditArchiveReasons;
++      saveBtn.title = canEditArchiveReasons
++        ? ""
++        : "Admin only: this list changes the choices everyone gets.";
++    }
++  }
++
++  /**
++   * Open the reason modal. `target` says what is being archived and what to do
++   * once a reason is chosen, so one modal serves leads, bulk selections and
++   * clients rather than three near-identical copies.
++   */
++  function openArchiveModal(target) {
++    archiveTarget = target;
++    $id("archiveModalTitle").textContent = target.title || "Archive";
++    $id("archiveModalWhat").innerHTML = target.what || "";
++    $id("archiveModalErr").textContent = "";
++    $id("archiveNoteInput").value = "";
++    paintArchiveReasonControls();
++    const sel = $id("archiveReasonSelect");
++    if (sel) sel.value = target.presetReason && archiveReasons.indexOf(target.presetReason) !== -1
++      ? target.presetReason : "";
++    $id("archiveOverlay").classList.add("open");
++  }
++
++  function closeArchiveModal() {
++    $id("archiveOverlay").classList.remove("open");
++    archiveTarget = null;
++  }
++
++  async function handleArchiveConfirm() {
++    if (!archiveTarget) return;
++    const reason = $id("archiveReasonSelect").value;
++    const note = $id("archiveNoteInput").value;
++    const errEl = $id("archiveModalErr");
++    if (!resolveReason(reason, archiveReasons)) {
++      // The whole point of the fixed list. A record archived with no reason is
++      // a record nobody can explain a month later.
++      errEl.textContent = "Pick a reason. Archiving needs one.";
++      return;
++    }
++    const btn = $id("archiveConfirmBtn");
++    btn.disabled = true;
++    const label = btn.textContent;
++    btn.textContent = "Archiving\u2026";
++    try {
++      await archiveTarget.run(reason, note);
++      closeArchiveModal();
++    } catch (e) {
++      errEl.textContent = (e && e.message) ? e.message : "That did not save.";
++    } finally {
++      btn.disabled = false;
++      btn.textContent = label;
++    }
++  }
++
++  /* ---- archiving leads --------------------------------------------------- */
++
++  const who = function() {
++    return (currentUser && (currentUser.name || currentUser.username)) || "unknown";
++  };
++
++  async function archiveLeads(leadIds, reason, note) {
++    const ids = {};
++    leadIds.forEach(function(id) { ids[id] = true; });
++    let touched = 0;
++    for (let i = 0; i < state_leads.length; i++) {
++      if (!ids[state_leads[i].lead_id] || isArchived(state_leads[i])) continue;
++      state_leads[i] = archiveRecord(state_leads[i], {
++        reason: reason, reasons: archiveReasons, by: who(), note: note,
++      });
++      touched++;
++    }
++    if (!touched) return 0;
++    await saveLeads();
++    selectedLeadIds.clear();
++    renderLeadsPage();
++    renderArchivePage();
++    return touched;
++  }
++
++  async function restoreLead(leadId) {
++    const i = state_leads.findIndex(function(l) { return l.lead_id === leadId; });
++    if (i === -1) return;
++    state_leads[i] = restoreRecord(state_leads[i], { by: who() });
++    await saveLeads();
++    renderLeadsPage();
++    renderArchivePage();
++  }
++
++  function openArchiveLeadModal(leadId) {
++    const lead = state_leads.find(function(l) { return l.lead_id === leadId; });
++    if (!lead) return;
++    openArchiveModal({
++      title: "Archive lead",
++      what: "<b>" + escapeHtml(lead.company_name) + "</b>" +
++        (lead.lead_no ? ' <span class="lead-no">' + escapeHtml(lead.lead_no) + "</span>" : "") +
++        " comes off the working list. It keeps the <b>" + escapeHtml(lead.status) +
++        "</b> stage it is standing in, so restoring puts it back exactly there.",
++      run: async function(reason, note) {
++        await archiveLeads([leadId], reason, note);
++        $id("leadDetailOverlay").classList.remove("open");
++        activeLeadId = null;
++      },
++    });
++  }
++
++  function openArchiveSelectedModal() {
++    const ids = Array.from(selectedLeadIds);
++    if (!ids.length) return;
++    openArchiveModal({
++      title: "Archive " + ids.length + " lead" + (ids.length === 1 ? "" : "s"),
++      what: "All " + ids.length + " get the same reason. Each keeps its own stage, " +
++        "so restoring any of them puts it back where it was.",
++      run: function(reason, note) { return archiveLeads(ids, reason, note); },
++    });
++  }
++
++  /* ---- disqualifying ------------------------------------------------------ */
++
++  // S-0003. Disqualifying is archiving with the reason already chosen: a
++  // disqualified lead that stays on the working list is a lead every AM has to
++  // decide about again every week.
++  function openDisqualifyModal(leadId) {
++    const lead = state_leads.find(function(l) { return l.lead_id === leadId; });
++    if (!lead) return;
++    openArchiveModal({
++      title: "Disqualify lead",
++      what: "<b>" + escapeHtml(lead.company_name) + "</b> comes off the working list as " +
++        "disqualified. It is not deleted, and it can be restored from Archived.",
++      presetReason: DISQUALIFIED_REASON,
++      run: async function(reason, note) {
++        await archiveLeads([leadId], reason, note);
++        $id("leadDetailOverlay").classList.remove("open");
++        activeLeadId = null;
++      },
++    });
++  }
++
++  /**
++   * A research run can come back with a Disqualified tier on its own. When it
++   * does, the lead comes off the working list without anybody having to notice
++   * and act, which is the whole ask behind S-0003.
++   *
++   * It is REPORTED, never silent. An archive nobody was told about looks like a
++   * lead that vanished. Returns the count so the caller can say so on screen.
++   */
++  function autoArchiveDisqualified(leads) {
++    let n = 0;
++    (leads || []).forEach(function(lead) {
++      if (!lead || isArchived(lead)) return;
++      const tier = lead.qualification && lead.qualification.qualification_scoring &&
++        lead.qualification.qualification_scoring.qualification_tier;
++      if (!/^Disqualified/i.test(String(tier || ""))) return;
++      // Only if "Disqualified" is still on the list. If an admin removed it,
++      // the automatic path stops too rather than writing a reason the team has
++      // deliberately retired.
++      if (!resolveReason(DISQUALIFIED_REASON, archiveReasons)) return;
++      const i = state_leads.indexOf(lead);
++      const stamped = archiveRecord(lead, {
++        reason: DISQUALIFIED_REASON,
++        reasons: archiveReasons,
++        by: "AI research",
++        note: "Scored " + String(tier) + " by the research run.",
++      });
++      if (i !== -1) state_leads[i] = stamped;
++      else Object.assign(lead, stamped);
++      n++;
++    });
++    return n;
++  }
++
++  /* ---- archiving clients --------------------------------------------------- */
++
++  function openArchiveClientModal(customerId) {
++    const rec = state.synced.find(function(c) { return c.customer_id === customerId; });
++    if (!rec) return;
++    openArchiveModal({
++      title: "Archive client",
++      what: "<b>" + escapeHtml(rec.company_name) + "</b> comes off the roster for everyone. " +
++        "Their Printavo history is untouched, and nothing about the sync changes: this is a " +
++        "flag we keep on our side, so tomorrow's reconcile cannot undo it.",
++      run: async function(reason, note) {
++        const d = await api.post(ENDPOINTS.bbArchivedClients, {
++          customer_id: customerId, reason: reason, note: note,
++        });
++        if (d && d.stamp) clientArchives[String(customerId)] = d.stamp;
++        closeDetail();
++        render();
++        renderArchivePage();
++      },
++    });
++  }
++
++  async function restoreClient(customerId) {
++    await api.post(ENDPOINTS.bbArchivedClients, { customer_id: customerId, restore: true });
++    delete clientArchives[String(customerId)];
++    render();
++    renderArchivePage();
++  }
++
++  /* ---- the Archived Manager screen ---------------------------------------- */
++
++  function archiveRowsLeads() {
++    let rows = state_leads.filter(isArchived);
++    const q = archiveSearchQuery.trim().toLowerCase();
++    if (q) {
++      rows = rows.filter(function(l) {
++        return String(l.company_name || "").toLowerCase().indexOf(q) !== -1 ||
++          String(l.lead_no || "").toLowerCase().indexOf(q) !== -1 ||
++          String(l.archive_reason || "").toLowerCase().indexOf(q) !== -1 ||
++          String(l.archive_note || "").toLowerCase().indexOf(q) !== -1;
++      });
++    }
++    if (archiveReasonFilter) {
++      rows = rows.filter(function(l) { return l.archive_reason === archiveReasonFilter; });
++    }
++    // Most recently archived first: the thing you are looking for is nearly
++    // always the thing that just left.
++    return rows.sort(function(a, b) {
++      return new Date(b.archived_at || 0) - new Date(a.archived_at || 0);
++    });
++  }
++
++  function archiveRowsClients() {
++    let rows = Object.keys(clientArchives).map(function(id) {
++      const rec = state.synced.find(function(c) { return String(c.customer_id) === String(id); });
++      return Object.assign({}, clientArchives[id], {
++        customer_id: id,
++        // A stamp whose customer is no longer in the roster is shown rather
++        // than hidden. Silently dropping it would leave a record that cannot be
++        // restored and cannot be seen.
++        company_name: rec ? rec.company_name : "(not on the current roster)",
++        missing: !rec,
++      });
++    });
++    const q = archiveSearchQuery.trim().toLowerCase();
++    if (q) {
++      rows = rows.filter(function(r) {
++        return String(r.company_name || "").toLowerCase().indexOf(q) !== -1 ||
++          String(r.archive_reason || "").toLowerCase().indexOf(q) !== -1 ||
++          String(r.archive_note || "").toLowerCase().indexOf(q) !== -1;
++      });
++    }
++    if (archiveReasonFilter) {
++      rows = rows.filter(function(r) { return r.archive_reason === archiveReasonFilter; });
++    }
++    return rows.sort(function(a, b) {
++      return new Date(b.archived_at || 0) - new Date(a.archived_at || 0);
++    });
++  }
++
++  function renderArchivePage() {
++    const kpi = $id("archiveKpiGrid");
++    if (!kpi) return;
++    const leadCount = state_leads.filter(isArchived).length;
++    const clientCount = Object.keys(clientArchives).length;
++    kpi.innerHTML =
++      '<div class="kpi"><div class="kpi-lbl">Archived leads' +
++        infoI("Leads taken off the working list. Not deleted: each one keeps the stage it was standing in.") +
++        '</div><div class="kpi-val">' + leadCount + '</div></div>' +
++      '<div class="kpi"><div class="kpi-lbl">Archived clients' +
++        infoI("Customers hidden from the roster. Their Printavo history is untouched.") +
++        '</div><div class="kpi-val">' + clientCount + '</div></div>';
++
++    $all(".archive-tab").forEach(function(b) {
++      b.classList.toggle("active", b.getAttribute("data-archive-tab") === archiveTab);
++    });
++
++    const wrap = $id("archiveTableWrap");
++    if (!wrap) return;
++
++    if (archiveTab === "leads") {
++      const rows = archiveRowsLeads();
++      if (!rows.length) {
++        wrap.innerHTML = '<div class="empty-state">' +
++          (leadCount ? "No archived leads match this search." : "No leads have been archived.") +
++          '</div>';
++        return;
++      }
++      let html = '<table><thead><tr><th>Lead</th><th>Company</th><th>Stage when archived</th>' +
++        '<th>Reason</th><th>Archived</th><th>By</th><th></th></tr></thead><tbody>';
++      rows.forEach(function(l) {
++        html += '<tr class="row">' +
++          '<td><span class="lead-no">' + escapeHtml(l.lead_no || "\u2014") + '</span></td>' +
++          '<td class="company-cell">' + escapeHtml(l.company_name) + '</td>' +
++          '<td><span class="lead-status-pill ' + statusClass(l.status) + '">' + escapeHtml(l.status) + '</span></td>' +
++          '<td><span class="archive-reason-pill">' + escapeHtml(l.archive_reason || "\u2014") + '</span>' +
++            (l.archive_note ? '<div class="archive-note">' + escapeHtml(l.archive_note) + '</div>' : "") + '</td>' +
++          '<td>' + fmtDate(String(l.archived_at || "").slice(0, 10)) + '</td>' +
++          '<td>' + escapeHtml(l.archived_by || "\u2014") + '</td>' +
++          '<td style="text-align:right"><button class="btn btn-gray btn-sm" data-restore-lead="' +
++            escapeHtml(l.lead_id) + '">Restore</button></td>' +
++          '</tr>';
++      });
++      wrap.innerHTML = html + "</tbody></table>";
++      wrap.querySelectorAll("[data-restore-lead]").forEach(function(b) {
++        b.addEventListener("click", function() { restoreLead(b.getAttribute("data-restore-lead")); });
++      });
++      return;
++    }
++
++    const rows = archiveRowsClients();
++    if (!rows.length) {
++      wrap.innerHTML = '<div class="empty-state">' +
++        (clientCount ? "No archived clients match this search." : "No clients have been archived.") +
++        '</div>';
++      return;
++    }
++    let html = '<table><thead><tr><th>Company</th><th>Reason</th><th>Archived</th><th>By</th><th></th></tr></thead><tbody>';
++    rows.forEach(function(r) {
++      html += '<tr class="row">' +
++        '<td class="company-cell">' + escapeHtml(r.company_name) +
++          (r.missing ? ' <span class="lead-age-chip" title="This customer is no longer in the Printavo roster. Restoring will do nothing until they come back.">not on roster</span>' : "") + '</td>' +
++        '<td><span class="archive-reason-pill">' + escapeHtml(r.archive_reason || "\u2014") + '</span>' +
++          (r.archive_note ? '<div class="archive-note">' + escapeHtml(r.archive_note) + '</div>' : "") + '</td>' +
++        '<td>' + fmtDate(String(r.archived_at || "").slice(0, 10)) + '</td>' +
++        '<td>' + escapeHtml(r.archived_by || "\u2014") + '</td>' +
++        '<td style="text-align:right">' +
++          (canArchiveClients
++            ? '<button class="btn btn-gray btn-sm" data-restore-client="' + escapeHtml(r.customer_id) + '">Restore</button>'
++            : '<span style="color:var(--faint);font-size:12px">Admin only</span>') +
++        '</td>' +
++        '</tr>';
++    });
++    wrap.innerHTML = html + "</tbody></table>";
++    wrap.querySelectorAll("[data-restore-client]").forEach(function(b) {
++      b.addEventListener("click", function() { restoreClient(b.getAttribute("data-restore-client")); });
++    });
++  }
++
++  /* ---- the reason list editor in Settings --------------------------------- */
++
++  async function handleSaveArchiveReasons() {
++    const box = $id("archiveReasonsBox");
++    const status = $id("archiveReasonsStatus");
++    const err = $id("archiveReasonsErr");
++    err.textContent = "";
++    const lines = box.value.split("\n");
++    status.textContent = "Saving\u2026";
++    try {
++      const d = await api.post(ENDPOINTS.bbArchiveReasons, { reasons: lines });
++      if (d && Array.isArray(d.reasons)) {
++        archiveReasons = d.reasons;
++        box.value = archiveReasons.join("\n");
++      }
++      status.textContent = "Saved.";
++      paintArchiveReasonControls();
++    } catch (e) {
++      status.textContent = "";
++      err.innerHTML = '<div class="help" style="color:var(--danger)">' +
++        escapeHtml((e && e.message) || "That did not save.") + '</div>';
++    }
++    setTimeout(function() { status.textContent = ""; }, 3000);
++  }
++
+   function showView(view, param) {
+     $all(".page").forEach(function(p) { p.classList.remove("active"); });
+     var page = $id("page-" + view);
+@@ -10505,6 +11136,7 @@ export async function start(ctx) {
+     if (view === "inbox") renderInbox();
+     if (view === "leads") renderLeadsPage();
+     if (view === "scorecard") renderScorecard();
++    if (view === "archive") renderArchivePage();
+ 
+     // A route param is a deep link into one specific record — a Notification
+     // carrying a link to an inquiry, lead, or roster client opens straight
+@@ -10671,6 +11303,67 @@ export async function start(ctx) {
+   $id("leadStatusSelect").addEventListener("change", handleLeadStatusChange);
+   $id("promoteLeadBtn").addEventListener("click", handlePromoteToRoster);
+ 
++  (function wireArchive() {
++    // The modal. Cancel, the X and clicking the backdrop all do the same thing,
++    // because a half-open reason dialog is the sort of state people click past.
++    const close = function() { closeArchiveModal(); };
++    const x = $id("archiveModalClose");   if (x) x.addEventListener("click", close);
++    const c = $id("archiveCancelBtn");    if (c) c.addEventListener("click", close);
++    const ov = $id("archiveOverlay");
++    if (ov) ov.addEventListener("click", function(e) { if (e.target.id === "archiveOverlay") close(); });
++    const ok = $id("archiveConfirmBtn");  if (ok) ok.addEventListener("click", handleArchiveConfirm);
++
++    // Lead detail.
++    const la = $id("archiveLeadBtn");
++    if (la) la.addEventListener("click", function() { if (activeLeadId) openArchiveLeadModal(activeLeadId); });
++    const lr = $id("restoreLeadBtn");
++    if (lr) lr.addEventListener("click", async function() {
++      if (!activeLeadId) return;
++      const id = activeLeadId;
++      $id("leadDetailOverlay").classList.remove("open");
++      activeLeadId = null;
++      await restoreLead(id);
++    });
++
++    // Client detail.
++    const ca = $id("archiveClientBtn");
++    if (ca) ca.addEventListener("click", function() { if (activeCustomerId) openArchiveClientModal(activeCustomerId); });
++    const cr = $id("restoreClientBtn");
++    if (cr) cr.addEventListener("click", async function() {
++      if (!activeCustomerId) return;
++      const id = activeCustomerId;
++      closeDetail();
++      await restoreClient(id);
++    });
++
++    // The Archived Manager's own controls.
++    $all(".archive-tab").forEach(function(b) {
++      b.addEventListener("click", function() {
++        archiveTab = b.getAttribute("data-archive-tab");
++        renderArchivePage();
++      });
++    });
++    const asearch = $id("archiveSearch");
++    if (asearch) asearch.addEventListener("input", function(e) {
++      archiveSearchQuery = e.target.value;
++      renderArchivePage();
++    });
++    const afilt = $id("archiveReasonFilter");
++    if (afilt) afilt.addEventListener("change", function(e) {
++      archiveReasonFilter = e.target.value;
++      renderArchivePage();
++    });
++
++    // Settings.
++    const rsave = $id("archiveReasonsSaveBtn");
++    if (rsave) rsave.addEventListener("click", handleSaveArchiveReasons);
++
++    // Fetched once on mount, like reorder timing: the list changes a few times
++    // a year and every archive screen needs it to draw its dropdown.
++    loadArchiveReasons();
++    loadClientArchives().then(function() { render(); renderArchivePage(); });
++  })();
++
+   $id("handoffClose").addEventListener("click", closeHandoffModal);
+   $id("handoffOverlay").addEventListener("click", function(e) {
+     if (e.target.id === "handoffOverlay") closeHandoffModal();
+diff --git a/apps/backbone/styles.js b/apps/backbone/styles.js
+index 67594cc..89cfce1 100644
+--- a/apps/backbone/styles.js
++++ b/apps/backbone/styles.js
+@@ -1,3 +1,4 @@
++// PUT IN: apps/backbone/styles.js
+ /**
+  * BackBone — styles.
+  *
+@@ -693,4 +694,36 @@ body.read-only .btn-green,body.read-only .btn-red{display:none !important}
+ }
+ .merge-results div:last-child { border-bottom: 0; }
+ .merge-results div:hover { background: var(--accent-tint); }
++
++/* ---- Archived Manager -------------------------------------------------- */
++/* Colours come from tokens. Nothing here defines a hex value. */
++.archive-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
++.archive-tab {
++  padding: 7px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
++  background: var(--card); color: var(--muted); font-size: 13px; font-weight: 600;
++  cursor: pointer;
++}
++.archive-tab:hover { border-color: var(--accent); color: var(--accent); }
++.archive-tab.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
++
++/* The reason reads as a label, not as a warning: an archived record is a
++   tidy outcome, not an error. */
++.archive-reason-pill {
++  display: inline-flex; padding: 2px 9px; border-radius: 99px; font-size: 11px;
++  font-weight: 700; background: var(--accent-tint); color: var(--accent); white-space: nowrap;
++}
++.archive-note { color: var(--muted); font-size: 12px; }
++
++/* The lead number. Tabular figures so a column of them lines up. */
++.lead-no {
++  font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); white-space: nowrap;
++}
++
++/* Shown on a record that IS archived while you are looking at it, so the
++   detail panel never reads as a live lead when it is not one. */
++.archive-banner {
++  border: 1px solid var(--line); border-left: 3px solid var(--accent);
++  background: var(--accent-tint); border-radius: var(--radius-sm);
++  padding: 10px 12px; margin-bottom: 12px; font-size: 12.5px;
++}
+ `;
+diff --git a/apps/backbone/template.js b/apps/backbone/template.js
+index 73a4b2d..76049cb 100644
+--- a/apps/backbone/template.js
++++ b/apps/backbone/template.js
+@@ -1,3 +1,4 @@
++// PUT IN: apps/backbone/template.js
+ /**
+  * BackBone — markup.
+  *
+@@ -204,6 +205,37 @@ export default `
+     </div>
+   </div>
+ 
++  <!-- ARCHIVED MANAGER. One screen for both leads and clients, because "where
++       did that go" is the same question whichever kind of record it was, and
++       two near-identical screens would drift apart within a month. -->
++  <div id="page-archive" class="page">
++    <div class="kpi-grid" id="archiveKpiGrid"></div>
++
++    <div class="card">
++      <div class="card-hd">
++        <h3>Archived</h3>
++      </div>
++      <div class="card-bd">
++        <div class="help">
++          Records taken off the working lists, with the reason they were taken off
++          and who did it. Nothing here is deleted: restore puts a lead back at the
++          exact stage it was standing in, and puts a client back on the roster.
++        </div>
++        <div class="archive-tabs">
++          <button class="archive-tab active" data-archive-tab="leads">Leads</button>
++          <button class="archive-tab" data-archive-tab="clients">Clients</button>
++        </div>
++        <div class="toolbar">
++          <input class="search" id="archiveSearch" placeholder="Search company, reason or lead number"/>
++          <select class="field" id="archiveReasonFilter" style="width:auto">
++            <option value="">All reasons</option>
++          </select>
++        </div>
++        <div id="archiveTableWrap"></div>
++      </div>
++    </div>
++  </div>
++
+   <div id="page-scorecard" class="page">
+     <div class="kpi-grid" id="tierKpiGrid"></div>
+ 
+@@ -426,6 +458,26 @@ export default `
+         <span class="save-status" id="reorderStatus" style="margin-left:10px"></span>
+       </div>
+     </div>
++    <div class="card" style="margin-bottom:16px">
++      <div class="card-hd"><h3>Archive reasons</h3></div>
++      <div class="card-bd">
++        <div class="help">
++          The list of reasons offered when a lead or a client is archived. It is a
++          fixed list rather than a free text box so the reasons can be counted and
++          filtered later. One per line.
++          <br/><br/>
++          Editing this list changes what can be picked from now on. It does
++          <b>not</b> rewrite anything already archived: the reason is copied onto
++          the record when it happens, so removing a line here leaves the records
++          filed under it readable, it just stops the reason being chosen again.
++          Saving is limited to admins.
++        </div>
++        <div id="archiveReasonsErr"></div>
++        <textarea class="field" id="archiveReasonsBox" style="width:100%;min-height:150px"></textarea>
++        <button class="btn btn-green" id="archiveReasonsSaveBtn" style="margin-top:8px">Save reasons</button>
++        <span class="save-status" id="archiveReasonsStatus" style="margin-left:10px"></span>
++      </div>
++    </div>
+     <div class="card" style="margin-bottom:16px">
+       <div class="card-hd"><h3>Sync from Printavo</h3></div>
+       <div class="card-bd">
+@@ -532,6 +584,8 @@ export default `
+     </div>
+     <div class="modal-ft">
+       <button class="btn btn-green" id="saveEnrichBtn">Save</button>
++      <button class="btn btn-gray" id="archiveClientBtn">Archive client</button>
++      <button class="btn btn-gray" id="restoreClientBtn" style="display:none">Restore client</button>
+       <span class="save-status" id="saveStatus"></span>
+     </div>
+   </div>
+@@ -579,6 +633,30 @@ export default `
+   </div>
+ </div>
+ 
++<!-- The reason is a dropdown and not a text box on purpose. Free text answers
++     "why is this gone" with twelve spellings of the same four reasons, which
++     cannot be counted or filtered afterwards. -->
++<div class="modal-overlay" id="archiveOverlay">
++  <div class="modal" style="max-width:520px">
++    <div class="modal-hd">
++      <h3 id="archiveModalTitle">Archive</h3>
++      <button class="modal-close" id="archiveModalClose">&times;</button>
++    </div>
++    <div class="modal-bd">
++      <div class="help" id="archiveModalWhat"></div>
++      <label class="field-lbl">Reason *</label>
++      <select class="field" id="archiveReasonSelect"></select>
++      <label class="field-lbl" style="margin-top:12px">Note (optional)</label>
++      <input class="field" id="archiveNoteInput" placeholder="Anything worth knowing later"/>
++      <div id="archiveModalErr" style="color:var(--danger);font-size:12px;margin-top:10px"></div>
++    </div>
++    <div class="modal-ft">
++      <button class="btn btn-danger" id="archiveConfirmBtn">Archive</button>
++      <button class="btn btn-gray" id="archiveCancelBtn">Cancel</button>
++    </div>
++  </div>
++</div>
++
+ <div class="modal-overlay" id="leadDetailOverlay">
+   <div class="modal" style="max-width:640px">
+     <div class="modal-hd">
+@@ -606,6 +684,8 @@ export default `
+       </div>
+       <div style="display:flex;gap:8px;align-items:center">
+         <button class="btn btn-danger btn-sm" id="deleteLeadBtn">Delete lead</button>
++        <button class="btn btn-gray btn-sm" id="archiveLeadBtn">Archive</button>
++        <button class="btn btn-gray btn-sm" id="restoreLeadBtn" style="display:none">Restore</button>
+         <button class="btn btn-gray btn-sm" id="rerunQualBtn">Run / re-run AI qualification (API)</button>
+         <button class="btn btn-green btn-sm" id="promoteLeadBtn">Promote to Roster</button>
+       </div>
+diff --git a/js/api.js b/js/api.js
+index 33a7274..36e5d3c 100644
+--- a/js/api.js
++++ b/js/api.js
+@@ -63,6 +63,7 @@ const LIVE_PREFIXES = [
+   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
+   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
+   '/api/reorder-settings', '/api/marketmachine/', '/api/merges',
++  '/api/archive-reasons', '/api/archived-clients',
+   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
+   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
+   // the 's' vs 'e' at position 10 keeps them distinct.)
+@@ -173,6 +174,10 @@ export const ENDPOINTS = {
+   bbIntake:        '/api/intake',
+   bbLeadsData:     '/api/leads-data',
+   bbLeadsSave:     '/api/leads-save',
++  // Archiving. The reason list is a setting; the client stamps are data.
++  // Lead archives ride along inside the leads blob and need no route.
++  bbArchiveReasons:  '/api/archive-reasons',
++  bbArchivedClients: '/api/archived-clients',
+   bbQualify:       '/api/qualify',
+   bbBrief:         '/api/brief',
+   bbScanCard:      '/api/scan-card',
+diff --git a/js/registry.js b/js/registry.js
+index 3407f60..e594bf2 100644
+--- a/js/registry.js
++++ b/js/registry.js
+@@ -1,3 +1,4 @@
++// PUT IN: js/registry.js
+ /**
+  * alliteration. — app registry
+  *
+@@ -49,6 +50,9 @@ export const APPS = [
+       ['leads', 'Leads'],
+       ['roster', 'Roster'],
+       ['scorecard', 'Scorecard'],
++      // One Archived screen covers leads AND clients: "where did that go" is
++      // the same question either way, and two near-identical screens drift.
++      ['archive', 'Archived'],
+       ['settings', 'Settings']
+     ],
+     defaultView: 'dashboard',
+diff --git a/lib/backbone/archive-store.js b/lib/backbone/archive-store.js
+new file mode 100644
+index 0000000..0494ba9
+--- /dev/null
++++ b/lib/backbone/archive-store.js
+@@ -0,0 +1,78 @@
++// PUT IN: lib/backbone/archive-store.js
++// lib/backbone/archive-store.js — storage for the archive reason list and for
++// client archives.
++//
++// TWO KEYS, DELIBERATELY SEPARATE.
++//   backbone_archive_reasons  the editable list of reasons (a setting)
++//   backbone_archived_clients the per-client stamps (data)
++// They change at completely different rates and by completely different people:
++// the list is edited once a quarter by an admin, the stamps every week by
++// whoever is tidying the roster. Keeping them in one blob would mean a routine
++// archive rewrites the settings, and a settings save could clobber archives
++// made while the screen was open.
++//
++// LEAD archives are NOT here. A lead's stamp lives on the lead itself in
++// backbone_leads, because leads are ours end to end. Clients need the separate
++// record because the roster is rebuilt from Printavo and a flag written onto a
++// synced row does not survive the next reconcile.
++//
++// ESM. Do NOT convert to module.exports.
++
++import { getRaw, setRaw } from "../kv.js";
++import { normalizeReasons, DEFAULT_ARCHIVE_REASONS, readClientArchiveMap } from "./archive.js";
++
++const REASONS_KEY = "backbone_archive_reasons";
++const CLIENTS_KEY = "backbone_archived_clients";
++
++/**
++ * The live reason list. Never throws and never returns empty: a storage blip
++ * falls back to the seeded defaults, because a screen offering no reasons is
++ * indistinguishable from a broken screen and would block archiving entirely.
++ */
++export async function getArchiveReasons() {
++  try {
++    const raw = await getRaw(REASONS_KEY);
++    if (!raw) return DEFAULT_ARCHIVE_REASONS.slice();
++    const list = Array.isArray(raw) ? raw : raw.reasons;
++    return normalizeReasons(list);
++  } catch (e) {
++    console.error("[archive-store] reason list unreadable, using defaults:", e && e.message);
++    return DEFAULT_ARCHIVE_REASONS.slice();
++  }
++}
++
++/** Save the reason list. Cleaned first, so storage never holds blanks or dupes. */
++export async function saveArchiveReasons(list) {
++  const reasons = normalizeReasons(list);
++  await setRaw(REASONS_KEY, { reasons, savedAt: new Date().toISOString() });
++  return reasons;
++}
++
++/** Every client archive stamp, keyed by customer id. Never throws. */
++export async function getClientArchives() {
++  try {
++    return readClientArchiveMap(await getRaw(CLIENTS_KEY));
++  } catch (e) {
++    console.error("[archive-store] client archives unreadable:", e && e.message);
++    return {};
++  }
++}
++
++/**
++ * Write one client's stamp, or remove it when `stamp` is null.
++ *
++ * READ, MERGE, WRITE rather than replace-the-whole-map, so two people archiving
++ * two different customers in the same minute do not erase each other. This is
++ * not airtight against a true simultaneous write, and it does not need to be:
++ * the loser of that race loses one archive that is visibly still on the roster,
++ * not the other ninety.
++ */
++export async function setClientArchive(customerId, stamp) {
++  const id = String(customerId == null ? "" : customerId).trim();
++  if (!id) throw new Error("A customer id is required.");
++  const map = await getClientArchives();
++  if (stamp) map[id] = stamp;
++  else delete map[id];
++  await setRaw(CLIENTS_KEY, { clients: map, savedAt: new Date().toISOString() });
++  return map;
++}
+diff --git a/lib/backbone/archive.js b/lib/backbone/archive.js
+new file mode 100644
+index 0000000..4321dc5
+--- /dev/null
++++ b/lib/backbone/archive.js
+@@ -0,0 +1,270 @@
++// PUT IN: lib/backbone/archive.js
++// lib/backbone/archive.js — archiving for leads and clients, and lead numbering.
++//
++// WHY ARCHIVE IS A FLAG AND NOT A STATUS.
++// A lead's exit states are Reach Back Out, Won and Lost. Archive is a different
++// question: it is "stop showing me this", and it has to answer for CLIENTS too,
++// which have no lead status at all. If archiving overwrote the status, restoring
++// would have to guess where the lead came from. As a flag beside the status, the
++// status and its history survive untouched and a restore puts the lead back
++// exactly where it was standing.
++//
++// WHY THE REASON IS REQUIRED AND COMES FROM A LIST.
++// Free text answers "why is this gone" with twelve spellings of the same four
++// reasons, which cannot be counted or filtered. The list is stored, not compiled
++// in, so it is a Settings edit rather than a deploy. Removing a reason from the
++// list NEVER rewrites records already archived under it: the reason is copied
++// onto the record at archive time, so history stays readable after the list
++// changes.
++//
++// WHY CLIENT ARCHIVES LIVE IN THEIR OWN RECORD.
++// The client roster is rebuilt from Printavo by the sync. A flag written onto a
++// synced row is erased by the next reconcile. So client archives are stored
++// separately and folded in WHEN THE ROSTER IS READ, the same pattern merges
++// already use in lib/backbone-merge.js, for the same reason.
++
++/**
++ * Seeded reasons. These are a starting point, not the law: the live list lives
++ * in storage and is edited in BackBone Settings.
++ */
++export const DEFAULT_ARCHIVE_REASONS = [
++  "Disqualified",
++  "Not a fit",
++  "No response after Death Call",
++  "Went with another supplier",
++  "Out of business or closed",
++  "Duplicate record",
++  "Bad or fake inquiry",
++  "Too small to pursue",
++];
++
++/** The reason applied when a research run disqualifies a lead by itself. */
++export const DISQUALIFIED_REASON = "Disqualified";
++
++/**
++ * Clean a stored reason list: trim, drop empties, drop duplicates (case
++ * insensitively), keep the order given. An empty result falls back to the
++ * defaults rather than to nothing, because a list of zero reasons would make
++ * archiving impossible and look like a bug rather than a setting.
++ */
++export function normalizeReasons(list) {
++  if (!Array.isArray(list)) return DEFAULT_ARCHIVE_REASONS.slice();
++  const seen = new Set();
++  const out = [];
++  for (const raw of list) {
++    const v = String(raw == null ? "" : raw).trim();
++    if (!v) continue;
++    const k = v.toLowerCase();
++    if (seen.has(k)) continue;
++    seen.add(k);
++    out.push(v);
++  }
++  return out.length ? out : DEFAULT_ARCHIVE_REASONS.slice();
++}
++
++/**
++ * Is this reason one the list allows? Compared case insensitively and returns
++ * the LIST's spelling, so records archived from different screens agree on
++ * capitalisation and group together when counted.
++ *
++ * Returns null when the reason is missing or not on the list. Callers treat
++ * null as a refusal; there is no "other" bucket by design.
++ */
++export function resolveReason(reason, reasons) {
++  const want = String(reason == null ? "" : reason).trim().toLowerCase();
++  if (!want) return null;
++  const allowed = normalizeReasons(reasons);
++  for (const r of allowed) {
++    if (r.toLowerCase() === want) return r;
++  }
++  return null;
++}
++
++/** Is the record archived? One reader, so no screen invents its own test. */
++export function isArchived(rec) {
++  return !!(rec && rec.archived_at);
++}
++
++/**
++ * Stamp a record as archived. Returns a NEW object; the caller decides what to
++ * do with it. Refuses a reason that is not on the list by throwing, because a
++ * silent archive with a blank reason is exactly the outcome the fixed list
++ * exists to prevent.
++ *
++ * `note` is optional free text ON TOP OF the reason, never instead of it.
++ */
++export function archiveRecord(rec, { reason, reasons, by, at, note } = {}) {
++  const resolved = resolveReason(reason, reasons);
++  if (!resolved) {
++    throw new Error("An archive reason from the list is required.");
++  }
++  const stamp = {
++    archived_at: at || new Date().toISOString(),
++    archive_reason: resolved,
++    archived_by: String(by || "").trim() || "unknown",
++  };
++  const noteText = String(note == null ? "" : note).trim();
++  if (noteText) stamp.archive_note = noteText;
++  const next = Object.assign({}, rec, stamp);
++  next.archive_history = (Array.isArray(rec && rec.archive_history) ? rec.archive_history : [])
++    .concat([{ action: "archived", at: stamp.archived_at, by: stamp.archived_by, reason: resolved }]);
++  return next;
++}
++
++/**
++ * Un-archive. The stamp fields are cleared so every "is it archived" test is the
++ * one test above, but the history entry stays: a record archived and restored
++ * three times is a fact worth being able to see, and wiping the trail on restore
++ * would hide it.
++ */
++export function restoreRecord(rec, { by, at } = {}) {
++  const next = Object.assign({}, rec);
++  const when = at || new Date().toISOString();
++  delete next.archived_at;
++  delete next.archive_reason;
++  delete next.archived_by;
++  delete next.archive_note;
++  next.archive_history = (Array.isArray(rec && rec.archive_history) ? rec.archive_history : [])
++    .concat([{ action: "restored", at: when, by: String(by || "").trim() || "unknown" }]);
++  return next;
++}
++
++/**
++ * Split a list into what the working screens show and what the Archived Manager
++ * shows. One function so the two lists can never overlap or lose a record
++ * between them, which is what happens when each screen writes its own filter.
++ */
++export function partitionArchived(rows) {
++  const live = [];
++  const archived = [];
++  for (const r of Array.isArray(rows) ? rows : []) {
++    (isArchived(r) ? archived : live).push(r);
++  }
++  return { live, archived };
++}
++
++/* ------------------------------------------------------------------ *
++ * LEAD NUMBERS
++ *
++ * lead_id is a random string and always has been. It is unique and it is
++ * useless out loud: nobody reads "lead_ma3k2x9f8b" down the phone. lead_no is
++ * the human handle, in the same shape as EE-00001 and the PO numbers, so a
++ * lead can be named in a hand-off, a notification or a conversation.
++ *
++ * Numbers are assigned SERVER SIDE, on save, never in the browser. Two people
++ * with the pipeline open would otherwise both compute the same "next" number
++ * and the second save would quietly overwrite the first.
++ * ------------------------------------------------------------------ */
++
++export const LEAD_NO_PREFIX = "L-";
++
++/** Format a counter value as a lead number. */
++export function formatLeadNo(n) {
++  return LEAD_NO_PREFIX + String(n).padStart(5, "0");
++}
++
++/** Read the numeric part back out, or null if this is not a lead number. */
++export function parseLeadNo(v) {
++  const m = /^L-(\d+)$/.exec(String(v == null ? "" : v).trim().toUpperCase());
++  if (!m) return null;
++  const n = Number(m[1]);
++  return Number.isFinite(n) && n > 0 ? n : null;
++}
++
++/** The highest number already handed out in this list. 0 when there are none. */
++export function highestLeadNo(leads) {
++  let max = 0;
++  for (const l of Array.isArray(leads) ? leads : []) {
++    const n = parseLeadNo(l && l.lead_no);
++    if (n && n > max) max = n;
++  }
++  return max;
++}
++
++/**
++ * Give every lead without a number one, oldest first, and hand back a new array.
++ *
++ * OLDEST FIRST MATTERS. The backfill runs once over leads that have existed for
++ * months, and numbering them in whatever order the array happens to sit in would
++ * make L-00001 an arbitrary record. Sorted by created_at, the numbers read as
++ * the order the leads actually arrived.
++ *
++ * A number already on a lead is never reissued or renumbered, including a
++ * duplicate: renumbering would break every reference to the old number, and a
++ * duplicate that stays visible gets noticed and fixed. Duplicates are reported
++ * rather than repaired.
++ */
++export function assignLeadNumbers(leads) {
++  const list = Array.isArray(leads) ? leads.slice() : [];
++  let next = highestLeadNo(list) + 1;
++
++  const missing = [];
++  for (let i = 0; i < list.length; i++) {
++    if (parseLeadNo(list[i] && list[i].lead_no) === null) missing.push(i);
++  }
++  if (!missing.length) return { leads: list, assigned: 0 };
++
++  missing.sort((a, b) => {
++    const ta = new Date((list[a] && list[a].created_at) || 0).getTime() || 0;
++    const tb = new Date((list[b] && list[b].created_at) || 0).getTime() || 0;
++    if (ta !== tb) return ta - tb;
++    return a - b;
++  });
++
++  for (const i of missing) {
++    list[i] = Object.assign({}, list[i], { lead_no: formatLeadNo(next) });
++    next += 1;
++  }
++  return { leads: list, assigned: missing.length };
++}
++
++/** Numbers handed to more than one lead. Should always be empty; worth seeing. */
++export function duplicateLeadNos(leads) {
++  const counts = new Map();
++  for (const l of Array.isArray(leads) ? leads : []) {
++    const n = l && l.lead_no;
++    if (parseLeadNo(n) === null) continue;
++    counts.set(n, (counts.get(n) || 0) + 1);
++  }
++  const dupes = [];
++  for (const [no, c] of counts) if (c > 1) dupes.push(no);
++  return dupes.sort();
++}
++
++/* ------------------------------------------------------------------ *
++ * CLIENT ARCHIVES
++ *
++ * Stored as a map of customer id -> stamp, folded onto the roster on read.
++ * ------------------------------------------------------------------ */
++
++/** A stored client-archive blob, in whatever shape, read as a plain map. */
++export function readClientArchiveMap(raw) {
++  if (!raw || typeof raw !== "object") return {};
++  const src = (raw.clients && typeof raw.clients === "object") ? raw.clients : raw;
++  const out = {};
++  for (const k of Object.keys(src)) {
++    const v = src[k];
++    if (v && typeof v === "object" && v.archived_at) out[String(k)] = v;
++  }
++  return out;
++}
++
++/**
++ * Fold client archive stamps onto roster rows. Rows are copied, never mutated,
++ * and a stamp for an id that is no longer in the roster is simply ignored: a
++ * customer deleted in Printavo should not resurrect as an empty archived row.
++ *
++ * `idKeys` is the list of fields a roster row might carry its id under, because
++ * the roster has been through more than one sync shape.
++ */
++export function applyClientArchive(rows, archiveMap, idKeys = ["customer_id", "id", "printavo_id"]) {
++  const map = readClientArchiveMap(archiveMap);
++  if (!Object.keys(map).length) return Array.isArray(rows) ? rows.slice() : [];
++  return (Array.isArray(rows) ? rows : []).map((row) => {
++    for (const k of idKeys) {
++      const id = row && row[k];
++      if (id != null && map[String(id)]) return Object.assign({}, row, map[String(id)]);
++    }
++    return row;
++  });
++}
+diff --git a/lib/help/content.js b/lib/help/content.js
+index a4f8fc3..ed7cee3 100644
+--- a/lib/help/content.js
++++ b/lib/help/content.js
+@@ -72,9 +72,10 @@ all. If a figure is what you need, it will tell you which screen shows it.`,
+ customers are, what they are worth, what is quoted and unpaid, and where new
+ inquiries stand.
+ 
+-SIX SCREENS. Dashboard is the numbers. Inbox is new inquiries as they arrive.
+-Leads is the pipeline for chasing them. Roster is the customer list.
+-Scorecard ranks customers. Settings holds the app's own options.
++SEVEN SCREENS. Dashboard is the numbers. Inbox is new inquiries as they
++arrive. Leads is the pipeline for chasing them. Roster is the customer list.
++Scorecard ranks customers. Archived holds leads and clients that have been
++taken off those working lists. Settings holds the app's own options.
+ 
+ WHERE THE DATA COMES FROM. Almost all of it comes from Printavo, pulled in by
+ an automatic sync that runs every morning around 6 AM Central. Nothing is
+@@ -106,7 +107,23 @@ LEADS move through stages: the account manager is notified, contacted a first
+ time, contacted a second time, a final "death call", and then won, lost, or
+ reach back out. Every status change is kept as a history trail, so it is
+ always visible who moved a lead and when. The inbox also screens obvious bot
+-and fake inquiries before they reach anybody.`,
++and fake inquiries before they reach anybody.
++
++EVERY LEAD HAS A NUMBER, like L-00042, so it can be named on the phone or in
++a hand-off. The number is issued once and never reused, so a gap in the
++sequence is normal and does not mean anything is missing.
++
++ARCHIVING takes a lead or a client off the working lists without deleting it.
++It always needs a reason, chosen from a fixed list an admin manages in
++BackBone Settings, so the reasons can be counted later instead of being
++twelve spellings of the same four things. A lead keeps the stage it was
++standing in, so restoring it from the Archived screen puts it back exactly
++there. Disqualifying is the same thing with the reason already filled in, and
++a research run that scores a lead Disqualified archives it automatically and
++says so rather than leaving it on the list for everybody to keep deciding
++about. Archiving a client hides them from the roster for the whole team, so
++it is admin only; their Printavo history is untouched and the daily sync
++cannot undo it.`,
+   },
+ 
+   {
+diff --git a/test/backbone-archive-wiring.test.cjs b/test/backbone-archive-wiring.test.cjs
+new file mode 100644
+index 0000000..ffa9997
+--- /dev/null
++++ b/test/backbone-archive-wiring.test.cjs
+@@ -0,0 +1,219 @@
++// PUT IN: test/backbone-archive-wiring.test.cjs
++/**
++ * The archive wiring: leads, clients, and the Archived screen.
++ *
++ * The lib logic is covered in backbone-archive.test.cjs. What is checked HERE
++ * is the wiring, because this app's two most expensive recurring failures are
++ * both wiring failures, not logic failures:
++ *
++ *   1. template.js missing an element id that main.js reads, which crashed
++ *      BackBone's mount once already.
++ *   2. a route that looks right in source but throws the moment it is loaded.
++ *
++ * So the routes are IMPORTED for real, and every id the archive code touches is
++ * checked against the markup that has to contain it.
++ */
++
++const fs = require('fs');
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
++
++const main = read('apps/backbone/main.js');
++const template = read('apps/backbone/template.js');
++const styles = read('apps/backbone/styles.js');
++
++Promise.all([
++  import('../api/archive-reasons.js'),
++  import('../api/archived-clients.js'),
++  import('../lib/backbone/archive-store.js'),
++  import('../js/registry.js'),
++]).then(async ([reasonsRoute, clientsRoute, store, reg]) => {
++
++  /* ---- the routes load and answer -------------------------------------- */
++
++  t.test('both archive routes load and export a handler', () => {
++    // Imported, not grepped. A missing export or a bad import path fails here
++    // in a second instead of as a 500 nobody sees for a week.
++    t.equal(typeof reasonsRoute.default, 'function', 'api/archive-reasons.js exports no handler');
++    t.equal(typeof clientsRoute.default, 'function', 'api/archived-clients.js exports no handler');
++  });
++
++  t.test('the store exposes the four things the routes call', () => {
++    ['getArchiveReasons', 'saveArchiveReasons', 'getClientArchives', 'setClientArchive']
++      .forEach((fn) => t.equal(typeof store[fn], 'function', fn + ' is missing from the store'));
++  });
++
++  await t.test('setClientArchive refuses a blank customer id', async () => {
++    // Reached before any storage call, so this runs without Upstash. A blank id
++    // would write a stamp under "" that no roster row could ever match, and the
++    // archive would look broken rather than absent.
++    let threw = false;
++    try { await store.setClientArchive('', { archived_at: 'x' }); } catch (e) { threw = true; }
++    t.assert(threw, 'a blank customer id must be refused');
++  });
++
++  /* ---- the registry ----------------------------------------------------- */
++
++  t.test('BackBone registers an Archived view', () => {
++    const bb = reg.APPS.find((a) => a.id === 'backbone');
++    t.assert(bb, 'BackBone is missing from the registry');
++    const view = bb.views.find(([key]) => key === 'archive');
++    t.assert(view, 'no "archive" view registered, so the rail has no way in');
++    t.equal(view[1], 'Archived', 'the rail label should read Archived');
++  });
++
++  /* ---- template ids main.js reads --------------------------------------- */
++
++  t.test('every element the archive code reads exists in the markup', () => {
++    // The exact failure that crashed BackBone's mount before: main.js expecting
++    // an id template.js never had.
++    const ids = [
++      'page-archive', 'archiveKpiGrid', 'archiveTableWrap', 'archiveSearch',
++      'archiveReasonFilter', 'archiveOverlay', 'archiveModalTitle',
++      'archiveModalWhat', 'archiveModalErr', 'archiveReasonSelect',
++      'archiveNoteInput', 'archiveConfirmBtn', 'archiveCancelBtn',
++      'archiveModalClose', 'archiveLeadBtn', 'restoreLeadBtn',
++      'archiveClientBtn', 'restoreClientBtn', 'archiveReasonsBox',
++      'archiveReasonsSaveBtn', 'archiveReasonsStatus', 'archiveReasonsErr',
++    ];
++    ids.forEach((id) => {
++      t.assert(template.includes('id="' + id + '"'),
++        'template.js has no #' + id + ', which main.js reads');
++    });
++  });
++
++  t.test('the page id matches the registered view key', () => {
++    // showView() finds the page as "page-" + view. A mismatch shows a blank
++    // screen with nothing in the console to explain it.
++    t.assert(template.includes('id="page-archive"'), 'page-archive must match the archive view key');
++  });
++
++  t.test('the archive tabs carry the attribute the handler reads', () => {
++    t.assert(template.includes('data-archive-tab="leads"'), 'the leads tab is missing its key');
++    t.assert(template.includes('data-archive-tab="clients"'), 'the clients tab is missing its key');
++    t.assert(main.includes('getAttribute("data-archive-tab")'), 'nothing reads the tab key');
++  });
++
++  /* ---- the decisions, asserted where they live -------------------------- */
++
++  t.test('archived leads are filtered out of the working list', () => {
++    // The single filter that makes archiving and disqualifying mean anything.
++    t.assert(/function getLeadsRows[\s\S]{0,400}?state_leads\.filter\(function\(l\) \{ return !isArchived\(l\); \}\)/.test(main),
++      'getLeadsRows no longer excludes archived leads, so archiving does nothing');
++  });
++
++  t.test('archived clients are filtered off the roster', () => {
++    t.assert(/function getRows[\s\S]{0,400}?state\.synced\.filter\(function\(c\) \{ return !isClientArchived/.test(main),
++      'getRows no longer excludes archived clients');
++  });
++
++  t.test('the roster count agrees with the roster list', () => {
++    // Two numbers on one screen disagreeing is how people stop trusting both.
++    t.assert(/activeSynced[\s\S]{0,200}setText\("kpiTotal", activeSynced\.length\)/.test(main),
++      'kpiTotal must count the same rows the table shows');
++  });
++
++  t.test('the browser never issues a lead number itself', () => {
++    // Two people with the pipeline open would each compute the same "next"
++    // number and the second save would take the first one's. Only the server
++    // sees the whole list at once.
++    t.assert(!/formatLeadNo|assignLeadNumbers|highestLeadNo/.test(main),
++      'main.js is computing lead numbers; that belongs in api/leads-save.js');
++    t.assert(read('api/leads-save.js').includes('assignLeadNumbers'),
++      'api/leads-save.js must be the one issuing numbers');
++  });
++
++  t.test('the save route refuses an archived lead with no reason', () => {
++    const src = read('api/leads-save.js');
++    t.assert(/isArchived\(l\) && !String\(l\.archive_reason/.test(src),
++      'a lead can reach storage archived with a blank reason');
++  });
++
++  t.test('the save route does not re-check the reason against the current list', () => {
++    // Deliberate. A reason retired from the list months later would otherwise
++    // make every future save of that lead fail, turning a settings edit into an
++    // outage. Membership is enforced when the archive happens, not forever.
++    t.assert(!/resolveReason/.test(read('api/leads-save.js')),
++      'leads-save must not re-validate old reasons against the live list');
++  });
++
++  t.test('the browser and the server share one archive module', () => {
++    // Two copies of "what counts as archived" drift, and the screen and the
++    // server then disagree about which leads exist.
++    t.assert(main.includes("from '../../lib/backbone/archive.js'"),
++      'main.js must import the same archive module the routes use');
++    t.assert(read('api/archived-clients.js').includes('../lib/backbone/archive.js'),
++      'the client route must use it too');
++  });
++
++  t.test('a disqualified research result archives the lead automatically', () => {
++    t.assert(/function autoArchiveDisqualified/.test(main), 'autoArchiveDisqualified is gone');
++    t.assert(/\/\^Disqualified\/i\.test/.test(main),
++      'nothing detects a Disqualified tier');
++    // Told, never silent: an archive nobody was told about looks like a lead
++    // that vanished off the list.
++    t.assert(/autoArchived[\s\S]{0,300}alert\(/.test(main),
++      'an automatic archive must say so on screen');
++  });
++
++  t.test('the automatic path stops if an admin retires the Disqualified reason', () => {
++    t.assert(/if \(!resolveReason\(DISQUALIFIED_REASON, archiveReasons\)\) return;/.test(main),
++      'the automatic archive must not write a reason the team has removed');
++  });
++
++  t.test('archiving and restoring swap rather than both showing', () => {
++    t.assert(/arcBtn\.style\.display = archived \? "none" : ""/.test(main),
++      'Archive must hide on an already-archived lead');
++    t.assert(/resBtn\.style\.display = archived \? "" : "none"/.test(main),
++      'Restore must only show on an archived lead');
++  });
++
++  t.test('an archived lead cannot have its stage changed from the panel', () => {
++    // Editing a record that is on no working list is a change nobody sees.
++    t.assert(/stSel\.disabled = archived/.test(main),
++      'the status dropdown must be disabled on an archived lead');
++  });
++
++  t.test('a failed reason fetch falls back to the defaults, never to an empty list', () => {
++    // An empty dropdown blocks archiving entirely and reads as a broken screen.
++    t.assert(/let archiveReasons = DEFAULT_ARCHIVE_REASONS\.slice\(\)/.test(main),
++      'archiveReasons must start from the defaults');
++    t.assert(/if \(d && Array\.isArray\(d\.reasons\) && d\.reasons\.length\) archiveReasons = d\.reasons/.test(main),
++      'only a non-empty response may replace the reason list');
++  });
++
++  t.test('a client stamp with no matching roster row is shown, not hidden', () => {
++    // Hiding it would leave a record that can neither be seen nor restored.
++    t.assert(/not on the current roster/.test(main), 'orphaned client stamps must still be listed');
++  });
++
++  /* ---- house rules ------------------------------------------------------ */
++
++  t.test('the archive styles define no hex colours', () => {
++    const block = styles.slice(styles.indexOf('Archived Manager'));
++    t.assert(!/#[0-9a-fA-F]{3,8}\b/.test(block),
++      'css/tokens.css is the only place colours live');
++  });
++
++  t.test('no app or lib file in this change imports a Node builtin', () => {
++    // Server code landing in a browser folder is a recurring failure here.
++    const browser = main + read('lib/backbone/archive.js');
++    t.assert(!/from\s+["'](fs|path|crypto|http|os)["']/.test(browser),
++      'a Node builtin import in browser-reachable code');
++  });
++
++  t.test('lib/backbone/archive.js stays free of storage concerns', () => {
++    // Pure logic, so both the browser and the server can run it. The moment it
++    // reaches for KV it can only run on one side.
++    t.assert(!/kv\.js|fetch\(/.test(read('lib/backbone/archive.js')),
++      'the shared archive module must not touch storage or the network');
++  });
++
++  t.report();
++}).catch((e) => {
++  console.error(e);
++  process.exit(1);
++});
+diff --git a/test/backbone-archive.test.cjs b/test/backbone-archive.test.cjs
+new file mode 100644
+index 0000000..8adda5a
+--- /dev/null
++++ b/test/backbone-archive.test.cjs
+@@ -0,0 +1,262 @@
++// PUT IN: test/backbone-archive.test.cjs
++/**
++ * Archiving leads and clients, and lead numbering.
++ *
++ * Every check below is a real call into lib/backbone/archive.js. The decisions
++ * worth guarding are the ones that are cheap to write and expensive to get
++ * wrong later: that a reason cannot be skipped, that a restore puts a lead back
++ * where it was rather than somewhere plausible, that a lead number once issued
++ * is never reissued, and that a Printavo reconcile cannot silently un-archive a
++ * customer.
++ */
++
++const fs = require('fs');
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
++
++import('../lib/backbone/archive.js').then((a) => {
++
++  const REASONS = ['Disqualified', 'Not a fit', 'Duplicate record'];
++
++  /* ---- the reason list -------------------------------------------------- */
++
++  t.test('the seeded reason list is not empty', () => {
++    t.assert(Array.isArray(a.DEFAULT_ARCHIVE_REASONS), 'defaults must be a list');
++    t.assert(a.DEFAULT_ARCHIVE_REASONS.length >= 3, 'a list of one or two is not a list');
++  });
++
++  t.test('normalizing trims, drops blanks and drops duplicates', () => {
++    const out = a.normalizeReasons(['  Not a fit  ', '', 'not a fit', 'Duplicate record', null]);
++    t.equal(out.length, 2, 'two survive');
++    t.equal(out[0], 'Not a fit', 'trimmed, and the first spelling wins');
++    t.equal(out[1], 'Duplicate record', 'order is preserved');
++  });
++
++  t.test('an empty list falls back to the defaults rather than to nothing', () => {
++    // A list of zero reasons would make archiving impossible, which reads as a
++    // broken screen rather than as a setting somebody cleared.
++    t.equal(a.normalizeReasons([]).length, a.DEFAULT_ARCHIVE_REASONS.length, 'defaults return');
++    t.equal(a.normalizeReasons(null).length, a.DEFAULT_ARCHIVE_REASONS.length, 'so does null');
++  });
++
++  t.test('a reason off the list resolves to the list spelling', () => {
++    t.equal(a.resolveReason('not a fit', REASONS), 'Not a fit',
++      'matching is case insensitive but the stored value is the canonical one');
++    t.equal(a.resolveReason('  DUPLICATE RECORD ', REASONS), 'Duplicate record',
++      'padding and case do not create a second bucket');
++  });
++
++  t.test('a reason not on the list is refused, and so is a blank one', () => {
++    t.equal(a.resolveReason('because I said so', REASONS), null, 'free text is refused');
++    t.equal(a.resolveReason('', REASONS), null, 'empty is refused');
++    t.equal(a.resolveReason(null, REASONS), null, 'missing is refused');
++  });
++
++  /* ---- archiving -------------------------------------------------------- */
++
++  t.test('archiving stamps the record and never mutates the original', () => {
++    const lead = { lead_id: 'lead_x', status: 'Death Call' };
++    const out = a.archiveRecord(lead, { reason: 'Not a fit', reasons: REASONS, by: 'ryan' });
++    t.assert(a.isArchived(out), 'the copy is archived');
++    t.assert(!a.isArchived(lead), 'the original is untouched');
++    t.equal(out.archive_reason, 'Not a fit', 'the reason is copied onto the record');
++    t.equal(out.archived_by, 'ryan', 'and who did it');
++    t.assert(!!out.archived_at, 'and when');
++  });
++
++  t.test('archiving without a valid reason throws instead of archiving blank', () => {
++    // This is the whole point of the fixed list. A record archived with no
++    // reason is a record nobody can explain a month later.
++    let threw = false;
++    try { a.archiveRecord({ lead_id: 'x' }, { reasons: REASONS, by: 'ryan' }); }
++    catch (e) { threw = true; }
++    t.assert(threw, 'a missing reason must throw');
++
++    let threw2 = false;
++    try { a.archiveRecord({ lead_id: 'x' }, { reason: 'made up', reasons: REASONS }); }
++    catch (e) { threw2 = true; }
++    t.assert(threw2, 'an off-list reason must throw');
++  });
++
++  t.test('the status is left alone, so a restore knows where to put the lead back', () => {
++    // Archive is a flag beside the status, not a status of its own. If it
++    // overwrote the status, restoring would have to guess.
++    const lead = { lead_id: 'l', status: 'Contacted 2nd', status_history: [{ status: 'Contacted 2nd', at: '2026-08-01T00:00:00.000Z' }] };
++    const out = a.archiveRecord(lead, { reason: 'Not a fit', reasons: REASONS, by: 'ryan' });
++    t.equal(out.status, 'Contacted 2nd', 'the stage survives the archive');
++    t.equal(out.status_history.length, 1, 'and so does its history, unchanged');
++  });
++
++  t.test('an optional note sits on top of the reason, never instead of it', () => {
++    const out = a.archiveRecord({}, { reason: 'Not a fit', reasons: REASONS, by: 'r', note: 'said to try next spring' });
++    t.equal(out.archive_reason, 'Not a fit', 'the reason is still there');
++    t.equal(out.archive_note, 'said to try next spring', 'the note rides along');
++  });
++
++  /* ---- restoring -------------------------------------------------------- */
++
++  t.test('restoring clears the stamp and puts the lead back at its old stage', () => {
++    const lead = { lead_id: 'l', status: 'Reach Back Out' };
++    const arch = a.archiveRecord(lead, { reason: 'Not a fit', reasons: REASONS, by: 'ryan' });
++    const back = a.restoreRecord(arch, { by: 'jacob' });
++    t.assert(!a.isArchived(back), 'no longer archived');
++    t.equal(back.archive_reason, undefined, 'the reason is cleared, not left dangling');
++    t.equal(back.archived_by, undefined, 'and so is the archiver');
++    t.equal(back.status, 'Reach Back Out', 'the lead is standing where it was');
++  });
++
++  t.test('the archive trail survives a restore', () => {
++    // Archived and restored three times is a fact worth being able to see.
++    const one = a.archiveRecord({}, { reason: 'Not a fit', reasons: REASONS, by: 'ryan' });
++    const two = a.restoreRecord(one, { by: 'ryan' });
++    const three = a.archiveRecord(two, { reason: 'Duplicate record', reasons: REASONS, by: 'abby' });
++    t.equal(three.archive_history.length, 3, 'all three actions are on the record');
++    t.equal(three.archive_history[0].action, 'archived', 'in order');
++    t.equal(three.archive_history[1].action, 'restored', 'in order');
++    t.equal(three.archive_history[2].reason, 'Duplicate record', 'with the reason each time');
++  });
++
++  t.test('a reason later deleted from the list does not rewrite old records', () => {
++    // The reason is copied onto the record at archive time. Editing the list is
++    // a Settings change, not a rewrite of history.
++    const arch = a.archiveRecord({}, { reason: 'Duplicate record', reasons: REASONS, by: 'ryan' });
++    const shorterList = ['Not a fit'];
++    t.equal(arch.archive_reason, 'Duplicate record', 'the record still says why');
++    t.equal(a.resolveReason('Duplicate record', shorterList), null,
++      'it just cannot be chosen again, which is what removing it should mean');
++  });
++
++  /* ---- splitting the working list from the archive ---------------------- */
++
++  t.test('partitioning puts every record in exactly one list', () => {
++    const rows = [
++      { id: 1 },
++      a.archiveRecord({ id: 2 }, { reason: 'Not a fit', reasons: REASONS, by: 'r' }),
++      { id: 3 },
++    ];
++    const { live, archived } = a.partitionArchived(rows);
++    t.equal(live.length, 2, 'two are still working');
++    t.equal(archived.length, 1, 'one is archived');
++    t.equal(live.length + archived.length, rows.length, 'nothing is lost between the two');
++  });
++
++  /* ---- lead numbers ----------------------------------------------------- */
++
++  t.test('a lead number formats and parses back', () => {
++    t.equal(a.formatLeadNo(1), 'L-00001', 'padded to five');
++    t.equal(a.formatLeadNo(2508), 'L-02508', 'and stays padded');
++    t.equal(a.parseLeadNo('L-02508'), 2508, 'and reads back');
++    t.equal(a.parseLeadNo('lead_ma3k2x9f'), null, 'the random id is not a lead number');
++    t.equal(a.parseLeadNo(''), null, 'nor is nothing');
++  });
++
++  t.test('the backfill numbers oldest first, so L-00001 is the first lead we got', () => {
++    const leads = [
++      { lead_id: 'c', created_at: '2026-03-01T00:00:00.000Z' },
++      { lead_id: 'a', created_at: '2026-01-01T00:00:00.000Z' },
++      { lead_id: 'b', created_at: '2026-02-01T00:00:00.000Z' },
++    ];
++    const { leads: out, assigned } = a.assignLeadNumbers(leads);
++    t.equal(assigned, 3, 'all three got one');
++    const byId = Object.fromEntries(out.map((l) => [l.lead_id, l.lead_no]));
++    t.equal(byId.a, 'L-00001', 'the oldest is first');
++    t.equal(byId.b, 'L-00002', 'then the next');
++    t.equal(byId.c, 'L-00003', 'then the newest');
++  });
++
++  t.test('a number already issued is never reissued or renumbered', () => {
++    // Renumbering would break every place the old number was written down.
++    const leads = [
++      { lead_id: 'old', lead_no: 'L-00007', created_at: '2026-01-01T00:00:00.000Z' },
++      { lead_id: 'new', created_at: '2026-02-01T00:00:00.000Z' },
++    ];
++    const { leads: out, assigned } = a.assignLeadNumbers(leads);
++    t.equal(assigned, 1, 'only the unnumbered one is touched');
++    t.equal(out[0].lead_no, 'L-00007', 'the existing number is left exactly as it was');
++    t.equal(out[1].lead_no, 'L-00008', 'and the new one continues past the highest, not past the count');
++  });
++
++  t.test('numbering twice is a no-op the second time', () => {
++    const first = a.assignLeadNumbers([{ lead_id: 'x', created_at: '2026-01-01T00:00:00.000Z' }]);
++    const second = a.assignLeadNumbers(first.leads);
++    t.equal(second.assigned, 0, 'nothing left to do');
++    t.equal(second.leads[0].lead_no, first.leads[0].lead_no, 'and the number did not move');
++  });
++
++  t.test('a gap in the numbers does not cause a collision', () => {
++    // Deleting L-00002 must not make the next lead L-00002 again.
++    const leads = [
++      { lead_id: 'a', lead_no: 'L-00001', created_at: '2026-01-01T00:00:00.000Z' },
++      { lead_id: 'c', lead_no: 'L-00003', created_at: '2026-03-01T00:00:00.000Z' },
++      { lead_id: 'd', created_at: '2026-04-01T00:00:00.000Z' },
++    ];
++    const { leads: out } = a.assignLeadNumbers(leads);
++    t.equal(out[2].lead_no, 'L-00004', 'the next number is past the highest, gap and all');
++    t.equal(a.duplicateLeadNos(out).length, 0, 'and nothing collides');
++  });
++
++  t.test('duplicates are reported, not silently repaired', () => {
++    const dupes = a.duplicateLeadNos([
++      { lead_no: 'L-00001' }, { lead_no: 'L-00001' }, { lead_no: 'L-00002' },
++    ]);
++    t.equal(dupes.length, 1, 'one number is doubled up');
++    t.equal(dupes[0], 'L-00001', 'and it says which');
++  });
++
++  t.test('leads with no created_at still all get distinct numbers', () => {
++    const { leads: out } = a.assignLeadNumbers([{ lead_id: 'a' }, { lead_id: 'b' }, { lead_id: 'c' }]);
++    t.equal(a.duplicateLeadNos(out).length, 0, 'missing dates must not collapse the ordering into ties');
++    t.equal(out.filter((l) => l.lead_no).length, 3, 'and everybody is numbered');
++  });
++
++  /* ---- client archives -------------------------------------------------- */
++
++  t.test('client stamps fold onto the roster on read', () => {
++    const rows = [{ customer_id: '55', company_name: 'Acme' }, { customer_id: '56', company_name: 'Beta' }];
++    const map = { clients: { 55: { archived_at: '2026-09-01T00:00:00.000Z', archive_reason: 'Out of business or closed' } } };
++    const out = a.applyClientArchive(rows, map);
++    t.assert(a.isArchived(out[0]), 'the archived customer reads as archived');
++    t.assert(!a.isArchived(out[1]), 'and the other one does not');
++    t.equal(out[0].company_name, 'Acme', 'the roster fields survive the fold');
++  });
++
++  t.test('a stamp for a customer no longer on the roster is ignored', () => {
++    // A customer deleted in Printavo must not come back as an empty archived row.
++    const out = a.applyClientArchive([{ customer_id: '55' }], { clients: { 99: { archived_at: 'x' } } });
++    t.equal(out.length, 1, 'no phantom row is added');
++  });
++
++  t.test('the fold copies rows rather than editing the synced roster in place', () => {
++    const rows = [{ customer_id: '55' }];
++    a.applyClientArchive(rows, { clients: { 55: { archived_at: 'x', archive_reason: 'Not a fit' } } });
++    t.assert(!a.isArchived(rows[0]), 'the roster array handed in is untouched');
++  });
++
++  t.test('a half-written stamp with no archived_at is not treated as archived', () => {
++    const out = a.applyClientArchive([{ customer_id: '55' }], { clients: { 55: { archive_reason: 'Not a fit' } } });
++    t.assert(!a.isArchived(out[0]), 'no timestamp means no archive');
++  });
++
++  /* ---- the rules this repo enforces ------------------------------------- */
++
++  t.test('lib/backbone/ does not import from api/', () => {
++    const src = read('lib/backbone/archive.js') + read('lib/backbone/archive-store.js');
++    t.assert(!/from\s+["']\.\.\/\.\.\/api\//.test(src), 'lib must never import from api');
++  });
++
++  t.test('the archive routes are on the seam and marked live', () => {
++    const src = read('js/api.js');
++    t.assert(/bbArchiveReasons:/.test(src), 'ENDPOINTS.bbArchiveReasons is missing');
++    t.assert(/bbArchivedClients:/.test(src), 'ENDPOINTS.bbArchivedClients is missing');
++    t.assert(src.includes("'/api/archive-reasons'"), "'/api/archive-reasons' must be in LIVE_PREFIXES");
++    t.assert(src.includes("'/api/archived-clients'"), "'/api/archived-clients' must be in LIVE_PREFIXES");
++  });
++
++  t.report();
++}).catch((e) => {
++  console.error(e);
++  process.exit(1);
++});

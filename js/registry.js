@@ -1,3 +1,4 @@
+// PUT IN: js/registry.js
 /**
  * alliteration. — app registry
  *
@@ -49,6 +50,9 @@ export const APPS = [
       ['leads', 'Leads'],
       ['roster', 'Roster'],
       ['scorecard', 'Scorecard'],
+      // One Archived screen covers leads AND clients: "where did that go" is
+      // the same question either way, and two near-identical screens drift.
+      ['archive', 'Archived'],
       ['settings', 'Settings']
     ],
     defaultView: 'dashboard',

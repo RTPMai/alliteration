@@ -1,3 +1,4 @@
+// PUT IN: apps/backbone/template.js
 /**
  * BackBone — markup.
  *
@@ -200,6 +201,37 @@ export default `
         </div>
         <div id="tableWrap"></div>
         <div class="help" style="margin-top:10px">Click any column header to sort — click again to reverse.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ARCHIVED MANAGER. One screen for both leads and clients, because "where
+       did that go" is the same question whichever kind of record it was, and
+       two near-identical screens would drift apart within a month. -->
+  <div id="page-archive" class="page">
+    <div class="kpi-grid" id="archiveKpiGrid"></div>
+
+    <div class="card">
+      <div class="card-hd">
+        <h3>Archived</h3>
+      </div>
+      <div class="card-bd">
+        <div class="help">
+          Records taken off the working lists, with the reason they were taken off
+          and who did it. Nothing here is deleted: restore puts a lead back at the
+          exact stage it was standing in, and puts a client back on the roster.
+        </div>
+        <div class="archive-tabs">
+          <button class="archive-tab active" data-archive-tab="leads">Leads</button>
+          <button class="archive-tab" data-archive-tab="clients">Clients</button>
+        </div>
+        <div class="toolbar">
+          <input class="search" id="archiveSearch" placeholder="Search company, reason or lead number"/>
+          <select class="field" id="archiveReasonFilter" style="width:auto">
+            <option value="">All reasons</option>
+          </select>
+        </div>
+        <div id="archiveTableWrap"></div>
       </div>
     </div>
   </div>
@@ -427,6 +459,26 @@ export default `
       </div>
     </div>
     <div class="card" style="margin-bottom:16px">
+      <div class="card-hd"><h3>Archive reasons</h3></div>
+      <div class="card-bd">
+        <div class="help">
+          The list of reasons offered when a lead or a client is archived. It is a
+          fixed list rather than a free text box so the reasons can be counted and
+          filtered later. One per line.
+          <br/><br/>
+          Editing this list changes what can be picked from now on. It does
+          <b>not</b> rewrite anything already archived: the reason is copied onto
+          the record when it happens, so removing a line here leaves the records
+          filed under it readable, it just stops the reason being chosen again.
+          Saving is limited to admins.
+        </div>
+        <div id="archiveReasonsErr"></div>
+        <textarea class="field" id="archiveReasonsBox" style="width:100%;min-height:150px"></textarea>
+        <button class="btn btn-green" id="archiveReasonsSaveBtn" style="margin-top:8px">Save reasons</button>
+        <span class="save-status" id="archiveReasonsStatus" style="margin-left:10px"></span>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px">
       <div class="card-hd"><h3>Sync from Printavo</h3></div>
       <div class="card-bd">
         <div class="help">
@@ -532,6 +584,8 @@ export default `
     </div>
     <div class="modal-ft">
       <button class="btn btn-green" id="saveEnrichBtn">Save</button>
+      <button class="btn btn-gray" id="archiveClientBtn">Archive client</button>
+      <button class="btn btn-gray" id="restoreClientBtn" style="display:none">Restore client</button>
       <span class="save-status" id="saveStatus"></span>
     </div>
   </div>
@@ -579,6 +633,30 @@ export default `
   </div>
 </div>
 
+<!-- The reason is a dropdown and not a text box on purpose. Free text answers
+     "why is this gone" with twelve spellings of the same four reasons, which
+     cannot be counted or filtered afterwards. -->
+<div class="modal-overlay" id="archiveOverlay">
+  <div class="modal" style="max-width:520px">
+    <div class="modal-hd">
+      <h3 id="archiveModalTitle">Archive</h3>
+      <button class="modal-close" id="archiveModalClose">&times;</button>
+    </div>
+    <div class="modal-bd">
+      <div class="help" id="archiveModalWhat"></div>
+      <label class="field-lbl">Reason *</label>
+      <select class="field" id="archiveReasonSelect"></select>
+      <label class="field-lbl" style="margin-top:12px">Note (optional)</label>
+      <input class="field" id="archiveNoteInput" placeholder="Anything worth knowing later"/>
+      <div id="archiveModalErr" style="color:var(--danger);font-size:12px;margin-top:10px"></div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn btn-danger" id="archiveConfirmBtn">Archive</button>
+      <button class="btn btn-gray" id="archiveCancelBtn">Cancel</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="leadDetailOverlay">
   <div class="modal" style="max-width:640px">
     <div class="modal-hd">
@@ -606,6 +684,8 @@ export default `
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn btn-danger btn-sm" id="deleteLeadBtn">Delete lead</button>
+        <button class="btn btn-gray btn-sm" id="archiveLeadBtn">Archive</button>
+        <button class="btn btn-gray btn-sm" id="restoreLeadBtn" style="display:none">Restore</button>
         <button class="btn btn-gray btn-sm" id="rerunQualBtn">Run / re-run AI qualification (API)</button>
         <button class="btn btn-green btn-sm" id="promoteLeadBtn">Promote to Roster</button>
       </div>

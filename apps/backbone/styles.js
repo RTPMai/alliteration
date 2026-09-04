@@ -1,3 +1,4 @@
+// PUT IN: apps/backbone/styles.js
 /**
  * BackBone — styles.
  *
@@ -693,4 +694,36 @@ body.read-only .btn-green,body.read-only .btn-red{display:none !important}
 }
 .merge-results div:last-child { border-bottom: 0; }
 .merge-results div:hover { background: var(--accent-tint); }
+
+/* ---- Archived Manager -------------------------------------------------- */
+/* Colours come from tokens. Nothing here defines a hex value. */
+.archive-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.archive-tab {
+  padding: 7px 14px; border: 1px solid var(--line); border-radius: var(--radius-sm);
+  background: var(--card); color: var(--muted); font-size: 13px; font-weight: 600;
+  cursor: pointer;
+}
+.archive-tab:hover { border-color: var(--accent); color: var(--accent); }
+.archive-tab.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+
+/* The reason reads as a label, not as a warning: an archived record is a
+   tidy outcome, not an error. */
+.archive-reason-pill {
+  display: inline-flex; padding: 2px 9px; border-radius: 99px; font-size: 11px;
+  font-weight: 700; background: var(--accent-tint); color: var(--accent); white-space: nowrap;
+}
+.archive-note { color: var(--muted); font-size: 12px; }
+
+/* The lead number. Tabular figures so a column of them lines up. */
+.lead-no {
+  font-variant-numeric: tabular-nums; font-size: 12px; color: var(--muted); white-space: nowrap;
+}
+
+/* Shown on a record that IS archived while you are looking at it, so the
+   detail panel never reads as a live lead when it is not one. */
+.archive-banner {
+  border: 1px solid var(--line); border-left: 3px solid var(--accent);
+  background: var(--accent-tint); border-radius: var(--radius-sm);
+  padding: 10px 12px; margin-bottom: 12px; font-size: 12.5px;
+}
 `;

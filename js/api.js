@@ -63,6 +63,7 @@ const LIVE_PREFIXES = [
   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/printavo-schema', '/api/customer-match',
   '/api/reorder-settings', '/api/marketmachine/', '/api/merges',
+  '/api/archive-reasons', '/api/archived-clients',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
   // the 's' vs 'e' at position 10 keeps them distinct.)
@@ -173,6 +174,10 @@ export const ENDPOINTS = {
   bbIntake:        '/api/intake',
   bbLeadsData:     '/api/leads-data',
   bbLeadsSave:     '/api/leads-save',
+  // Archiving. The reason list is a setting; the client stamps are data.
+  // Lead archives ride along inside the leads blob and need no route.
+  bbArchiveReasons:  '/api/archive-reasons',
+  bbArchivedClients: '/api/archived-clients',
   bbQualify:       '/api/qualify',
   bbBrief:         '/api/brief',
   bbScanCard:      '/api/scan-card',
