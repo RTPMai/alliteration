@@ -16,7 +16,15 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
-import { APPS } from '../js/registry.js';
+// SITE_APPS is included in the role toggles so StickySituations can be granted
+// without handing somebody the Admin flag. It is one entry, and it is off for
+// every role until ticked here.
+import { APPS, SITE_APPS } from '../js/registry.js';
+
+// The full toggle list. Site apps sit at the end, after the real apps, because
+// they are a different kind of thing: the build-the-platform list rather than
+// something used to run the business.
+const GRANTABLE_APPS = APPS.concat(SITE_APPS);
 // Resolves the donation-decision switch the same way the server does, so the
 // box shows ticked for a role that has always been able to decide even though
 // nothing was ever written to storage for it.
@@ -258,7 +266,7 @@ export default {
         return '<span class="app-chip off"><span class="sq"></span>No apps</span>';
       }
       return ids.map((id) => {
-        const a = APPS.find((x) => x.id === id);
+        const a = GRANTABLE_APPS.find((x) => x.id === id);
         const name = a ? a.name : id;
         const color = a ? a.accent : 'var(--muted)';
         return '<span class="app-chip" style="--c:' + esc(color) + '">' +
@@ -346,7 +354,7 @@ export default {
         const locked = !!r.protected;
         const held = holderCount(key);
 
-        const toggles = APPS.map((a) => {
+        const toggles = GRANTABLE_APPS.map((a) => {
           const on = Array.isArray(r.apps) && r.apps.includes(a.id);
           return '<button class="app-toggle" type="button"' +
             ' style="--c:' + esc(a.accent) + '"' +

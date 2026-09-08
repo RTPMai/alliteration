@@ -1,3 +1,4 @@
+// PUT IN: test/sitework.test.cjs
 /**
  * Site Work / StickySituations tests (Aug 18, 2026; renamed Sep 2026).
  *
@@ -26,7 +27,9 @@ const exists = (p) => fs.existsSync(path.join(ROOT, p));
 Promise.all([
   import(path.join(ROOT, 'lib/sitework/schema.js')),
   import(path.join(ROOT, 'js/registry.js')),
-]).then(([schema, reg]) => {
+  import(path.join(ROOT, 'lib/users.js')),
+]).then(([schema, reg, users]) => {
+  const { DEFAULT_ROLES } = users;
   const { validateNew, validatePatch, COLORS, SIZES, STATUSES, keys, DEFAULT_COLOR,
           SIZE_LABELS, noteText, boardText } = schema;
   const { APPS, SITE_APPS, SHELL_APPS, canAccess, getApp } = reg;
@@ -61,21 +64,46 @@ Promise.all([
 
   /* ---- access: superuser only, and not by role ------------------------- */
 
-  t.test('only a superuser can reach Sticky Notes', () => {
+  t.test('the Admin flag or an explicit role grant reaches Sticky Notes', () => {
+    // Sep 2026: Ryan asked for a role checkbox, so somebody can see the build
+    // list without being handed the whole platform. It was the flag alone.
     t.equal(canAccess({ superuser: true }, 'stickies'), true,
-      'a superuser must get in');
-    t.equal(canAccess({ superuser: false, role: 'admin', tabs: ['backbone'] }, 'stickies'), false,
-      'admin is not enough: this gates on the superuser flag alone');
-    t.equal(canAccess({ tabs: ['stickies'] }, 'stickies'), false,
-      'granting the id in a role must NOT open the section');
+      'the Admin flag must get in');
+    t.equal(canAccess({ tabs: ['stickies'] }, 'stickies'), true,
+      'a role with the box ticked must get in');
+    t.equal(canAccess({ superuser: false, tabs: ['backbone', 'stickies'] }, 'stickies'), true,
+      'the grant works alongside ordinary app grants');
     t.equal(canAccess(null, 'stickies'), false, 'no perms means no access');
   });
 
-  t.test('the Site Work check runs before the blanket app rules', () => {
-    // A user with no app grants at all falls through to the legacy
-    // "BackBone only" branch. Site Work must be decided before that.
+  t.test('the grant is exact: nothing else infers it', () => {
+    t.equal(canAccess({ superuser: false, role: 'admin', tabs: ['backbone'] }, 'stickies'), false,
+      'the admin ROLE name is not the grant; the box or the flag is');
+    t.equal(canAccess({ tabs: ['backbone', 'crewcore', 'mailme'] }, 'stickies'), false,
+      'no combination of other apps adds up to Site Work');
+    t.equal(canAccess({ superuser: false, tabs: ['stickies:board'] }, 'stickies'), false,
+      'a scoped view entry is not an app grant');
+  });
+
+  t.test('nobody gains Site Work on deploy', () => {
+    // THE CREWCORE TRAP. canAccess falls back to "BackBone only" for a role
+    // whose tabs list predates app ids, which is a convenience for the app
+    // rail. On a screen that is off by default it would hand access to roles
+    // nobody ticked, so Site Work is decided BEFORE that branch is reached.
     t.equal(canAccess({ tabs: [] }, 'stickies'), false,
-      'the legacy BackBone fallback must not accidentally grant Site Work');
+      'an empty grant list must not fall through to the legacy BackBone branch');
+    t.equal(canAccess({ superuser: false }, 'stickies'), false,
+      'a role with no tabs array at all must not get in');
+    t.equal(canAccess({ tabs: ['leads', 'roster'] }, 'stickies'), false,
+      'a legacy tabs list of BackBone view names must not get in');
+
+    // And no shipped role carries it, which is the other half of "off by
+    // default": a rule that is opt-in does not help if a default opts you in.
+    Object.keys(DEFAULT_ROLES).forEach((key) => {
+      const apps = DEFAULT_ROLES[key].apps || [];
+      t.assert(!apps.includes('stickies'),
+        'the default role "' + key + '" ships with Site Work granted');
+    });
   });
 
   /* ---- schema ---------------------------------------------------------- */

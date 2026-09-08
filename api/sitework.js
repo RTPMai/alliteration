@@ -1,17 +1,25 @@
+// PUT IN: api/sitework.js
 // api/sitework.js — StickySituations route (Site Work section).
 //
 // Site Work is the list of what still needs doing to Alliteration itself, kept
 // separate from Notifications (the team's hand-off list) on purpose. Access is
-// SUPERUSER ONLY, checked here and not merely hidden in the rail: a route that
-// relies on the nav to hide it is not gated at all.
+// checked HERE and not merely hidden in the rail: a route that relies on the
+// nav to hide it is not gated at all.
 //
-// Superuser today means Ryan, Jacob and Margo. To narrow it to one person,
-// change isBuilder() below; nothing else needs to move.
+// WHO GETS IN. The per-account Admin flag, or a role with "stickies" ticked in
+// Settings. It was the Admin flag alone until Sep 2026, when Ryan asked for a
+// role checkbox so somebody can see the build list without being handed the
+// whole platform.
+//
+// The grant is EXACT and OPT-IN. No default role ships with it, and there is no
+// fallback that infers it from a role's shape, so nobody gained this screen on
+// deploy. This mirrors js/registry.js canAccess(); the two must agree, and
+// test/sitework.test.cjs checks that they do by calling both.
 //
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser } from "../lib/users.js";
+import { getUser, permsFor } from "../lib/users.js";
 import { validateNew, validatePatch } from "../lib/sitework/schema.js";
 import {
   listNotes, getNote, saveNote, updateNote, deleteNote, nextNoteId,
@@ -28,9 +36,33 @@ const APP_IDS = [
   "stitchsense", "marketmachine",
 ];
 
+const SITE_APP_ID = "stickies";
+
 async function isBuilder(sess) {
+  if (!sess.username) return false;
+  const user = await getUser(sess.username);
+  if (!user) return false;
+  if (user.superuser === true) return true;
+  const perms = await permsFor(sess.username);
+  const tabs = Array.isArray(perms && perms.tabs) ? perms.tabs : [];
+  return tabs.includes(SITE_APP_ID);
+}
+
+/**
+ * Reading the board and changing it are different questions. Someone given the
+ * build list so they can see what is coming does not necessarily get to delete
+ * items off it, so writes additionally require can_edit, the same flag every
+ * other app writes under.
+ *
+ * The Admin flag skips this entirely. can_edit lives on a ROLE, and an admin's
+ * access does not come from one, so reading it for them would let a role edit
+ * take the board away from the people who build the platform.
+ */
+async function canWrite(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  return !!(user && user.superuser === true);
+  if (user && user.superuser === true) return true;
+  const perms = await permsFor(sess.username);
+  return !!(perms && perms.can_edit !== false);
 }
 
 function parseBody(req) {
@@ -50,6 +82,13 @@ export default async function handler(req, res) {
   // cannot accidentally ship ungated.
   if (!(await isBuilder(sess))) {
     return res.status(403).json({ error: "Site Work is admin only" });
+  }
+
+  // Read is settled above. Anything that CHANGES the board needs can_edit too.
+  // Placed here, ahead of every branch, so a method added later cannot ship
+  // ungated by being forgotten.
+  if (req.method !== "GET" && !(await canWrite(sess))) {
+    return res.status(403).json({ error: "Your role can view Site Work but not change it" });
   }
 
   const me = String(sess.username || "").toLowerCase();

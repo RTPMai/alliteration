@@ -461,8 +461,9 @@ export const SHELL_APPS = [
  * hand-off reading "call this customer back", and stacking them in one list is
  * what made the first attempt unusable.
  *
- * Superuser only. Enforced in api/sitework.js as well; hiding a rail entry is
- * not access control.
+ * Admin flag, or an explicit role grant. Off for every role until somebody
+ * ticks it in Settings; there is no default that hands it out. Enforced in
+ * api/sitework.js as well, because hiding a rail entry is not access control.
  */
 export const SITE_APPS = [
   {
@@ -472,7 +473,9 @@ export const SITE_APPS = [
     accent: '#C9A227',
     views: [['board', 'Board']],
     defaultView: 'board',
-    superuserOnly: true,
+    // Not superuserOnly any more: canAccess() reads a role grant too. The flag
+    // is gone rather than left lying at true, so nothing can read it and
+    // reach a different answer than canAccess does.
     siteLevel: true,
     stub: false
   }
@@ -545,13 +548,29 @@ export function firstAllowed(perms) {
 export function canAccess(perms, appId) {
   if (!perms) return false;
 
-  // Site Work screens gate on the per-account superuser flag alone. Not a
-  // role grant, not perms.tabs: this section is for whoever builds the
-  // platform, and that is not a job title anyone can be given by editing a
-  // role. Checked before the blanket superuser pass below so the rule reads
-  // in one place.
+  // Site Work screens: the per-account Admin flag, OR an explicit role grant.
+  //
+  // This used to be the Admin flag alone. Ryan asked for a role checkbox so
+  // somebody can see the build list without being handed the whole platform.
+  //
+  // THE GRANT IS EXACT AND OPT-IN: the id has to be in the list. Nobody gains
+  // this screen on deploy, because no default role carries it.
+  //
+  // Deciding it HERE rather than letting it fall through to the general app
+  // rules below is defensive, not a behaviour change: the legacy fallback down
+  // there only ever grants BackBone, so it would refuse Site Work today
+  // either way. The point is that it would not have to stay that way. A future
+  // edit widening that fallback would silently widen this screen too, and a
+  // screen that is off by default should not depend on a rule written for a
+  // different question. Mutation testing confirms the two paths currently
+  // agree, which is exactly why the branch needs a comment saying why it
+  // exists.
   const site = SITE_APPS.find((a) => a.id === appId);
-  if (site) return perms.superuser === true;
+  if (site) {
+    if (perms.superuser === true) return true;
+    const siteTabs = Array.isArray(perms.tabs) ? perms.tabs : [];
+    return siteTabs.includes(appId);
+  }
 
   // Shell-level screens gate on ROLE, not on perms.tabs. They are not apps, so
   // they are never listed in a role's app grants.
