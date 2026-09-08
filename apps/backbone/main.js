@@ -47,6 +47,16 @@ import {
   DEFAULT_ARCHIVE_REASONS, DISQUALIFIED_REASON, resolveReason,
   isArchived, archiveRecord, restoreRecord,
 } from '../../lib/backbone/archive.js';
+// The inquiry pipeline: stages, staleness, adoption and the ask score. Held in
+// lib/ rather than here so the tests can CALL it. While it lived in this file
+// node could not load it, so every test about the pipeline was a regular
+// expression over the source, which proves letters exist and nothing else.
+import {
+  INQUIRY_STATUSES, FUNNEL_STAGES, STAGE_STALE_DAYS,
+  normalizeInquiryStatus, setInquiryStatus, daysInStage, isStalled,
+  reachBackDue, askSummary, combinedScore, inquiryPriority, isActive,
+  inquiryFromSubmission,
+} from '../../lib/backbone/inquiries.js';
 
 export async function start(ctx) {
   const root = ctx.root;
@@ -7117,82 +7127,40 @@ export async function start(ctx) {
     return partial || "";
   }
 
-  // Single source of truth for lead pipeline statuses.
-  // Exit buckets by design decision (sales director, Jul 2026): a lead ends in
-  // exactly one of "Reach Back Out" (with a date), "Won", or "Lost". Never deleted.
-  const LEAD_STATUSES = ["New", "Researching", "Qualified", "AM Notified", "Contacted 1st", "Contacted 2nd", "Death Call", "Reach Back Out", "Won", "Lost"];
+  // THE LADDER NOW LIVES IN lib/backbone/inquiries.js. What used to sit here
+  // was ten stages built for cold outbound: Researching and Qualified while you
+  // decided whether a stranger was worth calling, then Contacted 1st, Contacted
+  // 2nd and Death Call, which is a cold-call cadence with a giving-up point.
+  // P&M's work arrives already asking for something, so the ladder is now the
+  // inbound sequence and Quoted, which never existed, is the stage that matters.
+  //
+  // Old records are mapped on READ by normalizeInquiryStatus and never rewritten
+  // in storage, so a lead that spent three weeks in Contacted 2nd keeps that in
+  // its history and simply displays as Responded.
+  const LEAD_STATUSES = INQUIRY_STATUSES;
 
-  // Outreach stages: everything between the AM getting the lead and it
-  // resolving to Won/Lost. Grouped here so the dashboard KPI can roll them
-  // into one "In Outreach" number without hardcoding the list twice.
-  const OUTREACH_STAGES = ["AM Notified", "Contacted 1st", "Contacted 2nd", "Death Call"];
+  // Kept as thin local names so the hundred-odd call sites below read the way
+  // they always did. Each one is the imported function; there is no second copy.
+  const normalizeLeadStatus = normalizeInquiryStatus;
+  const daysInCurrentStage = daysInStage;
+  function setLeadStatus(lead, status) { return setInquiryStatus(lead, status); }
 
-  // Old records may still say "Dead" or the old single "Contacted" stage —
-  // map on read so nothing displays a retired name. "Contacted" (pre-Aug 2026)
-  // becomes "Contacted 1st": it can't know which call it represented, and
-  // 1st is the safer under-count (won't skip a lead past 2nd/Death Call).
-  function normalizeLeadStatus(status) {
-    if (status === "Dead") return "Lost";
-    if (status === "Contacted") return "Contacted 1st";
-    return status || "New";
-  }
-
-  // EVERY status change goes through here so the lead keeps a timestamped trail.
-  // The trail is what makes "did the AM act on this?" answerable: a lead sitting
-  // in AM Notified for a week is visible instead of silently stale.
-  function setLeadStatus(lead, status) {
-    if (!lead) return;
-    if (lead.status === status) return;
-    lead.status = status;
-    if (!Array.isArray(lead.status_history)) lead.status_history = [];
-    lead.status_history.push({ status: status, at: new Date().toISOString() });
-  }
-
-  // How long has the lead been in its current stage? Falls back to created_at
-  // for leads that predate the history trail.
-  function daysInCurrentStage(lead) {
-    let since = lead.created_at;
-    if (Array.isArray(lead.status_history) && lead.status_history.length) {
-      since = lead.status_history[lead.status_history.length - 1].at;
-    }
-    if (!since) return null;
-    const ms = Date.now() - new Date(since).getTime();
-    return Math.floor(ms / 86400000);
-  }
-
-  // A "Reach Back Out" lead is due when its date has arrived. No date = due now,
-  // so a lead can't hide in the bucket by skipping the date.
-  function reachBackDue(lead) {
-    if (lead.status !== "Reach Back Out") return false;
-    if (!lead.reach_back_at) return true;
-    return new Date(lead.reach_back_at) <= new Date();
-  }
-
-  // How many days a lead can sit in each outreach stage before it's flagged
-  // as stalled. Same pattern as the original AM Notified check, extended to
-  // the two Contacted stages and Death Call so a quiet lead never hides
-  // silently in any of them.
-  const AM_NOTIFIED_STALE_DAYS = 5;
-  const STAGE_STALE_DAYS = {
-    "AM Notified": AM_NOTIFIED_STALE_DAYS,
-    "Contacted 1st": 5,
-    "Contacted 2nd": 5,
-    "Death Call": 3
-  };
-
-  // Chip rendered beside the status pill: makes a stalled handoff or a due
-  // reach-back visible in the list without opening the lead.
+  // Chip beside the status pill: makes an unanswered assignment or a quote
+  // nobody chased visible in the list without opening the record.
   function statusAgeChip(lead) {
-    const staleDays = STAGE_STALE_DAYS[lead.status];
-    if (staleDays != null) {
+    if (isStalled(lead)) {
       const d = daysInCurrentStage(lead);
-      if (d !== null && d >= staleDays) {
-        return ' <span class="lead-age-chip" title="' + lead.status + ' for ' + d + ' days with no status change — check whether the AM followed up.">' + d + 'd, no action</span>';
-      }
+      const limit = STAGE_STALE_DAYS[normalizeLeadStatus(lead.status)];
+      const why = normalizeLeadStatus(lead.status) === "Assigned"
+        ? "Assigned " + d + " days ago and the customer still has not heard back."
+        : (normalizeLeadStatus(lead.status) === "Quoted"
+            ? "A price has been out for " + d + " days with no answer. Time to chase it."
+            : lead.status + " for " + d + " days with no change.");
+      return ' <span class="lead-age-chip" title="' + escapeAttr(why) + '" data-stale-limit="' + limit + '">' + d + 'd, no action</span>';
     }
-    if (lead.status === "Reach Back Out") {
+    if (normalizeLeadStatus(lead.status) === "Reach Back Out") {
       if (reachBackDue(lead)) {
-        return ' <span class="lead-age-chip" title="The follow-up date for this lead has arrived.">due now</span>';
+        return ' <span class="lead-age-chip" title="The follow-up date for this inquiry has arrived.">due now</span>';
       }
       if (lead.reach_back_at) {
         return ' <span class="lead-wait-chip" title="Parked until this date, then it flags as due.">' + fmtDate(lead.reach_back_at) + '</span>';
@@ -7201,32 +7169,22 @@ export async function start(ctx) {
     return "";
   }
 
-  // "AM Notified" -> "AMNotified" so it's usable as a CSS class.
+  function escapeAttr(text) {
+    return String(text).replace(/"/g, "&quot;");
+  }
+
+  // "Reach Back Out" -> "ReachBackOut" so it is usable as a CSS class. Reads the
+  // NORMALIZED status, or a legacy record would ask for a pill class that the
+  // stylesheet stopped carrying.
   function statusClass(status) {
-    return "lead-status-" + String(status || "").replace(/[^A-Za-z0-9]/g, "");
+    return "lead-status-" + String(normalizeLeadStatus(status) || "").replace(/[^A-Za-z0-9]/g, "");
   }
 
   // Small hoverable "i" that explains what a control or number is for.
   // Plain title-attribute tooltips: zero JS, works everywhere, reads on hover.
   function infoI(text) {
-    return ' <span class="info-i" title="' + String(text).replace(/"/g, "&quot;") + '">i</span>';
+    return ' <span class="info-i" title="' + escapeAttr(text) + '">i</span>';
   }
-
-  // Funnel: the ordered flow stages, plus Dead parked at the end as an exit bucket.
-  // Colors mirror the existing lead-status pills so the two views read as one system.
-  // "In Outreach" rolls up the four outreach stages (AM Notified through Death
-  // Call) into one segment, by Ryan's call: the top-level funnel stays clean,
-  // and the stage-by-stage breakdown is still available via the status filter
-  // dropdown and on each lead's own record.
-  const FUNNEL_STAGES = [
-    { name: "New",         color: "var(--muted)" },
-    { name: "Researching", color: "var(--hue-sky)" },
-    { name: "Qualified",   color: "var(--hue-blue)" },
-    { name: "In Outreach", color: "var(--amber)", statuses: OUTREACH_STAGES },
-    { name: "Reach Back Out", color: "var(--hue-clay)" },
-    { name: "Won",         color: "var(--success)" },
-    { name: "Lost",        color: "var(--danger)" }
-  ];
 
   // null = no stage filter (show everything).
   let leadsStageFilter = null;
@@ -7254,6 +7212,89 @@ export async function start(ctx) {
     { key: "created", label: "Added", numeric: true }
   ];
 
+  /* ------------------------------------------------------------------ *
+   * ONE LIST.
+   *
+   * Inbox and Leads used to be two screens. A submission landed on the Inbox,
+   * somebody pressed "Convert to lead", and it appeared on the other screen as
+   * a record. That second step existed only because Leads was built for
+   * strangers we had researched, so an inbound inquiry had to be turned into
+   * one before the pipeline would take it.
+   *
+   * Now they are one thing at two moments of its life. A submission nobody has
+   * touched shows in this list as a New inquiry, drawn from the submission
+   * itself and stored nowhere. The moment anybody acts on it, it is adopted
+   * into the inquiry store as a real record and stops being drawn this way.
+   *
+   * WHY ADOPTION IS NOT AUTOMATIC ON LOAD. Two account managers opening the
+   * screen at the same moment would both write, and the second write would land
+   * on a list built before the first one, quietly losing whichever record was
+   * added in between. Acting on an inquiry is something one person does once,
+   * so that is where the write belongs.
+   * ------------------------------------------------------------------ */
+
+  // Submissions that already went somewhere are not pending: converted ones have
+  // a real record in the list, attached ones live on a client, dismissed ones
+  // were judged. Only untouched submissions are drawn as pending rows.
+  const RESOLVED_SUBMISSION_STATUSES = ["converted_lead", "attached_to_client", "dismissed"];
+
+  function pendingSubmissions() {
+    return state_intake.filter(function(sub) {
+      return RESOLVED_SUBMISSION_STATUSES.indexOf(sub.status) === -1;
+    });
+  }
+
+  // A pending row is built fresh on every render and never saved. Its id is
+  // prefixed so every handler can tell a drawn submission from a stored record
+  // without checking a flag it might forget to set.
+  const PENDING_PREFIX = "sub:";
+
+  function pendingRowFor(sub) {
+    const rec = inquiryFromSubmission(sub, { projectTypeLabels: PROJECT_TYPE_LABELS, id: PENDING_PREFIX + sub.id });
+    rec._pending = true;
+    rec._submission = sub;
+    return rec;
+  }
+
+  function isPendingId(id) {
+    return typeof id === "string" && id.indexOf(PENDING_PREFIX) === 0;
+  }
+
+  function workingInquiries() {
+    return state_leads.concat(pendingSubmissions().map(pendingRowFor));
+  }
+
+  /**
+   * Turn selected pending rows into stored records. Returns the ids the caller
+   * should now be working with, so a bulk action taken on a mix of drawn and
+   * stored rows treats them all the same.
+   *
+   * ONE SAVE, not one per row: adopting eight inquiries used to be eight
+   * sequential writes on a cold serverless function, which is exactly the shape
+   * that made TravelTrack's twelve-row import look like it had done nothing.
+   */
+  async function adoptIds(ids) {
+    const out = [];
+    let adopted = 0;
+    for (const id of ids) {
+      if (!isPendingId(id)) { out.push(id); continue; }
+      const subId = id.slice(PENDING_PREFIX.length);
+      const sub = state_intake.find(function(x) { return x.id === subId; });
+      if (!sub) continue;
+      const rec = inquiryFromSubmission(sub, { projectTypeLabels: PROJECT_TYPE_LABELS, id: uid() });
+      state_leads.push(rec);
+      sub.status = "converted_lead";
+      sub.links = Object.assign({}, sub.links, { lead_id: rec.lead_id });
+      out.push(rec.lead_id);
+      adopted += 1;
+    }
+    if (adopted) {
+      await saveLeads();
+      await saveInbox();
+    }
+    return out;
+  }
+
   // ignoreStage=true is used by the funnel itself, so its counts reflect the search box
   // but never collapse to only the stage you're currently standing in.
   function getLeadsRows(ignoreStage) {
@@ -7261,13 +7302,21 @@ export async function start(ctx) {
     // archiving and disqualifying mean anything: a disqualified lead that stays
     // here is a lead every AM has to decide about again every week. They are all
     // still on the Archived screen, and restoring puts one straight back.
-    let rows = state_leads.filter(function(l) { return !isArchived(l); }).map(function(l) {
+    let rows = workingInquiries().filter(function(l) { return !isArchived(l); }).map(function(l) {
       const q = l.qualification;
-      const score = q ? q.qualification_scoring.total_score : null;
-      const tier = q ? q.qualification_scoring.qualification_tier : "";
+      // The score is now BOTH halves: how good a company they are and how good
+      // the thing they asked for is. The research agent only ever answered the
+      // first, which is why two inquiries from identically sized firms used to
+      // score the same when one wanted an ongoing store and the other wanted
+      // four hats. combinedScore returns null, never zero, when neither half is
+      // answerable, and null must draw as a dash.
+      const blend = combinedScore(q, l.intake_submission, Date.now());
+      const score = blend.pct;
+      const priority = inquiryPriority(blend.pct);
+      const tier = (q && q.qualification_scoring) ? q.qualification_scoring.qualification_tier : "";
       const amR = leadSuggestedAM(l);
       const amText = amR.varies ? "Varies" : (amR.am || "");
-      const followUp = q ? q.routing.follow_up_speed : "";
+      const followUp = (q && q.routing) ? q.routing.follow_up_speed : "";
       const contact = leadBestContact(l);
       return Object.assign({}, l, {
         score_sort: score,
@@ -7276,7 +7325,7 @@ export async function start(ctx) {
         followup_sort: followUp,
         email_sort: (contact.email && contact.phone) ? 0 : (contact.email ? 1 : (contact.phone ? 2 : 3)),
         created_sort: new Date(l.created_at).getTime(),
-        _display: { score: score, tier: tier, am: amText, followUp: followUp, contact: contact }
+        _display: { score: score, blend: blend, priority: priority, tier: tier, am: amText, followUp: followUp, contact: contact }
       });
     });
     if (leadsSearchQuery.trim()) {
@@ -7288,13 +7337,11 @@ export async function start(ctx) {
       });
     }
     if (!ignoreStage && leadsStageFilter) {
-      // "In Outreach" is a rolled-up funnel segment, not a real status — it
-      // matches any of the four outreach statuses instead of one exact name.
-      if (leadsStageFilter === "In Outreach") {
-        rows = rows.filter(function(r) { return OUTREACH_STAGES.indexOf(r.status) !== -1; });
-      } else {
-        rows = rows.filter(function(r) { return r.status === leadsStageFilter; });
-      }
+      // Every funnel segment is now a real stage. The old rollup existed because
+      // seven segments across a screen was unreadable when four of them were
+      // cold-call steps nobody needed to tell apart at a glance; with three live
+      // stages there is nothing left to roll up, so the special case is gone.
+      rows = rows.filter(function(r) { return normalizeLeadStatus(r.status) === leadsStageFilter; });
     }
     // "My leads": only rows routed to the signed-in user, so an AM can weed out
     // everyone else's assignments with one click.
@@ -8379,13 +8426,12 @@ export async function start(ctx) {
     // Funnel counts respect the search box but ignore the stage filter.
     const pool = getLeadsRows(true);
 
-    // Map an actual lead status to the funnel segment it displays under.
-    // Grouped segments (like "In Outreach") list their member statuses in
-    // .statuses; ungrouped segments match on their own name.
+    // Every segment is a real stage now, so this is a straight name match on the
+    // NORMALIZED status. Normalizing here is what keeps a legacy "Death Call"
+    // record counted under Responded instead of falling through to New.
     function segmentFor(status) {
-      return FUNNEL_STAGES.find(function(s) {
-        return s.statuses ? s.statuses.indexOf(status) !== -1 : s.name === status;
-      });
+      const st = normalizeLeadStatus(status);
+      return FUNNEL_STAGES.find(function(s) { return s.name === st; });
     }
 
     const buckets = {};
@@ -8480,28 +8526,33 @@ export async function start(ctx) {
   }
 
   function renderLeadsPage() {
-    const total = state_leads.length;
-    const qualified = state_leads.filter(function(l) { return l.qualification; }).length;
-    const won = state_leads.filter(function(l) { return l.status === "Won"; }).length;
-    const strategic = state_leads.filter(function(l) {
-      return l.qualification && l.qualification.qualification_scoring &&
-        l.qualification.qualification_scoring.qualification_tier === "Strategic Account";
+    // The KPI row is built off the SAME merged pool the table draws, so a
+    // brand new form submission is counted the moment it lands rather than
+    // waiting for somebody to file it. That gap is what the old two-screen
+    // split created: the Leads KPIs said four while eleven sat on the Inbox.
+    const pool = workingInquiries().filter(function(l) { return !isArchived(l); });
+
+    const fresh = pool.filter(function(l) { return normalizeLeadStatus(l.status) === "New"; }).length;
+    const active = pool.filter(function(l) { return isActive(l); }).length;
+    const quoted = pool.filter(function(l) { return normalizeLeadStatus(l.status) === "Quoted"; }).length;
+    const stalled = pool.filter(function(l) { return isStalled(l); }).length;
+    const hot = pool.filter(function(l) {
+      return inquiryPriority(combinedScore(l.qualification, l.intake_submission, Date.now()).pct) === "Hot";
     }).length;
+    const reachDue = pool.filter(function(l) { return reachBackDue(l); }).length;
 
-    const reachDue = state_leads.filter(reachBackDue).length;
-
-    const kpiGrid = $id("leadsKpiGrid");
+    const kpiGrid = $id("inquiriesKpiGrid");
     if (kpiGrid) {
-      // "Scored", not "Qualified": this counts leads the research agent has scored,
-      // in ANY stage. The pipeline's Qualified bar counts stage only. Naming them
-      // the same thing made the two numbers look broken when both were right.
       kpiGrid.innerHTML =
-        '<div class="kpi"><div class="kpi-lbl">Total leads' + infoI("Every lead in the pipeline, all stages.") + '</div><div class="kpi-val">' + total + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Scored' + infoI("Leads the AI research agent has scored, in any stage. Different from the Qualified stage in the funnel below, which counts only leads currently sitting in that stage.") + '</div><div class="kpi-val">' + qualified + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Strategic tier' + infoI("Scored 40 or more out of 50: the highest-value account tier.") + '</div><div class="kpi-val">' + strategic + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Won</div><div class="kpi-val">' + won + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">New' + infoI("Inquiries nobody owns yet, including submissions that came off the form in the last few minutes. This is the pile to clear.") + '</div><div class="kpi-val"' + (fresh ? ' style="color:var(--amber)"' : '') + '>' + fresh + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">In progress' + infoI("Assigned, Responded or Quoted: somebody owes somebody something. Parked inquiries are not counted here, on purpose.") + '</div><div class="kpi-val">' + active + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">Quoted' + infoI("A price is in front of the customer and we are waiting on them.") + '</div><div class="kpi-val">' + quoted + '</div></div>' +
+        '<div class="kpi"><div class="kpi-lbl">Hot' + infoI("Scoring 75 or better on the two halves together: how good a company they are, and how good the thing they asked for is.") + '</div><div class="kpi-val">' + hot + '</div></div>' +
+        (stalled
+          ? '<div class="kpi"><div class="kpi-lbl">Sitting too long' + infoI("Past the clock for the stage they are in. An assignment nobody answered in two days, or a quote out for over ten with no chase.") + '</div><div class="kpi-val" style="color:var(--danger)">' + stalled + '</div></div>'
+          : '') +
         (reachDue
-          ? '<div class="kpi"><div class="kpi-lbl">Reach back due' + infoI("Reach Back Out leads whose follow-up date has arrived. Open them and get back in touch.") + '</div><div class="kpi-val" style="color:var(--amber)">' + reachDue + '</div></div>'
+          ? '<div class="kpi"><div class="kpi-lbl">Reach back due' + infoI("Parked inquiries whose follow-up date has arrived. Open them and get back in touch.") + '</div><div class="kpi-val" style="color:var(--amber)">' + reachDue + '</div></div>'
           : '');
     }
 
@@ -8512,8 +8563,8 @@ export async function start(ctx) {
     // A load failure must never masquerade as "no leads".
     if (leadsLoadError) {
       wrap.innerHTML = '<div class="empty-state" style="color:var(--amber)">' +
-        '<b>Leads didn\'t load.</b><br/>' + leadsLoadError +
-        '<br/><span style="font-size:11px;color:var(--faint)">Your leads are still stored — this is a loading problem, not data loss.</span>' +
+        '<b>Inquiries didn\'t load.</b><br/>' + leadsLoadError +
+        '<br/><span style="font-size:11px;color:var(--faint)">Your inquiries are still stored — this is a loading problem, not data loss.</span>' +
         '</div>';
       return;
     }
@@ -8521,11 +8572,11 @@ export async function start(ctx) {
     const rows = getLeadsRows();
     if (rows.length === 0) {
       wrap.innerHTML = '<div class="empty-state">' +
-        (state_leads.length === 0
-          ? "No leads yet. Add one above."
+        (workingInquiries().length === 0
+          ? "No inquiries yet. They arrive here from the public form, or you can log one above."
           : (leadsStageFilter
-              ? "No leads in <b>" + leadsStageFilter + "</b> matching this search."
-              : "No leads match this search.")) +
+              ? "No inquiries in <b>" + leadsStageFilter + "</b> matching this search."
+              : "No inquiries match this search.")) +
         '</div>';
       return;
     }
@@ -8569,7 +8620,7 @@ export async function start(ctx) {
         '<td>' + leadContactTag(d.contact) + '</td>' +
         '<td>' + (l.source_type || "—") + '</td>' +
         '<td><span class="lead-status-pill ' + statusClass(l.status) + '">' + l.status + '</span>' + statusAgeChip(l) + '</td>' +
-        '<td>' + (d.score === null ? "—" : d.score) + '</td>' +
+        '<td>' + scoreCell(d) + '</td>' +
         '<td>' + tierHtml + '</td>' +
         '<td>' + (d.am || "—") + '</td>' +
         '<td>' + (d.followUp || "—") + '</td>' +
@@ -8590,6 +8641,12 @@ export async function start(ctx) {
       tr.addEventListener("click", function(e) {
         if (e.target.classList.contains("lead-select") || e.target.type === "checkbox") return;
         if (e.target.closest("a")) return;
+        // A pending row has no stored record to open, so it opens the submission
+        // exactly as the old Inbox did. Everything on that panel adopts.
+        if (isPendingId(tr.dataset.leadId)) {
+          openInquiry(tr.dataset.leadId.slice(PENDING_PREFIX.length));
+          return;
+        }
         openLeadDetail(tr.dataset.leadId);
       });
     });
@@ -8632,7 +8689,29 @@ export async function start(ctx) {
     if (arcCount) arcCount.textContent = selectedLeadIds.size;
   }
 
-  // Delete every checked lead in one save. Rolls back cleanly if the save fails.
+  /**
+   * The score cell. Shows the blended number with the two halves behind a
+   * tooltip, because a single number nobody can take apart is a number people
+   * stop believing. An unscored inquiry shows a dash, NOT a zero: never having
+   * been assessed and having been assessed as worthless are different answers
+   * and drawing them the same way is how a rollup starts lying.
+   */
+  function scoreCell(d) {
+    if (d.score == null) {
+      return '<span class="score-none" title="Nothing to score on yet. Run the research agent, or ring them and fill in what they want.">\u2014</span>';
+    }
+    const b = d.blend;
+    const parts = [];
+    parts.push(b.fit == null ? "Company fit: not researched yet" : "Company fit: " + b.fit + "%");
+    parts.push(b.ask == null ? "What they asked for: nothing on the form to score" : "What they asked for: " + b.ask + "%");
+    if (b.detail && b.detail.unknown.length) {
+      parts.push("Not answered: " + b.detail.unknown.map(function(u) { return u.label; }).join(", "));
+    }
+    return '<span class="score-blend" title="' + escapeAttr(parts.join("\n")) + '">' + d.score + '%</span>' +
+      ' <span class="priority-pill priority-' + d.priority + '">' + d.priority + '</span>';
+  }
+
+  // Delete every checked inquiry in one save. Rolls back cleanly if the save fails.
   async function handleBulkDeleteLeads() {
     if (!CAN_DELETE_LEADS) return; // button never renders for these roles; belt and suspenders
     const targets = state_leads.filter(function(l) { return selectedLeadIds.has(l.lead_id); });
@@ -8697,29 +8776,44 @@ export async function start(ctx) {
     if (!status) { alert("Pick a status first."); return; }
     if (selectedLeadIds.size === 0) return;
 
-    const targets = state_leads.filter(function(l) { return selectedLeadIds.has(l.lead_id); });
-    if (targets.length === 0) return;
+    // A pending row is a submission nobody has stored yet, so there is nothing
+    // to change the status of until it is adopted. Adoption happens AFTER the
+    // confirms below, not here: pressing Cancel must leave the list exactly as
+    // it was, and adopting up front would quietly stamp lead numbers on eight
+    // inquiries for somebody who changed their mind.
+    const selectedIds = Array.from(selectedLeadIds);
+    const stored = state_leads.filter(function(l) { return selectedLeadIds.has(l.lead_id); });
+    const pendingCount = selectedIds.filter(isPendingId).length;
+    const selectedTotal = stored.length + pendingCount;
+    if (selectedTotal === 0) return;
 
     // Won is what Promote to Roster sets — don't let a bulk edit fake a promotion.
+    // A pending row has never been promoted by definition, so it counts here too.
     if (status === "Won") {
-      const unpromoted = targets.filter(function(l) { return !l.promoted_customer_id; });
-      if (unpromoted.length) {
-        const ok = confirm('Marking ' + unpromoted.length + ' lead(s) "Won" here does NOT add them to the Roster.\n\n' +
-          'To create the client record, open each lead and use "Promote to Roster" instead.\n\n' +
+      const unpromoted = stored.filter(function(l) { return !l.promoted_customer_id; });
+      if (unpromoted.length + pendingCount) {
+        const ok = confirm('Marking ' + (unpromoted.length + pendingCount) + ' inquiry(s) "Won" here does NOT add them to the Roster.\n\n' +
+          'To create the client record, open each one and use "Promote to Roster" instead.\n\n' +
           'Set status to Won anyway?');
         if (!ok) return;
       }
     }
 
-    const ok = confirm('Set ' + targets.length + ' lead(s) to "' + status + '"?');
+    const ok = confirm('Set ' + selectedTotal + ' inquiry(s) to "' + status + '"?' +
+      (pendingCount ? '\n\n' + pendingCount + ' of these came straight off the form and will be filed as inquiry records as part of this.' : ''));
     if (!ok) return;
 
     // One date for the whole batch — bulk-parking a set of soft no's together.
     let reachDate = null;
     if (status === "Reach Back Out") {
-      reachDate = promptReachBackDate(targets[0]);
+      reachDate = promptReachBackDate(stored[0] || {});
       if (reachDate === null) return;
     }
+
+    // Everything is confirmed, so now the pending rows become real records.
+    const resolved = await adoptIds(selectedIds);
+    const targets = state_leads.filter(function(l) { return resolved.indexOf(l.lead_id) !== -1; });
+    if (targets.length === 0) return;
 
     targets.forEach(function(l) {
       if (reachDate) l.reach_back_at = reachDate;
@@ -8954,7 +9048,7 @@ export async function start(ctx) {
   function buildIntakeEditForm(lead) {
     const sourceOptions = [
       ["", "Not set"], ["Inbound quote request", "Inbound quote request"], ["Website form", "Website form"],
-      ["Outbound prospecting", "Outbound prospecting"], ["Trade show", "Trade show"], ["Event", "Event"],
+      ["Phone call", "Phone call"], ["Walk-in", "Walk-in"], ["Trade show", "Trade show"], ["Event", "Event"],
       ["Referral", "Referral"], ["Existing account expansion", "Existing account expansion"]
     ];
     // Older leads only carry a single contact_name — split it for display so
@@ -9376,7 +9470,10 @@ export async function start(ctx) {
           inquiry_notes: lead.inquiry_notes,
           source_type: lead.source_type,
           industry: lead.industry,
-          existing_crm_notes: lead.existing_crm_notes
+          existing_crm_notes: lead.existing_crm_notes,
+          // Context for the research, not an input to its scores. A big
+          // employer asking for twelve hats is still a big employer.
+          asked_for: askSummary(lead, PROJECT_TYPE_LABELS)
       });
       if (result.error) {
         alert("Qualification failed: " + result.error +
@@ -9431,7 +9528,7 @@ export async function start(ctx) {
       // A v2 batch pasted into the single-lead box: unwrap a one-lead batch,
       // point a multi-lead batch at the bulk importer instead of guessing.
       if (parsed.leads.length !== 1) {
-        errEl.textContent = "This is a v2 batch with " + parsed.leads.length + " leads. This box updates one lead. Paste the whole batch into \"Create lead from JSON\" on the Add lead panel to import all of them.";
+        errEl.textContent = "This is a batch of " + parsed.leads.length + " companies. Bulk import was part of the cold prospecting pipeline and has been removed. This box scores the one inquiry you have open, so paste that company's object on its own.";
         return;
       }
       parsed = stampV2(parsed.leads[0], parsed);
@@ -9448,7 +9545,9 @@ export async function start(ctx) {
     parsed.qualified_at = new Date().toISOString();
     lead.qualification = parsed;
     const noContact = backfillLeadContactFromQual(lead);
-    if (lead.status === "New") setLeadStatus(lead, "Qualified");
+    // Deliberately does NOT advance the stage. Scoring tells you how hard to
+    // jump on something; it does not mean anybody has been assigned it or
+    // spoken to the customer, which is all the ladder tracks now.
     $id("leadStatusSelect").value = lead.status;
     const autoArchived = autoArchiveDisqualified([lead]);
     await saveLeads();
@@ -9503,206 +9602,16 @@ export async function start(ctx) {
   // v2 leads marked research_status "unresolved" land as status "New", not "Qualified" —
   // the research prompt preserves unresolved rows rather than dropping them, and the
   // pipeline should not present an unresolved organization as a qualified lead.
-  function leadRecordFromQual(parsed, name) {
-    const co = parsed.company_overview || {};
-    const c = contactsFromQual(parsed);
-    const industry = normalizeIndustry(cleanContactValue(co.industry_classification) || "");
-    const website = cleanContactValue(co.website) || "";
-    const rm = parsed.record_metadata || {};
-    const unresolved = rm.research_status === "unresolved";
-    parsed.qualified_at = new Date().toISOString();
-    return {
-      lead_id: uid(),
-      company_name: name,
-      website_url: website,
-      contact_name: c.name,
-      contact_email: c.email,
-      contact_phone: c.phone,
-      source_type: "Outbound prospecting",
-      intake_source: "prospecting_json",
-      industry: industry,
-      inquiry_notes: "",
-      existing_crm_notes: "Created from pasted qualification JSON on " + new Date().toLocaleDateString() + "." +
-        (unresolved ? " Research status: unresolved — see the research gaps in Full detail before outreach." : ""),
-      status: unresolved ? "New" : "Qualified",
-      created_at: new Date().toISOString(),
-      qualification: parsed,
-      promoted_customer_id: null
-    };
-  }
 
   // Pull the first usable email/phone out of key_contacts[]. Reuses the same cleaners the
   // rest of the app uses, so "not found" placeholders get stripped rather than stored.
-  function contactsFromQual(parsed) {
-    const out = { name: "", email: "", phone: "" };
-    const list = Array.isArray(parsed.key_contacts) ? parsed.key_contacts : [];
-    for (const c of list) {
-      if (!c) continue;
-      if (!out.name) out.name = cleanContactValue(c.name);
-      if (!out.email) out.email = cleanEmail(c.email) || cleanEmail(c.contact_info);
-      if (!out.phone) {
-        out.phone = cleanPhone(c.phone);
-        if (!out.phone && c.contact_info) {
-          const m = String(c.contact_info).match(/(\+?\d[\d\-().\s]{7,}\d)/);
-          if (m) out.phone = cleanPhone(m[1]);
-        }
-      }
-      if (out.name && out.email && out.phone) break;
-    }
-    return out;
-  }
 
-  async function handleCreateLeadFromJson() {
-    const box = $id("newLeadJsonBox");
-    const errEl = $id("newLeadJsonErr");
-    const okEl = $id("newLeadJsonOk");
-    const btn = $id("newLeadJsonBtn");
-    errEl.textContent = "";
-    okEl.textContent = "";
-
-    const raw = box.value.trim();
-    if (!raw) { errEl.textContent = "Nothing to parse — paste a qualification JSON first."; return; }
-
-    let parsed;
-    try {
-      parsed = JSON.parse(raw);
-    } catch (e) {
-      errEl.textContent = "That's not valid JSON.";
-      return;
-    }
-    const shape = classifyTriangulationJson(parsed);
-    if (shape.kind === "invalid") {
-      errEl.textContent = "Expected a single JSON object.";
-      return;
-    }
-    if (shape.kind === "parser_gate") { errEl.textContent = V2_PARSER_HELP; return; }
-    if (shape.kind === "batch") {
-      await createLeadsFromV2Batch(parsed);
-      return;
-    }
-    stampV2(parsed, null);
-    for (let i = 0; i < QUAL_REQUIRED_KEYS.length; i++) {
-      if (!(QUAL_REQUIRED_KEYS[i] in parsed)) {
-        errEl.textContent = 'Missing "' + QUAL_REQUIRED_KEYS[i] + '" — this doesn\'t match the qualification schema.';
-        return;
-      }
-    }
-
-    const co = parsed.company_overview || {};
-    const name = cleanContactValue(co.company_name);
-    if (!name) {
-      errEl.textContent = 'No usable "company_overview.company_name" in the JSON — can\'t create a lead without a company name.';
-      return;
-    }
-
-    // Same duplicate guards as handleAddLead, plus a check against the leads pipeline itself.
-    // Normalized compare so punctuation variants ("Gino's" vs "Ginos") still collide.
-    const jsonNameKey = normalizeCo(name);
-    const dupRoster = state.synced.find(function(c) {
-      return c.company_name && normalizeCo(c.company_name) === jsonNameKey;
-    });
-    if (dupRoster) {
-      errEl.textContent = 'A customer named "' + dupRoster.company_name + '" already exists in the Roster — check before adding as a new lead.';
-      return;
-    }
-    const dupLead = state_leads.find(function(l) {
-      return l.company_name && normalizeCo(l.company_name) === jsonNameKey;
-    });
-    if (dupLead) {
-      const ok = confirm('A lead named "' + name + '" is already in the pipeline (status: ' + dupLead.status + ').\n\n' +
-        'Create a second lead record anyway?');
-      if (!ok) return;
-    }
-
-    btn.disabled = true;
-    try {
-      const lead = leadRecordFromQual(parsed, name);
-      state_leads.push(lead);
-      await saveLeads();
-      box.value = "";
-      renderLeadsPage();
-
-      const qs = parsed.qualification_scoring || {};
-      okEl.textContent = "Created \u201C" + name + "\u201D" +
-        (qs.total_score != null ? " \u2014 " + qs.total_score + "/" + qualDenom(parsed) + ", " + (qs.qualification_tier || "") : "") + ".";
-
-      if (!lead.contact_email && !lead.contact_phone) warnNoContactAfterQual(lead);
-      openLeadDetail(lead.lead_id);
-    } catch (e) {
-      errEl.textContent = "Couldn't create the lead: " + (e && e.message ? e.message : "unknown error");
-    } finally {
-      btn.disabled = false;
-    }
-  }
 
   // ---- Bulk import: v2 triangulation batch -----------------------------------------
   // One canonical lead per entry in batch.leads. Duplicates against the Roster or the
   // pipeline are SKIPPED and reported by name, never confirm()-prompted — a 40-lead
   // batch must not turn into 40 modal dialogs. Merged input rows stay inside each
   // lead's record_metadata, so nothing from the research is lost by skipping here.
-  async function createLeadsFromV2Batch(batch) {
-    const box = $id("newLeadJsonBox");
-    const errEl = $id("newLeadJsonErr");
-    const okEl = $id("newLeadJsonOk");
-    const btn = $id("newLeadJsonBtn");
-    const list = batch.leads;
-    if (!list.length) {
-      errEl.textContent = 'The batch parsed, but its "leads" array is empty.';
-      return;
-    }
-
-    btn.disabled = true;
-    const created = [], skippedRoster = [], skippedLead = [], noName = [];
-    // The records themselves, not just their names: the disqualified check
-    // below needs the qualification that came in with each one.
-    const createdRecs = [];
-    try {
-      for (const q of list) {
-        if (!q || typeof q !== "object") { noName.push("(not an object)"); continue; }
-        stampV2(q, batch);
-        const co = q.company_overview || {};
-        const rm = q.record_metadata || {};
-        const oi = rm.original_input || {};
-        // Unresolved leads may have no resolved company_overview; fall back to the
-        // original submitted organization name so the row still lands somewhere visible.
-        const name = cleanContactValue(co.company_name) || cleanContactValue(oi.organization_name);
-        if (!name) { noName.push(rm.record_id || "(no company name)"); continue; }
-        const key = normalizeCo(name);
-        const dupRoster = state.synced.find(function(c2) {
-          return c2.company_name && normalizeCo(c2.company_name) === key;
-        });
-        if (dupRoster) { skippedRoster.push(name); continue; }
-        const dupLead = state_leads.find(function(l) {
-          return l.company_name && normalizeCo(l.company_name) === key;
-        });
-        if (dupLead) { skippedLead.push(name); continue; }
-        const rec = leadRecordFromQual(q, name);
-        state_leads.push(rec);
-        createdRecs.push(rec);
-        created.push(name);
-      }
-      // A batch usually carries a few already-disqualified leads. They are
-      // imported and then archived rather than dropped, so the record of having
-      // looked at that company still exists and nobody researches it twice.
-      const autoArchived = autoArchiveDisqualified(createdRecs);
-      if (created.length) await saveLeads();
-      box.value = "";
-      renderLeadsPage();
-      renderArchivePage();
-
-      const bits = ["Imported " + created.length + " of " + list.length + " leads from the batch."];
-      if (autoArchived) bits.push(autoArchived + " came back Disqualified and went straight to Archived, so they are not on the working list.");
-      if (skippedLead.length) bits.push("Already in the pipeline, skipped: " + skippedLead.join(", ") + ".");
-      if (skippedRoster.length) bits.push("Already Roster customers, skipped: " + skippedRoster.join(", ") + ".");
-      if (noName.length) bits.push("No usable company name, skipped: " + noName.join(", ") + ".");
-      okEl.textContent = bits.join(" ");
-      if (!created.length) errEl.textContent = "Nothing new was imported.";
-    } catch (e) {
-      errEl.textContent = "Batch import stopped: " + (e && e.message ? e.message : "unknown error");
-    } finally {
-      btn.disabled = false;
-    }
-  }
 
   async function handleLeadStatusChange() {
     const lead = state_leads.find(function(l) { return l.lead_id === activeLeadId; });
@@ -9845,7 +9754,6 @@ export async function start(ctx) {
   // ---- Inbox module (Layer 0 front door — intake submissions) ----
 
   let state_intake = [];
-  let inboxFilter = "open";
   let activeInquiryId = null;
 
   const PROJECT_TYPE_LABELS = {
@@ -10282,94 +10190,20 @@ export async function start(ctx) {
     return parts.join(" · ") || "No project detail";
   }
 
+  /**
+   * There is no Inbox list any more. Untouched submissions are rows in the one
+   * inquiry table, so redrawing "the inbox" means redrawing that table.
+   *
+   * Kept as a named function rather than deleted because a dozen places call it
+   * after they change a submission, and every one of them still needs the list
+   * to refresh. Renaming all of them would have been churn with a chance of
+   * missing one, and a missed one is a screen that silently stops updating.
+   */
   function renderInbox() {
     updateInboxBadge();
-
-    const total = state_intake.length;
-    const newCount = inboxNewCount();
-    const existing = state_intake.filter(function(s) { return s.entry && ["yes","yes_new","not_sure"].indexOf(s.entry.existing_client) !== -1; }).length;
-    const fresh = state_intake.filter(function(s) { return s.entry && s.entry.existing_client === "no"; }).length;
-
-    const grid = $id("inboxKpiGrid");
-    if (grid) {
-      grid.innerHTML =
-        '<div class="kpi"><div class="kpi-lbl">Needs action</div><div class="kpi-val">' + newCount + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Total inquiries</div><div class="kpi-val">' + total + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">Existing clients</div><div class="kpi-val">' + existing + '</div></div>' +
-        '<div class="kpi"><div class="kpi-lbl">New prospects</div><div class="kpi-val">' + fresh + '</div></div>';
-    }
-
-    const list = $id("inboxList");
-    if (!list) return;
-
-    let rows = state_intake.slice().sort(function(a, b) {
-      return new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0);
-    });
-    if (inboxFilter === "open") rows = rows.filter(function(s) { return s.status === "new" || s.status === "reviewed"; });
-    else if (inboxFilter !== "all") rows = rows.filter(function(s) { return s.status === inboxFilter; });
-
-    if (!rows.length) {
-      list.innerHTML = '<div class="help" style="padding:20px 0;text-align:center">No inquiries here yet. When someone submits the intake form, it lands in this list.</div>';
-      return;
-    }
-
-    const statusChip = {
-      new: '<span class="chip chip-new">New</span>',
-      reviewed: '<span class="chip">Reviewed</span>',
-      attached_to_client: '<span class="chip chip-existing">Attached to client</span>',
-      converted_lead: '<span class="chip chip-existing">Converted to lead</span>',
-      dismissed: '<span class="chip">Dismissed</span>'
-    };
-
-    list.innerHTML = rows.map(function(s) {
-      const gate = s.entry ? s.entry.existing_client : null;
-      const co = (s.company && s.company.name) || "(no company name)";
-      const contact = (s.contact && s.contact.name) || "";
-      const when = s.submitted_at ? new Date(s.submitted_at).toLocaleString() : "";
-      const done = s.status === "attached_to_client" || s.status === "converted_lead" || s.status === "dismissed";
-      let gateChip = "";
-      if (gate === "no") gateChip = '<span class="chip chip-new">New client</span>';
-      else if (gate === "manual") gateChip = '<span class="chip chip-internal">Manual entry</span>';
-      else if (gate) gateChip = '<span class="chip chip-existing">' + (GATE_LABELS[gate] || gate) + '</span>';
-      const assignedChip = s.assignedAM
-        ? '<span class="chip chip-existing" title="Routed ' + (s.assignedAMAt ? new Date(s.assignedAMAt).toLocaleString() : "") + '">\u2192 ' + escapeHtml(s.assignedAM) + '</span>'
-        : '';
-      return '<div class="inbox-item ' + (s.status === "new" ? "is-new" : "") + (done ? " is-done" : "") +
-        '" data-id="' + s.id + '">' +
-        '<div class="inbox-top"><div class="inbox-co">' + escapeHtml(co) + '</div>' +
-        '<div style="font-size:11px;color:var(--faint)">' + when + '</div></div>' +
-        '<div class="inbox-meta">' + escapeHtml(projectSummary(s)) + (contact ? " — " + escapeHtml(contact) : "") + '</div>' +
-        '<div class="inbox-chips">' + gateChip + assignedChip + botChip(s) + addressChip(s) + (statusChip[s.status] || "") + '</div>' +
-      '</div>';
-    }).join("");
-
-    list.querySelectorAll(".inbox-item").forEach(function(el) {
-      el.addEventListener("click", function() { openInquiry(el.dataset.id); });
-    });
+    renderLeadsPage();
   }
 
-  // fuzzy match an inquiry company against the Roster
-  function normalizeCo(s) {
-    return (s || "").toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\b(the|inc|llc|co|company|corp|ltd)\b/g, "").replace(/\s+/g, " ").trim();
-  }
-  function matchRoster(companyName) {
-    const target = normalizeCo(companyName);
-    if (!target) return [];
-    return state.synced.map(function(c) {
-      const n = normalizeCo(c.company_name);
-      let score = 0;
-      if (n === target) score = 100;
-      else if (n.indexOf(target) !== -1 || target.indexOf(n) !== -1) score = 70;
-      else {
-        const tw = target.split(" "), nw = n.split(" ");
-        const shared = tw.filter(function(w) { return w.length > 2 && nw.indexOf(w) !== -1; }).length;
-        if (shared) score = 40 + shared * 10;
-      }
-      return { rec: c, score: score };
-    }).filter(function(m) { return m.score >= 40; })
-      .sort(function(a, b) { return b.score - a.score; })
-      .slice(0, 5);
-  }
 
   function openInquiry(id) {
     const s = state_intake.find(function(x) { return x.id === id; });
@@ -10551,16 +10385,20 @@ export async function start(ctx) {
             'data-attach="' + m.rec.customer_id + '">' + escapeHtml(m.rec.company_name) +
             ' <span style="color:var(--faint)">(' + m.rec.customer_id + (m.rec.is_prospect ? " · prospect" : "") + ")</span></button>";
         }).join("");
-        html += '<div class="help" style="margin-top:4px">Not one of these? Convert it to a new Lead instead:</div>';
+        html += '<div class="help" style="margin-top:4px">Not one of these? File it as its own inquiry:</div>';
       } else {
-        html += '<div class="help">No confident Roster match for "' + escapeHtml(co.name) + '". Convert it to a Lead:</div>';
+        html += '<div class="help">No confident Roster match for "' + escapeHtml(co.name) + '". File it as its own inquiry:</div>';
       }
-      html += '<button class="btn btn-green btn-sm" id="inqConvert">Convert to Lead</button> ' +
+      html += '<button class="btn btn-green btn-sm" id="inqConvert">File it</button> ' +
               '<button class="btn btn-gray btn-sm" id="inqDismiss">Dismiss</button>';
     } else {
-      // new client / manual -> lead
-      html += '<div class="help">New prospect — convert to a Lead, pre-filled and ready for free chat qualification.</div>' +
-        '<button class="btn btn-green btn-sm" id="inqConvert">Convert to Lead</button> ' +
+      // Nothing is being CONVERTED any more. This inquiry is already in the
+      // list; filing gives it a record of its own so it can carry a stage, an
+      // account manager and a score. Assigning or archiving it does the same
+      // thing without anybody having to press this first.
+      html += '<div class="help">Filing this gives it its own record, ready to assign and score. ' +
+        'Assigning or archiving it from the list does the same thing in one step.</div>' +
+        '<button class="btn btn-green btn-sm" id="inqConvert">File it</button> ' +
         '<button class="btn btn-gray btn-sm" id="inqDismiss">Dismiss</button>';
     }
     html += '</div></div>';
@@ -10615,50 +10453,32 @@ export async function start(ctx) {
       ". It now shows on that client's record next to the Scorecard fields.");
   }
 
+  /**
+   * Filing an inquiry. This used to be "Convert to lead" and it used to build
+   * the record right here, with its own copy of the field mapping. That copy
+   * had already drifted: it never split the contact name into first and last,
+   * which the roster stores separately, and it flattened the submission into a
+   * notes string and threw the original away, so the ask half of the score had
+   * nothing left to read.
+   *
+   * It now calls the SAME adopter the list uses, so filing from this panel and
+   * assigning straight off the list produce an identical record.
+   */
   async function convertInquiryToLead(s) {
-    const co = s.company || {}, c = s.contact || {}, p = s.project || {};
-    const srcMap = { no: "Website form", yes_new: "Existing account expansion", not_sure: "Website form", manual: "Inbound quote request" };
-    const noteParts = [];
-    if (p.name) noteParts.push("Project: " + p.name);
-    if (p.type) noteParts.push("Type: " + (PROJECT_TYPE_LABELS[p.type] || p.type) + (p.store_kind ? " (" + p.store_kind.replace(/_/g, "-") + ")" : ""));
-    if (p.in_hands_date) noteParts.push("In-hands: " + p.in_hands_date);
-    if (p.description) noteParts.push(p.description);
-    if (s.entry && s.entry.source && s.entry.source.channel) noteParts.push("Heard about us: " + [s.entry.source.channel, s.entry.source.detail].filter(Boolean).join(" — "));
-    const det = p.details || {};
-    Object.keys(det).forEach(function(k) { if (det[k] && k.indexOf("waiver") === -1) noteParts.push(k.replace(/_/g, " ") + ": " + det[k]); });
+    const ids = await adoptIds([PENDING_PREFIX + s.id]);
+    const leadId = ids[0];
+    const lead = state_leads.find(function(l) { return l.lead_id === leadId; });
+    if (!lead) return;
 
-    const lead = {
-      lead_id: uid(),
-      company_name: co.name || "(from inquiry)",
-      website_url: c.url || "",
-      contact_name: c.name || "",
-      contact_email: c.email || "",
-      contact_phone: c.phone || "",
-      source_type: srcMap[s.entry ? s.entry.existing_client : "no"] || "Website form",
-      industry: co.industry || "",
-      inquiry_notes: noteParts.join("\n"),
-      existing_crm_notes: "Auto-created from intake inquiry " + s.id + " on " + new Date().toLocaleDateString() + ".",
-      status: "New",
-      created_at: new Date().toISOString(),
-      qualification: null,
-      promoted_customer_id: null,
-      from_inquiry_id: s.id
-    };
-    state_leads.push(lead);
-    s.status = "converted_lead";
-    s.links = Object.assign({}, s.links, { lead_id: lead.lead_id });
-
-    await saveLeads();
-    await saveInbox();
     renderInquiryBody(s);
-    renderInbox();
     renderLeadsPage();
 
-    const goToLead = confirm(lead.company_name + " added to Leads with intake context pre-filled. " +
-      "Open it now to run qualification?");
-    if (goToLead) {
+    const open = confirm(lead.company_name + " is filed, with everything from the form on it. " +
+      "Open it now to assign and score it?");
+    if (open) {
+      // No tab click needed: the inquiry panel opens on top of the inquiries
+      // page, so closing it lands back on the list this record is already in.
       $id("inboxDetailOverlay").classList.remove("open");
-      $one('[data-page="leads"]').click();
       openLeadDetail(lead.lead_id);
     }
   }
@@ -10880,11 +10700,24 @@ export async function start(ctx) {
   function openArchiveSelectedModal() {
     const ids = Array.from(selectedLeadIds);
     if (!ids.length) return;
+    const pendingCount = ids.filter(isPendingId).length;
     openArchiveModal({
-      title: "Archive " + ids.length + " lead" + (ids.length === 1 ? "" : "s"),
+      title: "Archive " + ids.length + " inquiry" + (ids.length === 1 ? "" : "s"),
       what: "All " + ids.length + " get the same reason. Each keeps its own stage, " +
-        "so restoring any of them puts it back where it was.",
-      run: function(reason, note) { return archiveLeads(ids, reason, note); },
+        "so restoring any of them puts it back where it was." +
+        (pendingCount
+          ? " " + pendingCount + " of these came straight off the form; archiving files them first, " +
+            "so a junk submission ends up on record with a reason rather than just disappearing."
+          : ""),
+      // Archiving a pending row FILES IT FIRST on purpose. The old Inbox had
+      // "Dismiss", which took a submission off the list and never asked why.
+      // Archiving demands a reason from the fixed list, so six months later
+      // "how much of what comes through the form is junk" is a countable
+      // question instead of a shrug.
+      run: async function(reason, note) {
+        const resolved = await adoptIds(ids);
+        return archiveLeads(resolved, reason, note);
+      },
     });
   }
 
@@ -11126,17 +10959,23 @@ export async function start(ctx) {
     setTimeout(function() { status.textContent = ""; }, 3000);
   }
 
+  // "inbox" and "leads" are the two screens that became one. Both names stay
+  // routable FOREVER, not for a transition period: every notification ever sent
+  // carries one of them in its link, and those records are not rewritten. A
+  // hand-off from July has to still open the thing it points at.
+  const VIEW_ALIASES = { inbox: "inquiries", leads: "inquiries" };
+
   function showView(view, param) {
+    var resolved = VIEW_ALIASES[view] || view;
     $all(".page").forEach(function(p) { p.classList.remove("active"); });
-    var page = $id("page-" + view);
+    var page = $id("page-" + resolved);
     if (page) page.classList.add("active");
 
     // Entry work that used to hang off the nav click.
-    if (view === "dashboard") renderDashboard();
-    if (view === "inbox") renderInbox();
-    if (view === "leads") renderLeadsPage();
-    if (view === "scorecard") renderScorecard();
-    if (view === "archive") renderArchivePage();
+    if (resolved === "dashboard") renderDashboard();
+    if (resolved === "inquiries") renderLeadsPage();
+    if (resolved === "scorecard") renderScorecard();
+    if (resolved === "archive") renderArchivePage();
 
     // A route param is a deep link into one specific record — a Notification
     // carrying a link to an inquiry, lead, or roster client opens straight
@@ -11153,16 +10992,16 @@ export async function start(ctx) {
   var pendingDeepLink = null;
 
   function openDeepLink(view, id) {
-    if (view === "leads") {
-      var lead = state_leads.find(function(l) { return l.lead_id === id; });
-      if (lead) { pendingDeepLink = null; openLeadDetail(id); }
-      else { pendingDeepLink = { view: "leads", id: id }; }
-      return;
-    }
-    if (view === "inbox") {
+    if (view === "leads" || view === "inbox" || view === "inquiries") {
+      // An old link does not know whether its target was later filed as a
+      // record, so BOTH stores are checked whichever screen name it carries.
+      // Checking only the one the link names is how a notification from July
+      // lands on an empty screen after somebody filed the inquiry in August.
+      var lead = state_leads.find(function(l) { return l.lead_id === id || l.from_inquiry_id === id; });
+      if (lead) { pendingDeepLink = null; openLeadDetail(lead.lead_id); return; }
       var inq = state_intake.find(function(x) { return x.id === id; });
-      if (inq) { pendingDeepLink = null; openInquiry(id); }
-      else { pendingDeepLink = { view: "inbox", id: id }; }
+      if (inq) { pendingDeepLink = null; openInquiry(id); return; }
+      pendingDeepLink = { view: "inquiries", id: id };
       return;
     }
     if (view === "dashboard") {
@@ -11287,12 +11126,6 @@ export async function start(ctx) {
   $id("deleteLeadBtn").addEventListener("click", handleDeleteLead);
   $id("rerunQualBtn").addEventListener("click", handleRunQualification);
   $id("pasteQualBtn").addEventListener("click", handlePasteQualification);
-  $id("newLeadJsonBtn").addEventListener("click", handleCreateLeadFromJson);
-  $id("newLeadJsonClearBtn").addEventListener("click", function() {
-    $id("newLeadJsonBox").value = "";
-    $id("newLeadJsonErr").textContent = "";
-    $id("newLeadJsonOk").textContent = "";
-  });
   (function populateLeadStatusSelect() {
     const el = $id("leadStatusSelect");
     if (!el) return;
@@ -11398,11 +11231,6 @@ export async function start(ctx) {
       activeInquiryId = null;
     }
   });
-  $id("inboxFilter").addEventListener("change", function(e) {
-    inboxFilter = e.target.value;
-    renderInbox();
-  });
-  $id("inboxRefreshBtn").addEventListener("click", loadInbox);
 
   /* ------------------------------------------------------------------ *
    * SHELL CONTRACT

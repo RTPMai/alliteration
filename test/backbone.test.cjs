@@ -1,3 +1,4 @@
+// PUT IN: test/backbone.test.cjs
 // test/backbone.test.cjs
 /**
  * BackBone contract tests.
@@ -18,6 +19,7 @@ const ROOT = path.join(__dirname, '..');
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 
 const main = read('apps/backbone/main.js');
+const inquiriesLib = read('lib/backbone/inquiries.js');
 const template = read('apps/backbone/template.js');
 const styles = read('apps/backbone/styles.js');
 const sync = read('api/printavo-sync.js');
@@ -467,11 +469,16 @@ t.test('the AM picker remembers the saved assignment when the inquiry is reopene
     'the AM <select> should pre-select s.assignedAM so re-opening a routed inquiry shows who it went to, not a blank picker');
 });
 
-t.test('the Inbox list shows an assigned-AM chip without needing to open the inquiry', () => {
-  const idx = main.indexOf('const assignedChip');
-  t.assert(idx !== -1, 'assignedChip is missing from the list-row renderer');
-  const block = main.slice(idx, idx + 300);
-  t.assert(/s\.assignedAM/.test(block), 'assignedChip should read s.assignedAM');
+t.test('an AM assigned before filing shows in the list without opening the inquiry', () => {
+  // The Inbox list this used to check is gone: untouched submissions are rows
+  // in the one inquiry table now, which has an AM column of its own. The
+  // behaviour still has to hold, so it moved to where the column gets its
+  // value. leadSuggestedAM reads account_manager, and inquiryFromSubmission is
+  // what puts assignedAM there. test/inquiries.test.cjs calls that for real.
+  t.assert(/account_manager: s\.assignedAM \|\| ""/.test(inquiriesLib),
+    'a submission assigned to an AM must carry that AM into the row');
+  t.assert(/const explicit = \(lead\.account_manager \|\| ""\)\.trim\(\);[\s\S]{0,120}?return \{ am: explicit/.test(main),
+    'leadSuggestedAM must prefer an explicit assignment over industry routing');
 });
 
 t.test('routing still creates the notification (save + notify happen together)', () => {

@@ -1,3 +1,4 @@
+// PUT IN: api/qualify.js
 // api/qualify.js
 // Runs a company through the P&M Apparel lead-qualification agent and returns
 // structured JSON matching the schema the Leads page renders.
@@ -34,6 +35,20 @@ connects, put the guess in "assumptions_flagged" instead of the narrative. A wro
 Prioritize recurring revenue potential over one-time orders, scalable operational
 clients, and industries with repeat apparel demand. Think like a sales director, a
 CRM administrator, and a strategic account manager — not just a quote generator.
+
+THESE COMPANIES CONTACTED US. This is not a cold prospecting list; somebody asked
+P&M for something. So the question is never "is this worth pursuing" — it is
+"what kind of account is this, now that they are in front of us".
+
+SCORE THE COMPANY, NOT THE ORDER. When you are told what they asked for, use it
+as CONTEXT for researching the company: a request for embroidered polos tells you
+they have staff to outfit, and a company store request tells you something about
+how they think about their brand. But do NOT let the size of that first request
+move your scores. A large employer asking for twelve hats is still a large
+employer, and a tiny shop asking for a thousand shirts is still a tiny shop. The
+size and shape of the request is scored separately and combined with your scores
+afterwards, so marking it down here counts it twice and buries good accounts that
+happened to start small.
 
 Score each of these 1-5 (5 = best fit): industry_fit, employee_size,
 multi_location_opportunity, uniform_potential, growth_activity, brand_maturity_score,
@@ -213,7 +228,11 @@ export default async function handler(req, res) {
 
   const {
     company_name, website_url, contact_name,
-    inquiry_notes, source_type, industry, existing_crm_notes
+    inquiry_notes, source_type, industry, existing_crm_notes,
+    // What the customer actually asked for, as plain text. Context for the
+    // research, deliberately NOT an input to the company scores. See the
+    // "SCORE THE COMPANY, NOT THE ORDER" paragraph in the system prompt.
+    asked_for
   } = req.body || {};
 
   if (!company_name || !company_name.trim()) {
@@ -229,8 +248,10 @@ Source Type: ${source_type || "(not specified)"}
 Industry (as entered by the sales rep, may be blank or wrong — verify): ${industry || "(not provided)"}
 Inquiry Notes: ${inquiry_notes || "(none)"}
 Existing CRM Notes: ${existing_crm_notes || "(none)"}
+What They Asked Us For: ${asked_for || "(they have not told us yet)"}
 
-Research this company using web search, then return the JSON object exactly as specified.`;
+Research this company using web search, then return the JSON object exactly as
+specified. Treat what they asked for as a clue about the company, not as a score.`;
 
   try {
     const apiRes = await fetch("https://api.anthropic.com/v1/messages", {

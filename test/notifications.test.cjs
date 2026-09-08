@@ -1,3 +1,4 @@
+// PUT IN: test/notifications.test.cjs
 /**
  * Notifications tests (v3 — back to a routed screen, plus reassignment and
  * a per-item history log).
@@ -96,14 +97,22 @@ Promise.all([
       t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));
   });
 
-  t.test('only the three original types are pickable via manual search', () => {
+  t.test('only searchable types are pickable via manual search', () => {
     // expense/donation only ever get attached automatically, by TravelTrack/
     // GivingGauge themselves — there's no "search by company name" for them,
     // so the manual link picker on the notification form should not offer
     // them as choices even though they're valid, storable link types.
-    t.equal(PICKABLE_LINK_TYPES.length, 3, 'expected exactly three pickable link types');
-    ['inquiry', 'lead', 'client'].forEach((v) =>
+    //
+    // "lead" left this list in Sep 2026 when Inbox and Leads merged. Offering
+    // both words made somebody choose between two names for one screen. It is
+    // still a STORABLE type, because notifications already on file carry it.
+    t.equal(PICKABLE_LINK_TYPES.length, 2, 'expected exactly two pickable link types');
+    ['inquiry', 'client'].forEach((v) =>
       t.assert(PICKABLE_LINK_TYPES.includes(v), 'missing pickable link type ' + v));
+    t.assert(!PICKABLE_LINK_TYPES.includes('lead'),
+      'lead and inquiry are the same screen now; offering both is a choice with no meaning');
+    t.assert(LINK_TYPES.includes('lead'),
+      'lead must stay storable or every notification already on file breaks');
     ['expense', 'donation'].forEach((v) =>
       t.assert(!PICKABLE_LINK_TYPES.includes(v), 'expense/donation should not be manually pickable — ' + v + ' is'));
   });

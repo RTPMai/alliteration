@@ -18,46 +18,23 @@
 
 export default `
 
-  <div id="page-inbox" class="page">
-    <div class="kpi-grid" id="inboxKpiGrid"></div>
-    <div class="card">
-      <div class="card-hd">
-        <h3>Inquiry inbox</h3>
-        <div style="display:flex;gap:8px;align-items:center">
-          <select class="field" id="inboxFilter" style="width:auto;padding:6px 10px">
-            <option value="open">Needs action</option>
-            <option value="all">All</option>
-            <option value="new">New</option>
-            <option value="attached_to_client">Attached to client</option>
-            <option value="converted_lead">Converted to lead</option>
-            <option value="dismissed">Dismissed</option>
-          </select>
-          <button class="btn btn-gray btn-sm" id="inboxRefreshBtn">Refresh</button>
-        </div>
-      </div>
-      <div class="card-bd">
-        <div class="help">
-          Submissions from the public intake form (<code>intake.html</code> &rarr; <code>/api/intake</code>).
-          Existing-client inquiries attach to a Roster record so activity shows up next to the
-          Scorecard judgment fields. New-client inquiries convert into a Lead, pre-filled and ready
-          for free chat qualification.
-        </div>
-        <div id="inboxList"></div>
-      </div>
-    </div>
-  </div>
-
-  <div id="page-leads" class="page">
-    <div class="kpi-grid" id="leadsKpiGrid"></div>
+  <!-- ONE SCREEN. Inbox and Leads were two lists of the same thing at two
+       moments of its life, joined by a "Convert to lead" button somebody had to
+       remember to press. A submission nobody has touched is drawn here as a New
+       inquiry; acting on it files it. page-inbox and page-leads both still route
+       here, because notifications sent months ago carry those names. -->
+  <div id="page-inquiries" class="page">
+    <div class="kpi-grid" id="inquiriesKpiGrid"></div>
 
     <div class="card" style="margin-bottom:16px">
-      <div class="card-hd"><h3>New lead</h3></div>
+      <div class="card-hd"><h3>Log an inquiry</h3></div>
       <div class="card-bd">
         <div class="help">
-          Front door for prospects that haven't transacted yet. Add what you know, then run
-          AI qualification — it researches the company via web search and scores it against
-          the same industry/AM logic the Roster uses. "Promote to Roster" adds it as a
-          $0 / 0-invoice prospect record you can track alongside real clients.
+          Anything that came in off the form is already in the list below. Use this for the
+          ones that did not: a phone call, somebody at the counter, a referral, a card from
+          an event. Scoring runs the company through web search and weighs it alongside what
+          they actually asked for. "Promote to Roster" adds them as a $0 / 0-invoice record
+          you can track next to real clients.
         </div>
         <div class="scan-card-bar">
           <button class="btn btn-gray" id="scanCardBtn" type="button">
@@ -98,7 +75,8 @@ export default `
               <option value="">Not set</option>
               <option>Inbound quote request</option>
               <option>Website form</option>
-              <option>Outbound prospecting</option>
+              <option>Phone call</option>
+              <option>Walk-in</option>
               <option>Trade show</option>
               <option>Event</option>
               <option>Referral</option>
@@ -126,26 +104,8 @@ export default `
             <textarea class="field" id="leadCrmNotes"></textarea>
           </div>
         </div>
-        <button class="btn btn-green" id="addLeadBtn">Add lead</button>
+        <button class="btn btn-green" id="addLeadBtn">Log inquiry</button>
         <span id="addLeadErr" style="color:var(--danger);font-size:12px;margin-left:10px"></span>
-      </div>
-    </div>
-
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-hd"><h3>Create lead from qualification JSON</h3></div>
-      <div class="card-bd">
-        <div class="help">
-          Already have a qualification JSON from a Claude chat? Paste it here and it'll create the
-          lead <em>and</em> attach the qualification in one step — no need to add the lead first.
-          Company name, website, contact, and industry are pulled from the JSON automatically.
-        </div>
-        <textarea class="field" id="newLeadJsonBox" style="width:100%;min-height:160px;font-family:monospace;font-size:11px" placeholder="Paste the full qualification JSON object here"></textarea>
-        <div style="margin-top:10px">
-          <button class="btn btn-green" id="newLeadJsonBtn">Create lead from JSON</button>
-          <button class="btn btn-gray btn-sm" id="newLeadJsonClearBtn" style="margin-left:6px">Clear</button>
-          <span id="newLeadJsonErr" style="color:var(--danger);font-size:12px;margin-left:10px"></span>
-          <span id="newLeadJsonOk" style="color:var(--success);font-size:12px;margin-left:10px"></span>
-        </div>
       </div>
     </div>
 
@@ -153,13 +113,14 @@ export default `
       <div class="card-hd"><h3>Pipeline</h3></div>
       <div class="card-bd">
         <div class="funnel-all">
-          <div class="fnl-hint">Click a stage to filter the pipeline. Click it again to show everything.</div>
+          <div class="fnl-hint">Click a stage to filter the pipeline. Click it again to show everything.
+            New means nobody owns it yet. Quoted means a price is out and the clock is theirs.</div>
           <button class="btn btn-gray btn-sm" id="funnelClearBtn" style="display:none">Show all stages</button>
         </div>
         <div class="funnel" id="leadsFunnel"></div>
         <div class="toolbar">
           <input class="search" id="leadsSearchBox" placeholder="Search company name"/>
-          <button class="btn btn-gray btn-sm" id="myLeadsBtn" title="Show only leads routed to you, hiding everyone else's assignments. Click again to show all.">My leads</button>
+          <button class="btn btn-gray btn-sm" id="myLeadsBtn" title="Show only inquiries routed to you, hiding everyone else's. Click again to show all.">Mine</button>
           <span id="leadsFilterNote" class="help" style="margin:0 0 0 10px"></span>
         </div>
         <div id="leadsTableWrap"></div>
@@ -222,11 +183,11 @@ export default `
           exact stage it was standing in, and puts a client back on the roster.
         </div>
         <div class="archive-tabs">
-          <button class="archive-tab active" data-archive-tab="leads">Leads</button>
+          <button class="archive-tab active" data-archive-tab="leads">Inquiries</button>
           <button class="archive-tab" data-archive-tab="clients">Clients</button>
         </div>
         <div class="toolbar">
-          <input class="search" id="archiveSearch" placeholder="Search company, reason or lead number"/>
+          <input class="search" id="archiveSearch" placeholder="Search company, reason or inquiry number"/>
           <select class="field" id="archiveReasonFilter" style="width:auto">
             <option value="">All reasons</option>
           </select>

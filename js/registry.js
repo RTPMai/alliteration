@@ -39,22 +39,29 @@ export const APPS = [
     name: 'BackBone',
     w1: 'Back', w2: 'Bone', letter: 'B',
     role: 'Who we sell to',
-    blurb: 'Accounts, leads, roster, scorecard.',
+    blurb: 'Accounts, inquiries, roster, scorecard.',
     accent: '#1B5DAB',           // display only (rail dot / app mark); tokens.css owns theming
     // BackBone is ~10k lines, so it lives in a FOLDER rather than one file.
     // `entry` selects that layout; the app contract is unchanged.
     entry: 'backbone/index.js',
     views: [
       ['dashboard', 'Dashboard'],
-      ['inbox', 'Inbox'],
-      ['leads', 'Leads'],
+      // Inbox and Leads merged here in Sep 2026. They were two lists of the
+      // same thing at two moments of its life, and the button between them
+      // existed only because Leads had been built for cold outbound.
+      ['inquiries', 'Inquiries'],
       ['roster', 'Roster'],
       ['scorecard', 'Scorecard'],
-      // One Archived screen covers leads AND clients: "where did that go" is
-      // the same question either way, and two near-identical screens drift.
+      // One Archived screen covers inquiries AND clients: "where did that go"
+      // is the same question either way, and two near-identical screens drift.
       ['archive', 'Archived'],
       ['settings', 'Settings']
     ],
+    // Both old names stay routable FOREVER, not for a transition period. Every
+    // notification ever sent carries one of them in its link and those records
+    // are never rewritten, so a hand-off from July has to still open. They are
+    // hidden rather than listed, so the rail shows one tab and not three.
+    hiddenViews: ['inbox', 'leads'],
     defaultView: 'dashboard',
     stub: false
   },

@@ -356,17 +356,31 @@ textarea.field{min-height:60px;resize:vertical}
 .qt-transactional{background:var(--amber-tint);color:var(--amber)}
 .qt-lowpriority{background:var(--danger-tint);color:var(--danger)}
 .lead-status-pill{display:inline-flex;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600;background:var(--line-soft);color:var(--ink)}
+/* One class per stage on the inbound ladder. There are no legacy classes here
+   on purpose: statusClass() normalizes before it builds the name, so a record
+   still stored as "Death Call" asks for .lead-status-Responded. Keeping dead
+   classes around would hide a broken normalizer behind a pill that still had
+   a color. */
+.lead-status-New{background:var(--line-soft);color:var(--ink)}
+.lead-status-Assigned{background:var(--hue-sky-tint);color:var(--hue-sky)}
+.lead-status-Responded{background:var(--hue-blue-tint);color:var(--hue-blue)}
+.lead-status-Quoted{background:var(--amber-tint);color:var(--amber)}
+.lead-status-ReachBackOut{background:var(--hue-clay-tint);color:var(--hue-clay)}
 .lead-status-Won{background:var(--success-tint);color:var(--success)}
 .lead-status-Lost{background:var(--danger-tint);color:var(--faint)}
-.lead-status-Dead{background:var(--danger-tint);color:var(--faint)} /* legacy records mid-save */
-.lead-status-ReachBackOut{background:var(--hue-clay-tint);color:var(--hue-clay)}
-.lead-status-Qualified{background:var(--hue-blue-tint);color:var(--hue-blue)}
-.lead-status-Contacted{background:var(--hue-violet-tint);color:var(--hue-violet)} /* legacy records mid-save, pre-Aug 2026 */
-.lead-status-Contacted1st{background:var(--hue-violet-tint);color:var(--hue-violet)}
-.lead-status-Contacted2nd{background:var(--hue-indigo-tint);color:var(--hue-indigo)}
-.lead-status-DeathCall{background:var(--danger-tint);color:var(--danger)}
-.lead-status-AMNotified{background:var(--amber-tint);color:var(--amber)}
-.lead-status-Researching{background:var(--hue-sky-tint);color:var(--hue-sky)}
+
+/* The score cell. An unscored inquiry is a dash in the faint color, never a
+   zero: never assessed and assessed as worthless are different answers. */
+.score-blend{font-weight:600}
+.score-none{color:var(--faint);cursor:help}
+.priority-pill{display:inline-flex;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:600;vertical-align:middle}
+.priority-Hot{background:var(--danger-tint);color:var(--danger)}
+.priority-Strong{background:var(--amber-tint);color:var(--amber)}
+.priority-Standard{background:var(--line-soft);color:var(--faint)}
+.priority-Low{background:var(--line-soft);color:var(--faint)}
+/* Unscored draws as nothing at all. A pill reading "Unscored" beside a dash
+   says the same thing twice and adds a column of noise to every new row. */
+.priority-Unscored{display:none}
 .lead-age-chip{display:inline-flex;margin-left:6px;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:700;background:var(--amber-tint);color:var(--amber);white-space:nowrap}
 .lead-wait-chip{display:inline-flex;margin-left:6px;padding:1px 7px;border-radius:99px;font-size:10px;font-weight:600;background:var(--line-soft);color:var(--muted);white-space:nowrap}
 .info-i{display:inline-flex;align-items:center;justify-content:center;width:13px;height:13px;border-radius:50%;border:1px solid var(--muted);color:var(--muted);font-size:9px;font-style:italic;font-weight:700;cursor:help;vertical-align:1px;user-select:none}

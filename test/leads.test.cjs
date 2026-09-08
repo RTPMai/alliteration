@@ -23,18 +23,7 @@ const qualify = read('api/qualify.js');
 
 /* ---- statuses and exit buckets ------------------------------------------ */
 
-t.test('lead statuses include Reach Back Out and Lost, not Dead', () => {
-  const m = main.match(/const LEAD_STATUSES = \[([^\]]+)\]/);
-  t.assert(m, 'LEAD_STATUSES not found');
-  t.assert(m[1].includes('"Reach Back Out"'), 'Reach Back Out missing from LEAD_STATUSES');
-  t.assert(m[1].includes('"Lost"'), 'Lost missing from LEAD_STATUSES');
-  t.assert(!m[1].includes('"Dead"'), '"Dead" is retired and must not be offered as a status');
-});
 
-t.test('legacy Dead statuses are normalized to Lost on load', () => {
-  t.assert(main.includes('function normalizeLeadStatus'), 'normalizeLeadStatus helper missing');
-  t.assert(/normalizeLeadStatus\(l\.status\)/.test(main), 'loadLeads no longer normalizes legacy statuses');
-});
 
 t.test('every status write goes through the history helper', () => {
   t.assert(main.includes('function setLeadStatus'), 'setLeadStatus helper missing');
@@ -45,19 +34,7 @@ t.test('every status write goes through the history helper', () => {
   t.assert(main.includes('status_history'), 'status_history trail missing');
 });
 
-t.test('Reach Back Out asks for a date and surfaces when due', () => {
-  t.assert(main.includes('promptReachBackDate'), 'reach-back date prompt missing');
-  t.assert(main.includes('reach_back_at'), 'reach_back_at field missing');
-  t.assert(main.includes('function reachBackDue'), 'reachBackDue helper missing');
-  // No date must mean due NOW, not invisible forever.
-  t.assert(/if \(!lead\.reach_back_at\) return true;/.test(main),
-    'a dateless Reach Back Out lead must count as due');
-});
 
-t.test('stalled AM Notified leads get flagged', () => {
-  t.assert(main.includes('AM_NOTIFIED_STALE_DAYS'), 'stale threshold constant missing');
-  t.assert(main.includes('statusAgeChip'), 'status age chip missing');
-});
 
 /* ---- deletion is role-gated --------------------------------------------- */
 
@@ -73,19 +50,15 @@ t.test('lead deletion is admin/superuser only', () => {
 
 /* ---- KPI naming ---------------------------------------------------------- */
 
-t.test('the agent-scored KPI is labeled Scored, not Qualified', () => {
-  t.assert(main.includes('kpi-lbl">Scored'), 'Scored KPI label missing');
-  t.assert(!main.includes('kpi-lbl">Qualified'),
-    'a KPI labeled "Qualified" collides with the funnel stage of the same name');
-});
 
 /* ---- duplicate detection -------------------------------------------------- */
 
 t.test('duplicate checks normalize punctuation and suffixes', () => {
-  // handleAddLead and the JSON-create path must both compare via normalizeCo,
-  // so "Gino\'s" and "Ginos" collide.
+  // The roster and pipeline dup checks must both compare via normalizeCo, so
+  // "Gino\'s" and "Ginos" collide. Three call sites until Sep 2026; the third
+  // was the JSON-create path, which went with the cold outbound pipeline.
   const uses = (main.match(/normalizeCo\((?:c|l)\.company_name\)/g) || []).length;
-  t.assert(uses >= 3, 'expected roster + pipeline dup checks to use normalizeCo (found ' + uses + ' uses)');
+  t.assert(uses >= 2, 'expected roster + pipeline dup checks to use normalizeCo (found ' + uses + ' uses)');
   t.assert(!/c\.company_name\.toLowerCase\(\) === name\.toLowerCase\(\)/.test(main),
     'a raw lowercase-only duplicate check survived');
 });
@@ -182,69 +155,14 @@ t.test('the qualification agent is barred from unverified relationship claims', 
 
 /* ---- outreach stages (Aug 2026 rework: Contacted split into a cadence) ---- */
 
-t.test('the single Contacted stage is replaced by a three-step outreach cadence', () => {
-  const m = main.match(/const LEAD_STATUSES = \[([^\]]+)\]/);
-  t.assert(m, 'LEAD_STATUSES not found');
-  t.assert(m[1].includes('"Contacted 1st"'), 'Contacted 1st missing from LEAD_STATUSES');
-  t.assert(m[1].includes('"Contacted 2nd"'), 'Contacted 2nd missing from LEAD_STATUSES');
-  t.assert(m[1].includes('"Death Call"'), 'Death Call missing from LEAD_STATUSES');
-  t.assert(!/"Contacted"/.test(m[1]), 'the old single "Contacted" status must not be offered as a choice anymore');
-});
 
-t.test('OUTREACH_STAGES groups AM Notified through Death Call for the funnel rollup', () => {
-  const m = main.match(/const OUTREACH_STAGES = \[([^\]]+)\]/);
-  t.assert(m, 'OUTREACH_STAGES not found');
-  ['AM Notified', 'Contacted 1st', 'Contacted 2nd', 'Death Call'].forEach((s) => {
-    t.assert(m[1].includes('"' + s + '"'), `${s} missing from OUTREACH_STAGES`);
-  });
-  t.assert(!m[1].includes('Reach Back Out'), 'Reach Back Out is a separate exit bucket, not part of outreach');
-  t.assert(!m[1].includes('"Won"') && !m[1].includes('"Lost"'), 'Won/Lost are exit buckets, not outreach stages');
-});
 
-t.test('legacy "Contacted" records normalize to Contacted 1st, not lost or miscounted', () => {
-  t.assert(/status === "Contacted"\)\s*return "Contacted 1st"/.test(main),
-    'normalizeLeadStatus must map the old single Contacted stage to Contacted 1st');
-});
 
-t.test('the funnel rolls the four outreach stages into one "In Outreach" segment', () => {
-  const m = main.match(/const FUNNEL_STAGES = \[([\s\S]*?)\];/);
-  t.assert(m, 'FUNNEL_STAGES not found');
-  t.assert(m[1].includes('"In Outreach"'), 'In Outreach segment missing from FUNNEL_STAGES');
-  t.assert(m[1].includes('statuses: OUTREACH_STAGES'), 'In Outreach segment must group OUTREACH_STAGES, not just match its own name');
-  t.assert(!/name: "AM Notified"/.test(m[1]) && !/name: "Contacted/.test(m[1]) && !/name: "Death Call"/.test(m[1]),
-    'individual outreach stages must not also appear as their own funnel segments (would double-count)');
-});
 
-t.test('funnel bucketing resolves grouped segments via segmentFor, not exact name match alone', () => {
-  t.assert(main.includes('function segmentFor'), 'segmentFor helper missing');
-  t.assert(/s\.statuses\s*\?\s*s\.statuses\.indexOf\(status\)/.test(main),
-    'segmentFor must check a grouped segment\'s statuses list, not just its own name');
-});
 
-t.test('clicking the In Outreach funnel segment filters to all four outreach statuses', () => {
-  t.assert(/leadsStageFilter === "In Outreach"/.test(main), 'In Outreach filter branch missing from getLeadsRows');
-  t.assert(/OUTREACH_STAGES\.indexOf\(r\.status\) !== -1/.test(main),
-    'In Outreach filter must match any outreach status, not a literal status named "In Outreach"');
-});
 
-t.test('every outreach stage has its own staleness clock', () => {
-  const m = main.match(/const STAGE_STALE_DAYS = \{([\s\S]*?)\};/);
-  t.assert(m, 'STAGE_STALE_DAYS not found');
-  ['AM Notified', 'Contacted 1st', 'Contacted 2nd', 'Death Call'].forEach((s) => {
-    t.assert(m[1].includes('"' + s + '"'), `${s} missing a staleness threshold`);
-  });
-});
 
-t.test('statusAgeChip flags any stale outreach stage, not just AM Notified', () => {
-  t.assert(main.includes('STAGE_STALE_DAYS[lead.status]'),
-    'statusAgeChip must look up the threshold per-stage instead of hardcoding AM Notified only');
-});
 
-t.test('new lead status pills exist for the split outreach stages', () => {
-  t.assert(styles.includes('.lead-status-Contacted1st'), 'Contacted 1st pill style missing');
-  t.assert(styles.includes('.lead-status-Contacted2nd'), 'Contacted 2nd pill style missing');
-  t.assert(styles.includes('.lead-status-DeathCall'), 'Death Call pill style missing');
-});
 
 t.test('new leads are tagged with an intake_source, distinct from source_type', () => {
   t.assert(main.includes('intake_source: "manual"'),
@@ -258,41 +176,24 @@ t.test('new leads are tagged with an intake_source, distinct from source_type', 
 
 const brief = read('api/brief.js');
 
-t.test('v2 batch pastes route to a bulk importer, not the single-lead path', () => {
-  t.assert(/Array\.isArray\(parsed\.leads\)/.test(main),
-    'classifyTriangulationJson must recognize the v2 batch shape by its leads array');
-  t.assert(/await createLeadsFromV2Batch\(parsed\)/.test(main),
-    'handleCreateLeadFromJson must hand a batch to createLeadsFromV2Batch');
-});
 
-t.test('the PARSER_UPDATE_REQUIRED gate is explained, in both paste boxes', () => {
+t.test('the PARSER_UPDATE_REQUIRED gate is explained in the paste box', () => {
   const hits = main.split('V2_PARSER_HELP').length - 1;
   t.assert(main.includes('PARSER_UPDATE_REQUIRED'), 'the gate error object must be recognized');
-  // Declaration plus one use per paste handler = at least 3 mentions.
-  t.assert(hits >= 3, 'both handlePasteQualification and handleCreateLeadFromJson must surface V2_PARSER_HELP');
+  // Declaration plus one use. It was two uses until Sep 2026, when the second
+  // paste box, "Create lead from JSON", went with the cold outbound pipeline.
+  t.assert(hits >= 2, 'the paste box must surface V2_PARSER_HELP (found ' + hits + ')');
 });
 
-t.test('bulk import never confirm()s per lead', () => {
-  const m = main.match(/async function createLeadsFromV2Batch[\s\S]*?\n  \}/);
-  t.assert(m, 'createLeadsFromV2Batch missing');
-  t.assert(!/confirm\(/.test(m[0]),
-    'a 40-lead batch must not become 40 modal dialogs — skip and report duplicates instead');
-});
 
-t.test('unresolved v2 records land as New, never Qualified', () => {
-  t.assert(/unresolved \? "New" : "Qualified"/.test(main),
-    'leadRecordFromQual must not present an unresolved organization as a qualified lead');
-  t.assert(/rm\.research_status === "unresolved"/.test(main),
-    'unresolved detection must read record_metadata.research_status');
-});
 
 t.test('score displays are schema-aware, no hardcoded /50 in display code', () => {
   t.assert(/function qualDenom\(q\)/.test(main), 'qualDenom helper missing');
   // Any remaining "/50" must be in a comment, not concatenated into output.
   t.assert(!/\+ "\/50/.test(main) && !/'\/50/.test(main) && !/"\/50 " \+/.test(main),
     'a display site still hardcodes /50 — it must use qualDenom(q)');
-  t.assert(/qualDenom\(q\)/.test(main) && /qualDenom\(parsed\)/.test(main),
-    'render and create paths must both call qualDenom');
+  t.assert(/qualDenom\(q\)/.test(main),
+    'the render path must call qualDenom rather than assuming a denominator');
 });
 
 t.test('stars scale to the denominator and clamp at 5', () => {
@@ -342,10 +243,6 @@ t.test('the schema version survives the batch wrapper being discarded', () => {
     'batch leads must carry the batch schema_version so per-lead rendering knows its scale');
 });
 
-t.test('JSON-created leads record a prospecting intake_source', () => {
-  t.assert(main.includes('intake_source: "prospecting_json"'),
-    'leadRecordFromQual must tag how the record entered the pipeline');
-});
 
 t.test('the lead brief is schema-aware too', () => {
   t.assert(/function isV2Qual\(q\)/.test(brief), 'brief.js must detect v2 qualifications');

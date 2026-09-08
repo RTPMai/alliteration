@@ -101,8 +101,15 @@ Promise.all([
 
   t.test('archived leads are filtered out of the working list', () => {
     // The single filter that makes archiving and disqualifying mean anything.
-    t.assert(/function getLeadsRows[\s\S]{0,400}?state_leads\.filter\(function\(l\) \{ return !isArchived\(l\); \}\)/.test(main),
-      'getLeadsRows no longer excludes archived leads, so archiving does nothing');
+    // The pool became workingInquiries() in Sep 2026, when untouched form
+    // submissions started being drawn in the same list as stored records.
+    t.assert(/function getLeadsRows[\s\S]{0,400}?workingInquiries\(\)\.filter\(function\(l\) \{ return !isArchived\(l\); \}\)/.test(main),
+      'getLeadsRows no longer excludes archived inquiries, so archiving does nothing');
+    // The KPI row counts off the same pool. It used to count off state_leads
+    // directly, which is how the Leads KPIs could say four while eleven
+    // untriaged inquiries sat on a screen nobody had opened.
+    t.assert(/function renderLeadsPage[\s\S]{0,600}?workingInquiries\(\)\.filter\(function\(l\) \{ return !isArchived\(l\); \}\)/.test(main),
+      'the KPI row must count the same pool the table draws, minus archived');
   });
 
   t.test('archived clients are filtered off the roster', () => {

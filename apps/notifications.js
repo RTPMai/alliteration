@@ -1,3 +1,4 @@
+// PUT IN: apps/notifications.js
 /**
  * Notifications — shell-level to-do / hand-off list.
  *
@@ -71,8 +72,11 @@ import {
 // to that sub-tab itself. See openDeepLink() in apps/backbone/main.js (and
 // the TravelTrack/GivingGauge equivalents for expense/donation).
 const LINK_ROUTE = {
-  inquiry: { app: 'backbone', view: 'inbox' },
-  lead: { app: 'backbone', view: 'leads' },
+  // Both types point at the one merged screen. The TYPES stay separate because
+  // notifications already on file carry one or the other and are never
+  // rewritten; only where they land changed.
+  inquiry: { app: 'backbone', view: 'inquiries' },
+  lead: { app: 'backbone', view: 'inquiries' },
   client: { app: 'backbone', view: 'dashboard' },
   expense: { app: 'traveltrack', view: 'expenses' },
   donation: { app: 'givinggauge', view: 'requests' },
