@@ -356,6 +356,19 @@ textarea.field{min-height:60px;resize:vertical}
 .qt-transactional{background:var(--amber-tint);color:var(--amber)}
 .qt-lowpriority{background:var(--danger-tint);color:var(--danger)}
 .lead-status-pill{display:inline-flex;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:600;background:var(--line-soft);color:var(--ink)}
+/* The status cell is a real <select> wearing the pill, so it keyboards and gets
+   a native picker on a phone. The stage colors come from the same
+   .lead-status-<Stage> classes the static pill uses, so a stage can never be
+   one color as a pill and another as a control. */
+.lead-status-select{-webkit-appearance:none;appearance:none;border:0;cursor:pointer;padding-right:20px;font-family:inherit;line-height:1.5;
+  background-image:linear-gradient(45deg,transparent 50%,currentColor 50%),linear-gradient(135deg,currentColor 50%,transparent 50%);
+  background-position:calc(100% - 10px) 52%,calc(100% - 6px) 52%;background-size:4px 4px,4px 4px;background-repeat:no-repeat}
+.lead-status-select:focus-visible{outline:2px solid var(--hue-blue);outline-offset:1px}
+.lead-status-select:disabled{opacity:.55;cursor:progress}
+/* The options themselves are drawn by the operating system, which does not
+   inherit the pill's background. Without this they render as light-on-light in
+   dark mode. */
+.lead-status-select option{background:var(--card);color:var(--ink);font-weight:500}
 /* One class per stage on the inbound ladder. There are no legacy classes here
    on purpose: statusClass() normalizes before it builds the name, so a record
    still stored as "Death Call" asks for .lead-status-Responded. Keeping dead

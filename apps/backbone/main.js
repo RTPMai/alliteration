@@ -83,6 +83,12 @@ export async function start(ctx) {
   // Cosmetic gate like everything else here — the server enforces its own rules.
   const CAN_DELETE_LEADS = currentRole === "admin" || currentRole === "superuser";
 
+  // Who may change a stage from the list. Same rule the rest of BackBone edits
+  // under: can_edit unless a role explicitly says otherwise. Read as
+  // "!== false" rather than truthiness, so a role that simply omits the field
+  // keeps the access it has today instead of silently losing it on deploy.
+  const CAN_EDIT_LEADS = !!(currentPerms.can_edit !== false || currentPerms.superuser);
+
 
   const SEED_CUSTOMERS = [
     { customer_id: "5860474", company_name: "Foth & VanDyke LLC", invoice_count: 378, last_invoice_date: "2026-07-01", total_revenue: 465300.17, median_gap_days: 2.777, revenue_by_year: {"2023": 67871.49, "2024": 111234.1, "2025": 186111.84, "2026": 100082.74}, invoices_by_year: {"2023": 53, "2024": 97, "2025": 152, "2026": 76} },
@@ -8619,7 +8625,7 @@ export async function start(ctx) {
         '<td class="company-cell">' + l.company_name + '</td>' +
         '<td>' + leadContactTag(d.contact) + '</td>' +
         '<td>' + (l.source_type || "—") + '</td>' +
-        '<td><span class="lead-status-pill ' + statusClass(l.status) + '">' + l.status + '</span>' + statusAgeChip(l) + '</td>' +
+        '<td>' + rowStatusControl(l) + statusAgeChip(l) + '</td>' +
         '<td>' + scoreCell(d) + '</td>' +
         '<td>' + tierHtml + '</td>' +
         '<td>' + (d.am || "—") + '</td>' +
@@ -8648,6 +8654,15 @@ export async function start(ctx) {
           return;
         }
         openLeadDetail(tr.dataset.leadId);
+      });
+    });
+    wrap.querySelectorAll(".lead-status-select").forEach(function(sel) {
+      // The row opens the record on click, so both the click that opens the
+      // dropdown and the click that picks an option have to stop there.
+      sel.addEventListener("click", function(e) { e.stopPropagation(); });
+      sel.addEventListener("change", function(e) {
+        e.stopPropagation();
+        handleRowStatusChange(sel.dataset.statusFor, sel.value, sel);
       });
     });
     wrap.querySelectorAll(".lead-select").forEach(function(cb) {
@@ -8687,6 +8702,97 @@ export async function start(ctx) {
     if (arcBtn) arcBtn.addEventListener("click", openArchiveSelectedModal);
     const arcCount = $id("bulkArchiveCount");
     if (arcCount) arcCount.textContent = selectedLeadIds.size;
+  }
+
+  /**
+   * Status, changeable without opening the record.
+   *
+   * Moving something from Assigned to Responded is the single most common thing
+   * anybody does on this screen, and it used to cost a modal open, a dropdown,
+   * and a close. Six inquiries answered in a morning was six round trips.
+   *
+   * It is a real <select> styled as the pill rather than a menu of our own, so
+   * it works with a keyboard and works on a phone, where the browser gives you
+   * a native picker instead of a list too small to hit.
+   */
+  function rowStatusControl(l) {
+    const st = normalizeLeadStatus(l.status);
+    if (!CAN_EDIT_LEADS) {
+      // Read-only accounts get the pill they always had. Cosmetic, like every
+      // gate in this file; the save route enforces its own rules.
+      return '<span class="lead-status-pill ' + statusClass(st) + '">' + st + '</span>';
+    }
+    return '<select class="lead-status-pill lead-status-select ' + statusClass(st) + '" ' +
+      'data-status-for="' + l.lead_id + '" title="Change the stage without opening this inquiry.">' +
+      INQUIRY_STATUSES.map(function(o) {
+        return '<option value="' + o + '"' + (o === st ? " selected" : "") + '>' + o + '</option>';
+      }).join("") +
+      '</select>';
+  }
+
+  /**
+   * One row, one change. Shares its rules with the bulk toolbar rather than
+   * restating them: Won still warns that it is not a promotion, Reach Back Out
+   * still asks for a date, and a row that came straight off the form is filed
+   * first because there is nothing to change the status of until it is.
+   *
+   * ANY REFUSAL PUTS THE DROPDOWN BACK. A select that keeps showing the value
+   * somebody picked after the change was cancelled is worse than no control at
+   * all: the screen would be claiming a stage the record does not have.
+   */
+  async function handleRowStatusChange(leadId, status, selectEl) {
+    const revert = function() { renderLeadsPage(); };
+
+    if (isPendingId(leadId)) {
+      const subId = leadId.slice(PENDING_PREFIX.length);
+      const sub = state_intake.find(function(x) { return x.id === subId; });
+      if (!sub) return revert();
+      const co = (sub.company && sub.company.name) || "This inquiry";
+      if (!confirm(co + ' came straight off the form. Setting it to "' + status +
+        '" files it as an inquiry record first.\n\nGo ahead?')) return revert();
+    }
+
+    let lead = state_leads.find(function(l) { return l.lead_id === leadId; });
+
+    if (status === "Won" && lead && !lead.promoted_customer_id) {
+      if (!confirm('Marking "' + lead.company_name + '" Won here does NOT add it to the Roster.\n\n' +
+        'To create the client record, open it and use "Promote to Roster" instead.\n\n' +
+        'Set status to Won anyway?')) return revert();
+    }
+
+    // Asked BEFORE anything is filed, so cancelling leaves the list untouched.
+    let reachDate = null;
+    if (status === "Reach Back Out") {
+      reachDate = promptReachBackDate(lead || { company_name: "this inquiry" });
+      if (reachDate === null) return revert();
+    }
+
+    if (isPendingId(leadId)) {
+      const ids = await adoptIds([leadId]);
+      lead = state_leads.find(function(l) { return l.lead_id === ids[0]; });
+    }
+    if (!lead) return revert();
+
+    if (reachDate) lead.reach_back_at = reachDate;
+    setLeadStatus(lead, status);
+
+    if (selectEl) selectEl.disabled = true;
+    try {
+      await saveLeads();
+    } catch (e) {
+      // Put the record back the way it was. A row showing a stage that never
+      // reached storage is how two people end up chasing the same inquiry.
+      alert("That status change didn't save: " + ((e && e.message) || e) +
+        "\n\nThe inquiry has been put back the way it was.");
+      return revert();
+    }
+
+    // An open detail panel showing the same record must not keep the old value.
+    if (activeLeadId === lead.lead_id) {
+      const el = $id("leadStatusSelect");
+      if (el) el.value = lead.status;
+    }
+    renderLeadsPage();
   }
 
   /**

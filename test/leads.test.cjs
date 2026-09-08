@@ -63,6 +63,71 @@ t.test('duplicate checks normalize punctuation and suffixes', () => {
     'a raw lowercase-only duplicate check survived');
 });
 
+/* ---- changing a stage from the row ---------------------------------------- */
+
+t.test('the row status control offers exactly the real stages', () => {
+  const idx = main.indexOf('function rowStatusControl');
+  t.assert(idx !== -1, 'rowStatusControl is missing');
+  const block = main.slice(idx, main.indexOf('async function handleRowStatusChange', idx));
+  t.assert(/INQUIRY_STATUSES\.map/.test(block),
+    'the options must come from the shared ladder, not a second list that can drift from it');
+  t.assert(/normalizeLeadStatus\(l\.status\)/.test(block),
+    'a legacy record must show its mapped stage as selected, or the row offers to "change" it to what it already is');
+});
+
+t.test('a read-only account gets a pill, not a control', () => {
+  const idx = main.indexOf('function rowStatusControl');
+  const block = main.slice(idx, main.indexOf('async function handleRowStatusChange', idx));
+  t.assert(/if \(!CAN_EDIT_LEADS\)[\s\S]{0,200}?lead-status-pill/.test(block),
+    'without the gate, a viewer sees a dropdown that fails on save');
+  t.assert(/can_edit !== false/.test(main),
+    'read can_edit as !== false, or a role that omits the field silently loses access on deploy');
+});
+
+t.test('every refusal path puts the dropdown back', () => {
+  const idx = main.indexOf('async function handleRowStatusChange');
+  const block = main.slice(idx, main.indexOf('* The score cell', idx));
+  const reverts = (block.match(/return revert\(\)/g) || []).length;
+  t.assert(reverts >= 4,
+    'a select still showing a cancelled choice claims a stage the record does not have (found ' + reverts + ' revert paths)');
+  t.assert(/function revert/.test(block) || /const revert =/.test(block), 'revert helper missing');
+});
+
+t.test('the date is asked before anything is filed', () => {
+  const idx = main.indexOf('async function handleRowStatusChange');
+  const block = main.slice(idx, main.indexOf('* The score cell', idx));
+  t.assert(block.indexOf('promptReachBackDate') < block.indexOf('await adoptIds'),
+    'cancelling the date prompt must leave the list untouched, so it cannot come after filing');
+});
+
+t.test('a row that came off the form is filed before its stage changes', () => {
+  const idx = main.indexOf('async function handleRowStatusChange');
+  const block = main.slice(idx, main.indexOf('* The score cell', idx));
+  t.assert(/isPendingId\(leadId\)[\s\S]*?await adoptIds\(\[leadId\]\)/.test(block),
+    'there is nothing to change the status of until the submission is a record');
+  t.assert(block.indexOf('await adoptIds') < block.indexOf('setLeadStatus(lead, status)'),
+    'the stage must be set on the filed record, not on the drawn row that is thrown away each render');
+});
+
+t.test('a failed save does not leave the row claiming the new stage', () => {
+  const idx = main.indexOf('async function handleRowStatusChange');
+  const block = main.slice(idx, main.indexOf('* The score cell', idx));
+  t.assert(/catch \(e\)[\s\S]{0,400}?return revert\(\)/.test(block),
+    'a row showing a stage that never reached storage is how two people chase the same inquiry');
+});
+
+t.test('the row dropdown does not also open the record', () => {
+  const idx = main.indexOf('querySelectorAll(".lead-status-select")');
+  t.assert(idx !== -1, 'the status selects are never wired up');
+  const block = main.slice(idx, main.indexOf('querySelectorAll(".lead-select")', idx));
+  // BOTH listeners. The click that opens the dropdown and the change that picks
+  // an option each bubble to the row, and the row opens the detail modal.
+  t.assert(/addEventListener\("click"[\s\S]{0,120}?stopPropagation/.test(block),
+    'opening the dropdown would also open the record behind it');
+  t.assert(/addEventListener\("change"[\s\S]{0,120}?stopPropagation/.test(block),
+    'picking an option would also open the record behind it');
+});
+
 /* ---- the log-an-inquiry form is behind a button ---------------------------- */
 
 t.test('the manual form lives in a modal, not inline above the pipeline', () => {
