@@ -63,6 +63,43 @@ t.test('duplicate checks normalize punctuation and suffixes', () => {
     'a raw lowercase-only duplicate check survived');
 });
 
+/* ---- the log-an-inquiry form is behind a button ---------------------------- */
+
+t.test('the manual form lives in a modal, not inline above the pipeline', () => {
+  // It was an always-open card, so every visit to the screen opened on a blank
+  // form with the funnel and the table pushed below the fold. Logging by hand
+  // is the rare case; nearly everything arrives through the public form.
+  const page = template.slice(
+    template.indexOf('id="page-inquiries"'),
+    template.indexOf('id="page-roster"'));
+  t.assert(!page.includes('id="leadCompanyName"'),
+    'the inquiry form is back on the page body, pushing the pipeline down again');
+  t.assert(page.includes('id="openLogInquiryBtn"'),
+    'the page needs the button that opens the form');
+
+  const modal = template.slice(
+    template.indexOf('id="logInquiryOverlay"'),
+    template.indexOf('id="handoffOverlay"'));
+  ['leadCompanyName', 'leadContactFirst', 'leadSourceType', 'scanCardBtn', 'addLeadBtn']
+    .forEach((id) => t.assert(modal.includes('id="' + id + '"'), id + ' is not inside the modal'));
+});
+
+t.test('logging an inquiry closes the form and does not strand it open', () => {
+  const idx = main.indexOf('async function handleAddLead');
+  const block = main.slice(idx, main.indexOf('function openLeadDetail', idx));
+  t.assert(/closeLogInquiry\(\)/.test(block),
+    'a successful save must close the modal, or the next inquiry types over a form that looks unsaved');
+  t.assert(block.indexOf('closeLogInquiry()') > block.indexOf('await saveLeads()'),
+    'the modal must close AFTER the save, so a failed save leaves the typing on screen');
+});
+
+t.test('the form modal does not close on a backdrop click', () => {
+  // Ten typed fields. No other BackBone modal does this either.
+  const idx = main.indexOf('logInquiryOverlay").addEventListener');
+  t.assert(idx === -1,
+    'a stray click beside the form would throw away a half-logged phone call');
+});
+
 /* ---- contact names -------------------------------------------------------- */
 
 t.test('lead forms capture first and last name separately', () => {

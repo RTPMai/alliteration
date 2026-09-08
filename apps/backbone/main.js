@@ -8989,7 +8989,29 @@ export async function start(ctx) {
     $id("leadSourceType").value = "";
     $id("leadMarketingInitiative").value = "";
     $id("leadIndustry").value = "";
+    closeLogInquiry();
     renderLeadsPage();
+  }
+
+  /* ---- the log-an-inquiry modal ------------------------------------------- *
+   * This was an always-open card sitting above the funnel, so every visit to
+   * the screen started on a blank form with the actual work pushed below the
+   * fold. Logging by hand is the rare case: nearly everything arrives through
+   * the public form and is already in the list.
+   * ------------------------------------------------------------------------ */
+
+  function openLogInquiry() {
+    $id("addLeadErr").textContent = "";
+    scanCardStatus("", "");
+    $id("logInquiryOverlay").classList.add("open");
+    // Focus the first field so the form is typeable without reaching for the
+    // mouse. Somebody logging a phone call is usually still on the phone.
+    const first = $id("leadCompanyName");
+    if (first) first.focus();
+  }
+
+  function closeLogInquiry() {
+    $id("logInquiryOverlay").classList.remove("open");
   }
 
   function openLeadDetail(leadId) {
@@ -11198,6 +11220,11 @@ export async function start(ctx) {
   })();
 
   $id("handoffClose").addEventListener("click", closeHandoffModal);
+  $id("openLogInquiryBtn").addEventListener("click", openLogInquiry);
+  $id("logInquiryClose").addEventListener("click", closeLogInquiry);
+  // Deliberately NO click-the-backdrop-to-close. No other modal in BackBone
+  // does it, and this one holds ten typed fields, so a stray click beside the
+  // form would throw away a phone call somebody was halfway through logging.
   $id("handoffOverlay").addEventListener("click", function(e) {
     if (e.target.id === "handoffOverlay") closeHandoffModal();
   });

@@ -26,91 +26,17 @@ export default `
   <div id="page-inquiries" class="page">
     <div class="kpi-grid" id="inquiriesKpiGrid"></div>
 
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-hd"><h3>Log an inquiry</h3></div>
-      <div class="card-bd">
-        <div class="help">
-          Anything that came in off the form is already in the list below. Use this for the
-          ones that did not: a phone call, somebody at the counter, a referral, a card from
-          an event. Scoring runs the company through web search and weighs it alongside what
-          they actually asked for. "Promote to Roster" adds them as a $0 / 0-invoice record
-          you can track next to real clients.
-        </div>
-        <div class="scan-card-bar">
-          <button class="btn btn-gray" id="scanCardBtn" type="button">
-            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h4"/><circle cx="17" cy="10" r="2"/><path d="M15 15c0-1.1.9-2 2-2s2 .9 2 2"/></svg>
-            Scan business card
-          </button>
-          <input type="file" id="scanCardInput" accept="image/*" capture="environment" style="display:none"/>
-          <span id="scanCardStatus" class="scan-card-status"></span>
-        </div>
-        <div class="lead-form-grid">
-          <div>
-            <label class="field-lbl">Company name *</label>
-            <input class="field" id="leadCompanyName"/>
-          </div>
-          <div>
-            <label class="field-lbl">Website URL</label>
-            <input class="field" id="leadWebsite" placeholder="https://"/>
-          </div>
-          <div>
-            <label class="field-lbl">Contact first name</label>
-            <input class="field" id="leadContactFirst"/>
-          </div>
-          <div>
-            <label class="field-lbl">Contact last name</label>
-            <input class="field" id="leadContactLast"/>
-          </div>
-          <div>
-            <label class="field-lbl">Contact email</label>
-            <input class="field" id="leadContactEmail" placeholder="name@company.com"/>
-          </div>
-          <div>
-            <label class="field-lbl">Contact phone</label>
-            <input class="field" id="leadContactPhone"/>
-          </div>
-          <div>
-            <label class="field-lbl">Source type</label>
-            <select class="field" id="leadSourceType">
-              <option value="">Not set</option>
-              <option>Inbound quote request</option>
-              <option>Website form</option>
-              <option>Phone call</option>
-              <option>Walk-in</option>
-              <option>Trade show</option>
-              <option>Event</option>
-              <option>Referral</option>
-              <option>Existing account expansion</option>
-            </select>
-          </div>
-          <div>
-            <label class="field-lbl">Event of origin (if from an event)</label>
-            <input class="field" id="leadSourceEvent" placeholder="e.g. Catch Des Moines expo, June 2026"/>
-          </div>
-          <div>
-            <label class="field-lbl">Marketing initiative</label>
-            <select class="field" id="leadMarketingInitiative"></select>
-          </div>
-          <div>
-            <label class="field-lbl">Industry (if known — the agent will verify)</label>
-            <select class="field" id="leadIndustry"></select>
-          </div>
-          <div class="wide">
-            <label class="field-lbl">Inquiry notes</label>
-            <textarea class="field" id="leadInquiryNotes"></textarea>
-          </div>
-          <div class="wide">
-            <label class="field-lbl">Existing CRM notes</label>
-            <textarea class="field" id="leadCrmNotes"></textarea>
-          </div>
-        </div>
-        <button class="btn btn-green" id="addLeadBtn">Log inquiry</button>
-        <span id="addLeadErr" style="color:var(--danger);font-size:12px;margin-left:10px"></span>
-      </div>
-    </div>
-
     <div class="card">
-      <div class="card-hd"><h3>Pipeline</h3></div>
+      <!-- The form that used to sit here as an always-open card pushed the
+           funnel and the table below the fold. Logging an inquiry by hand is
+           the rare case; almost everything arrives through the form and is
+           already in the list. So it is a button, and the screen opens on the
+           work instead of on a blank form. -->
+      <div class="card-hd">
+        <h3>Pipeline</h3>
+        <button class="btn btn-green btn-sm" id="openLogInquiryBtn"
+          title="For inquiries that did not come through the form: a phone call, somebody at the counter, a referral, a card from an event.">Log an inquiry</button>
+      </div>
       <div class="card-bd">
         <div class="funnel-all">
           <div class="fnl-hint">Click a stage to filter the pipeline. Click it again to show everything.
@@ -559,6 +485,96 @@ export default `
       <button class="modal-close" id="inboxDetailClose">&times;</button>
     </div>
     <div class="modal-bd" id="inboxDetailBody"></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="logInquiryOverlay">
+  <div class="modal" style="max-width:760px">
+    <div class="modal-hd">
+      <h3>Log an inquiry</h3>
+      <button class="modal-close" id="logInquiryClose">&times;</button>
+    </div>
+    <div class="modal-bd">
+        <div class="help">
+          Anything that came in off the public form is already in the list. Use this for the
+          ones that did not: a phone call, somebody at the counter, a referral, a card from
+          an event. Scoring runs the company through web search and weighs it alongside what
+          they actually asked for. "Promote to Roster" adds them as a $0 / 0-invoice record
+          you can track next to real clients.
+        </div>
+        <div class="scan-card-bar">
+          <button class="btn btn-gray" id="scanCardBtn" type="button">
+            <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:6px"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M7 15h4"/><circle cx="17" cy="10" r="2"/><path d="M15 15c0-1.1.9-2 2-2s2 .9 2 2"/></svg>
+            Scan business card
+          </button>
+          <input type="file" id="scanCardInput" accept="image/*" capture="environment" style="display:none"/>
+          <span id="scanCardStatus" class="scan-card-status"></span>
+        </div>
+        <div class="lead-form-grid">
+          <div>
+            <label class="field-lbl">Company name *</label>
+            <input class="field" id="leadCompanyName"/>
+          </div>
+          <div>
+            <label class="field-lbl">Website URL</label>
+            <input class="field" id="leadWebsite" placeholder="https://"/>
+          </div>
+          <div>
+            <label class="field-lbl">Contact first name</label>
+            <input class="field" id="leadContactFirst"/>
+          </div>
+          <div>
+            <label class="field-lbl">Contact last name</label>
+            <input class="field" id="leadContactLast"/>
+          </div>
+          <div>
+            <label class="field-lbl">Contact email</label>
+            <input class="field" id="leadContactEmail" placeholder="name@company.com"/>
+          </div>
+          <div>
+            <label class="field-lbl">Contact phone</label>
+            <input class="field" id="leadContactPhone"/>
+          </div>
+          <div>
+            <label class="field-lbl">Source type</label>
+            <select class="field" id="leadSourceType">
+              <option value="">Not set</option>
+              <option>Inbound quote request</option>
+              <option>Website form</option>
+              <option>Phone call</option>
+              <option>Walk-in</option>
+              <option>Trade show</option>
+              <option>Event</option>
+              <option>Referral</option>
+              <option>Existing account expansion</option>
+            </select>
+          </div>
+          <div>
+            <label class="field-lbl">Event of origin (if from an event)</label>
+            <input class="field" id="leadSourceEvent" placeholder="e.g. Catch Des Moines expo, June 2026"/>
+          </div>
+          <div>
+            <label class="field-lbl">Marketing initiative</label>
+            <select class="field" id="leadMarketingInitiative"></select>
+          </div>
+          <div>
+            <label class="field-lbl">Industry (if known — the agent will verify)</label>
+            <select class="field" id="leadIndustry"></select>
+          </div>
+          <div class="wide">
+            <label class="field-lbl">Inquiry notes</label>
+            <textarea class="field" id="leadInquiryNotes"></textarea>
+          </div>
+          <div class="wide">
+            <label class="field-lbl">Existing CRM notes</label>
+            <textarea class="field" id="leadCrmNotes"></textarea>
+          </div>
+        </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn btn-green" id="addLeadBtn">Log inquiry</button>
+      <span id="addLeadErr" style="color:var(--danger);font-size:12px;margin-left:10px"></span>
+    </div>
   </div>
 </div>
 
