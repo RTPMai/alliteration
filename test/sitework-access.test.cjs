@@ -76,6 +76,7 @@ function seed() {
   }));
   kv.set(P + 'users', JSON.stringify({
     ryan:   { username: 'ryan',   name: 'Ryan',   role: 'admin', superuser: true },
+    dana:   { username: 'dana',   name: 'Dana',   role: 'builder' },
     jacob:  { username: 'jacob',  name: 'Jacob',  role: 'builder' },
     margo:  { username: 'margo',  name: 'Margo',  role: 'watcher' },
     amanda: { username: 'amanda', name: 'Amanda', role: 'office' },
@@ -118,6 +119,10 @@ const JACOB  = { username: 'jacob',  name: 'Jacob',  role: 'builder' };
 const MARGO  = { username: 'margo',  name: 'Margo',  role: 'watcher' };
 const AMANDA = { username: 'amanda', name: 'Amanda', role: 'office' };
 const OLDDOG = { username: 'olddog', name: 'Old Dog', role: 'legacy' };
+// Granted AND able to edit, but not the author. Margo cannot stand in for this:
+// can_edit is off for her, so the write gate refuses her before the delete rule
+// is ever consulted, and the test would pass without a delete rule existing.
+const DANA = { username: 'dana', name: 'Dana', role: 'builder' };
 
 async function check(name, fn) {
   let err = null;
@@ -226,6 +231,132 @@ async function check(name, fn) {
     t.equal(res.statusCode, 201,
       'an admin lost write access because a role somewhere had can_edit off');
     seed();
+  });
+
+  /* ---- who touched it -------------------------------------------------- */
+
+  await check('the author is stamped from the session, not from the body', async () => {
+    seed();
+    const res = await call(route, {
+      as: JACOB, method: 'POST',
+      // A browser claiming to be somebody else. It must not be believed.
+      body: { title: 'Forged', createdBy: 'ryan', updatedBy: 'ryan' },
+    });
+    t.equal(res.statusCode, 201);
+    t.equal(res.body.note.createdBy, 'jacob', 'authorship must come off the session');
+    t.assert(!res.body.note.updatedBy, 'a brand new note has no editor yet');
+  });
+
+  await check('editing stamps who did it', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Mine' } });
+    const id = made.body.note.id;
+    const res = await call(route, { as: RYAN, method: 'PATCH', query: { id }, body: { detail: 'Ryan added context' } });
+    t.equal(res.statusCode, 200, JSON.stringify(res.body));
+    t.equal(res.body.note.createdBy, 'jacob', 'editing must not rewrite who wrote it');
+    t.equal(res.body.note.updatedBy, 'ryan', 'and must record who changed it');
+  });
+
+  await check('marking done records who closed it', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Ship it' } });
+    const id = made.body.note.id;
+    const done = await call(route, { as: RYAN, method: 'PATCH', query: { id }, body: { status: 'done' } });
+    t.equal(done.body.note.doneBy, 'ryan', 'who ticked it off is the useful one on a build board');
+    t.assert(done.body.note.doneAt, 'and when');
+
+    const reopened = await call(route, { as: JACOB, method: 'PATCH', query: { id }, body: { status: 'open' } });
+    t.equal(reopened.body.note.doneBy, null,
+      'an open note claiming somebody finished it is a card contradicting itself');
+    t.equal(reopened.body.note.doneAt, null);
+  });
+
+  await check('a drag does not make everybody an editor', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Drag me' } });
+    const id = made.body.note.id;
+    await call(route, { as: RYAN, method: 'PATCH', body: { order: [{ id, order: 3 }] } });
+    const after = await call(route, { as: RYAN, query: { id } });
+    const note = after.body.note || (after.body.notes || []).find((n) => n.id === id);
+    t.assert(!note.updatedBy,
+      'tidying the layout would otherwise put "edited by" on every note on the board');
+  });
+
+  /* ---- deleting is the author or an admin ------------------------------ */
+
+  await check('you can delete your own note', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Jacob deletes this' } });
+    const res = await call(route, { as: JACOB, method: 'DELETE', query: { id: made.body.note.id } });
+    t.equal(res.statusCode, 200, JSON.stringify(res.body));
+  });
+
+  await check('you cannot delete somebody else\'s', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Jacob wrote this' } });
+    const id = made.body.note.id;
+    const res = await call(route, { as: DANA, method: 'DELETE', query: { id } });
+    t.equal(res.statusCode, 403, 'a granted role must not clear another person\'s work');
+    t.assert(/delete/i.test(String(res.body && res.body.error)),
+      'the refusal must be the delete rule, not the can_edit gate refusing first: ' +
+      JSON.stringify(res.body));
+    const still = await call(route, { as: JACOB, query: { id } });
+    t.assert(still.statusCode === 200, 'and the note must still be there afterwards');
+  });
+
+  await check('an admin can delete anybody\'s', async () => {
+    seed();
+    const made = await call(route, { as: JACOB, method: 'POST', body: { title: 'Jacob wrote this too' } });
+    const res = await call(route, { as: RYAN, method: 'DELETE', query: { id: made.body.note.id } });
+    t.equal(res.statusCode, 200, 'somebody has to be able to tidy up after a leaver');
+  });
+
+  await check('a note with no author at all is admin-only', async () => {
+    seed();
+    // Not something this app writes. If one ever appears, "anyone may delete
+    // it" would make forging deletion rights as easy as omitting a field.
+    const { canDeleteNote } = await import(path.join(ROOT, 'lib/sitework/schema.js'));
+    t.equal(canDeleteNote({ id: 'S-0000' }, { username: 'jacob' }), false);
+    t.equal(canDeleteNote({ id: 'S-0000' }, { username: 'ryan', superuser: true }), true);
+  });
+
+  await check('the screen and the route agree about who may delete', async () => {
+    const { canDeleteNote } = await import(path.join(ROOT, 'lib/sitework/schema.js'));
+    const note = { id: 'S-0001', createdBy: 'jacob' };
+    t.equal(canDeleteNote(note, { username: 'jacob' }), true);
+    t.equal(canDeleteNote(note, { username: 'JACOB' }), true, 'usernames must compare case-insensitively');
+    t.equal(canDeleteNote(note, { username: 'margo' }), false);
+    t.equal(canDeleteNote(note, { username: 'margo', superuser: true }), true);
+    t.equal(canDeleteNote(note, {}), false, 'nobody is not somebody');
+    t.equal(canDeleteNote(note, { username: 'margo', superuser: 'yes' }), false,
+      'superuser must be a strict boolean, not anything truthy');
+  });
+
+  /* ---- the byline ------------------------------------------------------ */
+
+  await check('the byline says who, and skips what it would repeat', async () => {
+    const { noteByline } = await import(path.join(ROOT, 'lib/sitework/schema.js'));
+    const flat = (n) => noteByline(n, (u) => u).map((p) => p.label + ' ' + p.who).join(' | ');
+
+    t.equal(flat({ createdBy: 'ryan' }), 'Added by ryan');
+    t.equal(flat({ createdBy: 'ryan', updatedBy: 'jacob' }), 'Added by ryan | edited by jacob');
+    t.equal(flat({ createdBy: 'ryan', updatedBy: 'ryan' }), 'Added by ryan',
+      '"Added by Ryan, edited by Ryan" spends a line saying nothing');
+    t.equal(flat({ createdBy: 'ryan', updatedBy: 'RYAN' }), 'Added by ryan',
+      'and the same is true whatever case it was stored in');
+    t.equal(flat({}), '', 'a note with no author draws no line rather than a blank one');
+    t.equal(flat({ createdBy: 'ryan', status: 'done', doneBy: 'ryan' }), 'Added by ryan | done by ryan',
+      'who closed it is worth showing even when it is the same person');
+    t.equal(flat({ createdBy: 'ryan', doneBy: 'jacob' }), 'Added by ryan',
+      'a stale doneBy on an open note must not be drawn');
+  });
+
+  await check('the byline shows the reader as "you"', async () => {
+    const { noteByline } = await import(path.join(ROOT, 'lib/sitework/schema.js'));
+    const nameFor = (u) => (String(u).toLowerCase() === 'ryan' ? 'you' : u);
+    t.equal(noteByline({ createdBy: 'ryan' }, nameFor)[0].who, 'you');
+    t.equal(noteByline({ createdBy: 'jacob' }, nameFor)[0].who, 'jacob',
+      'and everybody else by the handle actually stored, never a guess');
   });
 
   /* ---- the write gate cannot be forgotten ------------------------------ */

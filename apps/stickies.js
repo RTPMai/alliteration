@@ -1,3 +1,4 @@
+// PUT IN: apps/stickies.js
 /**
  * apps/stickies.js — StickySituations (Site Work section).
  *
@@ -23,7 +24,7 @@
 
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
-import { SIZE_LABELS, noteText, boardText } from '../lib/sitework/schema.js';
+import { SIZE_LABELS, noteText, boardText, canDeleteNote, noteByline } from '../lib/sitework/schema.js';
 
 const COLORS = [
   ['yellow', 'Yellow'],
@@ -137,6 +138,10 @@ export default {
   .sk-detail{font-size:12.5px;line-height:1.45;margin-top:6px;white-space:pre-wrap;word-break:break-word}
 
   .sk-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px;align-items:center}
+  /* Deliberately quiet. It answers "who put this here" when somebody asks, and
+     stays out of the way of the note itself the rest of the time. */
+  .sk-by{margin-top:7px;font-size:11px;color:var(--faint);line-height:1.4}
+  .sk-by b{font-weight:600;color:var(--muted)}
   .sk-tag{
     display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;
     letter-spacing:.02em;padding:2px 7px;border-radius:999px;
@@ -226,6 +231,22 @@ export default {
     // notes are about the shell, not about one app.
     const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }));
     const appMeta = (id) => APP_OPTIONS.find((a) => a.id === id) || null;
+
+    // Who is looking. Used for two things: hiding Delete on somebody else's
+    // note, and saying "you" instead of your own username on the byline.
+    const ME = {
+      username: String((ctx.user && ctx.user.username) || '').toLowerCase(),
+      superuser: !!(ctx.perms && ctx.perms.superuser),
+    };
+
+    /**
+     * Usernames are all the board has. It never loads the account list, and it
+     * deliberately does not start: the list is admin-only, so a granted role
+     * would get a 403 and every name would fall back to the username anyway.
+     * Showing the handle is honest; guessing a real name from it would not be.
+     */
+    const nameFor = (u) =>
+      (String(u || '').toLowerCase() === ME.username && ME.username) ? 'you' : String(u || '');
 
     function msg(text, kind) {
       $('#skMsg').innerHTML = text
@@ -333,6 +354,19 @@ export default {
 
     /* ---- board --------------------------------------------------------- */
 
+    /**
+     * "Added by you · edited by jacob". Nothing is drawn for a note with no
+     * author at all rather than an empty row, so the card does not grow a blank
+     * line for a record that predates the field.
+     */
+    function byline(n) {
+      const parts = noteByline(n, nameFor);
+      if (!parts.length) return '';
+      return '<div class="sk-by">' +
+        parts.map((p) => esc(p.label) + ' ' + '<b>' + esc(p.who) + '</b>').join(' \u00b7 ') +
+        '</div>';
+    }
+
     function noteHtml(n) {
       const a = n.appId ? appMeta(n.appId) : null;
       const done = n.status === 'done';
@@ -352,10 +386,14 @@ export default {
           '</div>' +
           (n.detail ? '<div class="sk-detail">' + esc(n.detail) + '</div>' : '') +
           '<div class="sk-tags">' + tags + '</div>' +
+          byline(n) +
           '<div class="sk-acts">' +
             '<button data-edit="' + esc(n.id) + '">Edit</button>' +
             '<button data-copy="' + esc(n.id) + '">Copy</button>' +
-            '<button data-del="' + esc(n.id) + '">Delete</button>' +
+            // Hidden rather than disabled when it is not yours: a greyed-out
+            // button invites a click and then explains why it did nothing. The
+            // route refuses it regardless, which is the gate that counts.
+            (canDeleteNote(n, ME) ? '<button data-del="' + esc(n.id) + '">Delete</button>' : '') +
           '</div>' +
         '</div>';
     }

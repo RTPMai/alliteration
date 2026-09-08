@@ -20,7 +20,7 @@
 
 import { requireAuth } from "../lib/session.js";
 import { getUser, permsFor } from "../lib/users.js";
-import { validateNew, validatePatch } from "../lib/sitework/schema.js";
+import { validateNew, validatePatch, canDeleteNote } from "../lib/sitework/schema.js";
 import {
   listNotes, getNote, saveNote, updateNote, deleteNote, nextNoteId,
 } from "../lib/sitework/store.js";
@@ -172,6 +172,9 @@ export default async function handler(req, res) {
           const id = row && row.id;
           const n = Number(row && row.order);
           if (!id || !Number.isFinite(n)) continue;
+          // No updatedBy here on purpose. Dragging a card to a new spot is not
+          // editing it, and stamping the dragger would put "edited by" on every
+          // note on the board the first time anybody tidied the layout.
           const updated = await updateNote(id, { order: n, updatedAt: new Date().toISOString() });
           if (updated) results.push(id);
         }
@@ -189,10 +192,17 @@ export default async function handler(req, res) {
       if (!Object.keys(patch).length) return res.status(400).json({ error: "No editable fields in patch" });
 
       patch.updatedAt = new Date().toISOString();
+      // Stamped from the session, never from the body, for the same reason
+      // createdBy is: a browser must not be able to say who did something.
+      patch.updatedBy = me;
       if (patch.status === "done" && existing.status !== "done") {
         patch.doneAt = new Date().toISOString();
+        patch.doneBy = me;
       }
-      if (patch.status === "open") patch.doneAt = null;
+      // Reopening clears the closer along with the date. Leaving a doneBy on an
+      // open note would have the card claiming somebody finished a thing that
+      // is visibly not finished.
+      if (patch.status === "open") { patch.doneAt = null; patch.doneBy = null; }
 
       const merged = await updateNote(id, patch);
       return res.status(200).json({ ok: true, note: merged });
@@ -201,6 +211,21 @@ export default async function handler(req, res) {
     if (req.method === "DELETE") {
       const id = (req.query && req.query.id) || parseBody(req).id;
       if (!id) return res.status(400).json({ error: "Missing note id" });
+
+      // Author or admin, the same rule CrewCore kudos uses. A board several
+      // people can reach should not let one of them quietly clear another's
+      // work, and an admin still has to be able to tidy up after somebody who
+      // has left. canDeleteNote() is the shared decision, so the screen hiding
+      // the button and the route refusing the request cannot disagree.
+      const note = await getNote(id);
+      if (!note) return res.status(404).json({ error: "Note not found" });
+      const user = await getUser(sess.username);
+      if (!canDeleteNote(note, { username: sess.username, superuser: user && user.superuser })) {
+        return res.status(403).json({
+          error: "Only the person who added a note, or an admin, can delete it",
+        });
+      }
+
       const removed = await deleteNote(id);
       return res.status(200).json({ ok: true, deleted: removed ? id : null });
     }
