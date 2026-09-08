@@ -87,8 +87,10 @@ const LIVE_PREFIXES = [
   // Notifications: api/notifications.js is deployed. Shell-level, not one of
   // the nine apps, same as auth/users/health above.
   '/api/notifications',
-  // Site Work: api/sitework.js is deployed. Superuser-only, gated in the
-  // route itself, not merely hidden from the rail.
+  // Site Work: api/sitework.js and api/sitework-attach.js are deployed.
+  // The Admin flag or a role grant, gated in the routes themselves, not
+  // merely hidden from the rail. This is a PREFIX, so it covers the hyphenated
+  // attach route as well.
   '/api/sitework',
   // Help bot: api/help.js is deployed. Shell-level, explanations only, no
   // access to business data.
@@ -281,8 +283,13 @@ export const ENDPOINTS = {
   // ---- Notifications (shell-level) ----
   notifications:   '/api/notifications',
 
-  // ---- Site Work (superuser-only section, not an app) ----
+  // ---- Site Work (its own rail section, not an app) ----
   sitework:        '/api/sitework',
+  // Image attachments. A separate route because it carries a megabyte of
+  // base64 while the board's own requests stay small. Hyphenated, not
+  // api/sitework/attach.js: Vercel treats a file and a same-named folder as a
+  // route conflict once ".js" is stripped, and api/sitework.js already exists.
+  siteworkAttach:  '/api/sitework-attach',
 
   // ---- Help bot (shell-level, bottom-right bubble) ----
   help:            '/api/help',

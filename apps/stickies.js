@@ -25,6 +25,10 @@
 import { ENDPOINTS } from '../js/api.js';
 import { APPS } from '../js/registry.js';
 import { SIZE_LABELS, noteText, boardText, canDeleteNote, noteByline } from '../lib/sitework/schema.js';
+import {
+  MAX_IMAGE_EDGE, MAX_ATTACHMENTS_PER_NOTE, ALLOWED_TYPES,
+  attachmentsOf, canRemoveAttachment, humanSize,
+} from '../lib/sitework/attachments.js';
 
 const COLORS = [
   ['yellow', 'Yellow'],
@@ -141,6 +145,26 @@ export default {
   /* Deliberately quiet. It answers "who put this here" when somebody asks, and
      stays out of the way of the note itself the rest of the time. */
   .sk-by{margin-top:7px;font-size:11px;color:var(--faint);line-height:1.4}
+  /* Thumbnails. Fixed height, cropped to fill: screenshots come in wildly
+     different shapes and a row of them at natural aspect ratio makes the
+     board look broken. */
+  .sk-imgs{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+  .sk-img{position:relative;display:block;width:74px;height:56px;border-radius:6px;overflow:hidden;
+    border:1px solid var(--line);background:var(--line-soft);flex:0 0 auto}
+  .sk-img img{width:100%;height:100%;object-fit:cover;display:block}
+  .sk-img.pending{opacity:.72;border-style:dashed}
+  .sk-img-x{position:absolute;top:2px;right:2px;width:17px;height:17px;line-height:15px;padding:0;
+    border:0;border-radius:50%;cursor:pointer;font-size:13px;background:var(--ink);color:var(--card)}
+  .sk-img-cap{position:absolute;left:0;right:0;bottom:0;font-size:9px;text-align:center;
+    padding:1px 2px;background:var(--ink);color:var(--card);opacity:.82;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .sk-imgs.card .sk-img-cap{display:none}
+  .sk-imgbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  .sk-imghint{font-size:11px;color:var(--faint)}
+  .sk-imgbusy{font-size:11px;color:var(--muted)}
+  /* The whole form lights up as a drop target, since the drop handler is on
+     the form rather than on one small zone. */
+  .sk-dropping{outline:2px dashed var(--hue-blue);outline-offset:3px}
   .sk-by b{font-weight:600;color:var(--muted)}
   .sk-tag{
     display:inline-flex;align-items:center;gap:4px;font-size:10.5px;font-weight:600;
@@ -247,6 +271,152 @@ export default {
      */
     const nameFor = (u) =>
       (String(u || '').toLowerCase() === ME.username && ME.username) ? 'you' : String(u || '');
+
+    /* ---- images -------------------------------------------------------- *
+     * Screenshots, mostly. The ask was "paste into the box rather than always
+     * having to upload", so paste is the primary path and the file picker is
+     * the fallback, not the other way round.
+     * -------------------------------------------------------------------- */
+
+    // Held here when a NEW note is being written: it has no id until it is
+    // saved, and an attachment has nowhere to live without one. Uploaded the
+    // moment save() gets an id back.
+    let pendingImages = [];
+
+    function isImageFile(f) {
+      return !!f && ALLOWED_TYPES.indexOf(String(f.type || '').toLowerCase()) !== -1;
+    }
+
+    /**
+     * Shrink before uploading. This is what makes the simple upload path viable
+     * at all: a function request body cannot exceed 4.5 MB, and a screenshot of
+     * a 4K display is several megabytes of PNG. Resized to 1600px on its
+     * longest edge it is a few hundred kilobytes and still perfectly readable.
+     *
+     * A small image is returned UNTOUCHED. Re-encoding a 40 KB screenshot as
+     * JPEG makes the text on it fuzzy for no saving worth having.
+     *
+     * GIFs are never touched either: drawing one to a canvas keeps the first
+     * frame and silently throws the animation away, and a screen recording
+     * saved as a GIF is exactly the kind of thing somebody would attach here.
+     */
+    const SHRINK_ABOVE_BYTES = 400 * 1024;
+
+    function fileToDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ''));
+        r.onerror = () => reject(new Error('Could not read that image.'));
+        r.readAsDataURL(file);
+      });
+    }
+
+    async function shrinkImage(file) {
+      const original = await fileToDataUrl(file);
+      if (file.size <= SHRINK_ABOVE_BYTES) return original;
+      if (String(file.type).toLowerCase() === 'image/gif') return original;
+
+      try {
+        const img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = () => reject(new Error('decode failed'));
+          i.src = original;
+        });
+        const longest = Math.max(img.width, img.height);
+        if (longest <= MAX_IMAGE_EDGE) return original;
+
+        const scale = MAX_IMAGE_EDGE / longest;
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.width * scale);
+        canvas.height = Math.round(img.height * scale);
+        const cx = canvas.getContext('2d');
+        cx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        // THE FORMAT IS KEPT, not converted to JPEG.
+        //
+        // Converting would compress harder, but a screenshot is mostly text and
+        // flat colour, which is exactly what JPEG is worst at: the writing goes
+        // fuzzy at the edges, and fuzzy writing is the whole reason somebody
+        // attached the screenshot. It also means no white backing rectangle is
+        // needed behind a transparent PNG, which is the only place a raw colour
+        // would have appeared in this file.
+        //
+        // Resizing alone already does the work. A 4K PNG grab lands well under
+        // the limit at 1600px, and it stays sharp.
+        const type = String(file.type).toLowerCase() === 'image/webp' ? 'image/webp' : 'image/png';
+        return canvas.toDataURL(type);
+      } catch (e) {
+        // If anything about the resize fails, send the original and let the
+        // server's size limit be the thing that refuses it, with its own
+        // message. Better than refusing here for a reason nobody can act on.
+        return original;
+      }
+    }
+
+    async function uploadImage(noteId, file) {
+      const dataUrl = await shrinkImage(file);
+      const res = await ctx.api.post(ENDPOINTS.siteworkAttach, {
+        noteId: noteId,
+        name: file.name || '',
+        dataUrl: dataUrl,
+      });
+      return res && res.note;
+    }
+
+    /**
+     * Everything that can produce an image funnels through here: a paste, a
+     * drop, and the file picker. One path means one set of limits and one
+     * error message rather than three that drift.
+     */
+    async function acceptImages(fileList) {
+      const files = Array.from(fileList || []).filter(isImageFile);
+      if (!files.length) return;
+
+      const note = editing ? notes.find((n) => n.id === editing) : null;
+      const already = (note ? attachmentsOf(note).length : 0) + pendingImages.length;
+      const room = MAX_ATTACHMENTS_PER_NOTE - already;
+      if (room <= 0) {
+        msg('A note holds ' + MAX_ATTACHMENTS_PER_NOTE + ' images. Remove one first.', 'err');
+        return;
+      }
+      const take = files.slice(0, room);
+      if (files.length > room) {
+        msg('Only ' + room + ' more image' + (room === 1 ? '' : 's') + ' fit on this note.', 'err');
+      }
+
+      if (!editing) {
+        // A new note has no id yet. Hold them and upload after save().
+        pendingImages = pendingImages.concat(take);
+        renderFormImages();
+        return;
+      }
+
+      setImageBusy(true);
+      try {
+        for (const f of take) {
+          const updated = await uploadImage(editing, f);
+          if (updated) {
+            const at = notes.findIndex((n) => n.id === updated.id);
+            if (at >= 0) notes[at] = updated;
+          }
+        }
+        msg('');
+        render();
+        renderFormImages();
+      } catch (e) {
+        msg('That image did not attach. ' + (e.message || ''), 'err');
+      } finally {
+        setImageBusy(false);
+      }
+    }
+
+    function setImageBusy(on) {
+      const el = $('#skImgBusy');
+      if (el) el.textContent = on ? 'Uploading\u2026' : '';
+      const btn = $('#skImgPick');
+      if (btn) btn.disabled = !!on;
+    }
 
     function msg(text, kind) {
       $('#skMsg').innerHTML = text
@@ -367,6 +537,22 @@ export default {
         '</div>';
     }
 
+    /**
+     * Thumbnails on the card itself. They open the full image in a new tab
+     * rather than a viewer of our own: the browser's own image view already
+     * zooms, rotates and saves, and a screenshot of a bug is a thing somebody
+     * wants to look at properly, not squint at in a modal.
+     */
+    function cardImages(n) {
+      const list = attachmentsOf(n);
+      if (!list.length) return '';
+      return '<div class="sk-imgs card">' + list.map((a) =>
+        '<a class="sk-img" href="' + esc(a.url) + '" target="_blank" rel="noopener noreferrer" ' +
+          'title="' + esc(a.name) + '">' +
+          '<img src="' + esc(a.url) + '" alt="' + esc(a.name) + '" loading="lazy">' +
+        '</a>').join('') + '</div>';
+    }
+
     function noteHtml(n) {
       const a = n.appId ? appMeta(n.appId) : null;
       const done = n.status === 'done';
@@ -385,6 +571,7 @@ export default {
               'aria-label="Drag to reorder">\u283F</button>' +
           '</div>' +
           (n.detail ? '<div class="sk-detail">' + esc(n.detail) + '</div>' : '') +
+          cardImages(n) +
           '<div class="sk-tags">' + tags + '</div>' +
           byline(n) +
           '<div class="sk-acts">' +
@@ -561,6 +748,15 @@ export default {
               '<button type="button" class="sk-swatch" data-color="' + v + '" title="' + esc(l) + '" ' +
                 'aria-pressed="' + (formColor === v) + '"></button>').join('') +
           '</div></div>' +
+          '<div class="sk-field"><label>Images (optional)</label>' +
+            '<div class="sk-imgbar">' +
+              '<button type="button" class="sk-btn" id="skImgPick">Choose image</button>' +
+              '<input type="file" id="skImgInput" accept="image/*" multiple style="display:none">' +
+              '<span class="sk-imghint">or paste a screenshot straight into this form, or drop one on it</span>' +
+              '<span class="sk-imgbusy" id="skImgBusy"></span>' +
+            '</div>' +
+            '<div class="sk-imgs" id="skFormImgs"></div>' +
+          '</div>' +
           '<button class="sk-btn primary" id="sk-save">' + (n ? 'Save' : 'Add note') + '</button> ' +
           '<button class="sk-btn" id="sk-cancel">Cancel</button>' +
         '</div>';
@@ -581,10 +777,105 @@ export default {
       $('#sk-title').addEventListener('keydown', (e) => {
         if (e.key === 'Enter') save();
       });
+
+      // PASTE IS THE POINT. Bound to the whole form rather than one field, so
+      // Ctrl+V works wherever the cursor happens to be sitting. A paste
+      // carrying an image is taken; a paste carrying text is left completely
+      // alone so typing into the note still works normally.
+      const form = $('#skForm');
+      form.addEventListener('paste', (e) => {
+        const items = (e.clipboardData && e.clipboardData.files) || [];
+        const images = Array.from(items).filter(isImageFile);
+        if (!images.length) return;
+        e.preventDefault();
+        acceptImages(images);
+      });
+
+      // Drop anywhere on the form. dragover must be prevented or the browser
+      // navigates away to the image instead, which loses the half-typed note.
+      form.addEventListener('dragover', (e) => {
+        if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+        e.preventDefault();
+        form.classList.add('sk-dropping');
+      });
+      form.addEventListener('dragleave', () => form.classList.remove('sk-dropping'));
+      form.addEventListener('drop', (e) => {
+        if (!e.dataTransfer || !e.dataTransfer.files || !e.dataTransfer.files.length) return;
+        e.preventDefault();
+        form.classList.remove('sk-dropping');
+        acceptImages(e.dataTransfer.files);
+      });
+
+      $('#skImgPick').addEventListener('click', () => $('#skImgInput').click());
+      $('#skImgInput').addEventListener('change', (e) => {
+        acceptImages(e.target.files);
+        e.target.value = '';
+      });
+
+      renderFormImages();
+    }
+
+    /** Thumbnails inside the open form, including ones not uploaded yet. */
+    function renderFormImages() {
+      const wrap = $('#skFormImgs');
+      if (!wrap) return;
+      const note = editing ? notes.find((n) => n.id === editing) : null;
+      const saved = note ? attachmentsOf(note) : [];
+
+      const savedHtml = saved.map((a) =>
+        '<div class="sk-img">' +
+          '<img src="' + esc(a.url) + '" alt="' + esc(a.name) + '">' +
+          (canRemoveAttachment(note, a, ME)
+            ? '<button type="button" class="sk-img-x" data-rm="' + esc(a.id) + '" title="Remove">\u00d7</button>'
+            : '') +
+          '<span class="sk-img-cap">' + esc(humanSize(a.bytes)) + '</span>' +
+        '</div>').join('');
+
+      // Held images look different from saved ones and say so, because a
+      // thumbnail that looks stored but is not is how somebody closes the form
+      // and loses a screenshot without realising.
+      const pendingHtml = pendingImages.map((f, i) =>
+        '<div class="sk-img pending">' +
+          '<img src="' + esc(URL.createObjectURL(f)) + '" alt="">' +
+          '<button type="button" class="sk-img-x" data-pending="' + i + '" title="Remove">\u00d7</button>' +
+          '<span class="sk-img-cap">saves with the note</span>' +
+        '</div>').join('');
+
+      wrap.innerHTML = savedHtml + pendingHtml;
+
+      wrap.querySelectorAll('[data-rm]').forEach((b) => {
+        b.addEventListener('click', () => removeAttachment(editing, b.dataset.rm));
+      });
+      wrap.querySelectorAll('[data-pending]').forEach((b) => {
+        b.addEventListener('click', () => {
+          pendingImages.splice(Number(b.dataset.pending), 1);
+          renderFormImages();
+        });
+      });
+    }
+
+    async function removeAttachment(noteId, attachmentId) {
+      try {
+        const res = await ctx.api.del(ENDPOINTS.siteworkAttach, {
+          query: { noteId: noteId, attachmentId: attachmentId },
+        });
+        if (res && res.note) {
+          const at = notes.findIndex((n) => n.id === res.note.id);
+          if (at >= 0) notes[at] = res.note;
+        }
+        render();
+        renderFormImages();
+      } catch (e) {
+        msg('That image did not come off. ' + (e.message || ''), 'err');
+      }
     }
 
     function closeForm() {
       editing = null;
+      // Held images are dropped with the form. They were never uploaded, so
+      // there is nothing to clean up, but leaving them in the array would
+      // attach them to whatever note is written next.
+      pendingImages = [];
       $('#skForm').style.display = 'none';
       $('#skForm').innerHTML = '';
     }
@@ -610,7 +901,38 @@ export default {
           if (i >= 0 && res && res.note) notes[i] = res.note;
         } else {
           const res = await ctx.api.post(ENDPOINTS.sitework, body);
-          if (res && res.note) notes.push(res.note);
+          if (res && res.note) {
+            notes.push(res.note);
+            // Images pasted before the note existed. It has an id now, so they
+            // can go up. Done AFTER the note is saved rather than instead of
+            // it: if an upload fails the note is already safely on the board,
+            // and the person is told which image did not make it instead of
+            // losing what they wrote.
+            const held = pendingImages.slice();
+            pendingImages = [];
+            if (held.length) {
+              btn.textContent = 'Adding images\u2026';
+              const failed = [];
+              for (const f of held) {
+                try {
+                  const updated = await uploadImage(res.note.id, f);
+                  if (updated) {
+                    const at = notes.findIndex((n) => n.id === updated.id);
+                    if (at >= 0) notes[at] = updated;
+                  }
+                } catch (err) {
+                  failed.push((f.name || 'a pasted image') + ': ' + (err.message || 'upload failed'));
+                }
+              }
+              if (failed.length) {
+                closeForm();
+                render();
+                msg('The note saved, but ' + failed.length + ' image' +
+                  (failed.length === 1 ? ' did' : 's did') + ' not attach. ' + failed.join('; '), 'err');
+                return;
+              }
+            }
+          }
         }
         msg('');
         closeForm();

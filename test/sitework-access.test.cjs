@@ -21,7 +21,7 @@ const t = require('./harness.cjs');
 
 const ROOT = path.join(__dirname, '..');
 const P = 'alliteration:';
-const SW = 'sitework:';
+const SW = 'sitework_data:';   // lib/sitework/schema.js KEY_PREFIX
 
 /* ---- the store --------------------------------------------------------- */
 
