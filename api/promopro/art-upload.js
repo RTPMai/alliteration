@@ -35,6 +35,7 @@ import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { artSigningAvailable } from "../../lib/promopro/art-token.js";
 import { artPrefix } from "../../lib/promopro/art-reconcile.js";
+import { ART_ALLOWED_TYPES } from "../../lib/promopro/art-types.js";
 import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore, artWebhookKey, artWebhookKeySource } from "../../lib/promopro/blob-token.js";
 
 // 20 MB, to match what QuickBooks accepted, so nobody has to think about
@@ -42,12 +43,10 @@ import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSo
 export const MAX_ART_BYTES = 20 * 1024 * 1024;
 const MAX_FILES = 12;
 
-const ALLOWED_TYPES = [
-  "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/svg+xml",
-  "application/pdf", "application/postscript", "application/illustrator",
-  "image/vnd.adobe.photoshop", "image/tiff", "application/zip",
-  "application/octet-stream",
-];
+// The accepted list now lives in lib/promopro/art-types.js, alongside the
+// `accept` string the file picker uses, so the two cannot drift apart. A file
+// the picker offers is a file this route will sign for.
+const ALLOWED_TYPES = ART_ALLOWED_TYPES;
 
 /**
  * WHERE VERCEL SHOULD CALL BACK when an upload finishes.

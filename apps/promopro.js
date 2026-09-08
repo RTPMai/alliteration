@@ -31,6 +31,10 @@ import {
   repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
+// One list of accepted file types, shared with the upload route, so the
+// dialog cannot offer something the server then refuses.
+import { ART_ACCEPT, artAcceptSummary } from '../lib/promopro/art-types.js';
+const ART_ACCEPT_SUMMARY = artAcceptSummary();
 
 const esc = (s) => String(s == null ? '' : s)
   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -862,7 +866,7 @@ export default {
         '<div id="ppStagedArt">' + stagedArtHtml() + '</div>' +
         '<div style="margin-top:8px">' +
           '<input type="file" id="ppStageFile" multiple style="display:none" ' +
-            'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
+            'accept="' + ART_ACCEPT + '">' +
           '<button class="pp-btn ghost" id="ppStagePick">Attach artwork</button>' +
         '</div>' +
 
@@ -1610,17 +1614,17 @@ export default {
             (canEdit
               ? '<div style="margin-top:8px">' +
                   '<input type="file" id="ppArtFile" multiple style="display:none" ' +
-                    'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
+                    'accept="' + ART_ACCEPT + '">' +
                   '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
                   '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
                   (isOutsourced(po)
-                    ? '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. ' +
+                    ? '<div class="pp-hint" style="margin-top:6px">' + ART_ACCEPT_SUMMARY + ' Up to 20 MB per file. ' +
                       'Nothing is emailed on an outsourced job, so these are for us and for the printed sheet.</div>'
                     : (po.art || []).length
                       ? '<div class="pp-hint" style="margin-top:6px">Goes out attached to the order. ' +
                         'Anything too big to attach becomes a link that expires. ' +
                         '<button class="pp-linkish" id="ppArtRevoke">Withdraw sent links</button></div>'
-                      : '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. It goes out with the order.</div>') +
+                      : '<div class="pp-hint" style="margin-top:6px">' + ART_ACCEPT_SUMMARY + ' Up to 20 MB per file. It goes out with the order.</div>') +
                 '</div>'
               : '') +
           '</div>' +

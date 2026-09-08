@@ -1,0 +1,479 @@
+From 48f5abbdaa55cccd3603a504be7cc96a61ba5da3 Mon Sep 17 00:00:00 2001
+From: claude <c@a.co>
+Date: Tue, 8 Sep 2026 21:46:18 +0000
+Subject: [PATCH] PromoPro: accept CSV, Excel and Word, and merge three
+ file-type lists into one
+
+---
+ api/promopro/art-upload.js       |  11 +-
+ apps/promopro.js                 |  12 +-
+ lib/promopro/art-reconcile.js    |  16 +--
+ lib/promopro/art-types.js        | 149 +++++++++++++++++++++++++
+ test/promopro-art-types.test.cjs | 185 +++++++++++++++++++++++++++++++
+ 5 files changed, 352 insertions(+), 21 deletions(-)
+ create mode 100644 lib/promopro/art-types.js
+ create mode 100644 test/promopro-art-types.test.cjs
+
+diff --git a/api/promopro/art-upload.js b/api/promopro/art-upload.js
+index fca23b3..46f1f8e 100644
+--- a/api/promopro/art-upload.js
++++ b/api/promopro/art-upload.js
+@@ -35,6 +35,7 @@ import { canEditSession } from "../../lib/promopro/access.js";
+ import { getPo, updatePo, getSettings, saveSettings } from "../../lib/promopro/store.js";
+ import { artSigningAvailable } from "../../lib/promopro/art-token.js";
+ import { artPrefix } from "../../lib/promopro/art-reconcile.js";
++import { ART_ALLOWED_TYPES } from "../../lib/promopro/art-types.js";
+ import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSource, artBlobOptions, usingSharedStore, artWebhookKey, artWebhookKeySource } from "../../lib/promopro/blob-token.js";
+ 
+ // 20 MB, to match what QuickBooks accepted, so nobody has to think about
+@@ -42,12 +43,10 @@ import { blobToken, blobTokenSource, blobTokenCandidates, artStoreId, artStoreSo
+ export const MAX_ART_BYTES = 20 * 1024 * 1024;
+ const MAX_FILES = 12;
+ 
+-const ALLOWED_TYPES = [
+-  "image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/svg+xml",
+-  "application/pdf", "application/postscript", "application/illustrator",
+-  "image/vnd.adobe.photoshop", "image/tiff", "application/zip",
+-  "application/octet-stream",
+-];
++// The accepted list now lives in lib/promopro/art-types.js, alongside the
++// `accept` string the file picker uses, so the two cannot drift apart. A file
++// the picker offers is a file this route will sign for.
++const ALLOWED_TYPES = ART_ALLOWED_TYPES;
+ 
+ /**
+  * WHERE VERCEL SHOULD CALL BACK when an upload finishes.
+diff --git a/apps/promopro.js b/apps/promopro.js
+index b8546c9..ce7beef 100644
+--- a/apps/promopro.js
++++ b/apps/promopro.js
+@@ -31,6 +31,10 @@ import {
+   repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels
+ } from '../lib/promopro/schema.js';
+ import { promoGroups } from '../lib/promopro/printavo-lookup.js';
++// One list of accepted file types, shared with the upload route, so the
++// dialog cannot offer something the server then refuses.
++import { ART_ACCEPT, artAcceptSummary } from '../lib/promopro/art-types.js';
++const ART_ACCEPT_SUMMARY = artAcceptSummary();
+ 
+ const esc = (s) => String(s == null ? '' : s)
+   .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+@@ -862,7 +866,7 @@ export default {
+         '<div id="ppStagedArt">' + stagedArtHtml() + '</div>' +
+         '<div style="margin-top:8px">' +
+           '<input type="file" id="ppStageFile" multiple style="display:none" ' +
+-            'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
++            'accept="' + ART_ACCEPT + '">' +
+           '<button class="pp-btn ghost" id="ppStagePick">Attach artwork</button>' +
+         '</div>' +
+ 
+@@ -1610,17 +1614,17 @@ export default {
+             (canEdit
+               ? '<div style="margin-top:8px">' +
+                   '<input type="file" id="ppArtFile" multiple style="display:none" ' +
+-                    'accept=".ai,.eps,.svg,.psd,.pdf,.indd,.tif,.tiff,.cdr,.zip,image/*,application/pdf">' +
++                    'accept="' + ART_ACCEPT + '">' +
+                   '<button class="pp-btn ghost" id="ppArtPick">Attach artwork</button>' +
+                   '<span id="ppArtStatus" class="pp-hint" style="margin-left:10px"></span>' +
+                   (isOutsourced(po)
+-                    ? '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. ' +
++                    ? '<div class="pp-hint" style="margin-top:6px">' + ART_ACCEPT_SUMMARY + ' Up to 20 MB per file. ' +
+                       'Nothing is emailed on an outsourced job, so these are for us and for the printed sheet.</div>'
+                     : (po.art || []).length
+                       ? '<div class="pp-hint" style="margin-top:6px">Goes out attached to the order. ' +
+                         'Anything too big to attach becomes a link that expires. ' +
+                         '<button class="pp-linkish" id="ppArtRevoke">Withdraw sent links</button></div>'
+-                      : '<div class="pp-hint" style="margin-top:6px">Up to 20 MB per file. It goes out with the order.</div>') +
++                      : '<div class="pp-hint" style="margin-top:6px">' + ART_ACCEPT_SUMMARY + ' Up to 20 MB per file. It goes out with the order.</div>') +
+                 '</div>'
+               : '') +
+           '</div>' +
+diff --git a/lib/promopro/art-reconcile.js b/lib/promopro/art-reconcile.js
+index 1bb9f37..ef248d1 100644
+--- a/lib/promopro/art-reconcile.js
++++ b/lib/promopro/art-reconcile.js
+@@ -21,22 +21,16 @@
+ // ESM. Do NOT convert to module.exports.
+ 
+ import { artBlobOptions } from "./blob-token.js";
++import { artContentType } from "./art-types.js";
+ 
+ /** Where one order's artwork lives. Must match api/promopro/art-upload.js. */
+ export function artPrefix(poId) {
+   return `promopro/art/${poId}/`;
+ }
+ 
+-function guessType(filename) {
+-  const ext = String(filename || "").toLowerCase().split(".").pop();
+-  const map = {
+-    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+-    gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", ai: "application/illustrator",
+-    eps: "application/postscript", psd: "image/vnd.adobe.photoshop",
+-    tif: "image/tiff", tiff: "image/tiff", zip: "application/zip",
+-  };
+-  return map[ext] || "application/octet-stream";
+-}
++// Naming a file by its extension is art-types.js's job now. This used to be
++// a third copy of the same list and it was already behind: it had never
++// heard of .indd or .cdr, both of which the picker has offered for months.
+ 
+ /**
+  * What artwork does this order actually have?
+@@ -77,7 +71,7 @@ export async function reconcileArt(poId, po) {
+       pathname: b.pathname,
+       url: b.url,
+       filename,
+-      contentType: b.contentType || guessType(filename),
++      contentType: b.contentType || artContentType(filename),
+       bytes: Number(b.size) || 0,
+       uploadedBy: "",
+       uploadedAt: b.uploadedAt || new Date().toISOString(),
+diff --git a/lib/promopro/art-types.js b/lib/promopro/art-types.js
+new file mode 100644
+index 0000000..3ebea05
+--- /dev/null
++++ b/lib/promopro/art-types.js
+@@ -0,0 +1,149 @@
++// PUT IN: lib/promopro/art-types.js
++// lib/promopro/art-types.js — the one list of what a purchase order accepts.
++//
++// WHY THIS FILE EXISTS
++// There were three lists of file types and they did not agree:
++//
++//   1. the `accept` string on the two file pickers in apps/promopro.js,
++//      which decides what the Open dialog offers you,
++//   2. ALLOWED_TYPES in api/promopro/art-upload.js, which decides what the
++//      server will sign an upload token for,
++//   3. guessType() in art-reconcile.js, which names the type of a file
++//      already sitting in storage.
++//
++// A file type in list 1 but not list 2 can be picked and then refused, which
++// is what happened with a phone photo: the picker said `image/*`, the server
++// had never heard of image/heic. A type in 2 but not 1 works only if you know
++// to switch the dialog to "All files". So all three now read from here, and a
++// new type is one line in one place.
++//
++// HOW A BROWSER NAMES A FILE, WHICH IS THE WHOLE PROBLEM
++// The browser, not us, decides what content type a chosen file reports, and
++// it decides differently on different machines. A .csv is text/csv on a Mac
++// and application/vnd.ms-excel on a Windows box with Excel installed, and
++// text/plain on a machine with neither. So each extension below lists every
++// name it is known to arrive under. Refusing one of them is refusing the same
++// file on somebody else's desk.
++//
++// application/octet-stream stays allowed on purpose. It is what a browser
++// reports when it has no idea, which is how .indd, .cdr, .dst and every other
++// production format gets through. Dropping it would break files that work
++// today.
++//
++// ESM. Do NOT convert to module.exports.
++
++/**
++ * Every extension we accept, with the content types it is known to arrive as.
++ *
++ * `label` groups them for the file dialog and for anything that wants to
++ * explain the list to a person.
++ */
++export const ART_KINDS = [
++  // Design and production files. These are the originals.
++  { ext: "ai", label: "design", types: ["application/illustrator", "application/postscript", "application/pdf"] },
++  { ext: "eps", label: "design", types: ["application/postscript"] },
++  { ext: "svg", label: "design", types: ["image/svg+xml"] },
++  { ext: "psd", label: "design", types: ["image/vnd.adobe.photoshop", "application/x-photoshop"] },
++  { ext: "pdf", label: "design", types: ["application/pdf"] },
++  { ext: "indd", label: "design", types: ["application/x-indesign"] },
++  { ext: "cdr", label: "design", types: ["application/x-coreldraw", "application/coreldraw"] },
++
++  // Pictures. `image/*` on the picker means anything here can be chosen, so
++  // anything the picker will offer has to be a type the server knows.
++  { ext: "png", label: "image", types: ["image/png"] },
++  { ext: "jpg", label: "image", types: ["image/jpeg", "image/jpg"] },
++  { ext: "jpeg", label: "image", types: ["image/jpeg", "image/jpg"] },
++  { ext: "gif", label: "image", types: ["image/gif"] },
++  { ext: "webp", label: "image", types: ["image/webp"] },
++  { ext: "bmp", label: "image", types: ["image/bmp", "image/x-ms-bmp"] },
++  { ext: "tif", label: "image", types: ["image/tiff"] },
++  { ext: "tiff", label: "image", types: ["image/tiff"] },
++  // A photo taken on an iPhone. The picker has always offered these and the
++  // server has always refused them.
++  { ext: "heic", label: "image", types: ["image/heic", "image/heif"] },
++  { ext: "heif", label: "image", types: ["image/heic", "image/heif"] },
++
++  // Spreadsheets and documents. Size runs, name-and-number lists, a spec
++  // sheet a customer sent as a Word file.
++  { ext: "csv", label: "document", types: ["text/csv", "application/csv", "application/vnd.ms-excel", "text/plain"] },
++  { ext: "xls", label: "document", types: ["application/vnd.ms-excel"] },
++  { ext: "xlsx", label: "document", types: ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] },
++  { ext: "xlsm", label: "document", types: ["application/vnd.ms-excel.sheet.macroEnabled.12"] },
++  { ext: "doc", label: "document", types: ["application/msword"] },
++  { ext: "docx", label: "document", types: ["application/vnd.openxmlformats-officedocument.wordprocessingml.document"] },
++  { ext: "txt", label: "document", types: ["text/plain"] },
++
++  // A folder of the above, which is how a customer usually sends more than
++  // two files.
++  { ext: "zip", label: "archive", types: ["application/zip", "application/x-zip-compressed", "multipart/x-zip"] },
++];
++
++/**
++ * What the server will sign an upload token for.
++ *
++ * Built from ART_KINDS so it cannot fall behind the picker, plus the
++ * catch-all. Order does not matter; the SDK does an exact match.
++ */
++export const ART_ALLOWED_TYPES = (() => {
++  const seen = new Set();
++  for (const k of ART_KINDS) for (const t of k.types) seen.add(t);
++  // Anything a browser cannot name. This is what carries .dst, .emb, .indd
++  // and every other format nobody has taught a browser about.
++  seen.add("application/octet-stream");
++  return Array.from(seen);
++})();
++
++/**
++ * The same list, lowercased, for comparing against.
++ *
++ * Not the same as ART_ALLOWED_TYPES. The SDK's allowedContentTypes wants the
++ * registered spelling, and one of these is genuinely mixed case:
++ * application/vnd.ms-excel.sheet.macroEnabled.12, which is a macro-enabled
++ * .xlsm. Lowercasing the incoming type and comparing it to the registered
++ * spelling would refuse every one of those.
++ */
++const ART_ALLOWED_LOWER = new Set(ART_ALLOWED_TYPES.map((t) => t.toLowerCase()));
++
++/** Is this something we will take? */
++export function isAllowedArtType(contentType) {
++  if (typeof contentType !== "string") return false;
++  // Browsers append a charset on text types: "text/csv;charset=utf-8".
++  const bare = contentType.split(";")[0].trim().toLowerCase();
++  return ART_ALLOWED_LOWER.has(bare);
++}
++
++/**
++ * The `accept` attribute for a file input.
++ *
++ * Extensions first so the dialog's own filter is precise, then `image/*` so
++ * a phone offers its camera roll rather than a file browser. Every type
++ * `image/*` can produce is in ART_ALLOWED_TYPES above, so the picker never
++ * offers something the server then turns away.
++ */
++export const ART_ACCEPT = ART_KINDS
++  .map((k) => "." + k.ext)
++  .concat(["image/*", "application/pdf"])
++  .join(",");
++
++/**
++ * What type is a file already in storage?
++ *
++ * Used when reconciling against the blob store, where the recorded type may
++ * be missing. Falls back to the catch-all rather than guessing, because a
++ * wrong Content-Type on the way back out is worse than an honest unknown:
++ * the browser saves the file either way, and a wrong one makes it open in
++ * the wrong program.
++ */
++export function artContentType(filename) {
++  const ext = String(filename || "").toLowerCase().split(".").pop();
++  const kind = ART_KINDS.find((k) => k.ext === ext);
++  return kind ? kind.types[0] : "application/octet-stream";
++}
++
++/**
++ * A short, readable version of the list for on-screen help.
++ * Not the enforcement, just the explanation.
++ */
++export function artAcceptSummary() {
++  return "Design files, images, PDFs, Word, Excel, CSV and ZIP archives.";
++}
+diff --git a/test/promopro-art-types.test.cjs b/test/promopro-art-types.test.cjs
+new file mode 100644
+index 0000000..eb7dba6
+--- /dev/null
++++ b/test/promopro-art-types.test.cjs
+@@ -0,0 +1,185 @@
++// test/promopro-art-types.test.cjs
++/**
++ * PUT IN: test/promopro-art-types.test.cjs
++ *
++ * PromoPro: what a purchase order will take as a file.
++ *
++ * Everything below CALLS the real exported functions. The bug this file
++ * guards against was never a missing type, it was three lists that agreed on
++ * paper and not in practice: the picker offered `image/*` while the server
++ * had never heard of a photo off an iPhone, so a file could be chosen and
++ * then refused. So the check that matters most here is the one comparing the
++ * picker's list to the server's, not the ones asserting a single type is
++ * present.
++ */
++
++const fs = require('fs');
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
++
++(async () => {
++  const AT = await import('../lib/promopro/art-types.js');
++  const { isAllowedArtType, artContentType, ART_ACCEPT, ART_KINDS, ART_ALLOWED_TYPES } = AT;
++
++  /* ---- the documents Ryan asked for ------------------------------------ */
++
++  t.test('a CSV is accepted however the machine names it', () => {
++    // Mac Chrome says text/csv. Windows with Excel installed says it is a
++    // spreadsheet. A machine with neither says plain text. Same file.
++    t.assert(isAllowedArtType('text/csv'), 'text/csv must be accepted');
++    t.assert(isAllowedArtType('application/vnd.ms-excel'), 'a Windows CSV must be accepted');
++    t.assert(isAllowedArtType('text/plain'), 'a plain-text CSV must be accepted');
++  });
++
++  t.test('Excel is accepted, old format and new', () => {
++    t.assert(isAllowedArtType('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'), 'xlsx');
++    t.assert(isAllowedArtType('application/vnd.ms-excel'), 'xls');
++    t.assert(isAllowedArtType('application/vnd.ms-excel.sheet.macroEnabled.12'), 'xlsm');
++  });
++
++  t.test('Word is accepted, old format and new', () => {
++    t.assert(isAllowedArtType('application/vnd.openxmlformats-officedocument.wordprocessingml.document'), 'docx');
++    t.assert(isAllowedArtType('application/msword'), 'doc');
++  });
++
++  t.test('a charset on the end does not make a file unrecognisable', () => {
++    // Browsers append this to text types. An exact string match misses it,
++    // which would refuse every CSV on some machines and not others.
++    t.assert(isAllowedArtType('text/csv;charset=utf-8'), 'a charset must be ignored');
++    t.assert(isAllowedArtType('text/csv; charset=UTF-8'), 'a space and different case too');
++  });
++
++  /* ---- nothing that worked before stopped working ---------------------- */
++
++  t.test('the design formats that already worked still do', () => {
++    for (const ct of [
++      'application/pdf', 'application/illustrator', 'application/postscript',
++      'image/vnd.adobe.photoshop', 'image/png', 'image/jpeg', 'image/svg+xml',
++      'image/tiff', 'image/gif', 'image/webp', 'application/zip',
++    ]) {
++      t.assert(isAllowedArtType(ct), ct + ' must still be accepted');
++    }
++  });
++
++  t.test('an unnameable file still gets through, which is how .dst and .indd work', () => {
++    t.assert(isAllowedArtType('application/octet-stream'),
++      'dropping the catch-all would break every production format a browser cannot name');
++  });
++
++  /* ---- the check this file exists for ---------------------------------- */
++
++  t.test('the picker never offers a file the server will refuse', () => {
++    for (const kind of ART_KINDS) {
++      t.assert(ART_ACCEPT.includes('.' + kind.ext),
++        '.' + kind.ext + ' must be offered by the picker');
++      for (const ct of kind.types) {
++        t.assert(ART_ALLOWED_TYPES.includes(ct),
++          '.' + kind.ext + ' can arrive as ' + ct + ', so the server must accept it');
++      }
++    }
++  });
++
++  t.test('image/* on the picker does not over-promise', () => {
++    t.assert(ART_ACCEPT.includes('image/*'), 'a phone needs image/* to offer the camera roll');
++    // The old gap, closed: choosable and then refused.
++    t.assert(isAllowedArtType('image/heic'), 'an iPhone photo must be accepted');
++    t.assert(isAllowedArtType('image/bmp'), 'a bitmap must be accepted');
++  });
++
++  t.test('something we do not take is actually refused', () => {
++    t.assert(!isAllowedArtType('video/mp4'), 'video is not artwork');
++    t.assert(!isAllowedArtType('application/x-msdownload'), 'an executable must never be accepted');
++    t.assert(!isAllowedArtType('application/x-sh'), 'nor a script');
++    t.assert(!isAllowedArtType(''), 'an empty type is not a pass');
++    t.assert(!isAllowedArtType(null), 'a missing type is not a pass');
++    t.assert(!isAllowedArtType(undefined), 'undefined is not a pass');
++    t.assert(!isAllowedArtType(42), 'a non-string is not a pass');
++  });
++
++  /* ---- a file already sitting in storage ------------------------------- */
++
++  t.test('a file in storage is named from the same list', () => {
++    t.equal(artContentType('sizes.csv'), 'text/csv', 'a CSV in storage is a CSV');
++    t.equal(artContentType('run.XLSX'),
++      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
++      'extension matching is case-insensitive');
++    t.equal(artContentType('spec.docx'),
++      'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'a Word file');
++    t.equal(artContentType('front.pdf'), 'application/pdf', 'a PDF is a PDF');
++    t.equal(artContentType('logo.ai'), 'application/illustrator', 'an Illustrator file');
++  });
++
++  t.test('the two formats the old naming had never heard of', () => {
++    // guessType() had no .indd or .cdr even though the picker had been
++    // offering both for months. Merging the lists fixed it by construction.
++    t.equal(artContentType('layout.indd'), 'application/x-indesign', 'InDesign is now named');
++    t.equal(artContentType('mark.cdr'), 'application/x-coreldraw', 'CorelDRAW is now named');
++  });
++
++  t.test('an honest unknown beats a wrong guess', () => {
++    t.equal(artContentType('digitised.dst'), 'application/octet-stream',
++      'an embroidery file has no registered type and must not be given one');
++    t.equal(artContentType('noextension'), 'application/octet-stream', 'no extension is not a crash');
++    t.equal(artContentType(''), 'application/octet-stream', 'no filename is not a crash');
++    t.equal(artContentType(null), 'application/octet-stream', 'null is not a crash');
++  });
++
++  /* ---- the wiring, which has to be real -------------------------------- */
++
++  // Import the route BEFORE asserting on it. This harness does not await an
++  // async test body, so an async assertion prints "ok" and then throws into
++  // the void. Same reason route-imports.test.cjs collects first and asserts
++  // after.
++  let routeMod = null;
++  let routeErr = null;
++  try {
++    routeMod = await import('../api/promopro/art-upload.js');
++  } catch (e) {
++    routeErr = e;
++  }
++
++  t.test('the upload route loads and takes the shared list', () => {
++    // Importing proves it runs. A grep would only prove the letters are
++    // there, which is how a route 500ed for days with a green suite.
++    if (routeErr && /Cannot find package '@vercel\/blob'/.test(String(routeErr.message))) {
++      // npm install not run in this checkout. Environment, not code.
++      // route-imports.test.cjs skips on the same condition.
++      t.assert(true, 'skipped, node_modules not installed');
++      return;
++    }
++    t.assert(!routeErr, 'the route must import without throwing: ' + (routeErr && routeErr.message));
++    t.assert(typeof routeMod.default === 'function', 'the route must export a handler');
++  });
++
++  t.test('the shared list is substantial, not a stub', () => {
++    t.assert(ART_ALLOWED_TYPES.length > 20,
++      'expected a real list, got ' + ART_ALLOWED_TYPES.length + ' entries');
++  });
++
++  t.test('no file keeps a second copy of the list', () => {
++    const rec = read('lib/promopro/art-reconcile.js');
++    t.assert(!/const map = \{/.test(rec),
++      'the reconciler must not carry its own extension map again');
++
++    const route = read('api/promopro/art-upload.js');
++    t.assert(/ART_ALLOWED_TYPES/.test(route), 'the upload route must read the shared list');
++    t.assert(!/"image\/jpeg", "image\/jpg"/.test(route),
++      'the upload route must not have grown its own list back');
++
++    const app = read('apps/promopro.js');
++    t.assert(!/accept="\.ai,/.test(app),
++      'the picker must not carry a hardcoded accept string again');
++    t.assert(/ART_ACCEPT/.test(app), 'the picker must read the shared accept string');
++  });
++
++  const rec = await import('../lib/promopro/art-reconcile.js');
++  t.test('the reconciler still loads after losing its own naming', () => {
++    t.assert(typeof rec.reconcileArt === 'function', 'reconcileArt must still export');
++    t.assert(typeof rec.artPrefix === 'function', 'artPrefix must still export');
++  });
++
++  process.exit(t.report());
++})();
+-- 
+2.43.0
+
