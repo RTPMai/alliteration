@@ -1,4 +1,3 @@
-// PUT IN: apps/promopro.js
 // apps/promopro.js
 /**
  * PromoPro — purchase orders to vendors, and where each one stands.
@@ -2593,7 +2592,9 @@ export default {
         renderCcPreview();
         $('#ppFormWrap').hidden = false;
         $('#ppDetailWrap').hidden = true;
-        if (t.id === 'ppNewFromPipe') this.showView('orders');
+        // Same reason as the order click below: route, do not just swap the
+        // page, or the URL keeps saying pipeline and the Pipeline tab goes dead.
+        if (t.id === 'ppNewFromPipe') ctx.go('orders');
         return;
       }
 
@@ -2720,7 +2721,14 @@ export default {
 
       if (t.dataset && t.dataset.po) {
         const po = st.pos.find((p) => p.id === t.dataset.po);
-        if (po) { st.openPoId = po.id; renderDetail(po); this.showView('orders'); }
+        // ctx.go(), NOT this.showView(). Calling showView directly swapped the
+        // page behind the router's back: the screen showed the order while the
+        // URL still said #/promopro/pipeline. Pressing Pipeline then did
+        // nothing at all, because the router compares the hash it is being
+        // asked for against the current one and returns early when they match.
+        // Going through the router keeps the URL and the screen agreeing, which
+        // is also what makes the back button and a copied link work.
+        if (po) { st.openPoId = po.id; renderDetail(po); ctx.go('orders'); }
         return;
       }
 
