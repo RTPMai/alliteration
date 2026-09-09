@@ -238,4 +238,6 @@ const t = require('./harness.cjs');
     t.equal(r.ok, false);
     t.assert(r.error.length > 0);
   });
+
+  process.exit(t.report());
 })();
