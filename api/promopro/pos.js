@@ -19,7 +19,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
-import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced } from "../../lib/promopro/schema.js";
+import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced, validateFollowUp, followUpEntry } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
 import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
@@ -277,6 +277,33 @@ export default async function handler(req, res) {
         };
         const saved = await updatePo(String(id), { printavo });
         return res.status(200).json({ ok: true, po: saved });
+      }
+
+      // LOG A FOLLOW-UP.
+      //
+      // Its own action rather than an editable field, for the same reason the
+      // customer refresh is: who chased and when is a record of something
+      // that happened, not a value somebody should be able to type over. The
+      // route stamps the username and the clock; the caller only says how and
+      // what about.
+      //
+      // This deliberately does NOT touch a stage date or the health colour.
+      // Phoning a silent vendor does not make them less silent, and an order
+      // that went green because somebody left a voicemail is an order that
+      // stops being watched. See the note above lastChasedAt() in schema.js.
+      if (body.followUp !== undefined) {
+        const fu = validateFollowUp(body.followUp);
+        if (!fu.ok) return res.status(400).json({ error: fu.errors.join("; "), errors: fu.errors });
+
+        const entry = followUpEntry(fu.followUp, sess.username);
+        const history = Array.isArray(existing.history) ? existing.history.slice() : [];
+        history.push(entry);
+
+        // Denormalised alongside lastSentAt and lastVendorReplyAt so the
+        // pipeline and the orders table can answer "has anybody chased this"
+        // per row without walking a history array for every order on file.
+        const saved = await updatePo(String(id), { history, lastFollowUpAt: entry.at });
+        return res.status(200).json({ ok: true, po: saved, followUp: entry });
       }
 
       const [vendors, settings, employees] = await Promise.all([getVendors(), getSettings(), roster()]);

@@ -421,6 +421,17 @@ export default async function handler(req, res) {
       lastSentAt: now,
       sentTo: vendor.email,
       sendCount: (Number(po.sendCount) || 0) + 1,
+      // THE HANDLE ON THIS SEND. Resend hands back an id, and until now it
+      // was passed to the browser in the response and then dropped, which
+      // meant "did that purchase order actually land" had no way of ever
+      // being asked. Recording it is what makes a bounce visible instead of
+      // looking identical to a vendor ignoring us for nine days.
+      //
+      // Only the LATEST send is kept. The trail of every send is already in
+      // history; what somebody wants to know on the screen is the state of
+      // the email that is currently outstanding, and a re-send makes the
+      // previous one irrelevant.
+      lastMessageId: (result && result.id) ? String(result.id) : null,
     };
     if (!po.submittedAt) patch.submittedAt = now.slice(0, 10);
 

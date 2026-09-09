@@ -28,7 +28,9 @@ import { ENDPOINTS } from '../js/api.js';
 import {
   STAGES, MANUAL_STAGES, currentStage, poHealth, poTotal, lineTotal, orderByDate,
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
-  repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels
+  repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels,
+  FOLLOW_UP_METHODS, followUpLabel, chaseNote, lastChasedAt, productSummary,
+  openIsTrusted
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 // One list of accepted file types, shared with the upload route, so the
@@ -179,8 +181,46 @@ export default {
     .pp-card:hover { border-color: var(--faint); }
     .pp-card .po { font-weight: 700; font-size: 13px; }
     .pp-card .cust { font-size: 12px; color: var(--muted); margin-top: 1px; }
-    .pp-card .vend { font-size: 12px; margin-top: 4px; }
+    /* What is on the order, above who supplied it. An AM scanning the board
+       is matching against "the navy hoodies", not against SanMar. */
+    .pp-card .prod { font-size: 12px; margin-top: 4px; font-weight: 600; }
+    .pp-card .prod .more { font-weight: 400; color: var(--muted); }
+    .pp-card .vend { font-size: 12px; margin-top: 2px; color: var(--muted); }
     .pp-card .why { font-size: 11px; margin-top: 5px; font-weight: 600; }
+    /* Deliberately quiet and deliberately NOT a health colour. Somebody
+       having rung the vendor is not a change in how late the order is. */
+    .pp-card .chased { font-size: 11px; margin-top: 2px; color: var(--muted); }
+
+    /* ---- chasing ---- */
+    .pp-chased { color: var(--muted); font-weight: 600; }
+    .pp-chased-row { display: block; font-size: 11px; color: var(--muted); font-weight: 400; margin-top: 2px; }
+
+    .pp-activity { list-style: none; margin: 6px 0 10px; padding: 0; }
+    .pp-activity li {
+      display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+      font-size: 12px; padding: 5px 0; border-bottom: 1px solid var(--line);
+    }
+    .pp-activity li:last-child { border-bottom: 0; }
+    .pp-activity .when { color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    .pp-activity .what { flex: 1; min-width: 160px; }
+    .pp-activity .who { color: var(--muted); }
+    /* A person did this one, rather than the app recording itself. Weight
+       rather than colour: it is not a status, it is authorship. */
+    .pp-activity li.me .what { font-weight: 600; }
+
+    .pp-followup { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin: 8px 0 4px; }
+    .pp-followup select, .pp-followup input { padding: 7px 10px; font-size: 13px; }
+    .pp-followup input { flex: 1; min-width: 220px; }
+
+    /* ---- delivery ---- */
+    /* Sits inside an existing hint line, so it inherits its size and only
+       needs to say which of the three things it is. */
+    .pp-dstat { margin-left: 8px; font-weight: 600; color: var(--muted); }
+    .pp-d-good { color: var(--success); }
+    .pp-d-warn { color: var(--warn); }
+    .pp-d-bad  { color: var(--danger); }
+    .pp-notice.pp-bad { border-color: var(--danger); }
+    .pp-prod .pp-dim { color: var(--muted); font-weight: 400; }
 
     /* Health. Semantic status colours, not app accent: these mean the same
        thing in every app and must not re-theme per app. */
@@ -562,13 +602,26 @@ export default {
           ? inLane.map((x) => {
               const p = x.po;
               const why = x.health.reasons.length ? x.health.reasons[0] : '';
+              const prod = productSummary(p);
+              // Only when something is actually wrong. "Chased 2 days ago" on
+              // a healthy order is a line that means nothing, and a card full
+              // of lines that mean nothing is a card nobody reads.
+              const chased = why ? chaseNote(p, today()) : '';
               return '<button class="pp-card pp-h-' + x.health.level + '" data-po="' + esc(p.id) + '">' +
                 '<div class="po">' + esc(p.poNumber || 'Draft') + outsourcedTag(p) +
                   (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
                 '</div>' +
                 '<div class="cust">' + esc(custName(p)) + '</div>' +
+                // What it IS, above who we bought it from. An AM scanning
+                // this board is looking for the navy hoodies, and knowing it
+                // came from SanMar does not help them find it.
+                (prod.first
+                  ? '<div class="prod">' + esc(prod.first) +
+                    (prod.more ? '<span class="more"> +' + esc(prod.more) + ' more</span>' : '') + '</div>'
+                  : '') +
                 '<div class="vend">' + esc(vendorName(p.vendorId)) + ' &middot; ' + money(poTotal(p)) + '</div>' +
                 (why ? '<div class="why">' + esc(why) + '</div>' : '') +
+                (chased ? '<div class="chased">' + esc(chased) + '</div>' : '') +
               '</button>';
             }).join('')
           : '<div style="font-size:12px;color:var(--muted);padding:4px 0">None</div>';
@@ -630,11 +683,16 @@ export default {
       }
 
       body.innerHTML = '<table class="pp-table"><thead><tr>' +
-        '<th>PO</th><th>Customer</th><th>Vendor</th><th>AM</th><th>Stage</th><th>Needed by</th><th class="num">Total</th><th>Status</th>' +
+        '<th>PO</th><th>Customer</th><th>Product</th><th>Vendor</th><th>AM</th><th>Stage</th><th>Needed by</th><th class="num">Total</th><th>Status</th>' +
         '</tr></thead><tbody>' +
         rows.map((p) => {
           const h = health(p);
           const due = p.neededBy || (p.printavo && p.printavo.dueDate) || '';
+          const prod = productSummary(p);
+          // Beside the reason, never instead of it. "No word for 9 days" and
+          // "no word for 9 days, chased yesterday" are two different
+          // situations and the second still needs the 9 days in it.
+          const chased = h.reasons.length ? chaseNote(p, today()) : '';
           return '<tr data-po="' + esc(p.id) + '">' +
             '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong>' + outsourcedTag(p) +
               // "Did they come back to us" is the question this list is
@@ -642,12 +700,19 @@ export default {
               (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
             '</td>' +
             '<td>' + esc(custName(p)) + '</td>' +
+            // Vendor stays: it is who you ring when this goes red. Product is
+            // added rather than swapped in, because on a table there is room
+            // for both and each answers a different question.
+            '<td class="pp-prod">' + (prod.first ? esc(prod.first) : '<span class="pp-dim">no lines</span>') +
+              (prod.more ? '<span class="pp-dim"> +' + esc(prod.more) + ' more</span>' : '') + '</td>' +
             '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
             '<td>' + esc(amName(p.accountManager)) + '</td>' +
             '<td><span class="pp-pill">' + esc(stageLabel(h.stage, p)) + '</span></td>' +
             '<td>' + esc(due) + '</td>' +
             '<td class="num">' + money(poTotal(p)) + '</td>' +
-            '<td class="pp-h-' + h.level + '"><span class="why">' + esc(h.reasons[0] || (h.level === 'done' ? 'Complete' : 'On track')) + '</span></td>' +
+            '<td class="pp-h-' + h.level + '"><span class="why">' + esc(h.reasons[0] || (h.level === 'done' ? 'Complete' : 'On track')) + '</span>' +
+              (chased ? '<span class="pp-chased-row">' + esc(chased) + '</span>' : '') +
+            '</td>' +
           '</tr>';
         }).join('') + '</tbody></table>';
     }
@@ -1540,6 +1605,52 @@ export default {
         'confirmed or shipped, tick the step above.</div>';
     }
 
+    /**
+     * Everything that has happened to this order, newest first.
+     *
+     * The entries were already being written by send, receive, the stage
+     * patch and the inbound reply capture. Nothing on any screen read them,
+     * so an order chased three times looked identical to one nobody had
+     * touched. This reads what is already stored; no new data was needed for
+     * the half of this that is history.
+     */
+    function activityHtml(po) {
+      const list = Array.isArray(po.history) ? po.history.slice().reverse() : [];
+      const chased = chaseNote(po, today());
+
+      const box = canEdit
+        ? '<div class="pp-followup">' +
+            '<select id="ppFuMethod">' +
+              FOLLOW_UP_METHODS.map((m) => '<option value="' + esc(m.key) + '">' + esc(m.label) + '</option>').join('') +
+            '</select>' +
+            '<input id="ppFuNote" type="text" placeholder="What they said, or who you spoke to (optional)" maxlength="500">' +
+            '<button class="pp-btn ghost" id="ppLogFollowUp">Log it</button>' +
+          '</div>' +
+          '<div class="pp-hint">Logging a call does not change the colour of this order. ' +
+          'The clock is measuring how long the vendor has been quiet, and chasing them does not ' +
+          'make them less quiet. It puts "' + esc(chased || 'chased today') + '" next to the ' +
+          'warning so the next person can see somebody is already on it.</div>'
+        : '';
+
+      if (!list.length) {
+        return '<div class="pp-sect">Activity</div>' +
+          '<div class="pp-hint">Nothing recorded on this order yet.</div>' + box;
+      }
+
+      return '<div class="pp-sect">Activity</div>' +
+        '<ul class="pp-activity">' +
+          list.map((h) => {
+            const when = String(h.at || '').slice(0, 16).replace('T', ' ');
+            const who = String(h.by || '').trim();
+            return '<li' + (h.kind === 'followup' ? ' class="me"' : '') + '>' +
+              '<span class="when">' + esc(when) + '</span>' +
+              '<span class="what">' + esc(h.what || '') + '</span>' +
+              (who ? '<span class="who">' + esc(who) + '</span>' : '') +
+            '</li>';
+          }).join('') +
+        '</ul>' + box;
+    }
+
     function renderDetail(po) {
       const wrap = $('#ppDetailWrap');
       const v = vendorById(po.vendorId);
@@ -1579,7 +1690,20 @@ export default {
           '<button class="pp-btn ghost" id="ppCloseDetail">Close</button>' +
         '</div></div>' +
 
-        (h.reasons.length ? '<div class="pp-notice"><strong>Attention.</strong> ' + esc(h.reasons.join('. ')) + '</div>' : '') +
+        // The chase note rides WITH the warning rather than replacing it.
+        // "No word for 9 days" and "no word for 9 days, and Abby rang them
+        // yesterday" are two different situations and the second one still
+        // needs the 9 days in it.
+        (h.reasons.length
+          ? '<div class="pp-notice"><strong>Attention.</strong> ' + esc(h.reasons.join('. ')) +
+            (chaseNote(po, today()) ? ' <span class="pp-chased">' + esc(chaseNote(po, today())) + '</span>' : '') +
+            '</div>'
+          : '') +
+        // A bounce belongs at the TOP with the other things that change what
+        // you do next, not buried down by the send button. Hidden until the
+        // lookup comes back bad, which is the overwhelmingly common case.
+        '<div class="pp-notice pp-bad" id="ppDeliveryBad" hidden></div>' +
+
         (repliedSinceSend(po)
           ? '<div class="pp-notice"><strong>The vendor has replied</strong> since this was last emailed, ' +
             esc(String(po.lastVendorReplyAt || '').slice(0, 16).replace('T', ' ')) + '. ' +
@@ -1593,6 +1717,8 @@ export default {
         linesHtml(po) +
 
         repliesHtml(po) +
+
+        activityHtml(po) +
 
         // Shipping and artwork side by side. They are the two things somebody
         // checks before pressing send, and stacked they pushed the send
@@ -1640,7 +1766,12 @@ export default {
           : po.lastSentAt
             ? '<div class="pp-hint" style="margin-bottom:8px">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
               ' to ' + esc(po.sentTo || '') +
-              (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') + '</div>'
+              (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') +
+              // Filled in after render by loadDelivery(). Left empty rather
+              // than saying "checking" on first paint: a line that flashes a
+              // word and replaces it reads as a fault when the answer lands
+              // in under a second, which it usually does.
+              '<span id="ppDeliveryLine"></span></div>'
             : '<div class="pp-hint" style="margin-bottom:8px">Not sent yet.</div>') +
         '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
           '<button class="pp-btn ghost" id="ppPrint">Print or save as PDF</button>' +
@@ -1689,6 +1820,62 @@ export default {
 
       wrap.hidden = false;
       $('#ppFormWrap').hidden = true;
+
+      // After paint, never blocking it. The order has to be readable whether
+      // or not Resend answers, so this fills one line in late rather than
+      // holding the whole screen on a third-party call.
+      loadDelivery(po);
+    }
+
+    /**
+     * Ask what happened to the last email for this order.
+     *
+     * A bounce is the one answer here that changes what somebody should do,
+     * so it gets a full notice rather than a quiet grey line: an order that
+     * bounced is not being ignored by the vendor, it never arrived, and the
+     * silence clock has been counting a delivery that never happened.
+     *
+     * Every failure path ends in silence or a plain sentence, never an error
+     * box. Not knowing whether an email was opened is not a problem with the
+     * purchase order.
+     */
+    async function loadDelivery(po) {
+      const line = $('#ppDeliveryLine');
+      if (!line || !po || !po.lastSentAt) return;
+      let res;
+      try {
+        res = await ctx.api.get(ENDPOINTS.ppDelivery, { poId: po.id });
+      } catch (e) {
+        return;   // Silence. The send line above it is still true and useful.
+      }
+      // Guard against a slower answer landing after somebody has clicked on
+      // to a different order.
+      if (st.openPoId !== po.id) return;
+      if (!res || !res.ok) return;
+
+      if (!res.checked) {
+        if (res.why) line.innerHTML = ' <span class="pp-dstat">' + esc(res.why) + '</span>';
+        return;
+      }
+      const s = res.status;
+      if (!s) return;
+
+      line.innerHTML = ' <span class="pp-dstat pp-d-' + esc(s.level) + '">' + esc(s.label) + '</span>' +
+        (s.level === 'good' && openIsTrusted(s)
+          // Said once, here, and not repeated anywhere else in the app. An
+          // open is a pre-fetched image as often as a person reading, and a
+          // number nobody has qualified is a number somebody will act on.
+          ? '<span class="pp-dstat">Opens are approximate: some mail systems load images automatically.</span>'
+          : '');
+
+      if (s.level === 'bad') {
+        const notice = $('#ppDeliveryBad');
+        if (notice) {
+          notice.innerHTML = '<strong>' + esc(s.label) + '.</strong> ' + esc(s.detail) +
+            ' Check the address on the vendor record, fix it, and send this again.';
+          notice.hidden = false;
+        }
+      }
     }
 
     /* ---------------- vendor form ---------------- */
@@ -2642,6 +2829,30 @@ export default {
         st.showDates = !st.showDates;
         const po = st.pos.find((p) => p.id === st.openPoId);
         if (po) renderDetail(po);
+        return;
+      }
+
+      if (t.id === 'ppLogFollowUp') {
+        const err = $('#ppDetailErr');
+        if (err) err.hidden = true;
+        const method = ($('#ppFuMethod') || {}).value || '';
+        const note = ($('#ppFuNote') || {}).value || '';
+        try {
+          const res = await ctx.api.request(ENDPOINTS.ppPos, {
+            method: 'PATCH',
+            body: JSON.stringify({ id: st.openPoId, followUp: { method, note } }),
+          });
+          if (res && res.error) { if (err) { err.textContent = res.error; err.hidden = false; } return; }
+          // Reload rather than patching the DOM: the chase note now has to
+          // appear on the pipeline card and the orders row too, and those are
+          // built from st.pos.
+          await loadAll();
+          renderAll();
+          const po = st.pos.find((p) => p.id === st.openPoId);
+          if (po) renderDetail(po);
+        } catch (e) {
+          if (err) { err.textContent = e.message || 'Could not log that.'; err.hidden = false; }
+        }
         return;
       }
 

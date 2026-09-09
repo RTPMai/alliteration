@@ -1,3 +1,4 @@
+// PUT IN: test/promopro-reply-capture.test.cjs
 // test/promopro-reply-capture.test.cjs
 /**
  * PromoPro vendor reply capture.
@@ -267,10 +268,16 @@ const settingsRoute = read('api/promopro/settings.js');
 
   t.test('the list and the pipeline say a vendor has come back', () => {
     // "Did they confirm" is what these screens get scanned for.
-    const orders = app.slice(app.indexOf('function renderOrders'));
-    t.assert(/repliedSinceSend\(p\)/.test(orders.slice(0, 2500)), 'the orders list should mark it');
-    const pipe = app.slice(app.indexOf('function renderPipeline'));
-    t.assert(/repliedSinceSend\(p\)/.test(pipe.slice(0, 2500)), 'and so should the pipeline card');
+    //
+    // Bounded by the NEXT function rather than by a character count. The
+    // count version passed for the wrong reason: it was really asserting
+    // that nothing had been added above the line it was looking for, so
+    // adding a product line to the card broke a test about vendor replies.
+    const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+    const orders = between('function renderOrders', 'function lineRowHtml');
+    t.assert(/repliedSinceSend\(p\)/.test(orders), 'the orders list should mark it');
+    const pipe = between('function renderPipeline', 'function renderFilters');
+    t.assert(/repliedSinceSend\(p\)/.test(pipe), 'and so should the pipeline card');
   });
 
   t.test('the reply notice says the chasing has stopped', () => {

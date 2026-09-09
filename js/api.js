@@ -309,6 +309,7 @@ export const ENDPOINTS = {
   ppArtFile:       '/api/promopro/art-file',
   ppArtUpload:     '/api/promopro/art-upload',
   ppPrint:         '/api/promopro/print',
+  ppDelivery:      '/api/promopro/delivery',
 
   // ---- StitchSense ----
   // Folder form, not a flat api/stitchsense.js, for the same Vercel
@@ -580,6 +581,7 @@ const MOCK_DATA = {
   [ENDPOINTS.ppReceive]: () => ({ error: 'Receiving is not available in sample mode.' }),
   [ENDPOINTS.ppArtFile]: () => ({ error: 'Artwork is not available in sample mode.' }),
   [ENDPOINTS.ppArtUpload]: () => ({ error: 'Artwork is not available in sample mode.' }),
+  [ENDPOINTS.ppDelivery]: () => ({ ok: true, checked: false, why: 'Delivery status is not available in sample mode.', status: null }),
 
   [ENDPOINTS.ttTrips]: () => ({ trips: [] }),
   [ENDPOINTS.ttExpenses]: () => ({ expenses: [] }),
