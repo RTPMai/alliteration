@@ -36,6 +36,10 @@ import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 // One list of accepted file types, shared with the upload route, so the
 // dialog cannot offer something the server then refuses.
 import { ART_ACCEPT, artAcceptSummary } from '../lib/promopro/art-types.js';
+import {
+  ORDER_COLUMNS, columnByKey, sortRows, nextDir, filterValues,
+  applyColumnFilters, activeFilterList, anyFilterActive, HEALTH_LABELS
+} from '../lib/promopro/table.js';
 const ART_ACCEPT_SUMMARY = artAcceptSummary();
 
 const esc = (s) => String(s == null ? '' : s)
@@ -239,6 +243,60 @@ export default {
     .pp-table tr[data-po]:hover td { background: var(--accent-tint); }
     .pp-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 
+    /* ---- sorting and column filters ---- */
+    /* The header cell has to position the menu, so it stops being a plain
+       label and becomes a container with two controls in it. */
+    .pp-table th { position: relative; }
+    .pp-th { display: flex; align-items: center; gap: 2px; }
+    .pp-table th.num .pp-th { justify-content: flex-end; }
+
+    .pp-sort {
+      background: none; border: 0; padding: 0; margin: 0; cursor: pointer;
+      font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit;
+    }
+    .pp-sort:hover { color: var(--ink); }
+
+    .pp-funnel {
+      background: none; border: 0; padding: 0 2px; cursor: pointer;
+      font-size: 10px; line-height: 1; color: var(--muted); font-family: inherit;
+    }
+    .pp-funnel:hover { color: var(--ink); }
+    /* A column that is hiding rows must never look like one that is not. */
+    .pp-funnel.on { color: var(--accent); font-weight: 700; }
+
+    .pp-menu {
+      position: absolute; top: 100%; left: 0; z-index: 20; min-width: 200px;
+      max-height: 300px; overflow-y: auto;
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: var(--radius-sm); padding: 6px;
+      box-shadow: var(--shadow-pop);
+      text-transform: none; letter-spacing: normal;
+    }
+    .pp-table th.num .pp-menu { left: auto; right: 0; }
+    .pp-menu-hd {
+      display: flex; justify-content: space-between; align-items: center; gap: 8px;
+      font-size: 11px; font-weight: 700; color: var(--muted); padding: 2px 4px 6px;
+    }
+    .pp-menu-row {
+      display: flex; align-items: center; gap: 8px; padding: 4px;
+      font-size: 12px; font-weight: 400; color: var(--ink); cursor: pointer;
+      text-transform: none;
+    }
+    .pp-menu-row:hover { background: var(--accent-tint); border-radius: var(--radius-sm); }
+    .pp-menu-row .v { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pp-menu-row .n { color: var(--muted); font-variant-numeric: tabular-nums; }
+    .pp-menu-empty { font-size: 12px; color: var(--muted); padding: 4px; text-transform: none; }
+
+    /* What is being hidden, said out loud above the table. */
+    .pp-chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    .pp-chip {
+      background: var(--accent-tint); border: 1px solid var(--line);
+      border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 600;
+      color: var(--ink); cursor: pointer; font-family: inherit;
+      max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .pp-chip .x { margin-left: 6px; color: var(--muted); font-weight: 400; }
+
     .pp-pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; background: var(--accent-tint); color: var(--accent-deep); }
     .pp-pill.bad { background: var(--danger-tint); color: var(--danger-dk); }
 
@@ -434,6 +492,14 @@ export default {
       showDates: false,    // the back-fill date row, hidden until asked for
       openPoId: null,
       searchTimer: null,
+      // Sorting is remembered between visits; column filters are NOT.
+      // A sort you forgot about still shows you every order. A filter you
+      // forgot about hides some, and a half-empty table on Monday morning
+      // reads as data missing rather than as a choice made on Friday.
+      sortKey: 'neededBy',
+      sortDir: 'asc',
+      colFilters: {},        // { columnKey: [values] }
+      openMenu: null,        // which header menu is showing
     };
 
     const vendorById = (id) => st.vendors.find((v) => v.id === id) || null;
@@ -542,6 +608,25 @@ export default {
     }
     function saveMinePref() {
       try { localStorage.setItem(MINE_KEY, st.mine ? '1' : '0'); } catch (e) {}
+    }
+
+    const SORT_KEY = 'promopro.sort';
+
+    function loadSortPref() {
+      try {
+        const raw = localStorage.getItem(SORT_KEY);
+        if (!raw) return;
+        const [key, dir] = String(raw).split(':');
+        // Checked against the real column list rather than trusted. A stored
+        // key from a column that has since been renamed would otherwise sort
+        // by a field that does not exist, which silently does nothing and
+        // looks like the sort is broken.
+        if (columnByKey(key)) { st.sortKey = key; st.sortDir = dir === 'desc' ? 'desc' : 'asc'; }
+      } catch (e) {}
+    }
+
+    function saveSortPref() {
+      try { localStorage.setItem(SORT_KEY, st.sortKey + ':' + st.sortDir); } catch (e) {}
     }
 
     // One control, drawn the same on both screens, so the toggle does not look
@@ -664,57 +749,166 @@ export default {
       return rows.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p)));
     }
 
+    /**
+     * One purchase order flattened to exactly what the table shows.
+     *
+     * The sort and filter helpers never see a PO, only this. What somebody
+     * sorts has to be what they can read: sorting on a vendor id while the
+     * screen shows vendor names produces an order nobody can account for, and
+     * it looks like the sort is broken rather than like it is comparing
+     * something else.
+     */
+    function orderRow(p) {
+      const h = health(p);
+      const prod = productSummary(p);
+      return {
+        po: p,
+        id: p.id,
+        poNumber: p.poNumber || 'Draft',
+        customer: custName(p),
+        product: prod.first,
+        productMore: prod.more,
+        vendor: vendorName(p.vendorId),
+        am: amName(p.accountManager),
+        stage: stageLabel(h.stage, p),
+        stageKey: h.stage,
+        neededBy: p.neededBy || (p.printavo && p.printavo.dueDate) || '',
+        total: poTotal(p),
+        status: h.reasons[0] || (h.level === 'done' ? 'Complete' : 'On track'),
+        healthLevel: h.level,
+        chased: h.reasons.length ? chaseNote(p, today()) : '',
+      };
+    }
+
+    /** The rows the table will draw: scope, then pills, then column filters. */
+    function orderRows() {
+      const rows = visiblePos().map(orderRow);
+      return sortRows(applyColumnFilters(rows, st.colFilters), st.sortKey, st.sortDir);
+    }
+
+    function headerCellHtml(col, rows) {
+      const sorted = st.sortKey === col.key;
+      const arrow = sorted ? (st.sortDir === 'asc' ? ' ▲' : ' ▼') : '';
+      const on = Array.isArray(st.colFilters[col.key]) && st.colFilters[col.key].length;
+      return '<th' + (col.numeric ? ' class="num"' : '') + '>' +
+        '<span class="pp-th">' +
+          '<button class="pp-sort" data-sort="' + esc(col.key) + '"' +
+            ' aria-sort="' + (sorted ? (st.sortDir === 'asc' ? 'ascending' : 'descending') : 'none') + '">' +
+            esc(col.label) + esc(arrow) +
+          '</button>' +
+          (col.filter
+            ? '<button class="pp-funnel' + (on ? ' on' : '') + '" data-menu="' + esc(col.key) + '"' +
+              ' title="Filter by ' + esc(col.label) + '" aria-label="Filter by ' + esc(col.label) + '">▾</button>'
+            : '') +
+        '</span>' +
+        (st.openMenu === col.key ? filterMenuHtml(col, rows) : '') +
+      '</th>';
+    }
+
+    /**
+     * The menu for one column.
+     *
+     * Counts come from the rows BEFORE this column's own filter is applied,
+     * so unticking a value does not make the other options vanish out from
+     * under the cursor. Filtering a column by itself is the one case where
+     * the menu has to ignore what it is currently doing.
+     */
+    function filterMenuHtml(col, rowsBeforeThisColumn) {
+      const chosen = st.colFilters[col.key] || [];
+      const values = filterValues(rowsBeforeThisColumn, col.key);
+      return '<div class="pp-menu" data-menufor="' + esc(col.key) + '">' +
+        '<div class="pp-menu-hd">' + esc(col.label) +
+          (chosen.length ? '<button class="pp-linkish" data-clearcol="' + esc(col.key) + '">Clear</button>' : '') +
+        '</div>' +
+        (values.length
+          ? values.map((v) =>
+              '<label class="pp-menu-row">' +
+                '<input type="checkbox" data-colval="' + esc(col.key) + '" value="' + esc(v.value) + '"' +
+                  (chosen.includes(v.value) ? ' checked' : '') + '>' +
+                '<span class="v">' + esc(v.value) + '</span>' +
+                '<span class="n">' + esc(v.count) + '</span>' +
+              '</label>').join('')
+          : '<div class="pp-menu-empty">Nothing to filter here.</div>') +
+      '</div>';
+    }
+
+    /** Chips saying what is currently hidden, because a silent filter lies. */
+    function filterChipsHtml() {
+      const active = activeFilterList(st.colFilters);
+      if (!active.length) return '';
+      return '<div class="pp-chips">' +
+        active.map((a) =>
+          '<button class="pp-chip" data-clearcol="' + esc(a.key) + '">' +
+            esc(a.label) + ': ' + esc(a.values.join(', ')) +
+            '<span class="x">×</span>' +
+          '</button>').join('') +
+        '<button class="pp-linkish" data-clearcol="__all">Clear all filters</button>' +
+      '</div>';
+    }
+
     function renderOrders() {
       renderFilters();
-      const rows = visiblePos();
       const body = $('#ppOrdersBody');
       const scoping = st.mine && canScopeToMine();
+
+      // Before any column filter, for the menus and for the count sentence.
+      const base = visiblePos().map(orderRow);
+      const rows = orderRows();
+
       $('#ppOrdersSub').textContent = scoping
         ? scoped().length + ' of ' + st.pos.length + ' purchase orders are yours'
         : st.pos.length + ' purchase orders on file';
 
+      const chips = filterChipsHtml();
+
       if (!rows.length) {
-        // Which of the two filters emptied the list is the whole question when
-        // somebody is staring at a screen that says nothing is here.
-        body.innerHTML = '<div class="pp-empty">Nothing here. Try a different filter' +
-          (scoping ? ', turn off Just mine,' : ',') +
-          ' or create a purchase order.</div>';
+        // WHICH filter emptied the list is the whole question when somebody is
+        // staring at a screen that says nothing is here. A column filter is
+        // the easiest one to forget about, so it is named first and the chips
+        // stay on screen with it.
+        body.innerHTML = chips + '<div class="pp-empty">' +
+          (anyFilterActive(st.colFilters)
+            ? 'No purchase order matches the column filters above. Clear one and they come back.'
+            : 'Nothing here. Try a different filter' + (scoping ? ', turn off Just mine,' : ',') +
+              ' or create a purchase order.') +
+        '</div>';
         return;
       }
 
-      body.innerHTML = '<table class="pp-table"><thead><tr>' +
-        '<th>PO</th><th>Customer</th><th>Product</th><th>Vendor</th><th>AM</th><th>Stage</th><th>Needed by</th><th class="num">Total</th><th>Status</th>' +
+      body.innerHTML = chips +
+        '<table class="pp-table"><thead><tr>' +
+        ORDER_COLUMNS.map((col) => {
+          // Each menu counts against everything EXCEPT its own column.
+          const others = { ...st.colFilters };
+          delete others[col.key];
+          return headerCellHtml(col, applyColumnFilters(base, others));
+        }).join('') +
         '</tr></thead><tbody>' +
-        rows.map((p) => {
-          const h = health(p);
-          const due = p.neededBy || (p.printavo && p.printavo.dueDate) || '';
-          const prod = productSummary(p);
-          // Beside the reason, never instead of it. "No word for 9 days" and
-          // "no word for 9 days, chased yesterday" are two different
-          // situations and the second still needs the 9 days in it.
-          const chased = h.reasons.length ? chaseNote(p, today()) : '';
-          return '<tr data-po="' + esc(p.id) + '">' +
-            '<td><strong>' + esc(p.poNumber || 'Draft') + '</strong>' + outsourcedTag(p) +
+        rows.map((r) =>
+          '<tr data-po="' + esc(r.id) + '">' +
+            '<td><strong>' + esc(r.poNumber) + '</strong>' + outsourcedTag(r.po) +
               // "Did they come back to us" is the question this list is
               // scanned for, so it is answered here rather than one click in.
-              (repliedSinceSend(p) ? '<span class="pp-replied">replied</span>' : '') +
+              (repliedSinceSend(r.po) ? '<span class="pp-replied">replied</span>' : '') +
             '</td>' +
-            '<td>' + esc(custName(p)) + '</td>' +
-            // Vendor stays: it is who you ring when this goes red. Product is
-            // added rather than swapped in, because on a table there is room
-            // for both and each answers a different question.
-            '<td class="pp-prod">' + (prod.first ? esc(prod.first) : '<span class="pp-dim">no lines</span>') +
-              (prod.more ? '<span class="pp-dim"> +' + esc(prod.more) + ' more</span>' : '') + '</td>' +
-            '<td>' + esc(vendorName(p.vendorId)) + '</td>' +
-            '<td>' + esc(amName(p.accountManager)) + '</td>' +
-            '<td><span class="pp-pill">' + esc(stageLabel(h.stage, p)) + '</span></td>' +
-            '<td>' + esc(due) + '</td>' +
-            '<td class="num">' + money(poTotal(p)) + '</td>' +
-            '<td class="pp-h-' + h.level + '"><span class="why">' + esc(h.reasons[0] || (h.level === 'done' ? 'Complete' : 'On track')) + '</span>' +
-              (chased ? '<span class="pp-chased-row">' + esc(chased) + '</span>' : '') +
+            '<td>' + esc(r.customer) + '</td>' +
+            '<td class="pp-prod">' + (r.product ? esc(r.product) : '<span class="pp-dim">no lines</span>') +
+              (r.productMore ? '<span class="pp-dim"> +' + esc(r.productMore) + ' more</span>' : '') + '</td>' +
+            '<td>' + esc(r.vendor) + '</td>' +
+            '<td>' + esc(r.am) + '</td>' +
+            '<td><span class="pp-pill">' + esc(r.stage) + '</span></td>' +
+            '<td>' + esc(r.neededBy) + '</td>' +
+            '<td class="num">' + money(r.total) + '</td>' +
+            '<td class="pp-h-' + esc(r.healthLevel) + '"><span class="why">' + esc(r.status) + '</span>' +
+              (r.chased ? '<span class="pp-chased-row">' + esc(r.chased) + '</span>' : '') +
             '</td>' +
-          '</tr>';
-        }).join('') + '</tbody></table>';
+          '</tr>').join('') +
+        '</tbody></table>' +
+        // Says so when the table is showing fewer than the pills promised.
+        (rows.length !== base.length
+          ? '<div class="pp-hint" style="margin-top:8px">Showing ' + esc(rows.length) +
+            ' of ' + esc(base.length) + ', filtered by column.</div>'
+          : '');
     }
 
     /* ---------------- create form ---------------- */
@@ -2865,6 +3059,35 @@ export default {
         return;
       }
 
+      // ---- table sorting and column filters ----
+
+      if (t.dataset && t.dataset.sort) {
+        const key = t.dataset.sort;
+        st.sortDir = nextDir(st.sortKey, st.sortDir, key);
+        st.sortKey = key;
+        st.openMenu = null;
+        saveSortPref();
+        renderOrders();
+        return;
+      }
+
+      if (t.dataset && t.dataset.menu) {
+        // Toggle, so a second press on the same funnel closes it rather than
+        // redrawing the identical menu and looking like nothing happened.
+        st.openMenu = (st.openMenu === t.dataset.menu) ? null : t.dataset.menu;
+        renderOrders();
+        return;
+      }
+
+      if (t.dataset && t.dataset.clearcol) {
+        const k = t.dataset.clearcol;
+        if (k === '__all') st.colFilters = {};
+        else delete st.colFilters[k];
+        st.openMenu = null;
+        renderOrders();
+        return;
+      }
+
       if (t.id === 'ppDeletePo') {
         const po = st.pos.find((p) => p.id === st.openPoId);
         // Typing the number is deliberate friction. This is the one action in
@@ -3077,6 +3300,25 @@ export default {
 
     root.addEventListener('change', (e) => {
       if (e.target.id === 'ppAm') renderCcPreview();
+
+      // A column filter box. The menu is left OPEN on purpose: picking three
+      // vendors is one action to a person, and closing after each tick would
+      // make it three trips back to the same funnel.
+      if (e.target.dataset && e.target.dataset.colval) {
+        const key = e.target.dataset.colval;
+        const val = e.target.value;
+        const cur = Array.isArray(st.colFilters[key]) ? st.colFilters[key].slice() : [];
+        const next = e.target.checked
+          ? (cur.includes(val) ? cur : cur.concat([val]))
+          : cur.filter((v) => v !== val);
+        // Removed entirely rather than left as an empty array, so "no boxes
+        // ticked" means no filter instead of matching nothing. An empty list
+        // that hides every row looks like the table broke.
+        if (next.length) st.colFilters[key] = next;
+        else delete st.colFilters[key];
+        renderOrders();
+        return;
+      }
 
       // Ticking it changes what the buttons below say and whether a CC line
       // is worth showing, so the form redraws. Harvest first or the redraw
@@ -3566,6 +3808,7 @@ export default {
       if (wrap && wrap.scrollIntoView) wrap.scrollIntoView({ block: 'start' });
     };
 
+    loadSortPref();
     loadMinePref();
     await loadAll();
     renderAll();
