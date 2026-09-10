@@ -1,3 +1,4 @@
+// PUT IN: api/crewcore/samples.js
 // api/crewcore/samples.js — SanMar sample drops.
 //
 // GET    ?resource=drops                     every drop (any CrewCore user)
@@ -7,6 +8,8 @@
 //                                            admins get everyone's
 //        ?resource=export&drop_id=           the CSV for SanMar (admin)
 // POST   ?resource=drops                     create a drop (admin)
+//        ?resource=read-pdf                  read style lists off SanMar's
+//                                            offer PDF, suggestion only (admin)
 //        ?resource=import&drop_id=           queue a catalog import (admin)
 //        ?resource=import-step&drop_id=      fetch the next few styles (admin)
 //        ?resource=picks                     make a pick
@@ -42,6 +45,9 @@ import {
   listPicks, getPick, savePick, deletePick,
 } from "../../lib/crewcore/samples-store.js";
 import { parseStyleList, fetchStyle, credentials, missingCredentials } from "../../lib/crewcore/sanmar.js";
+import {
+  rejectReason, stripDataUrl, buildPrompt, parseExtraction, extractionSummary,
+} from "../../lib/crewcore/sample-pdf.js";
 
 // How many styles one import-step fetches. PC61 is the worst case seen: two
 // megabytes and about four seconds. Four keeps a step inside Vercel's window
@@ -49,6 +55,12 @@ import { parseStyleList, fetchStyle, credentials, missingCredentials } from "../
 // timeout costs one style rather than the batch.
 const CHUNK = 4;
 const PAUSE_MS = 250;
+
+// Reading a PDF is one call to Anthropic that takes 20 to 40 seconds, and an
+// import-step fetches four styles from SanMar at up to four seconds each.
+// Both run past the platform default, which shows up as a gateway 504 rather
+// than anything this file could catch.
+export const config = { maxDuration: 60 };
 
 function parseBody(req) {
   let b = req.body;
@@ -205,6 +217,81 @@ async function onPost(req, res, q, resource, me, adminOnly) {
     if (!v.ok) return res.status(400).json({ error: v.errors.join("; ") });
     const drop = await saveDrop({ ...v.record, catalog: [], import: null });
     return res.status(200).json({ drop });
+  }
+
+  // Reads SanMar's offer PDF and hands back two suggested lists. It writes
+  // nothing: no drop, no catalog, no pick. The boxes get filled, a person
+  // reads them, and the existing Import button is still what starts the
+  // import. A misread style number would otherwise order a garment nobody
+  // chose, and nobody would find out until a box arrived.
+  if (resource === "read-pdf") {
+    if (adminOnly()) return;
+
+    const b64 = stripDataUrl(body.pdf);
+    // Refused before any paid call: judged on the file's own first bytes and
+    // its real size, not on what it was named.
+    const bad = rejectReason(b64);
+    if (bad) return res.status(400).json({ error: bad });
+
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      return res.status(503).json({
+        error: "Reading a PDF is not set up yet (ANTHROPIC_API_KEY is not in the environment). Paste the style numbers into the boxes instead.",
+      });
+    }
+
+    let aiRes;
+    try {
+      aiRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 4000,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } },
+              { type: "text", text: buildPrompt() },
+            ],
+          }],
+        }),
+      });
+    } catch (e) {
+      return res.status(502).json({
+        error: "Could not reach the reader. Paste the style numbers into the boxes instead.",
+      });
+    }
+
+    if (!aiRes.ok) {
+      const detail = await aiRes.text().catch(() => "");
+      console.error("sample pdf read failed:", aiRes.status, detail.slice(0, 400));
+      return res.status(502).json({
+        error: `Could not read that PDF (upstream ${aiRes.status}). Paste the style numbers into the boxes instead.`,
+      });
+    }
+
+    const payload = await aiRes.json();
+    const text = (payload.content || [])
+      .filter((b) => b && b.type === "text")
+      .map((b) => b.text)
+      .join("");
+
+    const parsed = parseExtraction(text);
+    if (!parsed.ok) return res.status(200).json({ error: parsed.error });
+
+    return res.status(200).json({
+      fifty: parsed.fifty,
+      twentyfive: parsed.twentyfive,
+      unsure: parsed.unsure,
+      conflicts: parsed.conflicts,
+      note: parsed.note,
+      summary: extractionSummary(parsed),
+    });
   }
 
   if (resource === "import") {
