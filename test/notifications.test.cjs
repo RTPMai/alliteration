@@ -38,6 +38,23 @@ Promise.all([
   const APP_IDS = APPS.map((a) => a.id).concat([GENERAL_APP]);
   const USERS = ['ryan', 'hannah', 'margo'];
 
+  t.test('a refused save explains itself in a sentence, not a code', () => {
+    // Sep 2026. The server has always written one readable sentence per
+    // problem. The screen was showing only the headline, "Validation failed",
+    // and dropping the list, so a filled-in form was refused with no
+    // indication of which field. The wording matters because it is what a
+    // person reads: it should name the buttons they are looking at.
+    const { ok, errors } = validateNew(
+      { title: 'Image does not match the description', types: [], appIds: ['general'], assignedTo: 'ryan' },
+      APP_IDS, USERS
+    );
+    t.assert(!ok, 'a notification with no type should be refused');
+    t.assert(errors.join(' ').includes('at least one type'),
+      'the reason should name the field rather than reporting a bare failure');
+    t.assert(/Task/.test(errors.join(' ')) && /Hand Off/.test(errors.join(' ')),
+      'the reason should name the buttons on screen, so there is nothing to work out');
+  });
+
   /* ---- type tags ------------------------------------------------------- */
 
   t.test('exactly three type tags: Task, Need, Hand Off', () => {
@@ -509,5 +526,18 @@ t.test('apps/notifications.js shows a clickable link pill that opens the record 
   t.test('a private card is labelled on screen', () => {
     t.assert(/nt-pill private">Just for me/.test(app),
       'a private item must be visibly marked so it is never mistaken for shared work');
+  });
+
+  t.test('a rejected save says which field, not just that it failed', () => {
+    // Sep 2026. The screen showed "Validation failed" and threw away the list
+    // of reasons the server had already written for a person to read. Somebody
+    // looking at a filled-in form being told it failed, with no indication of
+    // which field, has nothing to go on but guesswork.
+    t.assert(/details/.test(route) && /\"Validation failed\"/.test(route),
+      'the route should keep sending the per-problem list alongside the headline');
+    t.assert(/whyFailed/.test(app),
+      'the screen should read the details rather than showing only the headline');
+    t.assert(!/say\(err\.message \|\|/.test(app),
+      'every save path should go through whyFailed, or one of them will keep hiding the reason');
   });
 }
