@@ -643,6 +643,24 @@ export default {
     /* ---- reset + remove ---- */
 
     root.addEventListener('click', async (e) => {
+      const acc = e.target.closest('[data-access]');
+      if (acc) {
+        const username = acc.dataset.access;
+        // Toggle: a second press on an open editor closes it rather than
+        // stacking a second copy under the same row.
+        const open = acc.closest('tr').nextSibling;
+        if (open && open.querySelector && open.querySelector('.u-access-panel')) {
+          open.remove();
+        } else {
+          document.querySelectorAll('.u-access-panel').forEach((el) => {
+            const holder = el.closest('tr');
+            if (holder) holder.remove();
+          });
+          openAccess(username);
+        }
+        return;
+      }
+
       const reset = e.target.closest('[data-reset]');
       if (reset) {
         const username = reset.dataset.reset;
@@ -697,24 +715,6 @@ export default {
         } catch (err) {
           say(err.message || 'Could not change that role', 'err');
           await load(); // reload puts the dropdown back on their real role
-        }
-        return;
-      }
-
-      const acc = e.target.closest('[data-access]');
-      if (acc) {
-        const username = acc.dataset.access;
-        // Toggle: a second press on an open editor closes it rather than
-        // stacking a second copy under the same row.
-        const open = acc.closest('tr').nextSibling;
-        if (open && open.querySelector && open.querySelector('.u-access-panel')) {
-          open.remove();
-        } else {
-          document.querySelectorAll('.u-access-panel').forEach((el) => {
-            const holder = el.closest('tr');
-            if (holder) holder.remove();
-          });
-          openAccess(username);
         }
         return;
       }
