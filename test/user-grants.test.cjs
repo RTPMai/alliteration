@@ -253,5 +253,37 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
       'a colon-suffixed entry in the apps list is still capped by the ceiling');
   });
 
+  // ---- the Set access button is wired to a CLICK ------------------------
+  //
+  // Source-matched because it needs a browser to run for real, but anchored
+  // on the exact defect rather than on wording: the first version of this
+  // shipped with the branch inside the `change` listener, where a button
+  // never fires, so Set access silently did nothing. Nothing about the
+  // permission model was wrong and no other test could have seen it.
+
+  t.test('Set access is handled in the click listener, not the change one', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'apps/settings.js'), 'utf8');
+
+    const clickAt = src.indexOf("root.addEventListener('click'");
+    const changeAt = src.indexOf("root.addEventListener('change'", clickAt);
+    const accessAt = src.indexOf("closest('[data-access]')");
+
+    t.assert(clickAt !== -1, 'the delegated click listener exists');
+    t.assert(changeAt > clickAt, 'the change listener comes after it');
+    t.assert(accessAt > clickAt && accessAt < changeAt,
+      'the data-access branch sits inside the click listener');
+  });
+
+  t.test('the access editor saves through the seam, not fetch', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'apps/settings.js'), 'utf8');
+    t.assert(/ctx\.api\.request\([\s\S]{0,200}method: 'PATCH'[\s\S]{0,120}grants/.test(src),
+      'saving access goes through ctx.api.request with a PATCH');
+    t.assert(!/fetch\(/.test(src), 'no app file calls fetch directly');
+  });
+
   process.exit(t.report());
 })();
