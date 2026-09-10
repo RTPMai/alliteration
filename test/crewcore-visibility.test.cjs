@@ -239,7 +239,11 @@ async function check(name, fn) {
 
   t.test('the Accounts table calls the flag Admin', () => {
     const src = read('apps/settings.js');
-    t.assert(/<th>Person<\/th><th>Role<\/th><th>Admin<\/th>/.test(src),
+    // Anchored on the header itself rather than on its neighbours: an Access
+    // column landed between Role and Admin in Sep 2026 and broke this check
+    // without anything being wrong. What matters is that the column is called
+    // Admin, not what sits either side of it.
+    t.assert(/<th>Admin<\/th>/.test(src),
       'the column header is the flag\'s name to everybody who uses the shell');
     t.assert(/data-superuser-user=/.test(src),
       'the stored field stays `superuser` — this was a rename of words, not of data');

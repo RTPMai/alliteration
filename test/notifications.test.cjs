@@ -374,8 +374,13 @@ t.test('api/notifications.js records before/after values on an edit, not just fi
 
 t.test('lib/users.js exposes can_delete_notifications via permsFor, opt-out by default', () => {
   const src = read('lib/users.js');
-  t.assert(/can_delete_notifications:\s*role\.can_delete_notifications\s*!==\s*false/.test(src),
-    'permsFor should default can_delete_notifications to true unless a role explicitly sets it false');
+  // Sep 2026: the opt-out default moved into resolveGrants() in
+  // lib/user-grants.js when accounts gained their own grants. The real
+  // behavioural check is in test/user-grants.test.cjs; this confirms permsFor
+  // goes through the resolver rather than reading the role directly, which
+  // would ignore a per-account override.
+  t.assert(/can_delete_notifications:\s*resolved\.can_delete_notifications/.test(src),
+    'permsFor must resolve can_delete_notifications through lib/user-grants.js');
 });
 
 t.test('apps/settings.js exposes a "Can delete notifications" role toggle', () => {

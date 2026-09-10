@@ -83,6 +83,9 @@ export default async function handler(req, res) {
       if (body.role !== undefined) patch.role = body.role;
       if (body.password !== undefined) patch.password = body.password;
       if (body.superuser !== undefined) patch.superuser = body.superuser === true;
+      // Per-account grants, Sep 2026. null resets this person to their role.
+      // updateUser normalizes: unknown keys are dropped rather than stored.
+      if (body.grants !== undefined) patch.grants = body.grants;
       const user = await updateUser(username, patch);
       return res.status(200).json({ ok: true, user });
     }

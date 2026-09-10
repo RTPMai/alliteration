@@ -368,8 +368,14 @@ t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => 
 
   const users = read('lib/users.js');
   // Opt-in: roles stored before the flag existed must NOT gain edit rights.
-  t.assert(users.includes('manage_lists: role.manage_lists === true'),
-    'permsFor must treat manage_lists as opt-in, default off');
+  // Sep 2026: the opt-in decision moved into resolveGrants() in
+  // lib/user-grants.js when accounts gained their own grants, so permsFor now
+  // reads `resolved.manage_lists`. The REAL behavioural check (permsFor
+  // against a fake Upstash, asserting the default is off) lives in
+  // test/user-grants.test.cjs. This one only confirms the value is not being
+  // read straight off the role again, which would skip the override.
+  t.assert(/manage_lists:\s*resolved\.manage_lists/.test(users),
+    'permsFor must resolve manage_lists through lib/user-grants.js');
   t.assert(/roles\.admin = Object\.assign\([\s\S]*?manage_lists: true/.test(users),
     'saveRoles must force manage_lists on for admin');
 

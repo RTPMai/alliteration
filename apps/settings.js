@@ -29,6 +29,7 @@ const GRANTABLE_APPS = APPS.concat(SITE_APPS);
 // box shows ticked for a role that has always been able to decide even though
 // nothing was ever written to storage for it.
 import { givingDecideVerdict } from '../lib/giving-access.js';
+import { GRANT_FLAGS, resolveGrants, overrideSummary } from '../lib/user-grants.js';
 
 export default {
   id: 'settings',
@@ -60,6 +61,21 @@ export default {
   .u-table tr:last-child td{border-bottom:none}
   .u-name{font-weight:700}
   .u-sub{font-size:11.5px;color:var(--muted);margin-top:1px}
+  /* Per-account access, Sep 2026 */
+  .u-access{max-width:260px}
+  .u-sub.on-account{color:var(--accent)}
+  .u-access-panel{
+    border:1px solid var(--line);border-radius:var(--radius);
+    background:var(--bg);padding:14px;margin:2px 0 8px;
+  }
+  .u-access-hd{font-size:13px;font-weight:700;margin-bottom:2px}
+  .u-access-hd .u-sub{font-weight:400;display:block}
+  .u-access-panel .role-flags{margin-top:12px}
+  .u-access-panel .role-flags label{display:flex;align-items:center;gap:7px}
+  .u-access-panel .src{font-size:11px;color:var(--muted)}
+  .u-access-msg{font-size:12px;color:var(--muted);margin-top:10px;min-height:16px}
+  .u-access-msg.err{color:var(--danger)}
+  .u-access-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:4px}
   .u-actions{text-align:right;white-space:nowrap}
 
   .set-btn{
@@ -275,6 +291,148 @@ export default {
       }).join('');
     }
 
+    /**
+     * What the Access column says. "Role default" when this account is
+     * exactly its role, otherwise the differences by name.
+     */
+    function accessCell(u, role) {
+      const resolved = resolveGrants(role, u.grants);
+      const diffs = overrideSummary(resolved);
+      if (!diffs.length) {
+        return '<div class="u-sub">Role default</div>';
+      }
+      return '<div class="u-sub on-account">Set here: ' + esc(diffs.join(', ')) + '</div>';
+    }
+
+    /**
+     * The access editor for one person, opened under their row.
+     *
+     * Seeded from the RESOLVED values, so opening it shows what they have
+     * today whether that came from the role or from here. Touching a box
+     * writes that one key onto the account; everything untouched keeps
+     * inheriting. Reset to role clears the lot.
+     *
+     * Note what is deliberately absent: nothing here can make somebody a
+     * CrewCore admin. That is the Admin flag or the protected admin role, and
+     * permsFor() applies CrewCore's self-serve ceiling after these grants,
+     * so ticking CrewCore on an account gets the same six self-serve views a
+     * role would, never Roster or CrewCore Settings.
+     */
+    function openAccess(username) {
+      const u = users.find((x) => x.username === username);
+      if (!u) return;
+      const role = roles[u.role] || {};
+      const resolved = resolveGrants(role, u.grants);
+      const draft = Object.assign({}, u.grants || {});
+
+      const wrap = document.createElement('div');
+      const appToggles = GRANTABLE_APPS.map((a) => {
+        const on = resolved.apps.indexOf(a.id) !== -1;
+        return '<button type="button" class="app-toggle' + (on ? ' on' : '') +
+                 '" data-acc-app="' + esc(a.id) + '" style="--c:' + esc(a.accent) + '">' +
+                 '<span class="sq"></span>' + esc(a.name) + '</button>';
+      }).join('');
+
+      const flagBoxes = GRANT_FLAGS.map((f) =>
+        '<label><input type="checkbox" data-acc-flag="' + esc(f.key) + '"' +
+          (resolved[f.key] ? ' checked' : '') + '> ' + esc(f.label) +
+          '<span class="src" data-src="' + esc(f.key) + '">' +
+            (resolved.sources[f.key] === 'account' ? 'set here' : 'from ' + esc(role.label || u.role)) +
+          '</span></label>').join('');
+
+      wrap.className = 'u-access-panel';
+      wrap.innerHTML =
+        '<div class="u-access-hd">Access for ' + esc(u.name || u.username) +
+          '<span class="u-sub">Starts from ' + esc(role.label || u.role) +
+          '. Anything changed here is saved on this person.</span></div>' +
+        '<div class="role-apps">' + appToggles + '</div>' +
+        '<div class="role-flags">' + flagBoxes +
+          '<label><input type="checkbox" data-acc-flag="own_only"' +
+            (resolved.data_scope === 'own' ? ' checked' : '') + '> Own accounts only' +
+            '<span class="src" data-src="own_only">' +
+              (resolved.sources.data_scope === 'account' ? 'set here' : 'from ' + esc(role.label || u.role)) +
+            '</span></label>' +
+        '</div>' +
+        '<div class="u-access-msg" id="accMsg"></div>' +
+        '<div class="u-access-actions">' +
+          '<button class="set-btn" data-acc="cancel">Cancel</button>' +
+          '<button class="set-btn" data-acc="reset">Reset to role</button>' +
+          '<button class="set-btn primary" data-acc="save">Save access</button>' +
+        '</div>';
+
+      const row = $('[data-access="' + username + '"]').closest('tr');
+      const holder = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 6;
+      cell.appendChild(wrap);
+      holder.appendChild(cell);
+      row.parentNode.insertBefore(holder, row.nextSibling);
+
+      const q = (sel) => wrap.querySelector(sel);
+      const say = (msg, kind) => {
+        const el = q('#accMsg');
+        el.textContent = msg || '';
+        el.className = 'u-access-msg' + (kind ? ' ' + kind : '');
+      };
+      const markSrc = (key) => {
+        const el = wrap.querySelector('[data-src="' + key + '"]');
+        if (el) el.textContent = 'set here';
+      };
+
+      wrap.querySelectorAll('[data-acc-app]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          // The first touch copies the resolved list onto the account, so you
+          // are editing this person from where they actually stand rather
+          // than from an empty list.
+          if (!Array.isArray(draft.apps)) draft.apps = resolved.apps.slice();
+          const id = btn.getAttribute('data-acc-app');
+          const at = draft.apps.indexOf(id);
+          if (at === -1) draft.apps.push(id); else draft.apps.splice(at, 1);
+          btn.classList.toggle('on');
+          say('');
+        });
+      });
+
+      wrap.querySelectorAll('[data-acc-flag]').forEach((box) => {
+        box.addEventListener('change', () => {
+          const key = box.getAttribute('data-acc-flag');
+          if (key === 'own_only') {
+            draft.data_scope = box.checked ? 'own' : 'all';
+            markSrc('own_only');
+          } else {
+            draft[key] = box.checked;
+            markSrc(key);
+          }
+          say('');
+        });
+      });
+
+      const close = () => { holder.remove(); };
+      q('[data-acc="cancel"]').addEventListener('click', close);
+
+      q('[data-acc="reset"]').addEventListener('click', async () => {
+        await saveAccess(username, null, close, say);
+      });
+      q('[data-acc="save"]').addEventListener('click', async () => {
+        await saveAccess(username, draft, close, say);
+      });
+    }
+
+    async function saveAccess(username, grants, close, say) {
+      say('Saving...');
+      try {
+        const out = await ctx.api.request(
+          ENDPOINTS.users + '?username=' + encodeURIComponent(username),
+          { method: 'PATCH', body: { grants: grants } });
+        const at = users.findIndex((x) => x.username === username);
+        if (at !== -1 && out.user) users[at] = out.user;
+        close();
+        renderUsers();
+      } catch (err) {
+        say(err.message || 'Could not save access', 'err');
+      }
+    }
+
     function renderUsers() {
       if (!users.length) {
         $('#userList').innerHTML = '<div class="set-empty">No accounts yet.</div>';
@@ -290,7 +448,7 @@ export default {
           // labelled "Full access" in lib/users.js so the two things on one
           // row don't both read as Admin. The stored field is still
           // `superuser` everywhere in code.
-          '<th>Person</th><th>Role</th><th>Admin</th><th>Last signed in</th><th></th>' +
+          '<th>Person</th><th>Role</th><th>Access</th><th>Admin</th><th>Last signed in</th><th></th>' +
         '</tr></thead><tbody>' +
         users.map((u) => {
           const role = roles[u.role] || {};
@@ -312,6 +470,14 @@ export default {
                   ).join('') +
                 '</select>') +
               '<div class="app-chips">' + appChips(role.apps) + '</div></td>' +
+            // ACCESS, Sep 2026. The role is a starting point; anything set
+            // here lives on the person and wins. This column exists so a
+            // difference is visible from the table rather than only from
+            // inside an editor nobody opens.
+            '<td class="u-access">' + accessCell(u, role) +
+              '<button class="set-btn" data-access="' + esc(u.username) + '">' +
+                (u.grants ? 'Edit access' : 'Set access') +
+              '</button></td>' +
             // Separate from role on purpose: an account can be "admin" and
             // still not see stub apps like CrewCore's pay/review data unless
             // this is checked. Unlike role, editing your own is allowed —
@@ -531,6 +697,24 @@ export default {
         } catch (err) {
           say(err.message || 'Could not change that role', 'err');
           await load(); // reload puts the dropdown back on their real role
+        }
+        return;
+      }
+
+      const acc = e.target.closest('[data-access]');
+      if (acc) {
+        const username = acc.dataset.access;
+        // Toggle: a second press on an open editor closes it rather than
+        // stacking a second copy under the same row.
+        const open = acc.closest('tr').nextSibling;
+        if (open && open.querySelector && open.querySelector('.u-access-panel')) {
+          open.remove();
+        } else {
+          document.querySelectorAll('.u-access-panel').forEach((el) => {
+            const holder = el.closest('tr');
+            if (holder) holder.remove();
+          });
+          openAccess(username);
         }
         return;
       }
