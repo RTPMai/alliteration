@@ -415,6 +415,23 @@ export default {
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     })[c]);
 
+    /**
+     * WHAT ACTUALLY WENT WRONG, not that something did.
+     *
+     * The server answers a rejected save with a sentence per problem, already
+     * written for a person to read: "select at least one type (Task, Need,
+     * Hand Off)". The screen was showing only the headline, "Validation
+     * failed", and dropping the list. Somebody looking at a filled-in form
+     * being told it failed, with no indication of which field, has nothing to
+     * go on but guesswork.
+     */
+    function whyFailed(err, fallback) {
+      const details = err && err.body && err.body.details;
+      if (Array.isArray(details) && details.length) return details.join('. ');
+      if (typeof details === 'string' && details) return details;
+      return (err && err.message) || fallback;
+    }
+
     function say(text, kind) {
       $('#ntMsg').innerHTML = text
         ? '<div class="nt-msg ' + kind + '">' + esc(text) + '</div>'
@@ -1010,7 +1027,7 @@ export default {
           say('Notification created.', 'ok');
           await load();
         } catch (err) {
-          say(err.message || 'Could not create that notification', 'err');
+          say(whyFailed(err, 'Could not create that notification'), 'err');
         } finally {
           btn.disabled = false;
         }
@@ -1070,7 +1087,7 @@ export default {
           say('Notification updated.', 'ok');
           await load();
         } catch (err) {
-          say(err.message || 'Could not save that edit', 'err');
+          say(whyFailed(err, 'Could not save that edit'), 'err');
           editSave.disabled = false;
         }
         return;
@@ -1105,7 +1122,7 @@ export default {
           say('Reassigned.', 'ok');
           await load();
         } catch (err) {
-          say(err.message || 'Could not reassign that notification', 'err');
+          say(whyFailed(err, 'Could not reassign that notification'), 'err');
           reassignSave.disabled = false;
         }
         return;
@@ -1118,7 +1135,7 @@ export default {
           await ctx.api.del(ENDPOINTS.notifications, { query: { id: del.dataset.del } });
           await load();
         } catch (err) {
-          say(err.message || 'Could not delete that notification', 'err');
+          say(whyFailed(err, 'Could not delete that notification'), 'err');
         }
       }
     });
@@ -1175,7 +1192,7 @@ export default {
         await ctx.api.patch(ENDPOINTS.notifications, { status: next }, { query: { id } });
         await load();
       } catch (err) {
-        say(err.message || 'Could not update that notification', 'err');
+        say(whyFailed(err, 'Could not update that notification'), 'err');
         box.disabled = false;
         box.checked = !box.checked;
       }
