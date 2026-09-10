@@ -1,3 +1,4 @@
+// PUT IN: test/promopro-customer-name.test.cjs
 // test/promopro-customer-name.test.cjs
 /**
  * PromoPro: the company, not the person who placed the order.
@@ -208,8 +209,22 @@ const inv = (contact, extra) => Object.assign({
 
   t.test('all three screens ask one helper, so they cannot disagree', () => {
     t.assert(/const custName = \(p\) =>/.test(app));
-    t.equal((app.match(/esc\(custName\(/g) || []).length >= 3, true,
-      'pipeline card, orders table and the detail header');
+
+    // Checked PER SCREEN, not as a total. A global count of calls passes even
+    // when one screen has been changed to work the name out for itself, since
+    // the other call sites keep the number up. Each place that puts a customer
+    // name on screen has to be asking the helper.
+    const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+    const screens = {
+      'pipeline card': between('function renderPipeline', 'function renderFilters'),
+      'orders row': between('function orderRow', 'function orderRows'),
+      'detail header': between('function renderDetail', 'function loadDelivery'),
+    };
+    Object.keys(screens).forEach((name) => {
+      t.assert(screens[name].length > 0, name + ' should still exist');
+      t.assert(/custName\(/.test(screens[name]), name + ' should ask custName');
+    });
+
     t.equal(/printavo && p\.printavo\.customerName/.test(app), false,
       'no screen should still be reading the old field directly');
   });

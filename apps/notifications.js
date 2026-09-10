@@ -59,8 +59,10 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
-import { APPS } from '../js/registry.js';
-import { TYPES, GENERAL_APP, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES } from '../lib/notifications/schema.js';
+import { APPS, canAccess } from '../js/registry.js';
+import {
+  TYPES, GENERAL_APP, LINK_TYPE_LABELS, linkTypesForApps, appForLinkType,
+} from '../lib/notifications/schema.js';
 import {
   DUE_FILTERS, STATUS_FILTERS, EMPTY_FILTERS,
   applyFilters, activeFilterCount, teamPool, todayLocalISO,
@@ -80,6 +82,21 @@ const LINK_ROUTE = {
   client: { app: 'backbone', view: 'dashboard' },
   expense: { app: 'traveltrack', view: 'expenses' },
   donation: { app: 'givinggauge', view: 'requests' },
+  // PromoPro already opened one order off a route segment before this existed:
+  // it is what the QR code on a printed purchase order points at. Nothing had
+  // to be built there, the link just had somewhere to go.
+  po: { app: 'promopro', view: 'orders' },
+  sticky: { app: 'stickies', view: 'board' },
+};
+
+// What the search box says it is searching. "by company name" was true while
+// every linkable record was a company; a purchase order is looked up by its
+// number, which is the thing printed on the sheet in somebody's hand.
+const LINK_SEARCH_HINT = {
+  inquiry: 'Search inquiries by company name',
+  client: 'Search clients by company name',
+  po: 'Search purchase orders by number or company',
+  sticky: 'Search the board by title',
 };
 
 const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
@@ -258,6 +275,8 @@ export default {
     cursor:pointer;font-family:inherit;padding:2px 9px 2px 7px;
   }
   .nt-pill.link:hover{border-color:var(--accent)}
+  .nt-pill.link.off{color:var(--faint);cursor:default}
+  .nt-pill.link.off:hover{border-color:var(--line)}
   .nt-pill.private{background:none;color:var(--faint);border:1px dashed var(--line)}
   .nt-private label{display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:400}
   .nt-private input{width:auto;margin:0}
@@ -571,7 +590,7 @@ export default {
         '<div class="nt-field"><label>Due date (optional)</label>' +
           '<input type="date" data-edit-due="' + esc(n.id) + '" value="' + esc(n.dueDate || '') + '"></div>' +
         '<div class="nt-field"><label>Link to a record (optional)</label>' +
-          linkPickerHtml(n.id, n.link || null) +
+          linkPickerHtml(n.id, n.link || null, n.appIds || []) +
         '</div>' +
         '<div class="nt-field"><label>What changed (optional, goes in History)</label>' +
           '<input type="text" data-edit-msg="' + esc(n.id) + '" maxlength="500" placeholder="e.g. wrong app selected the first time"></div>' +
@@ -602,12 +621,49 @@ export default {
       return root.querySelector('[data-link-picker="' + scope + '"]');
     }
 
-    function linkPickerHtml(scope, link) {
+    // WHICH APPS ARE TICKED RIGHT NOW, for this form. The create form keeps its
+    // selection in module state; an edit form keeps it in the DOM, because
+    // several can be open at once. Both answer the same question here so the
+    // picker below does not have to care which kind of form it is sitting in.
+    function selectedAppsFor(scope) {
+      return scope === 'new' ? [...formApps] : editSelected(scope, 'app');
+    }
+
+    /**
+     * THE PICKER FOLLOWS THE APP TAGS (Ryan's ask, Sep 2026).
+     *
+     * It used to offer every searchable record type regardless of what the
+     * notification was tagged with, so "which app is this about" and "which
+     * record is this about" were two separate questions that mostly had the
+     * same answer. Now ticking PromoPro is what puts purchase orders in the
+     * list, and an app with no linkable records offers none.
+     *
+     * `apps` is passed in rather than read off the DOM because the edit form
+     * builds its markup before any of it is on the page, so there would be
+     * nothing to read.
+     */
+    function linkPickerHtml(scope, link, apps) {
       const type = link ? link.type : '';
       const id = link ? link.id : '';
       const label = link ? link.label : '';
-      const typeOptions = PICKABLE_LINK_TYPES.map((t) =>
-        '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t]) + '</option>'
+      const offered = linkTypesForApps(apps || []);
+
+      // A stored link whose app has since been untagged still shows, so it can
+      // be seen and removed on purpose. Dropping it quietly on the next save
+      // would lose something somebody chose without ever saying so.
+      const orphaned = !!(type && !offered.includes(type));
+
+      if (!offered.length && !type) {
+        return '' +
+          '<div class="nt-link-picker" data-link-picker="' + esc(scope) + '"' +
+            ' data-link-type="" data-link-id="" data-link-label="">' +
+            '<div class="nt-link-empty">Tick an app with records to link to one. ' +
+            'BackBone, PromoPro and StickySituations have them.</div>' +
+          '</div>';
+      }
+
+      const typeOptions = offered.concat(orphaned ? [type] : []).map((t) =>
+        '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t] || t) + '</option>'
       ).join('');
       return '' +
         '<div class="nt-link-picker" data-link-picker="' + esc(scope) + '"' +
@@ -618,7 +674,7 @@ export default {
             '</select>' +
             (type && !id
               ? '<input type="text" data-link-search="' + esc(scope) + '" autocomplete="off" ' +
-                'placeholder="Search ' + esc((LINK_TYPE_LABELS[type] || '').toLowerCase()) + 's by company name">'
+                'placeholder="' + esc(LINK_SEARCH_HINT[type] || 'Search') + '">'
               : '') +
           '</div>' +
           (id
@@ -627,8 +683,21 @@ export default {
                 '<button type="button" data-link-clear="' + esc(scope) + '" title="Remove link">\u00d7</button>' +
               '</div>'
             : '') +
+          (orphaned
+            ? '<div class="nt-link-empty">This link is to an app that is no longer ticked above. ' +
+              'Tick it again or remove the link.</div>'
+            : '') +
           '<div class="nt-link-results" data-link-results="' + esc(scope) + '"></div>' +
         '</div>';
+    }
+
+    // Redraw one picker after the app tags changed. The selection survives if
+    // it still makes sense and is called out if it does not; see `orphaned`.
+    function refreshLinkTypes(scope) {
+      const el = pickerEl(scope);
+      if (!el) return;
+      const type = el.dataset.linkType, id = el.dataset.linkId, label = el.dataset.linkLabel;
+      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null, selectedAppsFor(scope));
     }
 
     function doLinkSearch(scope, type, q) {
@@ -658,7 +727,7 @@ export default {
     function applyLinkSelection(scope, type, id, label) {
       const el = pickerEl(scope);
       if (!el) return;
-      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null);
+      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null, selectedAppsFor(scope));
       if (type && !id) doLinkSearch(scope, type, '');
     }
 
@@ -690,12 +759,31 @@ export default {
       const typePills = (n.types || []).map((t) =>
         '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('') +
         (n.visibility === 'private' ? '<span class="nt-pill private">Just for me</span>' : '');
-      const linkPill = (n.link && n.link.id)
-        ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
-            ' data-link-id="' + esc(n.link.id) + '" title="Open in BackBone">' +
-            '\u2192 ' + esc(LINK_TYPE_LABELS[n.link.type] || n.link.type) + ': ' + esc(n.link.label || n.link.id) +
-          '</button>'
-        : '';
+      // A link is only a button for somebody who can open where it goes.
+      //
+      // This did not matter while every link went to BackBone, which the whole
+      // team can open. StickySituations is not: it is the build list, gated to
+      // the Admin flag or an explicit role grant. Notifications are visible to
+      // the team, so without this check a sticky-linked hand-off would show
+      // everybody an arrow that only ever produced a refusal. The label still
+      // shows, greyed and unclickable, because knowing the note exists is
+      // harmless and hiding it entirely makes the card read as if the link
+      // failed to save.
+      const linkApp = n.link ? appForLinkType(n.link.type) : '';
+      const linkOpenable = !!(linkApp && canAccess(ctx.perms, linkApp));
+      const linkAppName = linkApp ? appMeta(linkApp).name : '';
+      const linkText = '\u2192 ' + esc(LINK_TYPE_LABELS[n.link && n.link.type] || (n.link && n.link.type) || '') +
+        ': ' + esc((n.link && (n.link.label || n.link.id)) || '');
+      const linkPill = !(n.link && n.link.id)
+        ? ''
+        : linkOpenable
+          ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
+              ' data-link-id="' + esc(n.link.id) + '" title="Open in ' + esc(linkAppName) + '">' +
+              linkText +
+            '</button>'
+          : '<span class="nt-pill link off" title="You do not have access to ' + esc(linkAppName || 'that app') + '">' +
+              linkText +
+            '</span>';
       const histCount = Array.isArray(n.history) ? n.history.length : 0;
       const showReassign = openReassign.has(n.id);
       const showHistory = openHistory.has(n.id);
@@ -795,7 +883,7 @@ export default {
           '<div class="nt-field" id="nf-who-field"><label>Assign to</label><select id="nf-who"></select></div>' +
           '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
           '<div class="nt-field"><label>Link to a record (optional)</label>' +
-            linkPickerHtml('new', null) +
+            linkPickerHtml('new', null, [...formApps]) +
           '</div>' +
           '<button class="nt-btn primary" id="nf-save">Create</button>' +
           '<button class="nt-btn" id="nf-cancel">Cancel</button>' +
@@ -882,6 +970,7 @@ export default {
         const v = appToggle.dataset.app;
         if (formApps.has(v)) formApps.delete(v); else formApps.add(v);
         appToggle.setAttribute('aria-pressed', formApps.has(v));
+        refreshLinkTypes('new');
         return;
       }
 
@@ -935,6 +1024,10 @@ export default {
       if (editAppToggle) {
         const on = editAppToggle.getAttribute('aria-pressed') === 'true';
         editAppToggle.setAttribute('aria-pressed', String(!on));
+        // The link picker offers records from whichever apps are ticked, so it
+        // has to be redrawn the moment that changes.
+        const form = editAppToggle.closest('[data-edit-form]');
+        if (form) refreshLinkTypes(form.dataset.editForm);
         return;
       }
 

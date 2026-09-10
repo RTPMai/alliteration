@@ -274,10 +274,13 @@ const settingsRoute = read('api/promopro/settings.js');
     // that nothing had been added above the line it was looking for, so
     // adding a product line to the card broke a test about vendor replies.
     const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+    // The argument name is not the point and has changed once already: the
+    // orders table now passes a row projection rather than the PO directly.
+    // What matters is that both screens call the helper at all.
     const orders = between('function renderOrders', 'function lineRowHtml');
-    t.assert(/repliedSinceSend\(p\)/.test(orders), 'the orders list should mark it');
+    t.assert(/repliedSinceSend\(/.test(orders), 'the orders list should mark it');
     const pipe = between('function renderPipeline', 'function renderFilters');
-    t.assert(/repliedSinceSend\(p\)/.test(pipe), 'and so should the pipeline card');
+    t.assert(/repliedSinceSend\(/.test(pipe), 'and so should the pipeline card');
   });
 
   t.test('the reply notice says the chasing has stopped', () => {

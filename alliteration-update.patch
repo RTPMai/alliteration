@@ -1,0 +1,1894 @@
+From 33b97880da610ca0675c94baf686487d325db47c Mon Sep 17 00:00:00 2001
+From: Claude <claude@local>
+Date: Thu, 10 Sep 2026 14:49:41 +0000
+Subject: [PATCH] Qualify: raise the ceiling and explain a timeout;
+ Notifications: link to a PO or a sticky; fix three mis-named test files
+
+---
+ api/notifications.js                          |  75 +++-
+ api/qualify.js                                |  34 +-
+ api/sitework.js                               |  16 +-
+ apps/backbone/main.js                         |  13 +
+ apps/notifications.js                         | 123 ++++++-
+ apps/stickies.js                              |  49 +++
+ lib/notifications/schema.js                   |  55 ++-
+ lib/sitework/access.js                        |  38 ++
+ test/notification-links.test.cjs              | 347 ++++++++++++++++++
+ test/notifications.test.cjs                   |  25 +-
+ test/promopro-customer-name.test.cjs          |  19 +-
+ test/promopro-reply-capture.test.cjs          |   7 +-
+ ...table.test.cjs => promopro-table.test.cjs} |   0
+ test/qualify-timeout.test.cjs                 | 147 ++++++++
+ test/test_promopro-customer-name.test.cjs     | 271 --------------
+ test/test_promopro-reply-capture.test.cjs     | 307 ----------------
+ 16 files changed, 901 insertions(+), 625 deletions(-)
+ create mode 100644 lib/sitework/access.js
+ create mode 100644 test/notification-links.test.cjs
+ rename test/{test_promopro-table.test.cjs => promopro-table.test.cjs} (100%)
+ create mode 100644 test/qualify-timeout.test.cjs
+ delete mode 100644 test/test_promopro-customer-name.test.cjs
+ delete mode 100644 test/test_promopro-reply-capture.test.cjs
+
+diff --git a/api/notifications.js b/api/notifications.js
+index 9f32ad5..d8a7262 100644
+--- a/api/notifications.js
++++ b/api/notifications.js
+@@ -1,3 +1,4 @@
++// PUT IN: api/notifications.js
+ // api/notifications.js — shell-level notifications / to-do list.
+ //
+ // Every signed-in user can create a notification and assign it to anyone
+@@ -41,7 +42,9 @@
+ 
+ import { requireAuth } from "../lib/session.js";
+ import { getUser, getRole, listUsers } from "../lib/users.js";
+-import { validateNew, validatePatch, GENERAL_APP } from "../lib/notifications/schema.js";
++import {
++  validateNew, validatePatch, GENERAL_APP, PICKABLE_LINK_TYPES,
++} from "../lib/notifications/schema.js";
+ import {
+   listNotifications, saveNotification, nextNotificationId,
+   getNotification, updateNotification, deleteNotification,
+@@ -49,6 +52,10 @@ import {
+ } from "../lib/notifications/store.js";
+ import { KEYS, readKey, readRoster, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
+ import { listEmployees } from "../lib/crewcore/store.js";
++import { listPos } from "../lib/promopro/store.js";
++import { currentStage, stageLabel } from "../lib/promopro/schema.js";
++import { listNotes } from "../lib/sitework/store.js";
++import { canSeeBoard } from "../lib/sitework/access.js";
+ 
+ // Who reports to the caller, for the "My team" tab (Ryan's ask, Aug 25 2026).
+ //
+@@ -122,9 +129,65 @@ async function resolveTeam(sess, me, isAdmin) {
+ // search here matches that existing behavior rather than inventing a new
+ // restriction.
+ async function searchLinkable(type, q, sess) {
+-  if (!backboneConfigured()) return [];
+   const needle = String(q || "").trim().toLowerCase();
+ 
++  // PromoPro purchase orders (Ryan's ask, Sep 2026). Matched on the PO number
++  // as well as the company, because a PO number is the thing somebody is
++  // holding when they go looking: it is printed on the sheet and quoted in the
++  // vendor's reply.
++  //
++  // Open to any signed-in user, which is the same answer api/promopro/pos.js
++  // gives a GET. PromoPro read access is deliberately wide so an AM can answer
++  // "where is my order" without asking anyone, and a picker that was stricter
++  // than the app it points into would only ever hide orders the person can
++  // open by walking one screen over.
++  if (type === "po") {
++    const pos = await listPos();
++    return pos
++      .filter((p) => {
++        if (!needle) return true;
++        const number = String(p.poNumber || "").toLowerCase();
++        const company = String(
++          (p.printavo && (p.printavo.companyName || p.printavo.customerName)) || ""
++        ).toLowerCase();
++        return number.includes(needle) || company.includes(needle);
++      })
++      // Newest first. A PO being linked to is almost always a live one, and
++      // sorting by number would bury this year's orders under a decade of them.
++      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
++      .slice(0, 20)
++      .map((p) => ({
++        id: p.id,
++        label: p.poNumber || p.id,
++        sublabel: [
++          (p.printavo && (p.printavo.companyName || p.printavo.customerName)) || "Manual order",
++          stageLabel(currentStage(p), p),
++        ].filter(Boolean).join(" · "),
++      }));
++  }
++
++  // StickySituations notes. NOT open to everyone, unlike everything else here:
++  // the board is the build list and is gated to the Admin flag or an explicit
++  // role grant. The same check the board's own route uses, imported rather than
++  // rewritten, so tightening one tightens both.
++  if (type === "sticky") {
++    if (!(await canSeeBoard(sess))) return [];
++    const notes = await listNotes();
++    return notes
++      .filter((n) => {
++        if (n.status === "done") return false;
++        if (!needle) return true;
++        return String(n.title || "").toLowerCase().includes(needle) ||
++          String(n.detail || "").toLowerCase().includes(needle);
++      })
++      .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")))
++      .slice(0, 20)
++      .map((n) => ({ id: n.id, label: n.title || n.id, sublabel: n.appId || "" }));
++  }
++
++  // Everything below reads BackBone's own data.
++  if (!backboneConfigured()) return [];
++
+   if (type === "lead") {
+     const data = await readKey(KEYS.leads);
+     const leads = data && Array.isArray(data.leads) ? data.leads : [];
+@@ -277,9 +340,13 @@ export default async function handler(req, res) {
+       // people picker above — the "own" scope check for clients happens
+       // inside searchLinkable(), not here.
+       if (req.query && req.query.linkSearch) {
++        // The allowlist is PICKABLE_LINK_TYPES rather than a list written out
++        // again here. Two copies of "what can be searched" is how a type gets
++        // added to the picker and then refused by the route.
+         const type = String(req.query.linkSearch);
+-        if (!["lead", "inquiry", "client"].includes(type)) {
+-          return res.status(400).json({ error: "linkSearch must be lead, inquiry, or client" });
++        const allowed = PICKABLE_LINK_TYPES.concat(["lead"]); // lead: old links only
++        if (!allowed.includes(type)) {
++          return res.status(400).json({ error: "linkSearch must be one of: " + allowed.join(", ") });
+         }
+         const results = await searchLinkable(type, req.query.q, sess);
+         return res.status(200).json({ results });
+diff --git a/api/qualify.js b/api/qualify.js
+index ace5473..2332608 100644
+--- a/api/qualify.js
++++ b/api/qualify.js
+@@ -13,7 +13,20 @@
+ // made requireAuth undefined and 500'd every call.
+ import { requireAuth } from "../lib/session.js";
+ 
+-export const config = { api: { bodyParser: true }, maxDuration: 60 };
++// WHY 300 AND NOT 60. Research is not one request. The model asks for a web
++// search, waits, reads the results, decides whether to search again, and only
++// then writes 4,000 tokens of JSON. Three search rounds plus the write runs
++// past a minute often enough that 60 was failing rather than occasionally
++// failing. When Vercel hits maxDuration it kills the function and answers the
++// browser with its own gateway page, which is where "An error occurred with
++// your deployment (504)" came from: the handler never got to speak.
++export const config = { api: { bodyParser: true }, maxDuration: 300 };
++
++// Our own ceiling, comfortably inside Vercel's, so a run that is never going to
++// finish comes back as an error this file wrote and the screen can explain,
++// rather than a gateway page nobody can read. Never raise this above
++// maxDuration; the whole point is that we stop first.
++export const CALL_TIMEOUT_MS = 240000;
+ 
+ const SYSTEM_PROMPT = `You are a sales qualification and account intelligence agent for
+ P&M Apparel, a branded apparel, promotional products, uniforms, online stores, and
+@@ -253,9 +266,13 @@ What They Asked Us For: ${asked_for || "(they have not told us yet)"}
+ Research this company using web search, then return the JSON object exactly as
+ specified. Treat what they asked for as a clue about the company, not as a score.`;
+ 
++  const stopper = new AbortController();
++  const stopAt = setTimeout(function () { stopper.abort(); }, CALL_TIMEOUT_MS);
++
+   try {
+     const apiRes = await fetch("https://api.anthropic.com/v1/messages", {
+       method: "POST",
++      signal: stopper.signal,
+       headers: {
+         "Content-Type": "application/json",
+         "x-api-key": apiKey,
+@@ -305,6 +322,21 @@ specified. Treat what they asked for as a clue about the company, not as a score
+     parsed.qualified_at = new Date().toISOString();
+     return res.status(200).json(parsed);
+   } catch (e) {
++    // An abort is our own ceiling firing, not a fault. Said in words the screen
++    // can put in front of somebody, because the alternative is Vercel's gateway
++    // page and that tells a person nothing except that something is broken.
++    if (e && (e.name === "AbortError" || stopper.signal.aborted)) {
++      return res.status(504).json({
++        error: "The research took too long and was stopped",
++        timeout: true,
++        detail: "Gave up after " + Math.round(CALL_TIMEOUT_MS / 1000) + " seconds. " +
++          "Companies with little or no web presence are the slowest, because the " +
++          "research keeps looking. You can paste a qualification from a Claude chat " +
++          "instead, using the section at the bottom of this lead."
++      });
++    }
+     return res.status(500).json({ error: "Qualification request failed", detail: e.message });
++  } finally {
++    clearTimeout(stopAt);
+   }
+ }
+diff --git a/api/sitework.js b/api/sitework.js
+index 67b173d..39722a5 100644
+--- a/api/sitework.js
++++ b/api/sitework.js
+@@ -20,6 +20,7 @@
+ 
+ import { requireAuth } from "../lib/session.js";
+ import { getUser, permsFor } from "../lib/users.js";
++import { canSeeBoard, SITE_APP_ID } from "../lib/sitework/access.js";
+ import { validateNew, validatePatch, canDeleteNote } from "../lib/sitework/schema.js";
+ import {
+   listNotes, getNote, saveNote, updateNote, deleteNote, nextNoteId,
+@@ -36,17 +37,10 @@ const APP_IDS = [
+   "stitchsense", "marketmachine",
+ ];
+ 
+-const SITE_APP_ID = "stickies";
+-
+-async function isBuilder(sess) {
+-  if (!sess.username) return false;
+-  const user = await getUser(sess.username);
+-  if (!user) return false;
+-  if (user.superuser === true) return true;
+-  const perms = await permsFor(sess.username);
+-  const tabs = Array.isArray(perms && perms.tabs) ? perms.tabs : [];
+-  return tabs.includes(SITE_APP_ID);
+-}
++// The read gate moved to lib/sitework/access.js in Sep 2026, unchanged, because
++// api/notifications.js has to ask the same question now that a notification can
++// link to a sticky. One rule, two callers, rather than two copies that drift.
++const isBuilder = canSeeBoard;
+ 
+ /**
+  * Reading the board and changing it are different questions. Someone given the
+diff --git a/apps/backbone/main.js b/apps/backbone/main.js
+index 57f070f..f18b168 100644
+--- a/apps/backbone/main.js
++++ b/apps/backbone/main.js
+@@ -9630,6 +9630,19 @@ export async function start(ctx) {
+       }
+       if (noContact) warnNoContactAfterQual(lead);
+     } catch (e) {
++      // A timeout is the one failure here with a next step attached, so it is
++      // said in words rather than arriving as whatever text the platform
++      // produced. A function killed at its ceiling answers with the hosting
++      // provider's own gateway page ("An error occurred with your deployment"),
++      // which reads as broken and offers nobody anything to do about it.
++      if (e && (e.status === 504 || (e.body && e.body.timeout))) {
++        alert((e.body && e.body.detail) ||
++          "The research took too long and was stopped. Companies with little or no " +
++          "web presence are the slowest, because the research keeps looking. You can " +
++          "paste a qualification from a Claude chat instead, using the section at the " +
++          "bottom of this lead.");
++        return;
++      }
+       alert("Qualification request failed: " + e.message);
+     } finally {
+       btn.disabled = false;
+diff --git a/apps/notifications.js b/apps/notifications.js
+index 5ffd7c1..ca3eb0a 100644
+--- a/apps/notifications.js
++++ b/apps/notifications.js
+@@ -59,8 +59,10 @@
+  */
+ 
+ import { ENDPOINTS } from '../js/api.js';
+-import { APPS } from '../js/registry.js';
+-import { TYPES, GENERAL_APP, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES } from '../lib/notifications/schema.js';
++import { APPS, canAccess } from '../js/registry.js';
++import {
++  TYPES, GENERAL_APP, LINK_TYPE_LABELS, linkTypesForApps, appForLinkType,
++} from '../lib/notifications/schema.js';
+ import {
+   DUE_FILTERS, STATUS_FILTERS, EMPTY_FILTERS,
+   applyFilters, activeFilterCount, teamPool, todayLocalISO,
+@@ -80,6 +82,21 @@ const LINK_ROUTE = {
+   client: { app: 'backbone', view: 'dashboard' },
+   expense: { app: 'traveltrack', view: 'expenses' },
+   donation: { app: 'givinggauge', view: 'requests' },
++  // PromoPro already opened one order off a route segment before this existed:
++  // it is what the QR code on a printed purchase order points at. Nothing had
++  // to be built there, the link just had somewhere to go.
++  po: { app: 'promopro', view: 'orders' },
++  sticky: { app: 'stickies', view: 'board' },
++};
++
++// What the search box says it is searching. "by company name" was true while
++// every linkable record was a company; a purchase order is looked up by its
++// number, which is the thing printed on the sheet in somebody's hand.
++const LINK_SEARCH_HINT = {
++  inquiry: 'Search inquiries by company name',
++  client: 'Search clients by company name',
++  po: 'Search purchase orders by number or company',
++  sticky: 'Search the board by title',
+ };
+ 
+ const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
+@@ -258,6 +275,8 @@ export default {
+     cursor:pointer;font-family:inherit;padding:2px 9px 2px 7px;
+   }
+   .nt-pill.link:hover{border-color:var(--accent)}
++  .nt-pill.link.off{color:var(--faint);cursor:default}
++  .nt-pill.link.off:hover{border-color:var(--line)}
+   .nt-pill.private{background:none;color:var(--faint);border:1px dashed var(--line)}
+   .nt-private label{display:flex;align-items:center;gap:7px;cursor:pointer;font-weight:400}
+   .nt-private input{width:auto;margin:0}
+@@ -571,7 +590,7 @@ export default {
+         '<div class="nt-field"><label>Due date (optional)</label>' +
+           '<input type="date" data-edit-due="' + esc(n.id) + '" value="' + esc(n.dueDate || '') + '"></div>' +
+         '<div class="nt-field"><label>Link to a record (optional)</label>' +
+-          linkPickerHtml(n.id, n.link || null) +
++          linkPickerHtml(n.id, n.link || null, n.appIds || []) +
+         '</div>' +
+         '<div class="nt-field"><label>What changed (optional, goes in History)</label>' +
+           '<input type="text" data-edit-msg="' + esc(n.id) + '" maxlength="500" placeholder="e.g. wrong app selected the first time"></div>' +
+@@ -602,12 +621,49 @@ export default {
+       return root.querySelector('[data-link-picker="' + scope + '"]');
+     }
+ 
+-    function linkPickerHtml(scope, link) {
++    // WHICH APPS ARE TICKED RIGHT NOW, for this form. The create form keeps its
++    // selection in module state; an edit form keeps it in the DOM, because
++    // several can be open at once. Both answer the same question here so the
++    // picker below does not have to care which kind of form it is sitting in.
++    function selectedAppsFor(scope) {
++      return scope === 'new' ? [...formApps] : editSelected(scope, 'app');
++    }
++
++    /**
++     * THE PICKER FOLLOWS THE APP TAGS (Ryan's ask, Sep 2026).
++     *
++     * It used to offer every searchable record type regardless of what the
++     * notification was tagged with, so "which app is this about" and "which
++     * record is this about" were two separate questions that mostly had the
++     * same answer. Now ticking PromoPro is what puts purchase orders in the
++     * list, and an app with no linkable records offers none.
++     *
++     * `apps` is passed in rather than read off the DOM because the edit form
++     * builds its markup before any of it is on the page, so there would be
++     * nothing to read.
++     */
++    function linkPickerHtml(scope, link, apps) {
+       const type = link ? link.type : '';
+       const id = link ? link.id : '';
+       const label = link ? link.label : '';
+-      const typeOptions = PICKABLE_LINK_TYPES.map((t) =>
+-        '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t]) + '</option>'
++      const offered = linkTypesForApps(apps || []);
++
++      // A stored link whose app has since been untagged still shows, so it can
++      // be seen and removed on purpose. Dropping it quietly on the next save
++      // would lose something somebody chose without ever saying so.
++      const orphaned = !!(type && !offered.includes(type));
++
++      if (!offered.length && !type) {
++        return '' +
++          '<div class="nt-link-picker" data-link-picker="' + esc(scope) + '"' +
++            ' data-link-type="" data-link-id="" data-link-label="">' +
++            '<div class="nt-link-empty">Tick an app with records to link to one. ' +
++            'BackBone, PromoPro and StickySituations have them.</div>' +
++          '</div>';
++      }
++
++      const typeOptions = offered.concat(orphaned ? [type] : []).map((t) =>
++        '<option value="' + t + '"' + (t === type ? ' selected' : '') + '>' + esc(LINK_TYPE_LABELS[t] || t) + '</option>'
+       ).join('');
+       return '' +
+         '<div class="nt-link-picker" data-link-picker="' + esc(scope) + '"' +
+@@ -618,7 +674,7 @@ export default {
+             '</select>' +
+             (type && !id
+               ? '<input type="text" data-link-search="' + esc(scope) + '" autocomplete="off" ' +
+-                'placeholder="Search ' + esc((LINK_TYPE_LABELS[type] || '').toLowerCase()) + 's by company name">'
++                'placeholder="' + esc(LINK_SEARCH_HINT[type] || 'Search') + '">'
+               : '') +
+           '</div>' +
+           (id
+@@ -627,10 +683,23 @@ export default {
+                 '<button type="button" data-link-clear="' + esc(scope) + '" title="Remove link">\u00d7</button>' +
+               '</div>'
+             : '') +
++          (orphaned
++            ? '<div class="nt-link-empty">This link is to an app that is no longer ticked above. ' +
++              'Tick it again or remove the link.</div>'
++            : '') +
+           '<div class="nt-link-results" data-link-results="' + esc(scope) + '"></div>' +
+         '</div>';
+     }
+ 
++    // Redraw one picker after the app tags changed. The selection survives if
++    // it still makes sense and is called out if it does not; see `orphaned`.
++    function refreshLinkTypes(scope) {
++      const el = pickerEl(scope);
++      if (!el) return;
++      const type = el.dataset.linkType, id = el.dataset.linkId, label = el.dataset.linkLabel;
++      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null, selectedAppsFor(scope));
++    }
++
+     function doLinkSearch(scope, type, q) {
+       const resultsEl = root.querySelector('[data-link-results="' + scope + '"]');
+       if (!resultsEl) return;
+@@ -658,7 +727,7 @@ export default {
+     function applyLinkSelection(scope, type, id, label) {
+       const el = pickerEl(scope);
+       if (!el) return;
+-      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null);
++      el.outerHTML = linkPickerHtml(scope, type ? { type, id, label } : null, selectedAppsFor(scope));
+       if (type && !id) doLinkSearch(scope, type, '');
+     }
+ 
+@@ -690,12 +759,31 @@ export default {
+       const typePills = (n.types || []).map((t) =>
+         '<span class="' + typePillClass(t) + '">' + esc(typeLabel(t)) + '</span>').join('') +
+         (n.visibility === 'private' ? '<span class="nt-pill private">Just for me</span>' : '');
+-      const linkPill = (n.link && n.link.id)
+-        ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
+-            ' data-link-id="' + esc(n.link.id) + '" title="Open in BackBone">' +
+-            '\u2192 ' + esc(LINK_TYPE_LABELS[n.link.type] || n.link.type) + ': ' + esc(n.link.label || n.link.id) +
+-          '</button>'
+-        : '';
++      // A link is only a button for somebody who can open where it goes.
++      //
++      // This did not matter while every link went to BackBone, which the whole
++      // team can open. StickySituations is not: it is the build list, gated to
++      // the Admin flag or an explicit role grant. Notifications are visible to
++      // the team, so without this check a sticky-linked hand-off would show
++      // everybody an arrow that only ever produced a refusal. The label still
++      // shows, greyed and unclickable, because knowing the note exists is
++      // harmless and hiding it entirely makes the card read as if the link
++      // failed to save.
++      const linkApp = n.link ? appForLinkType(n.link.type) : '';
++      const linkOpenable = !!(linkApp && canAccess(ctx.perms, linkApp));
++      const linkAppName = linkApp ? appMeta(linkApp).name : '';
++      const linkText = '\u2192 ' + esc(LINK_TYPE_LABELS[n.link && n.link.type] || (n.link && n.link.type) || '') +
++        ': ' + esc((n.link && (n.link.label || n.link.id)) || '');
++      const linkPill = !(n.link && n.link.id)
++        ? ''
++        : linkOpenable
++          ? '<button type="button" class="nt-pill link" data-link-open data-link-type="' + esc(n.link.type) + '"' +
++              ' data-link-id="' + esc(n.link.id) + '" title="Open in ' + esc(linkAppName) + '">' +
++              linkText +
++            '</button>'
++          : '<span class="nt-pill link off" title="You do not have access to ' + esc(linkAppName || 'that app') + '">' +
++              linkText +
++            '</span>';
+       const histCount = Array.isArray(n.history) ? n.history.length : 0;
+       const showReassign = openReassign.has(n.id);
+       const showHistory = openHistory.has(n.id);
+@@ -795,7 +883,7 @@ export default {
+           '<div class="nt-field" id="nf-who-field"><label>Assign to</label><select id="nf-who"></select></div>' +
+           '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
+           '<div class="nt-field"><label>Link to a record (optional)</label>' +
+-            linkPickerHtml('new', null) +
++            linkPickerHtml('new', null, [...formApps]) +
+           '</div>' +
+           '<button class="nt-btn primary" id="nf-save">Create</button>' +
+           '<button class="nt-btn" id="nf-cancel">Cancel</button>' +
+@@ -882,6 +970,7 @@ export default {
+         const v = appToggle.dataset.app;
+         if (formApps.has(v)) formApps.delete(v); else formApps.add(v);
+         appToggle.setAttribute('aria-pressed', formApps.has(v));
++        refreshLinkTypes('new');
+         return;
+       }
+ 
+@@ -935,6 +1024,10 @@ export default {
+       if (editAppToggle) {
+         const on = editAppToggle.getAttribute('aria-pressed') === 'true';
+         editAppToggle.setAttribute('aria-pressed', String(!on));
++        // The link picker offers records from whichever apps are ticked, so it
++        // has to be redrawn the moment that changes.
++        const form = editAppToggle.closest('[data-edit-form]');
++        if (form) refreshLinkTypes(form.dataset.editForm);
+         return;
+       }
+ 
+diff --git a/apps/stickies.js b/apps/stickies.js
+index bc0fb0f..0ac1a8b 100644
+--- a/apps/stickies.js
++++ b/apps/stickies.js
+@@ -118,6 +118,10 @@ export default {
+     cursor:default;user-select:text;-webkit-user-select:text;
+   }
+   .sk-note[draggable="true"]{cursor:grabbing}
++  /* Where a link from a notification lands. An outline rather than a colour
++     change: a note's colour means something to whoever wrote it, and
++     recolouring one to say "over here" would overwrite that. */
++  .sk-note.hit{outline:2px solid var(--accent);outline-offset:2px}
+   .sk-grip{
+     flex:none;border:0;background:none;padding:0 2px;margin-top:1px;
+     color:inherit;opacity:.35;font-size:13px;line-height:1;cursor:grab;
+@@ -949,6 +953,51 @@ export default {
+       else openForm(null);
+     });
+ 
++    /**
++     * Open one note by id, from outside this closure.
++     *
++     * A notification can link to a sticky (Sep 2026), and following that link
++     * has to land on the note itself rather than on a board of forty where the
++     * one that was meant is somewhere below the fold.
++     *
++     * FILTERS GET CLEARED, not respected. Arriving at a board filtered to
++     * another app, or with Done hidden when the note has since been ticked
++     * off, would show a page with no sign of the thing that was linked, which
++     * reads exactly like a broken link. Being moved to "everything" is
++     * visible and undoable; an empty-looking board is not.
++     */
++    this._openNote = async (noteId) => {
++      const id = String(noteId);
++      if (!notes.length) await load();
++      const note = notes.find((n) => n.id === id);
++      if (!note) {
++        msg('That note could not be found. It may have been deleted since the link was made.', 'err');
++        return;
++      }
++      if (filterApp !== 'all' || (note.status === 'done' && !showDone)) {
++        filterApp = 'all';
++        if (note.status === 'done') showDone = true;
++        render();
++      }
++      const el = $('.sk-note[data-id="' + id.replace(/"/g, '') + '"]');
++      if (!el) return;
++      if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
++      // Long enough to catch the eye on a wall of notes that all look alike,
++      // short enough that it is gone before it becomes part of the furniture.
++      el.classList.add('hit');
++      setTimeout(() => el.classList.remove('hit'), 2200);
++    };
++
+     await load();
+   },
++
++  /**
++   * `param` is the third part of the route: #/stickies/board/<noteId>. Same
++   * mechanism PromoPro uses for a purchase order and ShopStock for a shelf
++   * label. The board is the only view, so there is nothing to switch, only a
++   * note to find.
++   */
++  showView(view, param) {
++    if (param && typeof this._openNote === 'function') this._openNote(String(param));
++  },
+ };
+diff --git a/lib/notifications/schema.js b/lib/notifications/schema.js
+index 8ad048a..e7f4728 100644
+--- a/lib/notifications/schema.js
++++ b/lib/notifications/schema.js
+@@ -43,17 +43,35 @@ export const STATUSES = ["open", "done"];
+ export const VISIBILITIES = ["team", "private"];
+ export const DEFAULT_VISIBILITY = "team";
+ 
+-// ---- Record link (Ryan's ask, Aug 2026) ---------------------------------
++// ---- Record link (Ryan's ask, Aug 2026; extended Sep 2026) --------------
+ // A notification can point at the specific record it's about. Started with
+ // BackBone (inquiry/lead/client); extended to TravelTrack expenses and
+ // GivingGauge donation decisions the same way, since both have the same
+ // "a decision happened, the person waiting on it should hear about it"
+-// shape as a lead handoff. Optional — plenty of notifications ("restock the
++// shape as a lead handoff. PromoPro purchase orders and StickySituations
++// notes joined in Sep 2026. Optional — plenty of notifications ("restock the
+ // coffee") have nothing to link to.
+-export const LINK_TYPES = ["inquiry", "lead", "client", "expense", "donation"];
++export const LINK_TYPES = [
++  "inquiry", "lead", "client", "expense", "donation", "po", "sticky",
++];
+ export const LINK_TYPE_LABELS = {
+   inquiry: "Inquiry", lead: "Lead", client: "Client",
+   expense: "Expense", donation: "Donation",
++  po: "Purchase Order", sticky: "Sticky",
++};
++
++// Which app each kind of record belongs to. This is what lets the picker follow
++// the app tag you already chose (Ryan's ask, Sep 2026): tag PromoPro and the
++// only thing offered to link is a purchase order, because "which app" and
++// "which record" were two separate questions asking the same thing.
++//
++// Adding a new linkable record kind is this table, a label above, a search
++// branch in api/notifications.js, and a route in apps/notifications.js. Four
++// lines, deliberately, so the next app is cheap.
++export const LINK_TYPE_APP = {
++  inquiry: "backbone", lead: "backbone", client: "backbone",
++  expense: "traveltrack", donation: "givinggauge",
++  po: "promopro", sticky: "stickies",
+ };
+ 
+ // The manual "Link to a record" picker on the create/edit form only offers
+@@ -66,7 +84,36 @@ export const LINK_TYPE_LABELS = {
+ // "lead" is deliberately NOT pickable any more. Inbox and Leads merged in Sep
+ // 2026, so offering both words made somebody choose between two names for one
+ // screen. The TYPE survives for the notifications already on file.
+-export const PICKABLE_LINK_TYPES = ["inquiry", "client"];
++//
++// Being pickable is not permission. Every branch of searchLinkable() answers
++// for itself who is allowed to search it — the sticky board is the sharp case,
++// since it is not open to the whole team the way the rest of these are.
++export const PICKABLE_LINK_TYPES = ["inquiry", "client", "po", "sticky"];
++
++/**
++ * The link types worth offering for a given set of app tags.
++ *
++ * An empty selection offers nothing rather than everything. A picker that
++ * ignores the tags is the thing this replaced, and offering all of them again
++ * the moment nothing is ticked would put it back for exactly the person who
++ * has not decided yet.
++ *
++ * "general" carries no records, so tagging only General offers no link. That is
++ * correct: "restock the front office coffee" has nothing to point at.
++ */
++export function linkTypesForApps(appIds) {
++  const tags = Array.isArray(appIds) ? appIds : [];
++  return PICKABLE_LINK_TYPES.filter((t) => tags.includes(LINK_TYPE_APP[t]));
++}
++
++/**
++ * The app a stored link opens into, or "" for a type this build does not know.
++ * Callers use it to decide whether to show the chip at all: a link into an app
++ * somebody cannot open is a button that only ever produces a refusal.
++ */
++export function appForLinkType(type) {
++  return LINK_TYPE_APP[type] || "";
++}
+ 
+ // "general" lets a notification carry an app tag without pointing at one of
+ // the nine registered apps — e.g. "restock the front office coffee." The
+diff --git a/lib/sitework/access.js b/lib/sitework/access.js
+new file mode 100644
+index 0000000..4716afe
+--- /dev/null
++++ b/lib/sitework/access.js
+@@ -0,0 +1,38 @@
++// PUT IN: lib/sitework/access.js
++// lib/sitework/access.js — who is allowed to see the StickySituations board.
++//
++// WHY THIS FILE EXISTS. The rule lived as a private helper inside
++// api/sitework.js, which was fine while exactly one route asked the question.
++// Notifications now asks it too, because a notification can link to a sticky
++// and the picker that searches the board has to answer "are you allowed to see
++// this" before it hands back titles. Copying the helper into a second route is
++// how the CrewCore trap happens: two copies of one rule, and the day somebody
++// tightens one, the other quietly keeps letting people in.
++//
++// The rule itself is unchanged: the per-account Admin flag, or a role with
++// "stickies" ticked in Settings. Exact and opt-in, no fallback that infers the
++// grant from a role's shape. This must keep agreeing with canAccess() in
++// js/registry.js; test/sitework.test.cjs checks that by calling both.
++//
++// ESM. lib/ never imports from api/.
++
++import { getUser, permsFor } from "../users.js";
++
++export const SITE_APP_ID = "stickies";
++
++/**
++ * Can this session see the build board at all?
++ *
++ * Reading the board and changing it are different questions; this one is read.
++ * Writes additionally require can_edit, which stays in api/sitework.js next to
++ * the writes it guards.
++ */
++export async function canSeeBoard(sess) {
++  if (!sess || !sess.username) return false;
++  const user = await getUser(sess.username);
++  if (!user) return false;
++  if (user.superuser === true) return true;
++  const perms = await permsFor(sess.username);
++  const tabs = Array.isArray(perms && perms.tabs) ? perms.tabs : [];
++  return tabs.includes(SITE_APP_ID);
++}
+diff --git a/test/notification-links.test.cjs b/test/notification-links.test.cjs
+new file mode 100644
+index 0000000..f550185
+--- /dev/null
++++ b/test/notification-links.test.cjs
+@@ -0,0 +1,347 @@
++// PUT IN: test/notification-links.test.cjs
++/**
++ * Notification record links: the picker follows the app tag, and two new
++ * kinds of record can be linked (Ryan's ask, Sep 2026).
++ *
++ * The picker used to offer every searchable record type no matter what the
++ * notification was tagged with, so "which app is this about" and "which record
++ * is this about" were two questions with mostly the same answer. Ticking
++ * PromoPro is now what puts purchase orders in the list.
++ *
++ * These are real calls: linkTypesForApps() is called for real, and the search
++ * goes through the real api/notifications.js route against a mocked store. The
++ * sticky branch especially, because that one is a permission question and the
++ * board is not open to the whole team the way the rest of these records are.
++ */
++
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++const P = 'alliteration:';
++const SW = 'sitework_data:';    // lib/sitework/schema.js KEY_PREFIX
++const PP = 'promopro_data:';    // lib/promopro/schema.js KEY_PREFIX
++
++/* ---- the store --------------------------------------------------------- */
++
++const kv = new Map();
++
++global.fetch = async (url, opts) => {
++  const u = String(url);
++  const get = u.match(/\/get\/(.+)$/);
++  if (get) {
++    const key = decodeURIComponent(get[1]);
++    return { ok: true, status: 200, json: async () => ({ result: kv.has(key) ? kv.get(key) : null }) };
++  }
++  if (u.endsWith('/pipeline')) {
++    const cmds = JSON.parse((opts && opts.body) || '[]');
++    const out = cmds.map(([op, key, val]) => {
++      if (op === 'SET') { kv.set(key, val); return { result: 'OK' }; }
++      if (op === 'DEL') { kv.delete(key); return { result: 1 }; }
++      if (op === 'INCR') {
++        const n = Number(kv.get(key) || 0) + 1;
++        kv.set(key, String(n));
++        return { result: n };
++      }
++      return { result: kv.has(key) ? kv.get(key) : null };
++    });
++    return { ok: true, status: 200, json: async () => out };
++  }
++  return { ok: true, status: 200, json: async () => ({ result: null }) };
++};
++
++process.env.KV_REST_API_URL = 'https://fake-upstash.test';
++process.env.KV_REST_API_TOKEN = 'fake-token';
++process.env.SESSION_SECRET = 'test-secret-for-notification-links';
++
++function seed() {
++  kv.clear();
++  kv.set(P + 'roles', JSON.stringify({
++    builder: { name: 'builder', label: 'Builder', apps: ['backbone', 'promopro', 'stickies'], can_edit: true },
++    office:  { name: 'office',  label: 'Office',  apps: ['backbone', 'promopro'], can_edit: true },
++  }));
++  kv.set(P + 'users', JSON.stringify({
++    ryan:   { username: 'ryan',   name: 'Ryan',   role: 'admin', superuser: true },
++    dana:   { username: 'dana',   name: 'Dana',   role: 'builder' },
++    amanda: { username: 'amanda', name: 'Amanda', role: 'office' },
++  }));
++
++  // Two purchase orders, one with a company on it and one raised by hand.
++  kv.set(PP + 'index', JSON.stringify(['po_a', 'po_b']));
++  kv.set(PP + 'po:po_a', JSON.stringify({
++    id: 'po_a', poNumber: '26-66608-9', createdAt: '2026-09-01T12:00:00.000Z',
++    vendorId: 'v1', submittedAt: '2026-09-01T13:00:00.000Z',
++    printavo: { companyName: 'Hy-Vee', customerName: 'Jill Stevents' },
++  }));
++  kv.set(PP + 'po:po_b', JSON.stringify({
++    id: 'po_b', poNumber: '26-70001-1', createdAt: '2026-09-05T12:00:00.000Z',
++    vendorId: 'v2', printavo: {},
++  }));
++
++  // Three stickies, one of them already done.
++  kv.set(SW + 'index', JSON.stringify(['SN-00001', 'SN-00002', 'SN-00003']));
++  kv.set(SW + 'note:SN-00001', JSON.stringify({
++    id: 'SN-00001', title: 'Fix the rail on mobile', status: 'open', color: 'yellow', appId: 'backbone',
++  }));
++  kv.set(SW + 'note:SN-00002', JSON.stringify({
++    id: 'SN-00002', title: 'Capacity view', detail: 'open jobs per AM', status: 'open', color: 'blue',
++  }));
++  kv.set(SW + 'note:SN-00003', JSON.stringify({
++    id: 'SN-00003', title: 'Favicon', status: 'done', color: 'grey',
++  }));
++}
++
++async function makeCookie(session) {
++  const s = await import(path.join(ROOT, 'lib/session.js'));
++  let header = null;
++  s.setSessionCookie({ setHeader: (k, v) => { if (k === 'Set-Cookie') header = v; } }, session);
++  return String(header).split('; ')[0];
++}
++
++function fakeRes() {
++  return {
++    statusCode: null, body: null, headers: {},
++    setHeader(k, v) { this.headers[k] = v; },
++    status(code) { this.statusCode = code; return this; },
++    json(payload) { this.body = payload; return this; },
++    end() { return this; },
++  };
++}
++
++async function search(route, as, type, q) {
++  const req = {
++    method: 'GET',
++    query: { linkSearch: type, q: q || '' },
++    headers: { cookie: await makeCookie(as) },
++  };
++  const res = fakeRes();
++  await route(req, res);
++  return res;
++}
++
++const RYAN   = { username: 'ryan',   name: 'Ryan',   role: 'admin' };
++const DANA   = { username: 'dana',   name: 'Dana',   role: 'builder' };
++const AMANDA = { username: 'amanda', name: 'Amanda', role: 'office' };
++
++async function check(name, fn) {
++  let err = null;
++  try { await fn(); } catch (e) { err = e; }
++  t.test(name, () => { if (err) throw err; });
++}
++
++(async () => {
++  const schema = await import(path.join(ROOT, 'lib/notifications/schema.js'));
++  const {
++    LINK_TYPES, LINK_TYPE_APP, PICKABLE_LINK_TYPES,
++    linkTypesForApps, appForLinkType, validateNew,
++  } = schema;
++  const registry = await import(path.join(ROOT, 'js/registry.js'));
++  const route = (await import(path.join(ROOT, 'api/notifications.js'))).default;
++
++  seed();
++
++  /* ---- the picker follows the app tags --------------------------------- */
++
++  t.test('ticking PromoPro offers purchase orders and nothing else', () => {
++    t.equal(JSON.stringify(linkTypesForApps(['promopro'])), JSON.stringify(['po']),
++      'PromoPro should offer exactly one kind of record');
++  });
++
++  t.test('ticking StickySituations offers stickies', () => {
++    t.equal(JSON.stringify(linkTypesForApps(['stickies'])), JSON.stringify(['sticky']),
++      'the board should offer its own notes');
++  });
++
++  t.test('BackBone still offers both of its pickable records', () => {
++    const got = linkTypesForApps(['backbone']);
++    t.assert(got.includes('inquiry') && got.includes('client'),
++      'BackBone should still offer inquiries and clients');
++    t.assert(!got.includes('lead'),
++      'lead stopped being pickable when Inbox and Leads merged; it must not come back through this door');
++  });
++
++  t.test('two apps ticked offers both apps records', () => {
++    const got = linkTypesForApps(['promopro', 'stickies']);
++    t.assert(got.includes('po') && got.includes('sticky'), 'expected records from both apps');
++    t.equal(got.length, 2, 'and nothing from apps that were not ticked');
++  });
++
++  t.test('nothing ticked offers nothing', () => {
++    // Offering everything when nothing is chosen puts back the picker this
++    // replaced, for exactly the person who has not decided yet.
++    t.equal(linkTypesForApps([]).length, 0, 'an empty selection should offer no link types');
++    t.equal(linkTypesForApps(null).length, 0, 'a missing selection should not throw or offer everything');
++  });
++
++  t.test('General carries no records', () => {
++    t.equal(linkTypesForApps(['general']).length, 0,
++      '"restock the front office coffee" has nothing to point at');
++  });
++
++  t.test('an app with no linkable records offers none', () => {
++    t.equal(linkTypesForApps(['mailme', 'websitewidget']).length, 0,
++      'only apps in LINK_TYPE_APP should offer anything');
++  });
++
++  /* ---- the table itself ------------------------------------------------ */
++
++  t.test('every link type names a real app', () => {
++    // A type whose app does not exist is a link that saves and then goes
++    // nowhere, which is worse than not offering it at all.
++    const ids = registry.APPS.map((a) => a.id)
++      .concat(registry.SITE_APPS.map((a) => a.id))
++      .concat(registry.SHELL_APPS.map((a) => a.id));
++    LINK_TYPES.forEach((type) => {
++      t.assert(ids.includes(LINK_TYPE_APP[type]),
++        'link type ' + type + ' points at "' + LINK_TYPE_APP[type] + '", which is not an app');
++    });
++  });
++
++  t.test('appForLinkType answers empty for a type this build does not know', () => {
++    t.equal(appForLinkType('nonsense'), '', 'an unknown type must not resolve to some app');
++    t.equal(appForLinkType(undefined), '', 'and neither must nothing at all');
++  });
++
++  t.test('every pickable type can actually be searched', () => {
++    // PICKABLE is what the form offers; the route allowlist is built from the
++    // same constant. This checks the third leg: a branch in searchLinkable.
++    const src = require('fs').readFileSync(path.join(ROOT, 'api/notifications.js'), 'utf8');
++    PICKABLE_LINK_TYPES.forEach((type) => {
++      t.assert(src.includes('type === "' + type + '"'),
++        'searchLinkable has no branch for pickable type ' + type);
++    });
++  });
++
++  /* ---- purchase orders ------------------------------------------------- */
++
++  await check('a PO is findable by its number', async () => {
++    const res = await search(route, AMANDA, 'po', '66608');
++    t.equal(res.statusCode, 200, 'the search should answer, got ' + res.statusCode);
++    const hits = res.body.results;
++    t.equal(hits.length, 1, 'expected one match on the PO number');
++    t.equal(hits[0].id, 'po_a', 'and it should be the order carrying that number');
++    t.assert(/Hy-Vee/.test(hits[0].sublabel), 'the company belongs on the line so two numbers can be told apart');
++  });
++
++  await check('a PO is findable by the company it is for', async () => {
++    // The number is what somebody holding the paper searches by; the company
++    // is what somebody who only knows whose order it is searches by.
++    const res = await search(route, AMANDA, 'po', 'hy-vee');
++    t.equal(res.body.results.length, 1, 'expected the Hy-Vee order');
++    t.equal(res.body.results[0].id, 'po_a', 'matched the wrong order');
++  });
++
++  await check('an empty search lists orders newest first', async () => {
++    const res = await search(route, AMANDA, 'po', '');
++    t.equal(res.body.results.length, 2, 'expected both orders');
++    t.equal(res.body.results[0].id, 'po_b',
++      'newest first: a PO being linked to is almost always a live one');
++  });
++
++  await check('a manual order with no company still gets a usable line', async () => {
++    const res = await search(route, AMANDA, 'po', '70001');
++    t.equal(res.body.results.length, 1, 'expected the manual order');
++    t.assert(!!res.body.results[0].label, 'a result with no label cannot be picked from a list');
++    t.assert(res.body.results[0].sublabel.includes('Manual order'),
++      'an order with no Printavo company should say so rather than showing a blank');
++  });
++
++  /* ---- stickies, which are NOT open to everyone ------------------------ */
++
++  await check('somebody without the board gets nothing back', async () => {
++    // Amanda can open PromoPro but has no Site Work grant. The titles on that
++    // board are the build plan, not a team hand-off list.
++    const res = await search(route, AMANDA, 'sticky', '');
++    t.equal(res.statusCode, 200, 'a refusal here is an empty list, not an error');
++    t.equal(res.body.results.length, 0, 'the board leaked to somebody without the grant');
++  });
++
++  await check('a role with the box ticked can search the board', async () => {
++    const res = await search(route, DANA, 'sticky', '');
++    t.assert(res.body.results.length > 0, 'a granted role should be able to search the board');
++  });
++
++  await check('the Admin flag can search the board', async () => {
++    const res = await search(route, RYAN, 'sticky', 'rail');
++    t.equal(res.body.results.length, 1, 'expected one match on the title');
++    t.equal(res.body.results[0].id, 'SN-00001', 'matched the wrong note');
++  });
++
++  await check('a note is findable by its detail, not just its title', async () => {
++    const res = await search(route, RYAN, 'sticky', 'open jobs');
++    t.equal(res.body.results.length, 1, 'the detail line should be searchable too');
++    t.equal(res.body.results[0].id, 'SN-00002', 'matched the wrong note');
++  });
++
++  await check('a note already ticked off is not offered', async () => {
++    // Linking a hand-off to a finished note points somebody at something that
++    // has already been dealt with.
++    const res = await search(route, RYAN, 'sticky', 'favicon');
++    t.equal(res.body.results.length, 0, 'a done note should not be offered as a link target');
++  });
++
++  /* ---- the route allowlist --------------------------------------------- */
++
++  await check('an unknown search type is refused', async () => {
++    const res = await search(route, RYAN, 'employee', '');
++    t.equal(res.statusCode, 400, 'an unknown linkSearch type should be refused, got ' + res.statusCode);
++  });
++
++  await check('lead can still be searched for links already on file', async () => {
++    const res = await search(route, RYAN, 'lead', '');
++    t.equal(res.statusCode, 200, 'lead left the picker but must not start erroring');
++  });
++
++  /* ---- storing one ----------------------------------------------------- */
++
++  t.test('a notification can carry a link to a purchase order', () => {
++    const { ok, record } = validateNew(
++      { title: 'Chase this one', types: ['task'], appIds: ['promopro'], assignedTo: 'ryan',
++        link: { type: 'po', id: 'po_a', label: '26-66608-9' } },
++      ['promopro', 'general'], ['ryan']
++    );
++    t.assert(ok, 'a PO link should validate');
++    t.equal(record.link.type, 'po', 'the link type should survive validation');
++    t.equal(record.link.id, 'po_a', 'the id should survive validation');
++  });
++
++  t.test('a notification can carry a link to a sticky', () => {
++    const { ok, record } = validateNew(
++      { title: 'This one graduated', types: ['task'], appIds: ['stickies'], assignedTo: 'ryan',
++        link: { type: 'sticky', id: 'SN-00002', label: 'Capacity view' } },
++      ['stickies', 'general'], ['ryan']
++    );
++    t.assert(ok, 'a sticky link should validate');
++    t.equal(record.link.id, 'SN-00002', 'the id should survive validation');
++  });
++
++  /* ---- where a link opens ---------------------------------------------- */
++
++  t.test('every link type has somewhere to open', () => {
++    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
++    const table = src.slice(src.indexOf('const LINK_ROUTE'), src.indexOf('const LINK_SEARCH_HINT'));
++    LINK_TYPES.forEach((type) => {
++      t.assert(new RegExp('\\b' + type + ':\\s*\\{').test(table),
++        'LINK_ROUTE has no destination for link type ' + type);
++    });
++  });
++
++  t.test('the pill checks access before offering to open anything', () => {
++    // Notifications are visible to the team; StickySituations is not. Without
++    // this the whole team sees an arrow that only ever produces a refusal.
++    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
++    t.assert(src.includes('canAccess(ctx.perms'),
++      'the link pill should ask canAccess before rendering as a button');
++    t.assert(src.includes('linkOpenable'),
++      'there should be a single decision about whether the link is openable');
++  });
++
++  t.test('StickySituations can open one note from a route param', () => {
++    const src = require('fs').readFileSync(path.join(ROOT, 'apps/stickies.js'), 'utf8');
++    t.assert(/showView\(view,\s*param\)/.test(src),
++      'stickies needs showView(view, param) or a link into it lands on the board and stops');
++    t.assert(src.includes('_openNote'), 'no way in from outside the mount closure');
++    t.assert(src.includes("filterApp = 'all'"),
++      'arriving at a filtered board with the linked note hidden reads exactly like a broken link');
++  });
++})();
+diff --git a/test/notifications.test.cjs b/test/notifications.test.cjs
+index 8478afb..0aa74cf 100644
+--- a/test/notifications.test.cjs
++++ b/test/notifications.test.cjs
+@@ -30,7 +30,8 @@ Promise.all([
+   import(path.join(ROOT, 'js/registry.js')),
+   import(path.join(ROOT, 'lib/users.js')),
+ ]).then(async ([schema, reg, users]) => {
+-  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES, keys } = schema;
++  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS,
++    LINK_TYPE_APP, PICKABLE_LINK_TYPES, keys } = schema;
+   const { APPS, SHELL_APPS } = reg;
+   const { DEFAULT_ROLES, permsFor } = users;
+ 
+@@ -89,14 +90,22 @@ Promise.all([
+ 
+   /* ---- link to a record (Ryan's ask, Aug 2026) --------------------------- */
+ 
+-  t.test('five link types total: inquiry, lead, client, expense, donation', () => {
+-    t.equal(LINK_TYPES.length, 5, 'expected exactly five link types');
+-    ['inquiry', 'lead', 'client', 'expense', 'donation'].forEach((v) =>
++  t.test('seven link types: the five BackBone/TravelTrack/GivingGauge ones plus po and sticky', () => {
++    t.equal(LINK_TYPES.length, 7, 'expected exactly seven link types');
++    ['inquiry', 'lead', 'client', 'expense', 'donation', 'po', 'sticky'].forEach((v) =>
+       t.assert(LINK_TYPES.includes(v), 'missing link type ' + v));
+     LINK_TYPES.forEach((v) =>
+       t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));
+   });
+ 
++  t.test('every link type says which app it opens into', () => {
++    // The picker filters on this table and the card decides whether to draw a
++    // clickable arrow from it. A type missing here is a link with nowhere to
++    // go, which is worse than not offering it: it saves and then does nothing.
++    LINK_TYPES.forEach((v) =>
++      t.assert(!!LINK_TYPE_APP[v], 'LINK_TYPE_APP has no app for link type ' + v));
++  });
++
+   t.test('only searchable types are pickable via manual search', () => {
+     // expense/donation only ever get attached automatically, by TravelTrack/
+     // GivingGauge themselves — there's no "search by company name" for them,
+@@ -106,8 +115,8 @@ Promise.all([
+     // "lead" left this list in Sep 2026 when Inbox and Leads merged. Offering
+     // both words made somebody choose between two names for one screen. It is
+     // still a STORABLE type, because notifications already on file carry it.
+-    t.equal(PICKABLE_LINK_TYPES.length, 2, 'expected exactly two pickable link types');
+-    ['inquiry', 'client'].forEach((v) =>
++    t.equal(PICKABLE_LINK_TYPES.length, 4, 'expected exactly four pickable link types');
++    ['inquiry', 'client', 'po', 'sticky'].forEach((v) =>
+       t.assert(PICKABLE_LINK_TYPES.includes(v), 'missing pickable link type ' + v));
+     t.assert(!PICKABLE_LINK_TYPES.includes('lead'),
+       'lead and inquiry are the same screen now; offering both is a choice with no meaning');
+@@ -418,8 +427,8 @@ t.test('js/shell.js forwards a param through goApp for cross-app deep links', ()
+ 
+ t.test('apps/notifications.js offers a link-to-a-record picker spanning all three link types', () => {
+   const src = read('apps/notifications.js');
+-  t.assert(src.includes('LINK_TYPES') && src.includes('LINK_TYPE_LABELS'),
+-    'notifications.js should import the link type constants from the schema');
++  t.assert(src.includes('LINK_TYPE_LABELS') && src.includes('linkTypesForApps'),
++    'notifications.js should take its link types and labels from the schema, not a local list');
+   t.assert(src.includes('linkPickerHtml'), 'no link picker markup helper found');
+   t.assert(src.includes('data-link-search') && src.includes('doLinkSearch'),
+     'the picker should support live search-as-you-type against the linkSearch endpoint');
+diff --git a/test/promopro-customer-name.test.cjs b/test/promopro-customer-name.test.cjs
+index 5e078e3..1ea758a 100644
+--- a/test/promopro-customer-name.test.cjs
++++ b/test/promopro-customer-name.test.cjs
+@@ -1,3 +1,4 @@
++// PUT IN: test/promopro-customer-name.test.cjs
+ // test/promopro-customer-name.test.cjs
+ /**
+  * PromoPro: the company, not the person who placed the order.
+@@ -208,8 +209,22 @@ const inv = (contact, extra) => Object.assign({
+ 
+   t.test('all three screens ask one helper, so they cannot disagree', () => {
+     t.assert(/const custName = \(p\) =>/.test(app));
+-    t.equal((app.match(/esc\(custName\(/g) || []).length >= 3, true,
+-      'pipeline card, orders table and the detail header');
++
++    // Checked PER SCREEN, not as a total. A global count of calls passes even
++    // when one screen has been changed to work the name out for itself, since
++    // the other call sites keep the number up. Each place that puts a customer
++    // name on screen has to be asking the helper.
++    const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
++    const screens = {
++      'pipeline card': between('function renderPipeline', 'function renderFilters'),
++      'orders row': between('function orderRow', 'function orderRows'),
++      'detail header': between('function renderDetail', 'function loadDelivery'),
++    };
++    Object.keys(screens).forEach((name) => {
++      t.assert(screens[name].length > 0, name + ' should still exist');
++      t.assert(/custName\(/.test(screens[name]), name + ' should ask custName');
++    });
++
+     t.equal(/printavo && p\.printavo\.customerName/.test(app), false,
+       'no screen should still be reading the old field directly');
+   });
+diff --git a/test/promopro-reply-capture.test.cjs b/test/promopro-reply-capture.test.cjs
+index 3606645..472b027 100644
+--- a/test/promopro-reply-capture.test.cjs
++++ b/test/promopro-reply-capture.test.cjs
+@@ -274,10 +274,13 @@ const settingsRoute = read('api/promopro/settings.js');
+     // that nothing had been added above the line it was looking for, so
+     // adding a product line to the card broke a test about vendor replies.
+     const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
++    // The argument name is not the point and has changed once already: the
++    // orders table now passes a row projection rather than the PO directly.
++    // What matters is that both screens call the helper at all.
+     const orders = between('function renderOrders', 'function lineRowHtml');
+-    t.assert(/repliedSinceSend\(p\)/.test(orders), 'the orders list should mark it');
++    t.assert(/repliedSinceSend\(/.test(orders), 'the orders list should mark it');
+     const pipe = between('function renderPipeline', 'function renderFilters');
+-    t.assert(/repliedSinceSend\(p\)/.test(pipe), 'and so should the pipeline card');
++    t.assert(/repliedSinceSend\(/.test(pipe), 'and so should the pipeline card');
+   });
+ 
+   t.test('the reply notice says the chasing has stopped', () => {
+diff --git a/test/test_promopro-table.test.cjs b/test/promopro-table.test.cjs
+similarity index 100%
+rename from test/test_promopro-table.test.cjs
+rename to test/promopro-table.test.cjs
+diff --git a/test/qualify-timeout.test.cjs b/test/qualify-timeout.test.cjs
+new file mode 100644
+index 0000000..b9fb3c0
+--- /dev/null
++++ b/test/qualify-timeout.test.cjs
+@@ -0,0 +1,147 @@
++// PUT IN: test/qualify-timeout.test.cjs
++/**
++ * Lead qualification: what happens when the research runs long.
++ *
++ * Sep 2026. The button was failing with "An error occurred with your
++ * deployment (504)". That is the hosting platform's own page, not this app
++ * talking: the function was killed at its 60 second ceiling with the research
++ * still in flight, so the handler never got to say anything.
++ *
++ * Two things are checked here. That the ceiling is high enough for work that
++ * involves several rounds of web search, and that when a run really is
++ * hopeless the answer is a message a person can act on rather than a gateway
++ * page. The second one matters more: a timeout with a next step attached is a
++ * nuisance, a timeout with no explanation is a report that the button is
++ * broken.
++ */
++
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++
++process.env.SESSION_SECRET = 'test-secret-for-qualify-timeout';
++process.env.ANTHROPIC_API_KEY = 'test-key-not-used';
++
++async function makeCookie(session) {
++  const s = await import(path.join(ROOT, 'lib/session.js'));
++  let header = null;
++  s.setSessionCookie({ setHeader: (k, v) => { if (k === 'Set-Cookie') header = v; } }, session);
++  return String(header).split('; ')[0];
++}
++
++function fakeRes() {
++  return {
++    statusCode: null, body: null, headers: {},
++    setHeader(k, v) { this.headers[k] = v; },
++    status(code) { this.statusCode = code; return this; },
++    json(payload) { this.body = payload; return this; },
++    end() { return this; },
++  };
++}
++
++async function check(name, fn) {
++  let err = null;
++  try { await fn(); } catch (e) { err = e; }
++  t.test(name, () => { if (err) throw err; });
++}
++
++(async () => {
++  const mod = await import(path.join(ROOT, 'api/qualify.js'));
++  const route = mod.default;
++  const { config, CALL_TIMEOUT_MS } = mod;
++
++  const RYAN = { username: 'ryan', name: 'Ryan', role: 'admin' };
++
++  async function post(body, fetchImpl) {
++    global.fetch = fetchImpl;
++    const req = {
++      method: 'POST',
++      query: {},
++      body,
++      headers: { cookie: await makeCookie(RYAN) },
++    };
++    const res = fakeRes();
++    await route(req, res);
++    return res;
++  }
++
++  /* ---- the ceilings ----------------------------------------------------- */
++
++  t.test('the function is allowed longer than one round of research takes', () => {
++    // 60 was the old value and it was not a near miss: the screen itself tells
++    // people to expect 15 to 30 seconds, and three rounds of web search plus
++    // writing 4,000 tokens of JSON goes past a minute often enough that this
++    // failed rather than occasionally failed.
++    t.assert(config.maxDuration >= 300,
++      'maxDuration is ' + config.maxDuration + ', which is what produced the 504');
++  });
++
++  t.test('we stop before the platform does', () => {
++    // The whole point of our own ceiling is that it fires first. If it is ever
++    // raised past maxDuration it does nothing at all, and the failure goes back
++    // to being a gateway page.
++    t.assert(CALL_TIMEOUT_MS / 1000 < config.maxDuration,
++      'our timeout (' + (CALL_TIMEOUT_MS / 1000) + 's) must be under maxDuration (' +
++      config.maxDuration + 's) or it never fires');
++  });
++
++  /* ---- what a timeout looks like from the screen ------------------------ */
++
++  await check('a run that gets stopped answers 504 with an explanation', async () => {
++    const res = await post({ company_name: 'Fake Person Co' }, async () => {
++      const err = new Error('The operation was aborted');
++      err.name = 'AbortError';
++      throw err;
++    });
++    t.equal(res.statusCode, 504, 'expected 504, got ' + res.statusCode);
++    t.equal(res.body.timeout, true, 'the screen needs to tell a timeout from a crash');
++    t.assert(/paste/i.test(res.body.detail),
++      'a timeout is the one failure with a next step, so the message should name it');
++  });
++
++  await check('a real failure is still reported as one', async () => {
++    // A timeout and a broken key are different problems. Reporting everything
++    // as "took too long" would send somebody looking at the wrong thing.
++    const res = await post({ company_name: 'Fake Person Co' }, async () => {
++      throw new Error('getaddrinfo ENOTFOUND api.anthropic.com');
++    });
++    t.equal(res.statusCode, 500, 'a network failure is not a timeout, got ' + res.statusCode);
++    t.assert(!res.body.timeout, 'a network failure must not claim to be a timeout');
++  });
++
++  await check('an error from Anthropic still comes back as one', async () => {
++    const res = await post({ company_name: 'Fake Person Co' }, async () => ({
++      ok: false, status: 401, text: async () => 'invalid x-api-key',
++    }));
++    t.equal(res.statusCode, 502, 'expected the upstream error path, got ' + res.statusCode);
++  });
++
++  await check('a good run is unaffected', async () => {
++    const payload = { company_overview: { company_name: 'Hy-Vee', website: 'hy-vee.com' } };
++    const res = await post({ company_name: 'Hy-Vee' }, async () => ({
++      ok: true,
++      status: 200,
++      json: async () => ({ content: [{ type: 'text', text: JSON.stringify(payload) }] }),
++    }));
++    t.equal(res.statusCode, 200, 'a normal answer should still be a normal answer');
++    t.equal(res.body.company_overview.company_name, 'Hy-Vee', 'the parsed JSON should come through');
++    t.assert(!!res.body.qualified_at, 'the stamp should still be added');
++  });
++
++  await check('the abort signal is actually handed to the request', async () => {
++    // Without this the timer fires and nothing listens, so the call runs on
++    // until the platform kills it and we are back where we started.
++    let sawSignal = false;
++    await post({ company_name: 'Hy-Vee' }, async (url, opts) => {
++      sawSignal = !!(opts && opts.signal);
++      return { ok: true, status: 200, json: async () => ({ content: [{ type: 'text', text: '{}' }] }) };
++    });
++    t.assert(sawSignal, 'fetch was called without an abort signal, so the timeout cannot stop it');
++  });
++
++  await check('the company name is still required', async () => {
++    const res = await post({}, async () => { throw new Error('should not be called'); });
++    t.equal(res.statusCode, 400, 'a request with no company should be refused before any billing happens');
++  });
++})();
+diff --git a/test/test_promopro-customer-name.test.cjs b/test/test_promopro-customer-name.test.cjs
+deleted file mode 100644
+index 1ea758a..0000000
+--- a/test/test_promopro-customer-name.test.cjs
++++ /dev/null
+@@ -1,271 +0,0 @@
+-// PUT IN: test/promopro-customer-name.test.cjs
+-// test/promopro-customer-name.test.cjs
+-/**
+- * PromoPro: the company, not the person who placed the order.
+- *
+- * Printavo hangs a job off a CONTACT and that contact off a CUSTOMER. The
+- * lookup only ever asked for the contact, so "Jill Stevents" appeared on a
+- * pipeline card, in the orders table, and on the purchase order emailed to
+- * the vendor, everywhere "Hy-Vee" belonged. Nothing was broken enough to
+- * throw; it was just the wrong name, confidently.
+- *
+- * normalizeInvoice is called for real below. The risky part is not the
+- * mapping though, it is the QUERY: GraphQL validates the whole thing before
+- * running it, so one field name this account does not have returns no invoice
+- * at all rather than an invoice missing a company. The ladder is what keeps
+- * that from being a broken autofill, and the last rung of it is checked here
+- * against the exact shape that worked before.
+- */
+-
+-const fs = require('fs');
+-const path = require('path');
+-const t = require('./harness.cjs');
+-
+-const ROOT = path.join(__dirname, '..');
+-const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+-
+-const lookupSrc = read('lib/promopro/printavo-lookup.js');
+-const app = read('apps/promopro.js');
+-const posRoute = read('api/promopro/pos.js');
+-
+-const inv = (contact, extra) => Object.assign({
+-  id: 'inv_1',
+-  visualId: 66848,
+-  contact,
+-  lineItemGroups: { nodes: [] },
+-}, extra || {});
+-
+-(async () => {
+-  const lookup = await import('../lib/promopro/printavo-lookup.js');
+-  const doc = await import('../lib/promopro/document.js');
+-  const schema = await import('../lib/promopro/schema.js');
+-
+-  /* ---- reading the invoice -------------------------------------------- */
+-
+-  t.test('the company comes off the contact parent, not the contact', () => {
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'Jill Stevents', customer: { id: 'c1', companyName: 'Hy-Vee' } }));
+-    t.equal(r.companyName, 'Hy-Vee');
+-    t.equal(r.contactName, 'Jill Stevents');
+-  });
+-
+-  t.test('the one name to show is the company', () => {
+-    // Every screen already reads customerName. Putting the company there is
+-    // what fixes the pipeline card, the table and the PO in one move.
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'Jill Stevents', customer: { companyName: 'Hy-Vee' } }));
+-    t.equal(r.customerName, 'Hy-Vee');
+-  });
+-
+-  t.test('a buyer with no company shows as themselves, not as blank', () => {
+-    // A real individual customer exists. A blank card is worse than a name.
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'Macy Denbeste' }));
+-    t.equal(r.customerName, 'Macy Denbeste');
+-    t.equal(r.companyName, '');
+-    t.equal(r.contactName, 'Macy Denbeste');
+-  });
+-
+-  t.test('a company object that calls its name field name still works', () => {
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'X', customer: { name: 'Ankeny Schools' } }));
+-    t.equal(r.customerName, 'Ankeny Schools');
+-  });
+-
+-  t.test('a customer hanging off the invoice itself is also read', () => {
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'X' }, { customer: { companyName: 'Casey\'s' } }));
+-    t.equal(r.companyName, "Casey's");
+-  });
+-
+-  t.test('an invoice with no contact at all does not throw', () => {
+-    const r = lookup.normalizeInvoice(inv(null));
+-    t.equal(r.customerName, '');
+-    t.equal(r.companyName, '');
+-  });
+-
+-  t.test('an empty company name does not beat a real person name', () => {
+-    const r = lookup.normalizeInvoice(inv({ fullName: 'Jill Stevents', customer: { id: 'c1', companyName: '' } }));
+-    t.equal(r.customerName, 'Jill Stevents', 'a blank company must not win the fallback');
+-  });
+-
+-  /* ---- the query ladder ------------------------------------------------ */
+-
+-  t.test('the last rung is exactly the query that worked before', () => {
+-    // This is the whole safety property. If every company shape is rejected
+-    // by this account, autofill must land back where it was this morning,
+-    // not on a broken lookup.
+-    t.assert(/{ name: "contact-only", fields: "contact { fullName email }" }/.test(lookupSrc),
+-      'the bottom rung should be the pre-existing selection, unchanged');
+-  });
+-
+-  t.test('the ladder is tried richest first', () => {
+-    const block = lookupSrc.slice(lookupSrc.indexOf('const PARTY_FIELD_SETS'), lookupSrc.indexOf('function invoiceQuery'));
+-    const order = ['companyName', 'customer { id name }', 'contact { fullName email }'];
+-    let at = -1;
+-    order.forEach((s) => {
+-      const i = block.indexOf(s);
+-      t.assert(i > at, 'out of order: ' + s);
+-      at = i;
+-    });
+-  });
+-
+-  t.test('a real failure stops the ladder instead of spending six requests', () => {
+-    const fn = lookupSrc.slice(lookupSrc.indexOf('async function getFromRoot'));
+-    t.assert(/if \(!isSchemaError\(e\.message\)\) return/.test(fn.slice(0, 2500)),
+-      'an auth error or an outage is not something to retry with fewer fields');
+-  });
+-
+-  t.test('which rung answered is reported back', () => {
+-    // The ladder is insurance, not a permanent state. partyVia is how the
+-    // first real lookup after deploy settles the shape so it can be trimmed.
+-    t.assert(/partyVia/.test(lookupSrc));
+-  });
+-
+-  t.test('the job picker searches with the company too', () => {
+-    const start = lookupSrc.indexOf('const SEARCH_PARTY_SETS');
+-    const sets = lookupSrc.slice(start, lookupSrc.indexOf('];', start) + 2);
+-    t.assert(/companyName/.test(sets), 'picking a job by contact name is the same problem one step earlier');
+-    t.assert(/contact { fullName }/.test(sets), 'and it needs the same bottom rung');
+-  });
+-
+-  /* ---- what gets stored ------------------------------------------------ */
+-
+-  t.test('a purchase order keeps the company and the person apart', () => {
+-    const r = schema.validateNew({
+-      vendorId: 'v1',
+-      accountManager: 'EMP-1',
+-      lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
+-      printavo: { invoiceNumber: '66848', id: 'inv_1', customerName: 'Hy-Vee', companyName: 'Hy-Vee', contactName: 'Jill Stevents' },
+-    }, ['v1'], ['EMP-1']);
+-    t.assert(r.ok, (r.errors || []).join('; '));
+-    t.equal(r.record.printavo.companyName, 'Hy-Vee');
+-    t.equal(r.record.printavo.contactName, 'Jill Stevents');
+-  });
+-
+-  t.test('an order raised before the split still validates', () => {
+-    // No companyName in the payload. It must not become a required field:
+-    // that would refuse every reorder and every older client.
+-    const r = schema.validateNew({
+-      vendorId: 'v1',
+-      accountManager: 'EMP-1',
+-      lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
+-      printavo: { invoiceNumber: '66848', customerName: 'Jill Stevents' },
+-    }, ['v1'], ['EMP-1']);
+-    t.assert(r.ok, (r.errors || []).join('; '));
+-    t.equal(r.record.printavo.companyName, '');
+-    t.equal(r.record.printavo.customerName, 'Jill Stevents');
+-  });
+-
+-  /* ---- the printed and emailed document -------------------------------- */
+-
+-  const po = {
+-    poNumber: '26-66848-4',
+-    createdAt: '2026-08-28T10:00:00Z',
+-    shipTo: 'Polk City',
+-    lines: [{ description: 'Mug', qty: 10, unitCost: 2 }],
+-    printavo: { id: 'inv_1', invoiceNumber: '66848', companyName: 'Hy-Vee', contactName: 'Jill Stevents', customerName: 'Hy-Vee' },
+-  };
+-  const opts = { vendor: { name: 'ALPI International', email: 'a@alpi.example' }, brand: { name: 'P&M Apparel' }, sender: { name: 'Ryan' } };
+-
+-  t.test('the company prints directly under the PO number', () => {
+-    const html = doc.renderPoHtml(po, opts);
+-    const num = html.indexOf('26-66848-4');
+-    const company = html.indexOf('Hy-Vee');
+-    t.assert(num > -1 && company > num, 'the company should follow the number');
+-    t.assert(company - num < 200, 'and sit under it, not somewhere else on the page');
+-  });
+-
+-  t.test('the buyer personal name is not printed at the vendor', () => {
+-    const html = doc.renderPoHtml(po, opts);
+-    t.equal(html.includes('Jill Stevents'), false,
+-      'the person is ours to know; the vendor needs the company');
+-  });
+-
+-  t.test('the plain-text copy says the same thing as the page', () => {
+-    const txt = doc.renderEmailText(po, opts);
+-    t.assert(/Purchase Order # : 26-66848-4/.test(txt));
+-    t.assert(/For: Hy-Vee/.test(txt), 'a summary that answers different questions than the page is how the two drift');
+-  });
+-
+-  t.test('an order raised before the split still prints a name', () => {
+-    const old = { ...po, printavo: { id: 'i', invoiceNumber: '66848', customerName: 'Jill Stevents' } };
+-    t.assert(doc.renderPoHtml(old, opts).includes('Jill Stevents'),
+-      'an out-of-date name beats a blank line on a document going to a vendor');
+-  });
+-
+-  t.test('a manual order prints nothing there rather than the words Manual order', () => {
+-    const manual = { ...po, printavo: null };
+-    const html = doc.renderPoHtml(manual, opts);
+-    t.equal(html.includes('Manual order'), false);
+-    const txt = doc.renderEmailText(manual, opts);
+-    t.equal(/^For:/m.test(txt), false, 'no empty For line');
+-  });
+-
+-  t.test('the new line adds no hex of its own', () => {
+-    // The document is TOKEN-EXEMPT because mail clients cannot read tokens,
+-    // but that is not a licence to add more.
+-    const block = read('lib/promopro/document.js');
+-    const added = block.slice(block.indexOf('WHOSE JOB THIS IS'), block.indexOf('const logo'));
+-    t.equal(/#[0-9a-fA-F]{6}/.test(added), false);
+-  });
+-
+-  /* ---- the screens ----------------------------------------------------- */
+-
+-  t.test('all three screens ask one helper, so they cannot disagree', () => {
+-    t.assert(/const custName = \(p\) =>/.test(app));
+-
+-    // Checked PER SCREEN, not as a total. A global count of calls passes even
+-    // when one screen has been changed to work the name out for itself, since
+-    // the other call sites keep the number up. Each place that puts a customer
+-    // name on screen has to be asking the helper.
+-    const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+-    const screens = {
+-      'pipeline card': between('function renderPipeline', 'function renderFilters'),
+-      'orders row': between('function orderRow', 'function orderRows'),
+-      'detail header': between('function renderDetail', 'function loadDelivery'),
+-    };
+-    Object.keys(screens).forEach((name) => {
+-      t.assert(screens[name].length > 0, name + ' should still exist');
+-      t.assert(/custName\(/.test(screens[name]), name + ' should ask custName');
+-    });
+-
+-    t.equal(/printavo && p\.printavo\.customerName/.test(app), false,
+-      'no screen should still be reading the old field directly');
+-  });
+-
+-  t.test('the detail shows the person as well, where there is room', () => {
+-    t.assert(/const custContact/.test(app));
+-    t.assert(/c !== custName\(p\)/.test(app),
+-      'an old record has the person in both fields and should not print it twice');
+-  });
+-
+-  /* ---- fixing the orders already on the board -------------------------- */
+-
+-  t.test('refresh re-reads Printavo rather than letting anyone type a name', () => {
+-    const block = posRoute.slice(posRoute.indexOf('refreshPrintavo'));
+-    t.assert(/getInvoice/.test(block.slice(0, 1600)), 'Printavo owns the name');
+-    t.assert(!/body\.companyName/.test(posRoute), 'a typed-in name is a second version that drifts');
+-  });
+-
+-  t.test('refresh touches the names and nothing else', () => {
+-    const block = posRoute.slice(posRoute.indexOf('refreshPrintavo'), posRoute.indexOf('refreshPrintavo') + 2000);
+-    t.assert(/companyName: invoice\.companyName/.test(block));
+-    t.assert(/contactName: invoice\.contactName/.test(block));
+-    t.equal(/lines:|unitCost|neededBy:/.test(block), false,
+-      'a PO is a snapshot of what the vendor was told; a refresh must not rewrite it');
+-  });
+-
+-  t.test('refresh on an unlinked order is refused with a reason', () => {
+-    const block = posRoute.slice(posRoute.indexOf('refreshPrintavo'));
+-    t.assert(/not linked to a Printavo job/.test(block.slice(0, 900)));
+-  });
+-
+-  t.test('a Printavo outage leaves the order alone and says so', () => {
+-    const block = posRoute.slice(posRoute.indexOf('refreshPrintavo'), posRoute.indexOf('refreshPrintavo') + 2000);
+-    t.assert(/The order is unchanged|did not answer/.test(block));
+-    t.assert(/status\(200\)/.test(block), 'an outage should not look like a broken app');
+-  });
+-
+-  t.test('the button only appears where it could do something', () => {
+-    t.assert(/canEdit && po\.printavo && po\.printavo\.id/.test(app),
+-      'a manual order has no job to re-read');
+-  });
+-
+-  process.exit(t.report());
+-})();
+diff --git a/test/test_promopro-reply-capture.test.cjs b/test/test_promopro-reply-capture.test.cjs
+deleted file mode 100644
+index 472b027..0000000
+--- a/test/test_promopro-reply-capture.test.cjs
++++ /dev/null
+@@ -1,307 +0,0 @@
+-// PUT IN: test/promopro-reply-capture.test.cjs
+-// test/promopro-reply-capture.test.cjs
+-/**
+- * PromoPro vendor reply capture.
+- *
+- * A PO goes out with Reply-To set to po+<poNumber>@<capture domain>, the
+- * vendor replies, and the message lands on the order instead of in one
+- * person's inbox.
+- *
+- * Two things here can fail INVISIBLY, and both are tested by calling the real
+- * functions rather than reading the source:
+- *
+- *   1. A capture domain that is empty or is not a domain. Reply-To quietly
+- *      falls back to a person, every PO looks perfectly sent, and no reply is
+- *      ever captured. Nothing about that is visible from the outside.
+- *   2. A PO number matched case-sensitively. A reply arriving as
+- *      PO+26-66608-9@ goes to the unmatched pile, which from the outside is
+- *      identical to a vendor who never replied.
+- */
+-
+-const fs = require('fs');
+-const path = require('path');
+-const t = require('./harness.cjs');
+-
+-const ROOT = path.join(__dirname, '..');
+-const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+-
+-const app = read('apps/promopro.js');
+-const sendRoute = read('api/promopro/send.js');
+-const inboundRoute = read('api/promopro/inbound.js');
+-const settingsRoute = read('api/promopro/settings.js');
+-
+-(async () => {
+-  const s = await import('../lib/promopro/schema.js');
+-  const inbound = await import('../api/promopro/inbound.js');
+-
+-  const on = { captureReplies: true, captureDomain: 'po.pmapparel.com' };
+-  const po = { poNumber: '26-66608-9' };
+-
+-  /* ---- what Reply-To will actually be -------------------------------- */
+-
+-  t.test('capture on gives the per-PO address', () => {
+-    t.equal(s.captureState(po, on).address, 'po+26-66608-9@po.pmapparel.com');
+-    t.equal(s.captureState(po, on).problem, '');
+-  });
+-
+-  t.test('capture off is not a problem, it is a choice', () => {
+-    const off = s.captureState(po, { captureReplies: false, captureDomain: 'po.pmapparel.com' });
+-    t.equal(off.address, '');
+-    t.equal(off.problem, '', 'switched off must never read as a fault');
+-  });
+-
+-  t.test('capture on with no domain reports the problem rather than falling back quietly', () => {
+-    const r = s.captureState(po, { captureReplies: true, captureDomain: '' });
+-    t.equal(r.address, '');
+-    t.assert(/no capture domain is set/i.test(r.problem), r.problem);
+-    t.assert(/will not be captured/.test(r.problem), 'it has to say what the consequence is');
+-  });
+-
+-  t.test('an ADDRESS typed where a domain belongs is caught', () => {
+-    // po@pmapparel.com here builds po+26-66608-9@po@pmapparel.com, which no
+-    // reply can ever reach, and nothing about the send would look wrong.
+-    const r = s.captureState(po, { captureReplies: true, captureDomain: 'po@pmapparel.com' });
+-    t.equal(r.address, '');
+-    t.assert(/not a domain name/.test(r.problem), r.problem);
+-    t.assert(/po\.pmapparel\.com/.test(r.problem), 'and show what a good one looks like');
+-  });
+-
+-  t.test('a URL typed where a domain belongs is caught', () => {
+-    t.equal(s.captureState(po, { captureReplies: true, captureDomain: 'https://po.pmapparel.com/' }).address, '');
+-  });
+-
+-  t.test('a leading @ and stray capitals are tolerated, not punished', () => {
+-    // Somebody typing @PO.PMApparel.com meant the right thing.
+-    t.equal(s.captureState(po, { captureReplies: true, captureDomain: '@PO.PMApparel.com  ' }).address,
+-      'po+26-66608-9@po.pmapparel.com');
+-  });
+-
+-  t.test('an order with no number yet says so instead of building a broken address', () => {
+-    const r = s.captureState({ poNumber: '' }, on);
+-    t.equal(r.address, '');
+-    t.assert(/no PO number/.test(r.problem), r.problem);
+-  });
+-
+-  t.test('what counts as a domain', () => {
+-    ['po.pmapparel.com', 'pmapparel.com', 'a.b.c.co.uk'].forEach((d) =>
+-      t.assert(s.looksLikeDomain(d), d + ' should be a domain'));
+-    ['', 'pmapparel', 'po@pmapparel.com', 'po.pmapparel.com/x', 'http://po.pmapparel.com',
+-      '-bad.com', 'bad-.com', 'po pmapparel.com'].forEach((d) =>
+-      t.assert(!s.looksLikeDomain(d), JSON.stringify(d) + ' should not be a domain'));
+-  });
+-
+-  /* ---- settings cannot be saved into the invisible state -------------- */
+-
+-  t.test('switching capture on with nothing stored and nothing sent is refused', () => {
+-    // The old check only looked at the request. A patch that says
+-    // captureReplies: true and nothing else sailed through with the domain
+-    // still empty, which is exactly how this ends up silently off.
+-    const r = s.validateSettings({ captureReplies: true }, {});
+-    t.assert(!r.ok, 'it should be refused');
+-    t.assert(/capture domain/.test(r.errors.join(' ')), r.errors.join('; '));
+-  });
+-
+-  t.test('switching capture on when a good domain is already stored is fine', () => {
+-    const r = s.validateSettings({ captureReplies: true }, { captureDomain: 'po.pmapparel.com' });
+-    t.assert(r.ok, r.errors && r.errors.join('; '));
+-  });
+-
+-  t.test('a bad domain is refused even when capture was already on', () => {
+-    const r = s.validateSettings({ captureDomain: 'po@pmapparel.com' }, { captureReplies: true });
+-    t.assert(!r.ok, 'it should be refused');
+-    t.assert(/not look like a domain name/.test(r.errors.join(' ')), r.errors.join('; '));
+-  });
+-
+-  t.test('a good domain and capture on together still save', () => {
+-    const r = s.validateSettings({ captureReplies: true, captureDomain: 'po.pmapparel.com' }, {});
+-    t.assert(r.ok, r.errors && r.errors.join('; '));
+-    t.equal(r.patch.captureDomain, 'po.pmapparel.com');
+-  });
+-
+-  t.test('turning capture OFF is never blocked by the domain', () => {
+-    // Switching it off is how somebody stops a broken setup. It must not
+-    // require fixing the thing they are switching off.
+-    const r = s.validateSettings({ captureReplies: false }, { captureDomain: '' });
+-    t.assert(r.ok, r.errors && r.errors.join('; '));
+-  });
+-
+-  t.test('the settings route judges the patch against what is stored', () => {
+-    t.assert(/validateSettings\(body, await getSettings\(\)\)/.test(settingsRoute),
+-      'the stored settings have to go in, or a one-field patch is judged on its own');
+-  });
+-
+-  /* ---- matching a reply to its order --------------------------------- */
+-
+-  const pos = [
+-    { id: 'po_1', poNumber: '26-66608-9' },
+-    { id: 'po_2', poNumber: '26-70001' },
+-  ];
+-
+-  t.test('the PO number comes out of the delivered address', () => {
+-    t.equal(inbound.poNumberFromAddress('po+26-66608-9@po.pmapparel.com'), '26-66608-9');
+-    t.equal(inbound.poNumberFromAddress('"Vendor" <po+26-70001@po.pmapparel.com>'), '26-70001');
+-  });
+-
+-  t.test('an address with no plus part matches nothing', () => {
+-    t.equal(inbound.poNumberFromAddress('test@po.pmapparel.com'), '');
+-    t.equal(inbound.matchPo(pos, ''), null);
+-  });
+-
+-  t.test('matching is case-insensitive, both sides', () => {
+-    // The live bug: a mail client or autoresponder rewrites the local part
+-    // and the reply lands in the unmatched pile, looking exactly like a
+-    // vendor who never replied.
+-    t.equal(inbound.matchPo(pos, '26-66608-9').id, 'po_1');
+-    t.equal(inbound.matchPo(pos, '26-66608-9'.toUpperCase()).id, 'po_1');
+-    t.equal(inbound.matchPo([{ id: 'po_x', poNumber: '26-ABC-1' }], '26-abc-1').id, 'po_x');
+-  });
+-
+-  t.test('surrounding whitespace does not lose a reply', () => {
+-    t.equal(inbound.matchPo(pos, '  26-70001 ').id, 'po_2');
+-    t.equal(inbound.matchPo([{ id: 'po_y', poNumber: ' 26-70002 ' }], '26-70002').id, 'po_y');
+-  });
+-
+-  t.test('a number nobody has still returns nothing rather than the first order', () => {
+-    // The one thing worse than an unmatched reply is a reply logged on the
+-    // wrong purchase order.
+-    t.equal(inbound.matchPo(pos, '26-99999'), null);
+-    t.equal(inbound.matchPo([], '26-66608-9'), null);
+-    t.equal(inbound.matchPo(null, '26-66608-9'), null);
+-  });
+-
+-  t.test('a PO with no number is never matched by accident', () => {
+-    t.equal(inbound.matchPo([{ id: 'po_draft', poNumber: '' }], ''), null);
+-    t.equal(inbound.matchPo([{ id: 'po_draft' }], 'undefined'), null);
+-  });
+-
+-  /* ---- the route wiring ---------------------------------------------- */
+-
+-  t.test('the inbound secret is taken from the header first', () => {
+-    t.assert(/x-promopro-secret/.test(inboundRoute), 'the header path has to exist');
+-    const auth = inboundRoute.slice(inboundRoute.indexOf('const secret = process.env.PROMOPRO_INBOUND_SECRET'));
+-    const block = auth.slice(0, 700);
+-    t.assert(block.indexOf('fromHeader') < block.indexOf('fromQuery'),
+-      'header before query string: a secret in a URL is a secret in every log');
+-    t.assert(/authVia/.test(block), 'and which one arrived should be recorded');
+-  });
+-
+-  t.test('an unset secret still fails closed', () => {
+-    // safeEqual against undefined must not be how this route lets someone in.
+-    t.assert(/if \(!secret \|\| !safeEqual/.test(inboundRoute));
+-  });
+-
+-  t.test('the inbound heartbeat records arrival before the capture gate', () => {
+-    // "Resend never called us" and "Resend called and capture was off" look
+-    // identical otherwise, and they need different fixes.
+-    const beat = inboundRoute.indexOf('_inboundLastAt');
+-    const gate = inboundRoute.indexOf('settings.captureReplies !== true');
+-    t.assert(beat !== -1 && beat < gate, 'record the arrival before anything can return early');
+-    t.assert(/_inboundAuthVia/.test(inboundRoute), 'and which way the secret arrived');
+-  });
+-
+-  t.test('the heartbeat can never cost a vendor reply', () => {
+-    const beat = inboundRoute.slice(inboundRoute.indexOf('_inboundLastAt') - 300);
+-    t.assert(/catch \(e\) \{ \/\* a missing heartbeat/.test(beat),
+-      'a failed settings write must not throw away the message');
+-  });
+-
+-  t.test('the send reports where a reply would go', () => {
+-    t.assert(/replyTo: message\.reply_to/.test(sendRoute), 'the address it actually used');
+-    t.assert(/warning: capture\.problem/.test(sendRoute), 'and anything wrong with it');
+-    const test = sendRoute.slice(sendRoute.indexOf('if (isTest)'));
+-    t.assert(/replyTo/.test(test.slice(0, 600)),
+-      'a test send especially: that is how this gets checked without a vendor involved');
+-  });
+-
+-  t.test('the screen shows the warning instead of swallowing it', () => {
+-    t.assert(/res\.warning/.test(app), 'the send message should carry it');
+-    t.assert(/Replies would go to/.test(app), 'and a test send should say where replies land');
+-  });
+-
+-  t.test('Settings says whether capture is really working, not just switched on', () => {
+-    t.assert(/function captureStatusHtml/.test(app));
+-    const fn = app.slice(app.indexOf('function captureStatusHtml'));
+-    const body = fn.slice(0, fn.indexOf('\n    }'));
+-    t.assert(/captureState\(/.test(body), 'it should ask the same reader the send uses');
+-    t.assert(/_inboundLastAt/.test(body), 'and say whether anything has ever arrived');
+-    t.assert(/Nothing has ever arrived here/.test(body), 'in words, not as a blank space');
+-  });
+-
+-  /* ---- a captured reply has to be VISIBLE ----------------------------- */
+-
+-  t.test('a reply counts as an answer only if it came after the last send', () => {
+-    // A reply to the first send is not an answer to the one we sent this
+-    // morning, and colouring it as one is how the marker stops meaning
+-    // anything.
+-    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-01T10:00:00Z', lastVendorReplyAt: '2026-08-02T09:00:00Z' }), true);
+-    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-03T10:00:00Z', lastVendorReplyAt: '2026-08-02T09:00:00Z' }), false);
+-  });
+-
+-  t.test('a reply on an order we never sent still counts', () => {
+-    // Odd, but real: a PO forwarded by hand, or the send record lost. The
+-    // vendor did say something, and hiding it would be the worse error.
+-    t.equal(s.repliedSinceSend({ lastVendorReplyAt: '2026-08-02T09:00:00Z' }), true);
+-  });
+-
+-  t.test('no reply is not a reply', () => {
+-    t.equal(s.repliedSinceSend({ lastSentAt: '2026-08-01T10:00:00Z' }), false);
+-    t.equal(s.repliedSinceSend({}), false);
+-    t.equal(s.repliedSinceSend(null), false);
+-    t.equal(s.replyCount({}), 0);
+-    t.equal(s.replyCount({ replies: [{}, {}] }), 2);
+-  });
+-
+-  t.test('the order screen shows what the vendor said', () => {
+-    // The hole this closes: inbound.js logged the message and stopped the
+-    // clock, and no screen anywhere rendered it. A reply captured where
+-    // nobody looks is the same failure as a reply in one person's inbox.
+-    t.assert(/function repliesHtml/.test(app), 'there should be a section for it');
+-    const fn = app.slice(app.indexOf('function repliesHtml'));
+-    const body = fn.slice(0, fn.indexOf('\n    }'));
+-    t.assert(/po\.replies/.test(body), 'it should read the replies on the order');
+-    t.assert(/r\.text/.test(body), 'and show the message itself, not just that one exists');
+-    t.assert(/reverse\(\)/.test(body), 'newest first: the last thing said is what is being asked about');
+-    t.assert(/Nothing captured yet/.test(body), 'and say so plainly when there are none');
+-    t.assert(/repliesHtml\(po\)/.test(app.slice(app.indexOf('function renderDetail'))),
+-      'and the detail screen has to actually call it');
+-  });
+-
+-  t.test('the list and the pipeline say a vendor has come back', () => {
+-    // "Did they confirm" is what these screens get scanned for.
+-    //
+-    // Bounded by the NEXT function rather than by a character count. The
+-    // count version passed for the wrong reason: it was really asserting
+-    // that nothing had been added above the line it was looking for, so
+-    // adding a product line to the card broke a test about vendor replies.
+-    const between = (from, to) => app.slice(app.indexOf(from), app.indexOf(to));
+-    // The argument name is not the point and has changed once already: the
+-    // orders table now passes a row projection rather than the PO directly.
+-    // What matters is that both screens call the helper at all.
+-    const orders = between('function renderOrders', 'function lineRowHtml');
+-    t.assert(/repliedSinceSend\(/.test(orders), 'the orders list should mark it');
+-    const pipe = between('function renderPipeline', 'function renderFilters');
+-    t.assert(/repliedSinceSend\(/.test(pipe), 'and so should the pipeline card');
+-  });
+-
+-  t.test('the reply notice says the chasing has stopped', () => {
+-    // Otherwise the natural reading of a stopped clock is that something is
+-    // broken.
+-    t.assert(/chasing has stopped/.test(app));
+-  });
+-
+-  t.test('the send route no longer claims capture is unwired', () => {
+-    // It was wired at the reply_to line while the header still said it was
+-    // not. A comment that lies is worse than no comment.
+-    const header = sendRoute.slice(0, sendRoute.indexOf('import '));
+-    t.assert(!/not wired yet/.test(header), 'the stale line should be gone');
+-    t.assert(/Reply capture IS wired/.test(header), 'and replaced with what actually happens');
+-  });
+-
+-  t.test('why Svix signature verification is NOT here is written down', () => {
+-    // Otherwise the next person adds it, verifies a re-serialized body, and
+-    // starts bouncing real vendor replies.
+-    t.assert(/RAW request body/.test(inboundRoute), 'the reason has to be in the file');
+-  });
+-
+-  process.exit(t.report());
+-})();
+-- 
+2.43.0
+

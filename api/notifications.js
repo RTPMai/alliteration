@@ -1,3 +1,4 @@
+// PUT IN: api/notifications.js
 // api/notifications.js — shell-level notifications / to-do list.
 //
 // Every signed-in user can create a notification and assign it to anyone
@@ -41,7 +42,9 @@
 
 import { requireAuth } from "../lib/session.js";
 import { getUser, getRole, listUsers } from "../lib/users.js";
-import { validateNew, validatePatch, GENERAL_APP } from "../lib/notifications/schema.js";
+import {
+  validateNew, validatePatch, GENERAL_APP, PICKABLE_LINK_TYPES,
+} from "../lib/notifications/schema.js";
 import {
   listNotifications, saveNotification, nextNotificationId,
   getNotification, updateNotification, deleteNotification,
@@ -49,6 +52,10 @@ import {
 } from "../lib/notifications/store.js";
 import { KEYS, readKey, readRoster, isConfigured as backboneConfigured } from "../lib/backbone-store.js";
 import { listEmployees } from "../lib/crewcore/store.js";
+import { listPos } from "../lib/promopro/store.js";
+import { currentStage, stageLabel } from "../lib/promopro/schema.js";
+import { listNotes } from "../lib/sitework/store.js";
+import { canSeeBoard } from "../lib/sitework/access.js";
 
 // Who reports to the caller, for the "My team" tab (Ryan's ask, Aug 25 2026).
 //
@@ -122,8 +129,64 @@ async function resolveTeam(sess, me, isAdmin) {
 // search here matches that existing behavior rather than inventing a new
 // restriction.
 async function searchLinkable(type, q, sess) {
-  if (!backboneConfigured()) return [];
   const needle = String(q || "").trim().toLowerCase();
+
+  // PromoPro purchase orders (Ryan's ask, Sep 2026). Matched on the PO number
+  // as well as the company, because a PO number is the thing somebody is
+  // holding when they go looking: it is printed on the sheet and quoted in the
+  // vendor's reply.
+  //
+  // Open to any signed-in user, which is the same answer api/promopro/pos.js
+  // gives a GET. PromoPro read access is deliberately wide so an AM can answer
+  // "where is my order" without asking anyone, and a picker that was stricter
+  // than the app it points into would only ever hide orders the person can
+  // open by walking one screen over.
+  if (type === "po") {
+    const pos = await listPos();
+    return pos
+      .filter((p) => {
+        if (!needle) return true;
+        const number = String(p.poNumber || "").toLowerCase();
+        const company = String(
+          (p.printavo && (p.printavo.companyName || p.printavo.customerName)) || ""
+        ).toLowerCase();
+        return number.includes(needle) || company.includes(needle);
+      })
+      // Newest first. A PO being linked to is almost always a live one, and
+      // sorting by number would bury this year's orders under a decade of them.
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
+      .slice(0, 20)
+      .map((p) => ({
+        id: p.id,
+        label: p.poNumber || p.id,
+        sublabel: [
+          (p.printavo && (p.printavo.companyName || p.printavo.customerName)) || "Manual order",
+          stageLabel(currentStage(p), p),
+        ].filter(Boolean).join(" · "),
+      }));
+  }
+
+  // StickySituations notes. NOT open to everyone, unlike everything else here:
+  // the board is the build list and is gated to the Admin flag or an explicit
+  // role grant. The same check the board's own route uses, imported rather than
+  // rewritten, so tightening one tightens both.
+  if (type === "sticky") {
+    if (!(await canSeeBoard(sess))) return [];
+    const notes = await listNotes();
+    return notes
+      .filter((n) => {
+        if (n.status === "done") return false;
+        if (!needle) return true;
+        return String(n.title || "").toLowerCase().includes(needle) ||
+          String(n.detail || "").toLowerCase().includes(needle);
+      })
+      .sort((a, b) => String(a.title || "").localeCompare(String(b.title || "")))
+      .slice(0, 20)
+      .map((n) => ({ id: n.id, label: n.title || n.id, sublabel: n.appId || "" }));
+  }
+
+  // Everything below reads BackBone's own data.
+  if (!backboneConfigured()) return [];
 
   if (type === "lead") {
     const data = await readKey(KEYS.leads);
@@ -277,9 +340,13 @@ export default async function handler(req, res) {
       // people picker above — the "own" scope check for clients happens
       // inside searchLinkable(), not here.
       if (req.query && req.query.linkSearch) {
+        // The allowlist is PICKABLE_LINK_TYPES rather than a list written out
+        // again here. Two copies of "what can be searched" is how a type gets
+        // added to the picker and then refused by the route.
         const type = String(req.query.linkSearch);
-        if (!["lead", "inquiry", "client"].includes(type)) {
-          return res.status(400).json({ error: "linkSearch must be lead, inquiry, or client" });
+        const allowed = PICKABLE_LINK_TYPES.concat(["lead"]); // lead: old links only
+        if (!allowed.includes(type)) {
+          return res.status(400).json({ error: "linkSearch must be one of: " + allowed.join(", ") });
         }
         const results = await searchLinkable(type, req.query.q, sess);
         return res.status(200).json({ results });

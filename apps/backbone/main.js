@@ -9630,6 +9630,19 @@ export async function start(ctx) {
       }
       if (noContact) warnNoContactAfterQual(lead);
     } catch (e) {
+      // A timeout is the one failure here with a next step attached, so it is
+      // said in words rather than arriving as whatever text the platform
+      // produced. A function killed at its ceiling answers with the hosting
+      // provider's own gateway page ("An error occurred with your deployment"),
+      // which reads as broken and offers nobody anything to do about it.
+      if (e && (e.status === 504 || (e.body && e.body.timeout))) {
+        alert((e.body && e.body.detail) ||
+          "The research took too long and was stopped. Companies with little or no " +
+          "web presence are the slowest, because the research keeps looking. You can " +
+          "paste a qualification from a Claude chat instead, using the section at the " +
+          "bottom of this lead.");
+        return;
+      }
       alert("Qualification request failed: " + e.message);
     } finally {
       btn.disabled = false;

@@ -118,6 +118,10 @@ export default {
     cursor:default;user-select:text;-webkit-user-select:text;
   }
   .sk-note[draggable="true"]{cursor:grabbing}
+  /* Where a link from a notification lands. An outline rather than a colour
+     change: a note's colour means something to whoever wrote it, and
+     recolouring one to say "over here" would overwrite that. */
+  .sk-note.hit{outline:2px solid var(--accent);outline-offset:2px}
   .sk-grip{
     flex:none;border:0;background:none;padding:0 2px;margin-top:1px;
     color:inherit;opacity:.35;font-size:13px;line-height:1;cursor:grab;
@@ -949,6 +953,51 @@ export default {
       else openForm(null);
     });
 
+    /**
+     * Open one note by id, from outside this closure.
+     *
+     * A notification can link to a sticky (Sep 2026), and following that link
+     * has to land on the note itself rather than on a board of forty where the
+     * one that was meant is somewhere below the fold.
+     *
+     * FILTERS GET CLEARED, not respected. Arriving at a board filtered to
+     * another app, or with Done hidden when the note has since been ticked
+     * off, would show a page with no sign of the thing that was linked, which
+     * reads exactly like a broken link. Being moved to "everything" is
+     * visible and undoable; an empty-looking board is not.
+     */
+    this._openNote = async (noteId) => {
+      const id = String(noteId);
+      if (!notes.length) await load();
+      const note = notes.find((n) => n.id === id);
+      if (!note) {
+        msg('That note could not be found. It may have been deleted since the link was made.', 'err');
+        return;
+      }
+      if (filterApp !== 'all' || (note.status === 'done' && !showDone)) {
+        filterApp = 'all';
+        if (note.status === 'done') showDone = true;
+        render();
+      }
+      const el = $('.sk-note[data-id="' + id.replace(/"/g, '') + '"]');
+      if (!el) return;
+      if (el.scrollIntoView) el.scrollIntoView({ block: 'center' });
+      // Long enough to catch the eye on a wall of notes that all look alike,
+      // short enough that it is gone before it becomes part of the furniture.
+      el.classList.add('hit');
+      setTimeout(() => el.classList.remove('hit'), 2200);
+    };
+
     await load();
+  },
+
+  /**
+   * `param` is the third part of the route: #/stickies/board/<noteId>. Same
+   * mechanism PromoPro uses for a purchase order and ShopStock for a shelf
+   * label. The board is the only view, so there is nothing to switch, only a
+   * note to find.
+   */
+  showView(view, param) {
+    if (param && typeof this._openNote === 'function') this._openNote(String(param));
   },
 };

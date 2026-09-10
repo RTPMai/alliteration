@@ -13,7 +13,20 @@
 // made requireAuth undefined and 500'd every call.
 import { requireAuth } from "../lib/session.js";
 
-export const config = { api: { bodyParser: true }, maxDuration: 60 };
+// WHY 300 AND NOT 60. Research is not one request. The model asks for a web
+// search, waits, reads the results, decides whether to search again, and only
+// then writes 4,000 tokens of JSON. Three search rounds plus the write runs
+// past a minute often enough that 60 was failing rather than occasionally
+// failing. When Vercel hits maxDuration it kills the function and answers the
+// browser with its own gateway page, which is where "An error occurred with
+// your deployment (504)" came from: the handler never got to speak.
+export const config = { api: { bodyParser: true }, maxDuration: 300 };
+
+// Our own ceiling, comfortably inside Vercel's, so a run that is never going to
+// finish comes back as an error this file wrote and the screen can explain,
+// rather than a gateway page nobody can read. Never raise this above
+// maxDuration; the whole point is that we stop first.
+export const CALL_TIMEOUT_MS = 240000;
 
 const SYSTEM_PROMPT = `You are a sales qualification and account intelligence agent for
 P&M Apparel, a branded apparel, promotional products, uniforms, online stores, and
@@ -253,9 +266,13 @@ What They Asked Us For: ${asked_for || "(they have not told us yet)"}
 Research this company using web search, then return the JSON object exactly as
 specified. Treat what they asked for as a clue about the company, not as a score.`;
 
+  const stopper = new AbortController();
+  const stopAt = setTimeout(function () { stopper.abort(); }, CALL_TIMEOUT_MS);
+
   try {
     const apiRes = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
+      signal: stopper.signal,
       headers: {
         "Content-Type": "application/json",
         "x-api-key": apiKey,
@@ -305,6 +322,21 @@ specified. Treat what they asked for as a clue about the company, not as a score
     parsed.qualified_at = new Date().toISOString();
     return res.status(200).json(parsed);
   } catch (e) {
+    // An abort is our own ceiling firing, not a fault. Said in words the screen
+    // can put in front of somebody, because the alternative is Vercel's gateway
+    // page and that tells a person nothing except that something is broken.
+    if (e && (e.name === "AbortError" || stopper.signal.aborted)) {
+      return res.status(504).json({
+        error: "The research took too long and was stopped",
+        timeout: true,
+        detail: "Gave up after " + Math.round(CALL_TIMEOUT_MS / 1000) + " seconds. " +
+          "Companies with little or no web presence are the slowest, because the " +
+          "research keeps looking. You can paste a qualification from a Claude chat " +
+          "instead, using the section at the bottom of this lead."
+      });
+    }
     return res.status(500).json({ error: "Qualification request failed", detail: e.message });
+  } finally {
+    clearTimeout(stopAt);
   }
 }

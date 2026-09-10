@@ -20,6 +20,7 @@
 
 import { requireAuth } from "../lib/session.js";
 import { getUser, permsFor } from "../lib/users.js";
+import { canSeeBoard, SITE_APP_ID } from "../lib/sitework/access.js";
 import { validateNew, validatePatch, canDeleteNote } from "../lib/sitework/schema.js";
 import {
   listNotes, getNote, saveNote, updateNote, deleteNote, nextNoteId,
@@ -36,17 +37,10 @@ const APP_IDS = [
   "stitchsense", "marketmachine",
 ];
 
-const SITE_APP_ID = "stickies";
-
-async function isBuilder(sess) {
-  if (!sess.username) return false;
-  const user = await getUser(sess.username);
-  if (!user) return false;
-  if (user.superuser === true) return true;
-  const perms = await permsFor(sess.username);
-  const tabs = Array.isArray(perms && perms.tabs) ? perms.tabs : [];
-  return tabs.includes(SITE_APP_ID);
-}
+// The read gate moved to lib/sitework/access.js in Sep 2026, unchanged, because
+// api/notifications.js has to ask the same question now that a notification can
+// link to a sticky. One rule, two callers, rather than two copies that drift.
+const isBuilder = canSeeBoard;
 
 /**
  * Reading the board and changing it are different questions. Someone given the

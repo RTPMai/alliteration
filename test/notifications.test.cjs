@@ -30,7 +30,8 @@ Promise.all([
   import(path.join(ROOT, 'js/registry.js')),
   import(path.join(ROOT, 'lib/users.js')),
 ]).then(async ([schema, reg, users]) => {
-  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS, PICKABLE_LINK_TYPES, keys } = schema;
+  const { validateNew, validatePatch, TYPES, TYPE_VALUES, GENERAL_APP, LINK_TYPES, LINK_TYPE_LABELS,
+    LINK_TYPE_APP, PICKABLE_LINK_TYPES, keys } = schema;
   const { APPS, SHELL_APPS } = reg;
   const { DEFAULT_ROLES, permsFor } = users;
 
@@ -89,12 +90,20 @@ Promise.all([
 
   /* ---- link to a record (Ryan's ask, Aug 2026) --------------------------- */
 
-  t.test('five link types total: inquiry, lead, client, expense, donation', () => {
-    t.equal(LINK_TYPES.length, 5, 'expected exactly five link types');
-    ['inquiry', 'lead', 'client', 'expense', 'donation'].forEach((v) =>
+  t.test('seven link types: the five BackBone/TravelTrack/GivingGauge ones plus po and sticky', () => {
+    t.equal(LINK_TYPES.length, 7, 'expected exactly seven link types');
+    ['inquiry', 'lead', 'client', 'expense', 'donation', 'po', 'sticky'].forEach((v) =>
       t.assert(LINK_TYPES.includes(v), 'missing link type ' + v));
     LINK_TYPES.forEach((v) =>
       t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));
+  });
+
+  t.test('every link type says which app it opens into', () => {
+    // The picker filters on this table and the card decides whether to draw a
+    // clickable arrow from it. A type missing here is a link with nowhere to
+    // go, which is worse than not offering it: it saves and then does nothing.
+    LINK_TYPES.forEach((v) =>
+      t.assert(!!LINK_TYPE_APP[v], 'LINK_TYPE_APP has no app for link type ' + v));
   });
 
   t.test('only searchable types are pickable via manual search', () => {
@@ -106,8 +115,8 @@ Promise.all([
     // "lead" left this list in Sep 2026 when Inbox and Leads merged. Offering
     // both words made somebody choose between two names for one screen. It is
     // still a STORABLE type, because notifications already on file carry it.
-    t.equal(PICKABLE_LINK_TYPES.length, 2, 'expected exactly two pickable link types');
-    ['inquiry', 'client'].forEach((v) =>
+    t.equal(PICKABLE_LINK_TYPES.length, 4, 'expected exactly four pickable link types');
+    ['inquiry', 'client', 'po', 'sticky'].forEach((v) =>
       t.assert(PICKABLE_LINK_TYPES.includes(v), 'missing pickable link type ' + v));
     t.assert(!PICKABLE_LINK_TYPES.includes('lead'),
       'lead and inquiry are the same screen now; offering both is a choice with no meaning');
@@ -418,8 +427,8 @@ t.test('js/shell.js forwards a param through goApp for cross-app deep links', ()
 
 t.test('apps/notifications.js offers a link-to-a-record picker spanning all three link types', () => {
   const src = read('apps/notifications.js');
-  t.assert(src.includes('LINK_TYPES') && src.includes('LINK_TYPE_LABELS'),
-    'notifications.js should import the link type constants from the schema');
+  t.assert(src.includes('LINK_TYPE_LABELS') && src.includes('linkTypesForApps'),
+    'notifications.js should take its link types and labels from the schema, not a local list');
   t.assert(src.includes('linkPickerHtml'), 'no link picker markup helper found');
   t.assert(src.includes('data-link-search') && src.includes('doLinkSearch'),
     'the picker should support live search-as-you-type against the linkSearch endpoint');
