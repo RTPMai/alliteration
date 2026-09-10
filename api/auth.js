@@ -94,7 +94,9 @@ export default async function handler(req, res) {
         user: {
           username: sess.username,
           name: sess.name,
-          role: sess.role,
+          // Derived from the Admin flag in permsFor, not from a role name
+          // carried in the cookie. Roles are gone (Sep 2026).
+          role: perms.role,
           perms,
         },
       });
@@ -116,13 +118,16 @@ export default async function handler(req, res) {
       if (!(await noUsersYet())) {
         return res.status(403).json({ error: "Accounts already exist — setup is disabled." });
       }
+      // The first account is the Admin, by the flag. With roles gone the flag
+      // is the only administrator, so bootstrapping without it would create an
+      // account that cannot reach Settings and no way to fix that.
       const user = await createUser({
         username: body.username,
         password: body.password,
         name: body.name,
-        role: "admin",
+        superuser: true,
       });
-      setSessionCookie(res, { username: user.username, name: user.name, role: user.role });
+      setSessionCookie(res, { username: user.username, name: user.name });
       const perms = await permsFor(user.username);
       return res.status(201).json({ ok: true, user: { ...user, perms } });
     }
@@ -154,7 +159,7 @@ export default async function handler(req, res) {
       await resetKey(userKey);
 
       await touchLastLogin(user.username);
-      setSessionCookie(res, { username: user.username, name: user.name, role: user.role });
+      setSessionCookie(res, { username: user.username, name: user.name });
 
       const perms = await permsFor(user.username);
       return res.status(200).json({ ok: true, user: { ...user, perms } });

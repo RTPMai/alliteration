@@ -94,10 +94,14 @@ t.test('authenticate burns work when the user is missing', () => {
     'a missing user must cost the same time as a wrong password, or usernames leak');
 });
 
-t.test('the last administrator cannot be removed or demoted', () => {
+// Sep 2026: roles are gone, so there is no role to demote. The Admin FLAG is
+// the only administrator and removing the last one is what would lock everyone
+// out. Real behavioural coverage (an actual updateUser call that is refused) is
+// in test/user-grants.test.cjs.
+t.test('the last administrator cannot be removed', () => {
   const src = read('lib/users.js');
   t.assert(src.includes('Cannot delete the last administrator'), 'delete guard missing');
-  t.assert(src.includes('Cannot demote the last administrator'), 'demote guard missing');
+  t.assert(src.includes('Cannot remove the last administrator'), 'flag guard missing');
 });
 
 /* ---- Permissions ------------------------------------------------------- */
@@ -140,10 +144,15 @@ t.test('bootstrap only works while no accounts exist', () => {
     'bootstrap must be gated on an empty store or anyone could mint an admin');
 });
 
+// Sep 2026: the third argument to requireAuth compared a role name carried in
+// the COOKIE. With roles gone, admin is the per-account flag and has to be read
+// from storage, so the route asks permsFor itself.
 t.test('user management requires an admin session', () => {
   const src = read('api/users.js');
-  t.assert(/requireAuth\(req, res, "admin"\)/.test(src),
-    'api/users.js must require the admin role');
+  t.assert(/permsFor\(sess\.username\)/.test(src),
+    'api/users.js must resolve the caller live');
+  t.assert(/superuser !== true/.test(src) && /403/.test(src),
+    'and refuse anyone without the Admin flag');
 });
 
 t.test('an admin cannot delete their own account', () => {
@@ -310,11 +319,14 @@ t.test('a 404 on a live endpoint is never masked by mock data', () => {
 
 /* ---- Role management --------------------------------------------------- */
 
-t.test('roles can be saved and deleted through the API', () => {
+// INVERTED, Sep 2026. Roles were removed; this now guards against them coming
+// back as a second place access can be set.
+t.test('the roles API is gone', () => {
   const src = read('api/users.js');
-  t.assert(src.includes('scope === "roles"'), 'the roles branch is missing');
-  t.assert(src.includes('saveRoles'), 'saving roles is not wired up');
-  t.assert(src.includes('deleteRole'), 'deleting roles is not wired up');
+  t.assert(!src.includes('scope === "roles"'), 'the roles branch must stay gone');
+  t.assert(!src.includes('saveRoles') && !src.includes('deleteRole'),
+    'nothing writes a roles map any more');
+  t.assert(src.includes('access'), 'access is what the route carries instead');
 });
 
 t.test('a role in use cannot be deleted', () => {
@@ -337,25 +349,25 @@ t.test('the admin role cannot be stripped of apps', () => {
     'saveRoles must reject a non-admin role with no apps');
 });
 
-t.test('role edits are batched, not saved per click', () => {
+// REPLACED, Sep 2026. The roles editor is gone. Access is edited one person at
+// a time and saved with one button, which has no cross-account invariant to
+// batch: one account being wrong cannot make another invalid.
+t.test('access is edited per person and saved explicitly', () => {
   const src = read('apps/settings.js');
-  // Roles have invariants that only hold across the WHOLE set (every role needs
-  // at least one app), so a per-click save would post states the server must
-  // reject. The Save button is what makes the batch valid.
-  t.assert(src.includes("$('#saveRolesBtn')"), 'the save button is missing');
-  t.assert(src.includes('markDirty'), 'unsaved changes should be tracked');
+  t.assert(!src.includes("$('#saveRolesBtn')"), 'the roles editor must stay gone');
+  t.assert(/data-acc="save"/.test(src), 'the access editor has its own save');
+  t.assert(/body: \{ access: access \}/.test(src),
+    'and it sends the whole access record for that one person');
 });
 
-t.test('accounts table can switch another user\'s role', () => {
+t.test('accounts table opens an access editor per person', () => {
   const src = read('apps/settings.js');
-  // The API always supported PATCH { role }; the UI has to expose it.
-  t.assert(src.includes('data-role-user'), 'each other-user row needs a role dropdown');
-  t.assert(/data-role-user[\s\S]*?method:\s*'PATCH'[\s\S]*?role:\s*next/.test(src),
-    'the dropdown must PATCH the role through the seam');
-  // Your own role stays read-only: the session cookie carries the role, so
-  // demoting yourself silently locks you out of Settings at next sign-in.
-  t.assert(/isMe\s*\?\s*'<span class="role-pill"/.test(src),
-    'your own row must keep the static pill, not a dropdown');
+  // Sep 2026: the role dropdown is gone with roles. Each row gets a Set access
+  // button instead, and the table shows what that person can open so the model
+  // can be read at a glance rather than only from inside an editor.
+  t.assert(!src.includes('data-role-user'), 'no role dropdown survives');
+  t.assert(src.includes('data-access='), 'each row needs a Set access button');
+  t.assert(src.includes('accessCell('), 'and the table says what they can open');
 });
 
 t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => {
@@ -364,9 +376,8 @@ t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => 
   // ("superuser", "management"), which silently reduced it to admin-only.
   t.assert(!api.includes('CAN_EDIT ='), 'the hardcoded CAN_EDIT list must be gone');
   t.assert(api.includes('manage_lists'), 'the gate must read the manage_lists flag');
-  // Sep 2026: getRole (what does this ROLE say) became getAccess (what may
-  // this PERSON do), because a per-account grant was being honoured by the
-  // rail and ignored by every route that read the role directly.
+  // Sep 2026: getRole (what does this ROLE say) became getAccess (what may this
+  // PERSON do). Roles no longer exist.
   t.assert(api.includes('getAccess'), 'the gate must resolve the caller\'s access live');
 
   const users = read('lib/users.js');
@@ -377,13 +388,15 @@ t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => 
   // against a fake Upstash, asserting the default is off) lives in
   // test/user-grants.test.cjs. This one only confirms the value is not being
   // read straight off the role again, which would skip the override.
-  t.assert(/manage_lists:\s*resolved\.manage_lists/.test(users),
+  t.assert(/manage_lists:\s*access\.manage_lists/.test(users),
     'permsFor must resolve manage_lists through lib/user-grants.js');
   t.assert(/roles\.admin = Object\.assign\([\s\S]*?manage_lists: true/.test(users),
     'saveRoles must force manage_lists on for admin');
 
   const set = read('apps/settings.js');
-  t.assert(set.includes('data-flag="manage_lists"'),
+  // Sep 2026: the switch moved from the roles editor to the per-person access
+  // editor when roles were removed. Same flag, one place to set it.
+  t.assert(set.includes('data-acc-flag='),
     'the role editor must expose a Manage ErrorEngine lists checkbox');
 });
 

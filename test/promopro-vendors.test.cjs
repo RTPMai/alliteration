@@ -1101,13 +1101,13 @@ t.test('the PO is recorded from the server callback, not the browser', () => {
 t.test('an empty edit-role list is preserved as empty, not filled in', () => {
   // Empty means "fall back to the shell's own permission". Defaulting it to
   // a role list would change who can buy on deploy day.
-  sameList(schema.withSettingDefaults({}).editRoles, []);
+  sameList(schema.withSettingDefaults({}).editUsers, []);
 });
 
-t.test('edit roles are lower-cased and de-duplicated', () => {
-  const r = schema.validateSettings({ editRoles: ['Admin', 'admin', 'AM'] });
+t.test('the buyer list is lower-cased and de-duplicated', () => {
+  const r = schema.validateSettings({ editUsers: ['Admin', 'admin', 'AM'] });
   t.assert(r.ok, (r.errors || []).join('; '));
-  sameList(r.patch.editRoles, ['admin', 'am']);
+  sameList(r.patch.editUsers, ['admin', 'am']);
 });
 
 t.test('a digest address that is not an address is refused', () => {

@@ -4,16 +4,22 @@
 // BackBone kept its accounts in lib/users.js with no HTTP surface. Under the
 // shell there is one account list, so there is one route to manage it.
 //
-//   GET    /api/users            -> list accounts + available roles
-//   POST   /api/users            -> create { username, password, name, role }
-//   PATCH  /api/users?username=  -> update { name?, role?, password? }
+//   GET    /api/users            -> list accounts
+//   POST   /api/users            -> create { username, password, name, access? }
+//   PATCH  /api/users?username=  -> update { name?, password?, access?, superuser? }
 //   DELETE /api/users?username=  -> remove
 //
-// Every action requires an admin session. requireAuth sends the 401/403 itself.
+// ROLES ARE GONE, Sep 2026. There is no ?scope=roles any more: access lives on
+// the account and is edited there. See lib/user-grants.js.
+//
+// Every action requires an ADMIN session, and admin now means the per-account
+// Admin flag, not a role name in a cookie. That matters here more than
+// anywhere: a cookie is issued at sign-in and a role name inside one is a
+// claim, while permsFor reads storage.
 
 import { requireAuth } from "../lib/session.js";
 import {
-  listUsers, createUser, updateUser, deleteUser, getRoles, saveRoles, deleteRole,
+  listUsers, createUser, updateUser, deleteUser, permsFor,
 } from "../lib/users.js";
 
 export default async function handler(req, res) {
@@ -22,8 +28,14 @@ export default async function handler(req, res) {
 
   // Only administrators manage accounts. Without this, any signed-in viewer
   // could promote themselves.
-  const sess = requireAuth(req, res, "admin");
+  const sess = requireAuth(req, res);
   if (!sess) return;
+
+  // Read live rather than trusting the cookie's claim.
+  const perms = await permsFor(sess.username);
+  if (!perms || perms.superuser !== true) {
+    return res.status(403).json({ error: "Admin only" });
+  }
 
   let body = req.body;
   if (typeof body === "string") {
@@ -32,38 +44,10 @@ export default async function handler(req, res) {
   if (!body || typeof body !== "object") body = {};
 
   const username = (req.query && req.query.username) || body.username || "";
-  const roleName = (req.query && req.query.role) || body.roleName || "";
-  const scope = (req.query && req.query.scope) || body.scope || "";
 
   try {
-    // ---- roles ----
-    // Routed by ?scope=roles so accounts and roles can share one endpoint
-    // rather than adding a second serverless function for four handlers.
-    if (scope === "roles") {
-      if (req.method === "GET") {
-        return res.status(200).json({ roles: await getRoles() });
-      }
-      if (req.method === "POST" || req.method === "PUT" || req.method === "PATCH") {
-        if (!body.roles || typeof body.roles !== "object") {
-          return res.status(400).json({ error: "roles object is required" });
-        }
-        // saveRoles enforces the invariants: admin keeps every app, and no
-        // other role may end up with none.
-        const saved = await saveRoles(body.roles);
-        return res.status(200).json({ ok: true, roles: saved });
-      }
-      if (req.method === "DELETE") {
-        if (!roleName) return res.status(400).json({ error: "role is required" });
-        await deleteRole(roleName);
-        return res.status(200).json({ ok: true, roles: await getRoles() });
-      }
-      res.setHeader("Allow", "GET, POST, DELETE");
-      return res.status(405).json({ error: "Method not allowed" });
-    }
-
     if (req.method === "GET") {
-      const [users, roles] = await Promise.all([listUsers(), getRoles()]);
-      return res.status(200).json({ users, roles });
+      return res.status(200).json({ users: await listUsers() });
     }
 
     if (req.method === "POST") {
@@ -71,7 +55,9 @@ export default async function handler(req, res) {
         username: body.username,
         password: body.password,
         name: body.name,
-        role: body.role,
+        // Optional. Absent means an account with no apps at all, which is
+        // deliberate: see emptyAccess() in lib/user-grants.js.
+        access: body.access,
       });
       return res.status(201).json({ ok: true, user });
     }
@@ -80,12 +66,11 @@ export default async function handler(req, res) {
       if (!username) return res.status(400).json({ error: "username is required" });
       const patch = {};
       if (body.name !== undefined) patch.name = body.name;
-      if (body.role !== undefined) patch.role = body.role;
       if (body.password !== undefined) patch.password = body.password;
       if (body.superuser !== undefined) patch.superuser = body.superuser === true;
-      // Per-account grants, Sep 2026. null resets this person to their role.
-      // updateUser normalizes: unknown keys are dropped rather than stored.
-      if (body.grants !== undefined) patch.grants = body.grants;
+      // The whole access record for this person. updateUser normalizes:
+      // unknown keys are dropped rather than stored looking like settings.
+      if (body.access !== undefined) patch.access = body.access;
       const user = await updateUser(username, patch);
       return res.status(200).json({ ok: true, user });
     }

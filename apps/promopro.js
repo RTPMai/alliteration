@@ -2598,17 +2598,21 @@ export default {
             'This is about who can create, change and send them. Admins always can. ' +
             'Tick nothing and it falls back to whoever the shell already lets edit, which is how it behaved before this list existed.' +
           '</div>' +
+          // PEOPLE, not roles (Sep 2026: roles were removed from the shell).
+          // The list is the accounts that can open PromoPro at all, since
+          // naming somebody who cannot open the app as a buyer is a setting
+          // that reads as true and does nothing.
           (isAdmin
-            ? (Array.isArray(S.roleChoices) && S.roleChoices.length
-                ? '<div class="pp-amgrid">' + S.roleChoices.map((r) =>
-                    '<label class="pp-amrow"><input type="checkbox" data-editrole="' + esc(r.name) + '"' +
-                      ((S.editRoles || []).includes(r.name) ? ' checked' : '') + '>' +
-                    '<span><span class="nm">' + esc(r.label || r.name) + '</span>' +
-                    '<span class="em">' + esc(r.name) + '</span></span></label>'
+            ? (Array.isArray(S.buyers) && S.buyers.length
+                ? '<div class="pp-amgrid">' + S.buyers.filter((b) => b.canOpen).map((b) =>
+                    '<label class="pp-amrow"><input type="checkbox" data-edituser="' + esc(b.username) + '"' +
+                      ((S.editUsers || []).includes(String(b.username).toLowerCase()) ? ' checked' : '') + '>' +
+                    '<span><span class="nm">' + esc(b.name || b.username) + '</span>' +
+                    '<span class="em">' + esc(b.username) + '</span></span></label>'
                   ).join('') + '</div>'
-                : '<div class="pp-notice">The shell role list could not be read, so this cannot be changed right now.</div>')
+                : '<div class="pp-notice">The account list could not be read, so this cannot be changed right now.</div>')
             : '<div style="font-size:13px">' +
-                ((S.editRoles || []).length ? esc((S.editRoles || []).join(', ')) : 'Anyone with edit access in the shell.') +
+                ((S.editUsers || []).length ? esc((S.editUsers || []).join(', ')) : 'Anyone with edit access in the shell.') +
               '</div>') +
 
           buyersHtml(S) +
@@ -2730,12 +2734,12 @@ export default {
         payload.promoCategories = String($('#ppPromoCats').value || '')
           .split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
       }
-      if (root.querySelector('[data-editrole]')) {
-        const editRoles = [];
-        root.querySelectorAll('[data-editrole]').forEach((el) => {
-          if (el.checked) editRoles.push(el.dataset.editrole);
+      if (root.querySelector('[data-edituser]')) {
+        const editUsers = [];
+        root.querySelectorAll('[data-edituser]').forEach((el) => {
+          if (el.checked) editUsers.push(String(el.dataset.edituser).toLowerCase());
         });
-        payload.editRoles = editRoles;
+        payload.editUsers = editUsers;
       }
 
       try {

@@ -29,7 +29,7 @@ const GRANTABLE_APPS = APPS.concat(SITE_APPS);
 // box shows ticked for a role that has always been able to decide even though
 // nothing was ever written to storage for it.
 import { givingDecideVerdict } from '../lib/giving-access.js';
-import { GRANT_FLAGS, resolveGrants, overrideSummary } from '../lib/user-grants.js';
+import { GRANT_FLAGS, resolveAccess, accessSummary } from '../lib/user-grants.js';
 
 export default {
   id: 'settings',
@@ -70,7 +70,15 @@ export default {
   }
   .u-access-hd{font-size:13px;font-weight:700;margin-bottom:2px}
   .u-access-hd .u-sub{font-weight:400;display:block}
-  .u-access-panel .role-flags{margin-top:12px}
+  .u-access-panel .role-flags{margin-top:12px;display:flex;flex-wrap:wrap;gap:10px 18px}
+  .acc-copy{font-size:12px;color:var(--muted);margin:10px 0}
+  .acc-copy select{margin:0 8px;font-family:inherit;font-size:12px}
+  .acc-apps{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+  .acc-app{border:1px solid transparent;border-radius:var(--radius);padding:4px}
+  .acc-app.on{border-color:var(--line);background:var(--card)}
+  .acc-views{display:flex;flex-direction:column;gap:3px;padding:8px 4px 2px;font-size:11.5px}
+  .acc-views label{display:flex;align-items:center;gap:6px}
+  .acc-views .hint{margin-top:4px}
   .u-access-panel .role-flags label{display:flex;align-items:center;gap:7px}
   .u-access-panel .src{font-size:11px;color:var(--muted)}
   .u-access-msg{font-size:12px;color:var(--muted);margin-top:10px;min-height:16px}
@@ -220,8 +228,8 @@ export default {
                 <div class="hint">At least 8 characters</div>
               </div>
               <div class="set-field">
-                <label for="nu-role">Role</label>
-                <select id="nu-role"></select>
+                <div class="hint">A new account starts with no apps. Press Set
+                access on their row once it exists.</div>
               </div>
             </div>
             <button class="set-btn primary" id="saveUserBtn">Create account</button>
@@ -231,17 +239,6 @@ export default {
         <div id="userList"><div class="set-empty">Loading...</div></div>
       </div>
 
-      <div class="set-card">
-        <div class="set-card-hd">
-          <h2>Roles</h2>
-          <div>
-            <span class="set-msg" id="roleMsg" style="display:none;margin:0 8px 0 0;padding:4px 9px"></span>
-            <button class="set-btn" id="addRoleBtn">Add role</button>
-            <button class="set-btn primary" id="saveRolesBtn" disabled>Save changes</button>
-          </div>
-        </div>
-        <div class="set-card-bd" id="roleList"></div>
-      </div>
     </div>
   `,
 
@@ -250,7 +247,6 @@ export default {
     const $ = (sel) => root.querySelector(sel);
 
     let users = [];
-    let roles = {};
 
     const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
       '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -266,10 +262,7 @@ export default {
       try {
         const data = await ctx.api.get(ENDPOINTS.users);
         users = data.users || [];
-        roles = data.roles || {};
         renderUsers();
-        renderRoles();
-        fillRoleSelect();
       } catch (e) {
         $('#userList').innerHTML =
           '<div class="set-empty">Could not load accounts: ' + esc(e.message) + '</div>';
@@ -295,13 +288,21 @@ export default {
      * What the Access column says. "Role default" when this account is
      * exactly its role, otherwise the differences by name.
      */
-    function accessCell(u, role) {
-      const resolved = resolveGrants(role, u.grants);
-      const diffs = overrideSummary(resolved);
-      if (!diffs.length) {
-        return '<div class="u-sub">Role default</div>';
+    const appName = (id) => {
+      const a = GRANTABLE_APPS.find((x) => x.id === id);
+      return a ? a.name : id;
+    };
+
+    /**
+     * What the Access column says: the apps this person can open, with a note
+     * when one of them is narrowed to particular screens.
+     */
+    function accessCell(u) {
+      const bits = accessSummary(u.access, appName);
+      if (!bits.length) {
+        return '<div class="u-sub">No apps yet</div>';
       }
-      return '<div class="u-sub on-account">Set here: ' + esc(diffs.join(', ')) + '</div>';
+      return '<div class="u-sub on-account">' + esc(bits.join(', ')) + '</div>';
     }
 
     /**
@@ -321,49 +322,75 @@ export default {
     function openAccess(username) {
       const u = users.find((x) => x.username === username);
       if (!u) return;
-      const role = roles[u.role] || {};
-      const resolved = resolveGrants(role, u.grants);
-      const draft = Object.assign({}, u.grants || {});
+      const access = resolveAccess(u.access);
+      // Edited as a copy. Nothing reaches the server until Save, so closing
+      // the panel changes nothing.
+      const draft = {
+        apps: access.apps.slice(),
+        views: JSON.parse(JSON.stringify(access.views || {})),
+        data_scope: access.data_scope,
+      };
+      GRANT_FLAGS.forEach((f) => { draft[f.key] = access[f.key]; });
 
       const wrap = document.createElement('div');
-      const appToggles = GRANTABLE_APPS.map((a) => {
-        const on = resolved.apps.indexOf(a.id) !== -1;
-        return '<button type="button" class="app-toggle' + (on ? ' on' : '') +
-                 '" data-acc-app="' + esc(a.id) + '" style="--c:' + esc(a.accent) + '">' +
-                 '<span class="sq"></span>' + esc(a.name) + '</button>';
-      }).join('');
-
-      const flagBoxes = GRANT_FLAGS.map((f) =>
-        '<label><input type="checkbox" data-acc-flag="' + esc(f.key) + '"' +
-          (resolved[f.key] ? ' checked' : '') + '> ' + esc(f.label) +
-          '<span class="src" data-src="' + esc(f.key) + '">' +
-            (resolved.sources[f.key] === 'account' ? 'set here' : 'from ' + esc(role.label || u.role)) +
-          '</span></label>').join('');
-
       wrap.className = 'u-access-panel';
+
+      // An app is off, on for everything, or on for particular screens. The
+      // third case is why per-view narrowing had to move onto the account:
+      // "StitchSense, Stitch Guess only" used to be a property of a role, and
+      // with roles gone it is a thing you tick for a person.
+      const appBlock = (a) => {
+        const on = draft.apps.indexOf(a.id) !== -1;
+        // Registry views are [id, label] pairs, not objects.
+        const views = (a.views || []).map((v) =>
+          Array.isArray(v) ? { id: v[0], name: v[1] || v[0] } : v);
+        const picked = draft.views[a.id] || [];
+        return '<div class="acc-app' + (on ? ' on' : '') + '" data-acc-block="' + esc(a.id) + '">' +
+          '<button type="button" class="app-toggle' + (on ? ' on' : '') +
+            '" data-acc-app="' + esc(a.id) + '" style="--c:' + esc(a.accent) + '">' +
+            '<span class="sq"></span>' + esc(a.name) + '</button>' +
+          (on && views.length > 1
+            ? '<div class="acc-views">' + views.map((v) =>
+                '<label><input type="checkbox" data-acc-view="' + esc(a.id) + '" value="' + esc(v.id) + '"' +
+                  (!picked.length || picked.indexOf(v.id) !== -1 ? ' checked' : '') + '> ' +
+                  esc(v.name) + '</label>').join('') +
+              '<div class="hint">All ticked means every screen. Untick to narrow.</div></div>'
+            : '') +
+        '</div>';
+      };
+
+      const others = users.filter((x) => x.username !== username);
+
       wrap.innerHTML =
         '<div class="u-access-hd">Access for ' + esc(u.name || u.username) +
-          '<span class="u-sub">Starts from ' + esc(role.label || u.role) +
-          '. Anything changed here is saved on this person.</span></div>' +
-        '<div class="role-apps">' + appToggles + '</div>' +
-        '<div class="role-flags">' + flagBoxes +
+          '<span class="u-sub">This is their whole access. There is no role behind it.</span></div>' +
+        (others.length
+          ? '<div class="acc-copy">Start from somebody else: ' +
+              '<select data-acc="copy"><option value="">pick a person</option>' +
+              others.map((o) => '<option value="' + esc(o.username) + '">' +
+                esc(o.name || o.username) + '</option>').join('') +
+              '</select><span class="hint">Copies their access here for you to adjust. ' +
+              'Values only, no link, so changing one person never changes another.</span></div>'
+          : '') +
+        '<div class="acc-apps">' + GRANTABLE_APPS.map(appBlock).join('') + '</div>' +
+        '<div class="role-flags">' +
+          GRANT_FLAGS.map((f) =>
+            '<label><input type="checkbox" data-acc-flag="' + esc(f.key) + '"' +
+              (draft[f.key] ? ' checked' : '') + '> ' + esc(f.label) + '</label>').join('') +
           '<label><input type="checkbox" data-acc-flag="own_only"' +
-            (resolved.data_scope === 'own' ? ' checked' : '') + '> Own accounts only' +
-            '<span class="src" data-src="own_only">' +
-              (resolved.sources.data_scope === 'account' ? 'set here' : 'from ' + esc(role.label || u.role)) +
-            '</span></label>' +
+            (draft.data_scope === 'own' ? ' checked' : '') + '> Own accounts only</label>' +
         '</div>' +
         '<div class="u-access-msg" id="accMsg"></div>' +
         '<div class="u-access-actions">' +
           '<button class="set-btn" data-acc="cancel">Cancel</button>' +
-          '<button class="set-btn" data-acc="reset">Reset to role</button>' +
+          '<button class="set-btn" data-acc="clear">Remove all access</button>' +
           '<button class="set-btn primary" data-acc="save">Save access</button>' +
         '</div>';
 
       const row = $('[data-access="' + username + '"]').closest('tr');
       const holder = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 6;
+      cell.colSpan = 5;
       cell.appendChild(wrap);
       holder.appendChild(cell);
       row.parentNode.insertBefore(holder, row.nextSibling);
@@ -374,56 +401,103 @@ export default {
         el.textContent = msg || '';
         el.className = 'u-access-msg' + (kind ? ' ' + kind : '');
       };
-      const markSrc = (key) => {
-        const el = wrap.querySelector('[data-src="' + key + '"]');
-        if (el) el.textContent = 'set here';
+
+      const repaintApps = () => {
+        wrap.querySelector('.acc-apps').innerHTML = GRANTABLE_APPS.map(appBlock).join('');
+        bindApps();
       };
 
-      wrap.querySelectorAll('[data-acc-app]').forEach((btn) => {
-        btn.addEventListener('click', () => {
-          // The first touch copies the resolved list onto the account, so you
-          // are editing this person from where they actually stand rather
-          // than from an empty list.
-          if (!Array.isArray(draft.apps)) draft.apps = resolved.apps.slice();
-          const id = btn.getAttribute('data-acc-app');
-          const at = draft.apps.indexOf(id);
-          if (at === -1) draft.apps.push(id); else draft.apps.splice(at, 1);
-          btn.classList.toggle('on');
-          say('');
+      function bindApps() {
+        wrap.querySelectorAll('[data-acc-app]').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            const id = btn.getAttribute('data-acc-app');
+            const at = draft.apps.indexOf(id);
+            if (at === -1) {
+              draft.apps.push(id);
+            } else {
+              draft.apps.splice(at, 1);
+              // A narrowing on an app somebody cannot open is dead weight,
+              // and it would come back to life if the app were re-ticked.
+              delete draft.views[id];
+            }
+            say('');
+            repaintApps();
+          });
         });
-      });
+        wrap.querySelectorAll('[data-acc-view]').forEach((box) => {
+          box.addEventListener('change', () => {
+            const id = box.getAttribute('data-acc-view');
+            const app = GRANTABLE_APPS.find((x) => x.id === id);
+            const all = (app && app.views ? app.views : [])
+              .map((v) => (Array.isArray(v) ? v[0] : v.id));
+            const ticked = Array.prototype.slice
+              .call(wrap.querySelectorAll('[data-acc-view="' + id + '"]'))
+              .filter((el) => el.checked).map((el) => el.value);
+            if (!ticked.length) {
+              // Every screen unticked would grant an app that shows nothing,
+              // which reads as broken rather than restricted. Refused here so
+              // nobody has to discover it from a blank rail.
+              box.checked = true;
+              say('Leave at least one screen ticked, or turn the app off.', 'err');
+              return;
+            }
+            // All of them is the same as no narrowing at all, and storing it
+            // would silently freeze the list on the day it was saved: a view
+            // added later would not appear for this person.
+            if (ticked.length === all.length) delete draft.views[id];
+            else draft.views[id] = ticked;
+            say('');
+          });
+        });
+      }
+      bindApps();
 
       wrap.querySelectorAll('[data-acc-flag]').forEach((box) => {
         box.addEventListener('change', () => {
           const key = box.getAttribute('data-acc-flag');
-          if (key === 'own_only') {
-            draft.data_scope = box.checked ? 'own' : 'all';
-            markSrc('own_only');
-          } else {
-            draft[key] = box.checked;
-            markSrc(key);
-          }
+          if (key === 'own_only') draft.data_scope = box.checked ? 'own' : 'all';
+          else draft[key] = box.checked;
           say('');
         });
       });
 
+      const copy = q('[data-acc="copy"]');
+      if (copy) {
+        copy.addEventListener('change', () => {
+          const from = users.find((x) => x.username === copy.value);
+          if (!from) return;
+          const src = resolveAccess(from.access);
+          draft.apps = src.apps.slice();
+          draft.views = JSON.parse(JSON.stringify(src.views || {}));
+          draft.data_scope = src.data_scope;
+          GRANT_FLAGS.forEach((f) => { draft[f.key] = src[f.key]; });
+          repaintApps();
+          wrap.querySelectorAll('[data-acc-flag]').forEach((box) => {
+            const key = box.getAttribute('data-acc-flag');
+            box.checked = key === 'own_only' ? draft.data_scope === 'own' : !!draft[key];
+          });
+          copy.value = '';
+          say('Copied ' + (from.name || from.username) + '. Nothing is saved until you press Save access.');
+        });
+      }
+
       const close = () => { holder.remove(); };
       q('[data-acc="cancel"]').addEventListener('click', close);
-
-      q('[data-acc="reset"]').addEventListener('click', async () => {
-        await saveAccess(username, null, close, say);
+      q('[data-acc="clear"]').addEventListener('click', async () => {
+        if (!confirm('Remove every app from ' + (u.name || u.username) + '?')) return;
+        await saveAccess(username, { apps: [], views: {}, data_scope: draft.data_scope }, close, say);
       });
       q('[data-acc="save"]').addEventListener('click', async () => {
         await saveAccess(username, draft, close, say);
       });
     }
 
-    async function saveAccess(username, grants, close, say) {
+    async function saveAccess(username, access, close, say) {
       say('Saving...');
       try {
         const out = await ctx.api.request(
           ENDPOINTS.users + '?username=' + encodeURIComponent(username),
-          { method: 'PATCH', body: { grants: grants } });
+          { method: 'PATCH', body: { access: access } });
         const at = users.findIndex((x) => x.username === username);
         if (at !== -1 && out.user) users[at] = out.user;
         close();
@@ -443,41 +517,24 @@ export default {
 
       $('#userList').innerHTML =
         '<table class="u-table"><thead><tr>' +
-          // "Admin", not "Superuser" — Ryan's call, Aug 2026. This column is
-          // the per-account elevated flag; the protected role beside it is
-          // labelled "Full access" in lib/users.js so the two things on one
-          // row don't both read as Admin. The stored field is still
-          // `superuser` everywhere in code.
-          '<th>Person</th><th>Role</th><th>Access</th><th>Admin</th><th>Last signed in</th><th></th>' +
+          // "Admin", not "Superuser" — Ryan's call, Aug 2026. The stored field
+          // is still `superuser` everywhere in code. With roles gone this is
+          // the only administrator there is, which is why the last one cannot
+          // be unticked.
+          '<th>Person</th><th>Access</th><th>Admin</th><th>Last signed in</th><th></th>' +
         '</tr></thead><tbody>' +
         users.map((u) => {
-          const role = roles[u.role] || {};
           const isMe = String(u.username).toLowerCase() === me;
           return '<tr>' +
             '<td><div class="u-name">' + esc(u.name || u.username) +
               (isMe ? ' <span class="u-sub" style="display:inline">(you)</span>' : '') +
             '</div><div class="u-sub">' + esc(u.username) + '</div></td>' +
-            // Your own role is not editable here, same reasoning as Remove:
-            // the session cookie carries the role, so demoting yourself
-            // silently locks you out of this screen at your next sign-in.
-            '<td>' + (isMe
-              ? '<span class="role-pill">' + esc(role.label || u.role) + '</span>'
-              : '<select class="role-select" data-role-user="' + esc(u.username) + '">' +
-                  Object.keys(roles).map((k) =>
-                    '<option value="' + esc(k) + '"' + (k === u.role ? ' selected' : '') + '>' +
-                      esc(roles[k].label || k) +
-                    '</option>'
-                  ).join('') +
-                '</select>') +
-              '<div class="app-chips">' + appChips(role.apps) + '</div></td>' +
-            // ACCESS, Sep 2026. The role is a starting point; anything set
-            // here lives on the person and wins. This column exists so a
-            // difference is visible from the table rather than only from
-            // inside an editor nobody opens.
-            '<td class="u-access">' + accessCell(u, role) +
-              '<button class="set-btn" data-access="' + esc(u.username) + '">' +
-                (u.grants ? 'Edit access' : 'Set access') +
-              '</button></td>' +
+            // ACCESS, Sep 2026. Roles are gone; this IS their access, not an
+            // override of anything. Shown in the table rather than only inside
+            // an editor, because an access model nobody can read at a glance
+            // is one nobody audits.
+            '<td class="u-access">' + accessCell(u) +
+              '<button class="set-btn" data-access="' + esc(u.username) + '">Set access</button></td>' +
             // Separate from role on purpose: an account can be "admin" and
             // still not see stub apps like CrewCore's pay/review data unless
             // this is checked. Unlike role, editing your own is allowed —
@@ -501,111 +558,6 @@ export default {
         '</tbody></table>';
     }
 
-    /**
-     * Roles are edited in place: toggle apps, tick permissions, then Save.
-     *
-     * Not saved per-click, unlike the classification dropdowns in GivingGauge.
-     * Roles have invariants that only hold for a COMPLETE set — every role must
-     * keep at least one app — so a half-made edit is a state the server would
-     * rightly reject. Batching means the whole set is valid when it is sent.
-     */
-    function renderRoles() {
-      const names = Object.keys(roles);
-      if (!names.length) { $('#roleList').innerHTML = ''; return; }
-
-      const holderCount = (roleKey) => users.filter((u) => u.role === roleKey).length;
-
-      $('#roleList').innerHTML = names.map((key) => {
-        const r = roles[key];
-        const locked = !!r.protected;
-        const held = holderCount(key);
-
-        const toggles = GRANTABLE_APPS.map((a) => {
-          const on = Array.isArray(r.apps) && r.apps.includes(a.id);
-          return '<button class="app-toggle" type="button"' +
-            ' style="--c:' + esc(a.accent) + '"' +
-            ' data-role="' + esc(key) + '" data-app-toggle="' + esc(a.id) + '"' +
-            ' aria-pressed="' + on + '"' +
-            (locked ? ' disabled' : '') + '>' +
-            '<span class="sq"></span>' + esc(a.name) +
-          '</button>';
-        }).join('');
-
-        return '' +
-          '<div class="role-block' + (locked ? ' protected' : '') + '">' +
-            '<div class="role-top">' +
-              '<div>' +
-                '<div class="role-name">' + esc(r.label || key) + '</div>' +
-                '<div class="role-id">' + esc(key) +
-                  (held ? ' · ' + held + (held === 1 ? ' person' : ' people') : ' · nobody yet') +
-                '</div>' +
-              '</div>' +
-              (locked ? '' :
-                '<button class="set-btn danger" data-del-role="' + esc(key) + '">Delete role</button>') +
-            '</div>' +
-
-            '<div class="role-apps">' + toggles + '</div>' +
-
-            '<div class="role-opts">' +
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_edit"' +
-                (r.can_edit !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can edit</label>' +
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_export"' +
-                (r.can_export !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can export</label>' +
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="own_only"' +
-                (r.data_scope === 'own' ? ' checked' : '') + (locked ? ' disabled' : '') + '> Own accounts only</label>' +
-              // Opt-in (checked only when explicitly true): roles saved before
-              // this flag existed must not silently gain list editing.
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="manage_lists"' +
-                (r.manage_lists === true ? ' checked' : '') + (locked ? ' disabled' : '') + '> Manage ErrorEngine lists</label>' +
-              // Opt-out (checked unless explicitly false), matching can_edit/
-              // can_export: everyone keeps the ability to delete their own
-              // notifications until an admin turns it off for a role.
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_delete_notifications"' +
-                (r.can_delete_notifications !== false ? ' checked' : '') + (locked ? ' disabled' : '') + '> Can delete notifications</label>' +
-              // GIVINGGAUGE, Sep 2026. Separate from can_edit on purpose:
-              // somebody can be given the app to type in the requests that
-              // arrive by phone without also being handed the yes or no. The
-              // tick shown is the RESOLVED answer, so a role that has been
-              // deciding all along reads as ticked rather than as blank.
-              '<label><input type="checkbox" data-role="' + esc(key) + '" data-flag="can_decide_giving"' +
-                (givingDecideVerdict(null, r).allowed ? ' checked' : '') + (locked ? ' disabled' : '') +
-                '> Can approve donations</label>' +
-            '</div>' +
-
-            (locked
-              ? '<div class="role-lock">The admin role always keeps every app and every ' +
-                'permission. Without that, an administrator could remove their own access ' +
-                'to the only screen that could undo it.</div>'
-              : '') +
-          '</div>';
-      }).join('');
-    }
-
-    let dirty = false;
-    function markDirty(on) {
-      dirty = on;
-      const btn = $('#saveRolesBtn');
-      if (btn) btn.disabled = !on;
-    }
-
-    function sayRole(text, kind) {
-      const el = $('#roleMsg');
-      if (!el) return;
-      el.textContent = text || '';
-      el.className = 'set-msg ' + (kind || '');
-      el.style.display = text ? 'inline-block' : 'none';
-      el.style.margin = '0 8px 0 0';
-      el.style.padding = '4px 9px';
-    }
-
-    function fillRoleSelect() {
-      $('#nu-role').innerHTML = Object.keys(roles).map((k) =>
-        '<option value="' + esc(k) + '">' + esc(roles[k].label || k) + '</option>'
-      ).join('');
-    }
-
-    /* ---- add ---- */
-
     $('#addUserBtn').addEventListener('click', () => {
       const f = $('#addUserForm');
       const open = f.style.display !== 'none';
@@ -626,8 +578,7 @@ export default {
         await ctx.api.post(ENDPOINTS.users, {
           username: $('#nu-username').value.trim(),
           name: $('#nu-name').value.trim(),
-          password: $('#nu-password').value,
-          role: $('#nu-role').value
+          password: $('#nu-password').value
         });
         ['#nu-username', '#nu-name', '#nu-password'].forEach((s) => { $(s).value = ''; });
         $('#addUserForm').style.display = 'none';
@@ -697,28 +648,6 @@ export default {
     // Saved per-change, unlike the role editor below: one user's role is a
     // single independent value, so there is no half-made state to batch.
     root.addEventListener('change', async (e) => {
-      const sel = e.target.closest('[data-role-user]');
-      if (sel) {
-        const username = sel.dataset.roleUser;
-        const next = sel.value;
-        sel.disabled = true;
-        try {
-          await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
-            method: 'PATCH',
-            body: { role: next }
-          });
-          // Sessions carry the role in the cookie, so a signed-in user keeps
-          // their old access until they next sign in. Worth saying out loud.
-          say(username + ' is now ' + (roles[next] ? (roles[next].label || next) : next) +
-              '. Takes effect the next time they sign in.', 'ok');
-          await load();
-        } catch (err) {
-          say(err.message || 'Could not change that role', 'err');
-          await load(); // reload puts the dropdown back on their real role
-        }
-        return;
-      }
-
       const su = e.target.closest('[data-superuser-user]');
       if (su) {
         const username = su.dataset.superuserUser;
@@ -735,132 +664,6 @@ export default {
           say(err.message || 'Could not change that setting', 'err');
           await load();
         }
-      }
-    });
-
-    /* ---- role editing ---- */
-
-    // App toggles and permission ticks edit the LOCAL copy. Nothing reaches the
-    // server until Save, because saveRoles validates the whole set at once.
-    root.addEventListener('click', (e) => {
-      const tog = e.target.closest('[data-app-toggle]');
-      if (!tog || tog.disabled) return;
-
-      const key = tog.dataset.role;
-      const appId = tog.dataset.appToggle;
-      const role = roles[key];
-      if (!role) return;
-
-      role.apps = Array.isArray(role.apps) ? role.apps : [];
-      const at = role.apps.indexOf(appId);
-      if (at === -1) role.apps.push(appId); else role.apps.splice(at, 1);
-
-      // Warn immediately rather than letting Save fail: a role with no apps
-      // means its people sign in to a blank screen.
-      if (!role.apps.length) {
-        sayRole('"' + (role.label || key) + '" has no apps', 'err');
-      } else {
-        sayRole('');
-      }
-
-      renderRoles();
-      markDirty(true);
-    });
-
-    root.addEventListener('change', (e) => {
-      const box = e.target.closest('[data-flag]');
-      if (!box || box.disabled) return;
-
-      const role = roles[box.dataset.role];
-      if (!role) return;
-
-      const flag = box.dataset.flag;
-      if (flag === 'own_only') role.data_scope = box.checked ? 'own' : 'all';
-      else role[flag] = box.checked;
-
-      markDirty(true);
-    });
-
-    $('#saveRolesBtn').addEventListener('click', async () => {
-      const empty = Object.keys(roles).filter(
-        (k) => k !== 'admin' && (!roles[k].apps || !roles[k].apps.length));
-      if (empty.length) {
-        sayRole('Give ' + empty.join(', ') + ' at least one app first', 'err');
-        return;
-      }
-
-      const btn = $('#saveRolesBtn');
-      btn.disabled = true;
-      sayRole('Saving...');
-      try {
-        const out = await ctx.api.post(ENDPOINTS.users + '?scope=roles', { roles });
-        roles = out.roles || roles;
-        renderRoles();
-        renderUsers();          // the people table shows role apps too
-        fillRoleSelect();
-        markDirty(false);
-        sayRole('Saved', 'ok');
-        setTimeout(() => sayRole(''), 2500);
-      } catch (err) {
-        sayRole(err.message || 'Could not save roles', 'err');
-        btn.disabled = false;
-      }
-    });
-
-    $('#addRoleBtn').addEventListener('click', () => {
-      const label = prompt('Name for the new role (e.g. "Production Lead"):');
-      if (!label || !label.trim()) return;
-
-      const key = label.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
-      if (!key) { sayRole('That name has no usable letters or numbers', 'err'); return; }
-      if (roles[key]) { sayRole('A role called "' + key + '" already exists', 'err'); return; }
-
-      roles[key] = {
-        name: key,
-        label: label.trim(),
-        protected: false,
-        // Starts with BackBone only. An empty app list would be invalid, and
-        // defaulting to everything would quietly over-grant.
-        apps: ['backbone'],
-        data_scope: 'all',
-        can_edit: true,
-        can_export: false,
-        // Written explicitly, and off, from the moment the role exists. A
-        // missing value means "this role predates the switch" and falls back
-        // to deciding (see lib/giving-access.js), which must never be what a
-        // brand new role gets by accident.
-        can_decide_giving: false
-      };
-      renderRoles();
-      markDirty(true);
-      sayRole('Added "' + label.trim() + '". Pick its apps, then Save.', 'ok');
-    });
-
-    root.addEventListener('click', async (e) => {
-      const del = e.target.closest('[data-del-role]');
-      if (!del) return;
-
-      const key = del.dataset.delRole;
-      const held = users.filter((u) => u.role === key);
-      if (held.length) {
-        // Deleting a role someone holds would silently drop them to viewer
-        // permissions. They would not lose access, they would lose the RIGHT
-        // access, which is harder to notice.
-        sayRole(held.length + (held.length === 1 ? ' person is' : ' people are') +
-                ' still using this role. Move them first.', 'err');
-        return;
-      }
-      if (!confirm('Delete the "' + (roles[key].label || key) + '" role?')) return;
-
-      try {
-        const out = await ctx.api.del(ENDPOINTS.users + '?scope=roles&role=' + encodeURIComponent(key));
-        roles = out.roles || roles;
-        renderRoles();
-        fillRoleSelect();
-        markDirty(false);
-        sayRole('Role deleted', 'ok');
-      } catch (err) {
-        sayRole(err.message || 'Could not delete that role', 'err');
       }
     });
 

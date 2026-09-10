@@ -232,11 +232,19 @@ Promise.all([
 
   t.test('Settings can turn the decision on and off', () => {
     const settings = read('apps/settings.js');
-    t.assert(/data-flag="can_decide_giving"/.test(settings), 'there is a checkbox');
+    // Sep 2026: roles are gone, so the switch is on the person. GRANT_FLAGS in
+    // lib/user-grants.js is what draws it, and can_decide_giving is in that list.
+    t.assert(/data-acc-flag=/.test(settings), 'there is a checkbox');
+    const flags = read('lib/user-grants.js');
+    t.assert(/can_decide_giving/.test(flags), 'and can_decide_giving is one of them');
     t.assert(/givingDecideVerdict/.test(settings),
       'and it shows the RESOLVED answer, so a role that has always decided reads as ticked');
-    t.assert(/can_decide_giving: false/.test(settings),
-      'a brand new role is written with the switch off rather than left undefined');
+    // Sep 2026: with roles gone there is no "new role" to seed. A new ACCOUNT
+    // starts with nothing at all, and can_decide_giving is opt-in in
+    // GRANT_FLAGS, so off is the default without anyone writing it.
+    const grantFlags = read('lib/user-grants.js');
+    t.assert(/\{ key: "can_decide_giving"[^}]*mode: "optin" \}/.test(grantFlags),
+      'deciding is opt-in, so a fresh account cannot inherit it');
   });
 
   process.exit(t.report());

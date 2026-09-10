@@ -1,26 +1,29 @@
-// PUT IN: test/user-grants.test.cjs
+// PUT IN: test/user-grants.test.cjs (REPLACES the current one)
 /**
- * Per-account grants (Sep 2026).
+ * Access per person, roles removed (Sep 2026).
  *
- * The role is a starting point; an account may carry its own answers and they
- * win, key by key. Absent means inherit, never deny.
- *
- * The permission checks here are REAL calls to permsFor() against a fake
- * Upstash, not source matching. That matters more than usual for this change:
- * the whole risk is a grant resolving differently from how the code reads, and
- * reading DEFAULT_ROLES would never catch it.
+ * The permission checks are REAL calls to permsFor() and getAccess() against a
+ * fake Upstash, not source matching. That matters most for the two things that
+ * cannot be allowed to regress: the migration must not lock anybody out, and
+ * the CrewCore ceiling must survive a model change that removed the thing it
+ * used to be expressed against.
  */
 
 const t = require('./harness.cjs');
 
-/* ---- fake Upstash ------------------------------------------------------ *
- * Reads only. permsFor() never writes.
- * ----------------------------------------------------------------------- */
-
 const kv = new Map();
+let lastWrite = null;
 
-global.fetch = async (url) => {
-  const key = decodeURIComponent((String(url).match(/\/get\/(.+)$/) || [])[1] || '');
+global.fetch = async (url, opts) => {
+  const u = String(url);
+  const setAt = u.match(/\/set\/(.+)$/);
+  if (setAt) {
+    const key = decodeURIComponent(setAt[1]);
+    lastWrite = { key, body: opts && opts.body };
+    kv.set(key, typeof (opts && opts.body) === 'string' ? opts.body : JSON.stringify(opts && opts.body));
+    return { ok: true, status: 200, json: async () => ({ result: 'OK' }) };
+  }
+  const key = decodeURIComponent((u.match(/\/get\/(.+)$/) || [])[1] || '');
   return { ok: true, status: 200, json: async () => ({ result: kv.has(key) ? kv.get(key) : null }) };
 };
 
@@ -28,269 +31,287 @@ process.env.KV_REST_API_URL = 'https://fake-upstash.test';
 process.env.KV_REST_API_TOKEN = 'fake-token';
 
 (async () => {
-  const grants = await import('../lib/user-grants.js');
+  const g = await import('../lib/user-grants.js');
   const users = await import('../lib/users.js');
-  const { resolveGrants, normalizeGrants, asRole, overrideSummary, GRANT_FLAGS } = grants;
-  const { permsFor, keysForTest } = users;
   const kvKeys = await import('../lib/kv.js');
+  const {
+    GRANT_FLAGS, emptyAccess, normalizeAccess, resolveAccess, tabsFor,
+    asRole, accessFromRole, accessSummary,
+  } = g;
+  const { permsFor, getAccess, countAdmins, updateUser } = users;
 
   const USERS_KEY = kvKeys.keys.users();
   const ROLES_KEY = kvKeys.keys.roles();
 
-  function seed({ user, roles }) {
+  function seed(map, roles) {
     kv.clear();
-    kv.set(USERS_KEY, JSON.stringify({ [user.username]: user }));
+    lastWrite = null;
+    kv.set(USERS_KEY, JSON.stringify(map));
     if (roles) kv.set(ROLES_KEY, JSON.stringify(roles));
   }
 
-  const baseRole = {
-    name: 'am', label: 'Account Manager', apps: ['backbone', 'shopstock'],
-    data_scope: 'own', can_edit: true, can_export: false,
-  };
+  // ---- the record itself --------------------------------------------------
 
-  // ---- resolveGrants: absent means inherit ------------------------------
-
-  t.test('an account with no grants is exactly its role', () => {
-    const r = resolveGrants(baseRole, null);
-    t.equal(r.apps.join(','), 'backbone,shopstock');
-    t.equal(r.data_scope, 'own');
-    t.equal(r.can_edit, true);
-    t.equal(r.can_export, false);
-    t.equal(r.sources.apps, 'role');
-    t.equal(r.sources.can_edit, 'role');
+  t.test('a new account starts with nothing', () => {
+    const a = emptyAccess();
+    t.equal(a.apps.length, 0, 'no apps, not a helpful default nobody chose');
+    t.equal(Object.keys(a.views).length, 0);
   });
-
-  t.test('an empty grants object changes nothing', () => {
-    const r = resolveGrants(baseRole, {});
-    t.equal(r.apps.join(','), 'backbone,shopstock');
-    t.equal(r.sources.apps, 'role');
-  });
-
-  t.test('false is an answer and overrides; undefined is not', () => {
-    const r = resolveGrants(baseRole, { can_edit: false });
-    t.equal(r.can_edit, false, 'the account said no');
-    t.equal(r.sources.can_edit, 'account');
-    t.equal(r.can_export, false, 'untouched flag still comes from the role');
-    t.equal(r.sources.can_export, 'role');
-  });
-
-  t.test('an account app list replaces the role list, it does not merge', () => {
-    const r = resolveGrants(baseRole, { apps: ['crewcore'] });
-    t.equal(r.apps.join(','), 'crewcore');
-    t.equal(r.sources.apps, 'account');
-  });
-
-  t.test('opt-in flags stay off and opt-out flags stay on when nobody says', () => {
-    const r = resolveGrants({ name: 'bare' }, null);
-    t.equal(r.manage_lists, false, 'opt-in: a role stored before the flag existed gains nothing');
-    t.equal(r.can_decide_giving, false, 'opt-in');
-    t.equal(r.can_edit, true, 'opt-out');
-    t.equal(r.can_delete_notifications, true, 'opt-out');
-  });
-
-  t.test('an opt-in flag can be turned on for one person', () => {
-    const r = resolveGrants(baseRole, { manage_lists: true });
-    t.equal(r.manage_lists, true);
-    t.equal(r.sources.manage_lists, 'account');
-  });
-
-  // ---- normalizeGrants ---------------------------------------------------
 
   t.test('unknown keys are dropped, not stored looking like settings', () => {
-    const g = normalizeGrants({ can_edit: true, is_wizard: true, apps: ['backbone'] });
-    t.equal(Object.keys(g).sort().join(','), 'apps,can_edit');
+    const a = normalizeAccess({ apps: ['backbone'], is_wizard: true, can_edit: false });
+    t.equal(a.is_wizard, undefined);
+    t.equal(a.can_edit, false, 'a real flag survives');
   });
 
-  t.test('a non-boolean flag value is ignored rather than coerced', () => {
-    t.equal(normalizeGrants({ can_edit: 'yes' }), null,
+  t.test('a non-boolean flag is ignored rather than coerced', () => {
+    t.equal(normalizeAccess({ can_edit: 'yes' }).can_edit, undefined,
       'a truthy string is not a decision anybody made');
   });
 
-  t.test('a bad data_scope is dropped', () => {
-    t.equal(normalizeGrants({ data_scope: 'everything' }), null);
-    t.equal(normalizeGrants({ data_scope: 'own' }).data_scope, 'own');
-  });
-
   t.test('duplicate and blank apps are cleaned', () => {
-    const g = normalizeGrants({ apps: ['backbone', 'backbone', '', '  crewcore  '] });
-    t.equal(g.apps.join(','), 'backbone,crewcore');
+    t.equal(normalizeAccess({ apps: ['backbone', 'backbone', '', ' crewcore '] }).apps.join(','),
+      'backbone,crewcore');
   });
 
-  t.test('nothing usable normalizes to null, so a reset stores no object', () => {
-    t.equal(normalizeGrants({}), null);
-    t.equal(normalizeGrants(null), null);
-    t.equal(normalizeGrants([1, 2]), null, 'an array is not a grants object');
+  t.test('a scoped entry cannot hide in the apps list', () => {
+    const a = normalizeAccess({ apps: ['crewcore', 'crewcore:roster'] });
+    t.equal(a.apps.join(','), 'crewcore', 'the colon-suffixed entry is stripped');
   });
 
-  // ---- asRole and the summary -------------------------------------------
-
-  t.test('asRole hands the resolved values to a role-shaped reader', () => {
-    const r = resolveGrants(baseRole, { can_edit: false, apps: ['givinggauge'] });
-    const shaped = asRole(r, baseRole);
-    t.equal(shaped.can_edit, false, 'giving-access sees the account answer');
-    t.equal(shaped.apps.join(','), 'givinggauge');
-    t.equal(shaped.label, 'Account Manager', 'the rest of the role survives');
+  t.test('a narrowing on an app they cannot open is dropped', () => {
+    const a = normalizeAccess({ apps: ['backbone'], views: { stitchsense: ['guess'] } });
+    t.equal(Object.keys(a.views).length, 0,
+      'dead weight that would come back to life if the app were re-ticked');
   });
 
-  t.test('the summary names only what differs from the role', () => {
-    t.equal(overrideSummary(resolveGrants(baseRole, null)).length, 0,
-      'a role-default account has nothing to say');
-    const diffs = overrideSummary(resolveGrants(baseRole, { can_edit: false, apps: ['backbone'] }));
-    t.assert(diffs.includes('apps'), diffs.join(','));
-    t.assert(diffs.some((d) => /no can edit/.test(d)), diffs.join(','));
+  t.test('a narrowing survives on an app they can open', () => {
+    const a = normalizeAccess({ apps: ['stitchsense'], views: { stitchsense: ['guess'] } });
+    t.equal((a.views.stitchsense || []).join(','), 'guess');
   });
 
-  t.test('every flag in GRANT_FLAGS resolves and reports a source', () => {
-    const r = resolveGrants(baseRole, null);
+  t.test('opt-in flags stay off and opt-out flags stay on when nothing is stored', () => {
+    const a = resolveAccess({});
+    t.equal(a.manage_lists, false, 'opt-in');
+    t.equal(a.can_decide_giving, false, 'opt-in');
+    t.equal(a.can_edit, true, 'opt-out');
+    t.equal(a.can_delete_notifications, true, 'opt-out');
+  });
+
+  t.test('false is an answer and survives resolution', () => {
+    t.equal(resolveAccess({ can_edit: false }).can_edit, false);
+  });
+
+  t.test('every flag in GRANT_FLAGS resolves to a boolean', () => {
+    const a = resolveAccess({});
     GRANT_FLAGS.forEach((f) => {
-      t.assert(typeof r[f.key] === 'boolean', f.key + ' resolves to a boolean');
-      t.assert(r.sources[f.key] === 'role' || r.sources[f.key] === 'account',
-        f.key + ' reports where it came from');
+      t.assert(typeof a[f.key] === 'boolean', f.key + ' resolves');
     });
   });
 
-  // ---- permsFor, the real thing ------------------------------------------
+  t.test('tabsFor emits app ids plus scoped entries for narrowed apps', () => {
+    const tabs = tabsFor({ apps: ['backbone', 'stitchsense'], views: { stitchsense: ['guess'] } });
+    t.assert(tabs.includes('backbone'), 'an unnarrowed app needs only its id');
+    t.assert(tabs.includes('stitchsense'), tabs.join(','));
+    t.assert(tabs.includes('stitchsense:guess'), tabs.join(','));
+  });
 
-  await t.test('permsFor: an account with no grants is unchanged by this feature', async () => {
+  t.test('asRole hands role-shaped readers the resolved answer', () => {
+    const r = asRole({ apps: ['givinggauge'], can_edit: false, can_decide_giving: true });
+    t.equal(r.can_edit, false);
+    t.equal(r.can_decide_giving, true);
+    t.equal(r.apps.join(','), 'givinggauge');
+  });
+
+  t.test('the summary names apps and flags a narrowed one', () => {
+    const bits = accessSummary({ apps: ['stitchsense'], views: { stitchsense: ['guess'] } },
+      (id) => id.toUpperCase());
+    t.equal(bits.length, 1);
+    t.assert(/STITCHSENSE/.test(bits[0]), bits[0]);
+    t.assert(/1 views/.test(bits[0]), 'says it is narrowed: ' + bits[0]);
+  });
+
+  // ---- converting an old role --------------------------------------------
+
+  t.test('a role becomes an access record, scoped views and all', () => {
+    const a = accessFromRole({
+      apps: ['crewcore', 'stitchsense'],
+      tabs: ['crewcore:dashboard', 'stitchsense:guess'],
+      data_scope: 'own', can_edit: false,
+    });
+    t.equal(a.apps.join(','), 'crewcore,stitchsense');
+    t.equal((a.views.stitchsense || []).join(','), 'guess',
+      'Stitch Guess only survives instead of quietly widening to the whole app');
+    t.equal(a.data_scope, 'own');
+    t.equal(a.can_edit, false);
+  });
+
+  t.test('a per-account override still beats the role it is converted with', () => {
+    const a = accessFromRole(
+      { apps: ['backbone'], can_export: false },
+      { apps: ['backbone', 'crewcore'], can_export: true });
+    t.equal(a.apps.join(','), 'backbone,crewcore');
+    t.equal(a.can_export, true);
+  });
+
+  // ---- THE MIGRATION ------------------------------------------------------
+
+  await t.test('the migration bakes each account access on first read', async () => {
     seed({
-      user: { username: 'hannah', name: 'Hannah', role: 'am' },
-      roles: { am: baseRole },
+      hannah: { username: 'hannah', name: 'Hannah', role: 'am' },
+    }, {
+      am: { name: 'am', apps: ['backbone', 'shopstock'], data_scope: 'own', can_edit: true },
     });
     const p = await permsFor('hannah');
-    t.assert(p.tabs.includes('backbone'), 'role apps still arrive');
+    t.assert(p.tabs.includes('backbone'), 'access survives the move');
     t.assert(p.tabs.includes('shopstock'));
+    t.equal(p.data_scope, 'own', 'and so does the scope');
+  });
+
+  await t.test('THE LOCKOUT GUARD: an admin role becomes the Admin flag', async () => {
+    seed({
+      ryan: { username: 'ryan', role: 'admin' },
+      hannah: { username: 'hannah', role: 'am' },
+    }, {
+      admin: { name: 'admin', apps: ['backbone'], data_scope: 'all' },
+      am: { name: 'am', apps: ['backbone'], data_scope: 'own' },
+    });
+    const p = await permsFor('ryan');
+    t.equal(p.superuser, true, 'without this, deploy day locks everybody out of Settings');
+    t.equal((await permsFor('hannah')).superuser, false, 'and it does not spread');
+  });
+
+  await t.test('the migration keeps a scoped view narrowing', async () => {
+    seed({
+      amanda: { username: 'amanda', role: 'employee' },
+    }, {
+      employee: {
+        name: 'employee', apps: ['crewcore', 'stitchsense'],
+        tabs: ['crewcore:dashboard', 'stitchsense:guess'], data_scope: 'own', can_edit: false,
+      },
+    });
+    const p = await permsFor('amanda');
+    t.assert(p.tabs.includes('stitchsense:guess'), p.tabs.join(','));
+    t.assert(!p.tabs.includes('stitchsense:library'), 'the rest of the app did not open up');
+  });
+
+  await t.test('the migration is idempotent', async () => {
+    seed({ hannah: { username: 'hannah', role: 'am' } },
+         { am: { name: 'am', apps: ['backbone'] } });
+    await permsFor('hannah');
+    const afterFirst = kv.get(USERS_KEY);
+    lastWrite = null;
+    await permsFor('hannah');
+    t.equal(lastWrite, null, 'a second read writes nothing');
+    t.equal(kv.get(USERS_KEY), afterFirst, 'and changes nothing');
+  });
+
+  // ---- permsFor -----------------------------------------------------------
+
+  await t.test('access set on an account is what permsFor returns', async () => {
+    seed({
+      hannah: {
+        username: 'hannah',
+        access: { apps: ['backbone', 'promopro'], data_scope: 'own', can_export: true },
+      },
+    });
+    const p = await permsFor('hannah');
+    t.assert(p.tabs.includes('promopro'), 'no role was involved anywhere');
+    t.equal(p.can_export, true);
     t.equal(p.data_scope, 'own');
-    t.equal(p.can_edit, true);
-  });
-
-  await t.test('permsFor: an account grant beats the role', async () => {
-    seed({
-      user: { username: 'hannah', name: 'Hannah', role: 'am',
-              grants: { apps: ['backbone', 'crewcore'], can_export: true } },
-      roles: { am: baseRole },
-    });
-    const p = await permsFor('hannah');
-    t.assert(p.tabs.includes('crewcore'), 'the extra app arrives without a new role');
-    t.assert(!p.tabs.includes('shopstock'), 'the account list replaced the role list');
-    t.equal(p.can_export, true, 'the role said no and the account said yes');
-  });
-
-  await t.test('permsFor: manage_lists stays opt-in through the resolver', async () => {
-    seed({ user: { username: 'hannah', role: 'am' }, roles: { am: baseRole } });
-    t.equal((await permsFor('hannah')).manage_lists, false, 'default off');
-
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { manage_lists: true } },
-      roles: { am: baseRole },
-    });
-    t.equal((await permsFor('hannah')).manage_lists, true, 'on for this person only');
-  });
-
-  await t.test('permsFor: can_delete_notifications stays opt-out through the resolver', async () => {
-    seed({ user: { username: 'hannah', role: 'am' }, roles: { am: baseRole } });
-    t.equal((await permsFor('hannah')).can_delete_notifications, true, 'default on');
-
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { can_delete_notifications: false } },
-      roles: { am: baseRole },
-    });
-    t.equal((await permsFor('hannah')).can_delete_notifications, false, 'off for this person');
-  });
-
-  await t.test('permsFor: an account grant flows into the GivingGauge answers', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { can_decide_giving: true } },
-      roles: { am: { ...baseRole, apps: ['backbone', 'givinggauge'] } },
-    });
-    t.equal((await permsFor('hannah')).can_decide_giving, true,
-      'deciding follows the account, not only the role');
-  });
-
-  await t.test('permsFor reports where each answer came from', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { can_edit: false } },
-      roles: { am: baseRole },
-    });
-    const p = await permsFor('hannah');
-    t.equal(p.grant_sources.can_edit, 'account');
-    t.equal(p.grant_sources.can_export, 'role');
-  });
-
-  // ---- THE CEILING IS NOT NEGOTIABLE -------------------------------------
-  //
-  // This is the check that matters most. Per-account grants must not become a
-  // second door into CrewCore's admin views. That is the CrewCore trap, and
-  // it has already cost one security incident.
-
-  await t.test('an account grant cannot hand somebody CrewCore Roster or Settings', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { apps: ['crewcore'] } },
-      roles: { am: baseRole },
-    });
-    const p = await permsFor('hannah');
-    t.assert(!p.tabs.includes('crewcore:roster'), 'no roster');
-    t.assert(!p.tabs.includes('crewcore:settings'), 'no CrewCore settings');
-    t.assert(p.tabs.includes('crewcore:samples'), 'the self-serve views do arrive');
-    t.assert(p.tabs.includes('crewcore:dashboard'));
-  });
-
-  await t.test('an account grant cannot make somebody a CrewCore admin', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { apps: ['crewcore'], can_edit: true } },
-      roles: { am: baseRole },
-    });
-    const p = await permsFor('hannah');
-    t.equal(p.superuser, false, 'the Admin flag is the only way in, and no grant sets it');
-  });
-
-  await t.test('an account cannot smuggle a scoped view in through the apps list', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { apps: ['crewcore:roster'] } },
-      roles: { am: baseRole },
-    });
-    const p = await permsFor('hannah');
-    t.assert(!p.tabs.includes('crewcore:roster'),
-      'a colon-suffixed entry in the apps list is still capped by the ceiling');
-  });
-
-  // ---- THE SERVER HONOURS AN ACCOUNT GRANT, NOT JUST THE RAIL -----------
-  //
-  // The bug this catches: per-account grants shipped in permsFor(), which the
-  // rail reads, while eighteen routes still called getRole(user.role). So a
-  // grant changed what somebody SAW and not what the server let them DO.
-  // Buttons hidden, endpoints open. getAccess() is the fix, and these are
-  // real calls against a fake Upstash.
-
-  await t.test('getAccess resolves the account over the role', async () => {
-    seed({
-      user: { username: 'hannah', role: 'am', grants: { can_export: true } },
-      roles: { am: baseRole },
-    });
-    const access = await users.getAccess('hannah');
-    t.equal(access.can_export, true, 'the role says no and the account says yes');
-    t.equal(access.data_scope, 'own', 'untouched values still come from the role');
   });
 
   await t.test('getAccess and permsFor cannot disagree', async () => {
+    seed({ hannah: { username: 'hannah', access: { apps: ['backbone'], can_edit: false } } });
+    const a = await getAccess('hannah');
+    const p = await permsFor('hannah');
+    t.equal(a.can_edit, p.can_edit);
+    t.equal(a.data_scope, p.data_scope);
+    t.equal(a.apps.join(','), 'backbone');
+  });
+
+  await t.test('an account with no apps signs in to an empty rail, not an error', async () => {
+    seed({ newbie: { username: 'newbie', access: { apps: [] } } });
+    const p = await permsFor('newbie');
+    t.equal(p.tabs.length, 0);
+    t.equal(p.superuser, false);
+  });
+
+  await t.test('perms.role is derived from the flag, not stored', async () => {
     seed({
-      user: { username: 'hannah', role: 'am', grants: { can_edit: false, apps: ['backbone'] } },
-      roles: { am: baseRole },
+      ryan: { username: 'ryan', superuser: true, access: { apps: ['backbone'] } },
+      hannah: { username: 'hannah', access: { apps: ['backbone'] } },
     });
-    const access = await users.getAccess('hannah');
-    const perms = await permsFor('hannah');
-    t.equal(access.can_edit, perms.can_edit, 'can_edit agrees');
-    t.equal(access.data_scope, perms.data_scope, 'data_scope agrees');
-    t.equal(access.apps.join(','), 'backbone', 'and the app list agrees');
+    t.equal((await permsFor('ryan')).role, 'admin',
+      'so the routes reading perms.role === "admin" still mean the right thing');
+    t.equal((await permsFor('hannah')).role, 'account');
   });
 
-  await t.test('getAccess on an unknown account does not throw', async () => {
-    seed({ user: { username: 'hannah', role: 'am' }, roles: { am: baseRole } });
-    const access = await users.getAccess('nobody');
-    t.assert(access && typeof access === 'object', 'an object comes back');
-    t.assert(Array.isArray(access.apps), 'with an app list rather than an exception');
+  // ---- THE CEILING SURVIVES THE MODEL CHANGE -----------------------------
+
+  await t.test('an account grant cannot hand somebody CrewCore Roster or Settings', async () => {
+    seed({ hannah: { username: 'hannah', access: { apps: ['crewcore'] } } });
+    const p = await permsFor('hannah');
+    t.assert(!p.tabs.includes('crewcore:roster'), 'no roster');
+    t.assert(!p.tabs.includes('crewcore:settings'), 'no CrewCore settings');
+    t.assert(p.tabs.includes('crewcore:dashboard'), 'the self-serve views do arrive');
+    t.assert(p.tabs.includes('crewcore:samples'));
   });
 
-  t.test('no route reads a role directly any more', () => {
+  await t.test('narrowing CrewCore by hand cannot widen past the ceiling', async () => {
+    seed({
+      hannah: {
+        username: 'hannah',
+        access: { apps: ['crewcore'], views: { crewcore: ['roster', 'settings', 'dashboard'] } },
+      },
+    });
+    const p = await permsFor('hannah');
+    t.assert(!p.tabs.includes('crewcore:roster'), 'the ceiling is applied after the account');
+    t.assert(!p.tabs.includes('crewcore:settings'));
+    t.assert(p.tabs.includes('crewcore:dashboard'), 'what was in the self-serve set survives');
+  });
+
+  await t.test('an Admin does get the full CrewCore rail', async () => {
+    seed({ ryan: { username: 'ryan', superuser: true, access: { apps: ['crewcore'] } } });
+    const p = await permsFor('ryan');
+    t.assert(!p.tabs.some((x) => x.startsWith('crewcore:')),
+      'unnarrowed means every view, so no scoped entries and no ceiling: ' + p.tabs.join(','));
+    t.assert(p.tabs.includes('crewcore'));
+  });
+
+  // ---- the last administrator --------------------------------------------
+
+  await t.test('countAdmins counts the flag', async () => {
+    seed({
+      ryan: { username: 'ryan', superuser: true, access: {} },
+      hannah: { username: 'hannah', access: {} },
+    });
+    t.equal(await countAdmins(), 1);
+  });
+
+  await t.test('the last Admin flag cannot be removed', async () => {
+    seed({
+      ryan: { username: 'ryan', superuser: true, access: {} },
+      hannah: { username: 'hannah', access: {} },
+    });
+    let threw = null;
+    try { await updateUser('ryan', { superuser: false }); } catch (e) { threw = e; }
+    t.assert(threw, 'refused');
+    t.assert(/last administrator/i.test(threw.message), threw.message);
+  });
+
+  await t.test('one of two Admins can be removed', async () => {
+    seed({
+      ryan: { username: 'ryan', superuser: true, access: {} },
+      megan: { username: 'megan', superuser: true, access: {} },
+    });
+    await updateUser('megan', { superuser: false });
+    t.equal(await countAdmins(), 1, 'the guard is about the last one, not about all of them');
+  });
+
+  // ---- nothing reads a role any more --------------------------------------
+
+  t.test('no route resolves access from a role', () => {
     const fs = require('fs');
     const path = require('path');
     const ROOT = path.join(__dirname, '..');
@@ -299,42 +320,31 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
       return e.isDirectory() ? walk(full) : (e.name.endsWith('.js') ? [full] : []);
     });
     const offenders = walk(path.join(ROOT, 'api'))
-      .filter((f) => /getRole\(/.test(fs.readFileSync(f, 'utf8')))
+      .filter((f) => /getRole\(|getRoles\(/.test(fs.readFileSync(f, 'utf8')))
       .map((f) => path.relative(ROOT, f));
     t.equal(offenders.length, 0,
-      'these still ask the role instead of the person: ' + offenders.join(', '));
+      'these still ask a role instead of the person: ' + offenders.join(', '));
   });
 
-  // ---- the Set access button is wired to a CLICK ------------------------
-  //
-  // Source-matched because it needs a browser to run for real, but anchored
-  // on the exact defect rather than on wording: the first version of this
-  // shipped with the branch inside the `change` listener, where a button
-  // never fires, so Set access silently did nothing. Nothing about the
-  // permission model was wrong and no other test could have seen it.
+  t.test('the Settings screen has no roles editor left', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const src = fs.readFileSync(path.join(__dirname, '..', 'apps/settings.js'), 'utf8');
+    t.assert(!/scope=roles/.test(src), 'no calls to the deleted roles endpoint');
+    t.assert(!/data-role-user/.test(src), 'no role dropdown on an account row');
+    t.assert(/data-access=/.test(src), 'the access editor is what is left');
+  });
 
   t.test('Set access is handled in the click listener, not the change one', () => {
     const fs = require('fs');
     const path = require('path');
     const src = fs.readFileSync(path.join(__dirname, '..', 'apps/settings.js'), 'utf8');
-
     const clickAt = src.indexOf("root.addEventListener('click'");
     const changeAt = src.indexOf("root.addEventListener('change'", clickAt);
     const accessAt = src.indexOf("closest('[data-access]')");
-
-    t.assert(clickAt !== -1, 'the delegated click listener exists');
-    t.assert(changeAt > clickAt, 'the change listener comes after it');
+    t.assert(clickAt !== -1 && changeAt > clickAt, 'both listeners exist in order');
     t.assert(accessAt > clickAt && accessAt < changeAt,
-      'the data-access branch sits inside the click listener');
-  });
-
-  t.test('the access editor saves through the seam, not fetch', () => {
-    const fs = require('fs');
-    const path = require('path');
-    const src = fs.readFileSync(path.join(__dirname, '..', 'apps/settings.js'), 'utf8');
-    t.assert(/ctx\.api\.request\([\s\S]{0,200}method: 'PATCH'[\s\S]{0,120}grants/.test(src),
-      'saving access goes through ctx.api.request with a PATCH');
-    t.assert(!/fetch\(/.test(src), 'no app file calls fetch directly');
+      'a button fires click, not change. This shipped wrong once.');
   });
 
   process.exit(t.report());

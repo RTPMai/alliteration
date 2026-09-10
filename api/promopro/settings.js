@@ -133,12 +133,28 @@ export default async function handler(req, res) {
       if (isAdmin) {
         try {
           const { listUsers, getAccess, permsFor } = await import("../../lib/users.js");
+          const { buyersFromRoles } = await import("../../lib/promopro/access.js");
           const accounts = await listUsers();
+
+          // ONE-TIME: the buyer list named shell roles, and roles are gone.
+          // Expanded into usernames using each account's historical role, then
+          // saved, so this happens once and the old list is never read again.
+          // Done before the rows are built so the screen shows the converted
+          // answer rather than a stale one.
+          const converted = buyersFromRoles(settings, accounts);
+          if (converted) {
+            settings.editUsers = converted;
+            try {
+              await saveSettings({ ...settings, editUsers: converted });
+            } catch (e) {
+              console.error("promopro/settings could not save the converted buyer list:", e && e.message);
+            }
+          }
           const rows = [];
           for (const u of accounts) {
-            // Each person's RESOLVED access, not their role's. This screen
-            // exists to answer "who can buy", so reading the role would have
-            // reported the wrong answer for anybody with a per-account grant.
+            // The person's RESOLVED access, not their role's. This screen
+            // exists to answer "who can buy", so reading a role would report
+            // the wrong answer for anybody carrying their own grants.
             const r = await getAccess(u.username);
             const perms = await permsFor(u.username);
             const tabs = (perms && perms.tabs) || [];
@@ -173,23 +189,6 @@ export default async function handler(req, res) {
 
       const candidates = candidatesFrom(employees);
       if (isAdmin) settings.candidates = candidates;
-
-      // The role names the edit-roles picker offers. Sent only to admins,
-      // since it is the shell's role list and nobody else can change it here
-      // anyway. Read live rather than stored, so a role added in shell
-      // Settings shows up without a deploy.
-      if (isAdmin) {
-        try {
-          const { getRoles } = await import("../../lib/users.js");
-          const roles = await getRoles();
-          settings.roleChoices = Object.values(roles || {})
-            .map((r) => ({ name: String(r.name || "").toLowerCase(), label: r.label || r.name }))
-            .filter((r) => r.name);
-        } catch (e) {
-          console.error("promopro/settings could not read the role list:", e && e.message);
-          settings.roleChoices = [];
-        }
-      }
 
       // Counts, always, admin or not. An empty picker has several very
       // different causes (nobody on the roster, everybody inactive, nobody

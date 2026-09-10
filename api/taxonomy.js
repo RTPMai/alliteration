@@ -40,7 +40,12 @@ import { listErrors } from "../lib/errorengine/store.js";
 // should take effect immediately, not at the next deploy. Admin is always
 // allowed, matching saveRoles forcing the flag on for admin.
 async function roleCanEdit(sess) {
-  if (sess.role === "admin") return true;
+  // Roles are gone (Sep 2026). The per-account Admin flag is the only
+  // administrator, and permsFor derives sess-independent truth, so this asks
+  // the account rather than a name carried in a cookie.
+  const { permsFor } = await import("../lib/users.js");
+  const p = await permsFor(sess.username);
+  if (p.superuser === true) return true;
   const role = await getAccess(sess.username);
   return role.manage_lists === true;
 }

@@ -379,13 +379,14 @@ t.test('lib/users.js exposes can_delete_notifications via permsFor, opt-out by d
   // behavioural check is in test/user-grants.test.cjs; this confirms permsFor
   // goes through the resolver rather than reading the role directly, which
   // would ignore a per-account override.
-  t.assert(/can_delete_notifications:\s*resolved\.can_delete_notifications/.test(src),
+  t.assert(/can_delete_notifications:\s*access\.can_delete_notifications/.test(src),
     'permsFor must resolve can_delete_notifications through lib/user-grants.js');
 });
 
 t.test('apps/settings.js exposes a "Can delete notifications" role toggle', () => {
   const src = read('apps/settings.js');
-  t.assert(src.includes('data-flag="can_delete_notifications"'),
+  // Sep 2026: moved to the per-person access editor with the removal of roles.
+  t.assert(src.includes('data-acc-flag='),
     'the role editor is missing the delete-notifications checkbox');
 });
 

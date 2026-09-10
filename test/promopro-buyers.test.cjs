@@ -37,19 +37,19 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
   /* ---- raising one ----------------------------------------------------- */
 
   t.test('the admin flag always wins, so there is a way back in', () => {
-    t.equal(a.editVerdict(ADMIN, VIEWER, { editRoles: ['nobody'] }).allowed, true);
+    t.equal(a.editVerdict(ADMIN, VIEWER, { editUsers: ['nobody'] }).allowed, true);
   });
 
   t.test('nothing ticked keeps today behaviour, not nobody', () => {
     // An empty list is what a fresh deploy looks like. If it meant "nobody",
     // deploying this would lock the whole team out of a working app.
-    t.equal(a.editVerdict({ username: 'alexis' }, AM, { editRoles: [] }).allowed, true);
+    t.equal(a.editVerdict({ username: 'alexis' }, AM, { editUsers: [] }).allowed, true);
     t.equal(a.editVerdict({ username: 'alexis' }, AM, {}).allowed, true);
     t.equal(a.editVerdict({ username: 'alexis' }, AM, null).allowed, true);
   });
 
   t.test('once a role is ticked, everyone else is out', () => {
-    const s = { editRoles: ['manager'] };
+    const s = { editUsers: ['m'] };
     t.equal(a.editVerdict({ username: 'm' }, MANAGER, s).allowed, true);
     t.equal(a.editVerdict({ username: 'alexis' }, AM, s).allowed, false);
   });
@@ -57,15 +57,15 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
   t.test('a read-only role is never let in by a tick', () => {
     // Ticking "viewer" in PromoPro must not hand edit rights to a role the
     // shell says is read-only. This list narrows; it cannot widen.
-    t.equal(a.editVerdict({ username: 'v' }, VIEWER, { editRoles: ['viewer'] }).allowed, false);
+    t.equal(a.editVerdict({ username: 'v' }, VIEWER, { editUsers: ['viewer'] }).allowed, false);
   });
 
   t.test('role names are matched case-insensitively', () => {
-    t.equal(a.editVerdict({ username: 'm' }, { name: 'Manager', can_edit: true }, { editRoles: ['manager'] }).allowed, true);
+    t.equal(a.editVerdict({ username: 'm' }, { name: 'Manager', can_edit: true }, { editUsers: ['m'] }).allowed, true);
   });
 
   t.test('an account with no role at all is refused', () => {
-    t.equal(a.editVerdict({ username: 'x' }, null, { editRoles: [] }).allowed, false);
+    t.equal(a.editVerdict({ username: 'x' }, null, { editUsers: [] }).allowed, false);
   });
 
   t.test('every verdict explains itself in words', () => {
@@ -74,9 +74,9 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
     const cases = [
       a.editVerdict(ADMIN, null, {}),
       a.editVerdict({ username: 'v' }, VIEWER, {}),
-      a.editVerdict({ username: 'a' }, AM, { editRoles: [] }),
-      a.editVerdict({ username: 'a' }, AM, { editRoles: ['manager'] }),
-      a.editVerdict({ username: 'm' }, MANAGER, { editRoles: ['manager'] }),
+      a.editVerdict({ username: 'a' }, AM, { editUsers: [] }),
+      a.editVerdict({ username: 'a' }, AM, { editUsers: ['m'] }),
+      a.editVerdict({ username: 'm' }, MANAGER, { editUsers: ['m'] }),
       a.editVerdict({ username: 'x' }, null, {}),
     ];
     cases.forEach((v, i) => {
@@ -85,8 +85,8 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
   });
 
   t.test('the fallback says so, so it can be told from a real grant', () => {
-    t.equal(a.editVerdict({ username: 'a' }, AM, { editRoles: [] }).viaFallback, true);
-    t.equal(a.editVerdict({ username: 'm' }, MANAGER, { editRoles: ['manager'] }).viaFallback, undefined);
+    t.equal(a.editVerdict({ username: 'a' }, AM, { editUsers: [] }).viaFallback, true);
+    t.equal(a.editVerdict({ username: 'm' }, MANAGER, { editUsers: ['m'] }).viaFallback, undefined);
   });
 
   /* ---- booking in stock ------------------------------------------------ */
@@ -94,7 +94,7 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
   t.test('receiving stays open to people who cannot raise a PO', () => {
     // Ryan's call. Buying is a decision to spend money; receiving is a record
     // that a box turned up, and it belongs to whoever opened the box.
-    const s = { editRoles: ['manager'] };
+    const s = { editUsers: ['m'] };
     t.equal(a.editVerdict({ username: 'alexis' }, AM, s).allowed, false, 'cannot buy');
     t.equal(a.receiveVerdict({ username: 'alexis' }, AM).allowed, true, 'can still book in');
   });
@@ -213,6 +213,40 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
     // control over a failure somewhere else entirely.
     const outage = settingsRoute.slice(settingsRoute.indexOf('rosterUnavailable'));
     t.assert(/youCanRaise/.test(outage.slice(0, 900)));
+  });
+
+  // ---- the one-time conversion off roles ---------------------------------
+  //
+  // These exist because the first version of this shipped broken: publicUser
+  // had stopped carrying the historical role, so every account matched
+  // nothing, the expansion returned an empty list, and saving it would have
+  // wiped a configured buyer list on the first load after deploy.
+
+  t.test('a stored role list expands into the people who held those roles', () => {
+    const out = a.buyersFromRoles(
+      { editRoles: ['manager', 'am'] },
+      [
+        { username: 'ryan', role: 'admin' },
+        { username: 'megan', role: 'manager' },
+        { username: 'alexis', role: 'am' },
+      ]);
+    t.equal((out || []).join(','), 'megan,alexis');
+  });
+
+  t.test('an expansion that finds nobody is refused, not saved as empty', () => {
+    t.equal(a.buyersFromRoles({ editRoles: ['manager'] }, [{ username: 'ryan' }]), null,
+      'an empty list means "shell edit rights decide", which is a setting nobody chose');
+  });
+
+  t.test('the conversion does not run twice', () => {
+    t.equal(a.buyersFromRoles({ editRoles: ['am'], editUsers: [] },
+      [{ username: 'alexis', role: 'am' }]), null,
+      'once editUsers exists the old list is never read again');
+  });
+
+  t.test('nothing to convert is not an error', () => {
+    t.equal(a.buyersFromRoles({ editRoles: [] }, []), null);
+    t.equal(a.buyersFromRoles(null, []), null);
   });
 
   process.exit(t.report());
