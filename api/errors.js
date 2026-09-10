@@ -20,7 +20,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser, getRole } from "../lib/users.js";
+import { getUser, getAccess } from "../lib/users.js";
 import { validateRecordWith, validatePatchWith, VENDOR_DEFECT } from "../lib/errorengine/schema.js";
 import {
   listErrors, saveError, nextErrorId, resolveFromBackbone, deleteError,
@@ -37,7 +37,7 @@ import { getTaxonomy } from "../lib/errorengine/taxonomy-store.js";
 // api/crewcore/*.js.
 async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return (role && role.data_scope === "all") || (user && user.superuser === true);
 }
 

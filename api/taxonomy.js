@@ -27,7 +27,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
-import { getRole } from "../lib/users.js";
+import { getAccess } from "../lib/users.js";
 import {
   getTaxonomy, addOption, setOptionActive, renameOption, deleteOption,
   setOptionPriceList, getPrices, addPrice, updatePrice, deletePrice,
@@ -41,7 +41,7 @@ import { listErrors } from "../lib/errorengine/store.js";
 // allowed, matching saveRoles forcing the flag on for admin.
 async function roleCanEdit(sess) {
   if (sess.role === "admin") return true;
-  const role = await getRole(sess.role);
+  const role = await getAccess(sess.username);
   return role.manage_lists === true;
 }
 

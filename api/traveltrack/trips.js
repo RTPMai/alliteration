@@ -9,7 +9,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
+import { getUser, getAccess } from "../../lib/users.js";
 import { validateTrip } from "../../lib/traveltrack/schema.js";
 import { listTrips, getTrip, saveTrip, updateTrip, deleteTrip } from "../../lib/traveltrack/store.js";
 
@@ -21,7 +21,7 @@ function parseBody(req) {
 
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return {
     scope: (role && role.data_scope) || "all",
     canEdit: role ? !!role.can_edit : true,

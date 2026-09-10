@@ -253,6 +253,58 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
       'a colon-suffixed entry in the apps list is still capped by the ceiling');
   });
 
+  // ---- THE SERVER HONOURS AN ACCOUNT GRANT, NOT JUST THE RAIL -----------
+  //
+  // The bug this catches: per-account grants shipped in permsFor(), which the
+  // rail reads, while eighteen routes still called getRole(user.role). So a
+  // grant changed what somebody SAW and not what the server let them DO.
+  // Buttons hidden, endpoints open. getAccess() is the fix, and these are
+  // real calls against a fake Upstash.
+
+  await t.test('getAccess resolves the account over the role', async () => {
+    seed({
+      user: { username: 'hannah', role: 'am', grants: { can_export: true } },
+      roles: { am: baseRole },
+    });
+    const access = await users.getAccess('hannah');
+    t.equal(access.can_export, true, 'the role says no and the account says yes');
+    t.equal(access.data_scope, 'own', 'untouched values still come from the role');
+  });
+
+  await t.test('getAccess and permsFor cannot disagree', async () => {
+    seed({
+      user: { username: 'hannah', role: 'am', grants: { can_edit: false, apps: ['backbone'] } },
+      roles: { am: baseRole },
+    });
+    const access = await users.getAccess('hannah');
+    const perms = await permsFor('hannah');
+    t.equal(access.can_edit, perms.can_edit, 'can_edit agrees');
+    t.equal(access.data_scope, perms.data_scope, 'data_scope agrees');
+    t.equal(access.apps.join(','), 'backbone', 'and the app list agrees');
+  });
+
+  await t.test('getAccess on an unknown account does not throw', async () => {
+    seed({ user: { username: 'hannah', role: 'am' }, roles: { am: baseRole } });
+    const access = await users.getAccess('nobody');
+    t.assert(access && typeof access === 'object', 'an object comes back');
+    t.assert(Array.isArray(access.apps), 'with an app list rather than an exception');
+  });
+
+  t.test('no route reads a role directly any more', () => {
+    const fs = require('fs');
+    const path = require('path');
+    const ROOT = path.join(__dirname, '..');
+    const walk = (dir) => fs.readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+      const full = path.join(dir, e.name);
+      return e.isDirectory() ? walk(full) : (e.name.endsWith('.js') ? [full] : []);
+    });
+    const offenders = walk(path.join(ROOT, 'api'))
+      .filter((f) => /getRole\(/.test(fs.readFileSync(f, 'utf8')))
+      .map((f) => path.relative(ROOT, f));
+    t.equal(offenders.length, 0,
+      'these still ask the role instead of the person: ' + offenders.join(', '));
+  });
+
   // ---- the Set access button is wired to a CLICK ------------------------
   //
   // Source-matched because it needs a browser to run for real, but anchored

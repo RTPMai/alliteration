@@ -41,7 +41,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser, getRole, listUsers } from "../lib/users.js";
+import { getUser, getAccess, listUsers } from "../lib/users.js";
 import {
   validateNew, validatePatch, GENERAL_APP, PICKABLE_LINK_TYPES,
 } from "../lib/notifications/schema.js";
@@ -220,7 +220,7 @@ async function searchLinkable(type, q, sess) {
     let synced = data && Array.isArray(data.synced) ? data.synced : [];
 
     const user = sess.username ? await getUser(sess.username) : null;
-    const role = await getRole(user ? user.role : sess.role);
+    const role = await getAccess(sess.username);
     const scope = (role && role.data_scope) || "all";
     if (scope === "own") {
       const amName = (user && (user.am_name || user.name)) || "";
@@ -265,7 +265,7 @@ const APP_IDS = [
 
 async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return (role && role.data_scope === "all") || (user && user.superuser === true);
 }
 
@@ -276,7 +276,7 @@ async function callerIsAdmin(sess) {
 // an admin out of cleanup by mis-configuring a role.
 async function callerCanDelete(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return !role || role.can_delete_notifications !== false;
 }
 

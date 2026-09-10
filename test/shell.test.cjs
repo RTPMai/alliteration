@@ -566,8 +566,8 @@ t.test('errors.js delete gate checks the superuser flag, not a fake "superuser" 
     'errors.js should not gate delete on a hardcoded ["admin","superuser"] role-name list');
   t.assert(src.includes('user.superuser === true'),
     'errors.js should check the user record\'s superuser flag before allowing delete');
-  t.assert(src.includes('getRole') && src.includes('data_scope'),
-    'errors.js should resolve the caller\'s role and check data_scope, matching the CrewCore admin-check pattern');
+  t.assert(src.includes('getAccess') && src.includes('data_scope'),
+    'errors.js should resolve the caller\'s access and check data_scope, matching the CrewCore admin-check pattern');
 });
 
 process.exit(t.report());

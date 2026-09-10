@@ -19,7 +19,7 @@
 // then noticing the dashboard tab is broken.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser, getRole } from "../../lib/users.js";
+import { getUser, getAccess } from "../../lib/users.js";
 import { getSites, addSite, updateSite, deleteSite } from "../../lib/websitewidget/sites-store.js";
 import { probeProperty } from "../../lib/websitewidget/ga4.js";
 
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
 
   try {
     const user = sess.username ? await getUser(sess.username) : null;
-    const role = await getRole(user ? user.role : sess.role);
+    const role = await getAccess(sess.username);
     const isAdmin = (role && role.data_scope === "all") || (user && user.superuser === true);
 
     if (req.method === "GET" && req.query && req.query.check) {

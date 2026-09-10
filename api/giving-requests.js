@@ -27,7 +27,7 @@
 // Settings, and it puts a gate on deciding, which had none at all.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser, getRole } from "../lib/users.js";
+import { getUser, getAccess } from "../lib/users.js";
 import { givingAddVerdict, givingDecideVerdict, givingManageVerdict } from "../lib/giving-access.js";
 import { listRequests, getRequest, updateRequest, buildRequest, buildManualRequest, saveRequest, alreadyHave, attachAccount, repairRequest } from "../lib/giving.js";
 import { isConfigured } from "../lib/kv.js";
@@ -54,7 +54,7 @@ export default async function handler(req, res) {
   // read off the account when there is one and off the session when there is
   // not, which is what every working gate in the shell does.
   const account = sess.username ? await getUser(sess.username) : null;
-  const callerRole = await getRole(account ? account.role : sess.role);
+  const callerRole = await getAccess(sess.username);
   const mayAdd = givingAddVerdict(account, callerRole);
   const mayDecide = givingDecideVerdict(account, callerRole);
   const mayManage = givingManageVerdict(account, callerRole);

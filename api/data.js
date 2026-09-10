@@ -16,7 +16,7 @@
 // would leave the full payload sitting in DevTools.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser, getRole } from "../lib/users.js";
+import { getUser, getAccess } from "../lib/users.js";
 import { KEYS, readKey, readRoster, isConfigured } from "../lib/backbone-store.js";
 
 export default async function handler(req, res) {
@@ -60,7 +60,7 @@ export default async function handler(req, res) {
 
     // ---- Permission filtering ---------------------------------------------
     const user = sess.username ? await getUser(sess.username) : null;
-    const role = await getRole(user ? user.role : sess.role);
+    const role = await getAccess(sess.username);
     const scope = (role && role.data_scope) || "all";
 
     if (scope === "own") {

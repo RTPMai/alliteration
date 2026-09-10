@@ -26,7 +26,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../lib/session.js";
-import { getUser, getRole } from "../lib/users.js";
+import { getUser, getAccess } from "../lib/users.js";
 import { DOCS } from "../lib/help/content.js";
 import { pickDocs, buildPrompt } from "../lib/help/retrieve.js";
 import { logQuestion, listQuestions } from "../lib/help/store.js";
@@ -49,7 +49,7 @@ async function allowedAppsFor(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
   if (user && user.superuser === true) return APP_ACCESS_IDS.slice();
 
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   const granted = (role && Array.isArray(role.apps)) ? role.apps : [];
   const always = ["notifications"];
   if (role && role.data_scope === "all") always.push("settings");

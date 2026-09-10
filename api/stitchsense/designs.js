@@ -22,7 +22,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from '../../lib/session.js';
-import { getUser, getRole } from '../../lib/users.js';
+import { getUser, getAccess } from '../../lib/users.js';
 import { validateDesign } from '../../lib/stitchsense/schema.js';
 import {
   listDesigns, getDesign, saveDesigns, updateDesign, deleteDesign,
@@ -35,7 +35,7 @@ import {
 // game is that production staff can play it.
 async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return (role && role.data_scope === 'all') || (user && user.superuser === true);
 }
 

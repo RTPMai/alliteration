@@ -27,7 +27,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from '../../lib/session.js';
-import { getUser, getRole } from '../../lib/users.js';
+import { getUser, getAccess } from '../../lib/users.js';
 import { KEY_PREFIX } from '../../lib/stitchsense/schema.js';
 
 const KV_URL = process.env.KV_REST_API_URL;
@@ -81,7 +81,7 @@ async function writeSettings(next) {
 
 async function callerIsAdmin(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
-  const role = await getRole(user ? user.role : sess.role);
+  const role = await getAccess(sess.username);
   return (role && role.data_scope === 'all') || (user && user.superuser === true);
 }
 

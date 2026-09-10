@@ -364,7 +364,10 @@ t.test('taxonomy list editing is a role flag, not a hardcoded name list', () => 
   // ("superuser", "management"), which silently reduced it to admin-only.
   t.assert(!api.includes('CAN_EDIT ='), 'the hardcoded CAN_EDIT list must be gone');
   t.assert(api.includes('manage_lists'), 'the gate must read the manage_lists flag');
-  t.assert(api.includes('getRole'), 'the gate must read the roles store live');
+  // Sep 2026: getRole (what does this ROLE say) became getAccess (what may
+  // this PERSON do), because a per-account grant was being honoured by the
+  // rail and ignored by every route that read the role directly.
+  t.assert(api.includes('getAccess'), 'the gate must resolve the caller\'s access live');
 
   const users = read('lib/users.js');
   // Opt-in: roles stored before the flag existed must NOT gain edit rights.

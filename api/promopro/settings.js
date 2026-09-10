@@ -132,11 +132,14 @@ export default async function handler(req, res) {
       // the Accounts screen does not already show an admin.
       if (isAdmin) {
         try {
-          const { listUsers, getRole, permsFor } = await import("../../lib/users.js");
+          const { listUsers, getAccess, permsFor } = await import("../../lib/users.js");
           const accounts = await listUsers();
           const rows = [];
           for (const u of accounts) {
-            const r = await getRole(u.role);
+            // Each person's RESOLVED access, not their role's. This screen
+            // exists to answer "who can buy", so reading the role would have
+            // reported the wrong answer for anybody with a per-account grant.
+            const r = await getAccess(u.username);
             const perms = await permsFor(u.username);
             const tabs = (perms && perms.tabs) || [];
             // Superusers see every app including ones no role grants, which
