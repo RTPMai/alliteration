@@ -165,8 +165,12 @@ export default async function handler(req, res) {
       const rows = await Promise.all(
         employees.map(async (emp) => {
           const shifts = useRange
-            ? await listRange(emp.id, rangeStart, rangeEnd, weekStartDay)
-            : await listWeek(emp.id, weekKey);
+            // weekKey is the PAY week start. Storage is anchored to Sunday
+            // whatever the setting says, so these read the buckets that
+            // overlap the window and filter by real dates. Changing the week
+            // start now redraws the grid instead of orphaning every bucket.
+            ? await listRange(emp.id, rangeStart, rangeEnd, timezone)
+            : await listWeek(emp.id, weekKey, timezone);
           return buildRow(emp, shifts, { ...opts, weekKey: useRange ? null : weekKey }, isAdmin);
         })
       );
@@ -211,7 +215,7 @@ export default async function handler(req, res) {
       const emp = await getEmployee(record.employee_id);
       if (!emp) return res.status(404).json({ error: "Employee not found" });
 
-      const shift = await addShift(record, { weekStartDay, timezone, by: username });
+      const shift = await addShift(record, { timezone, by: username });
       return res.status(200).json({ ok: true, shift });
     }
 
@@ -230,7 +234,7 @@ export default async function handler(req, res) {
 
       const updated = await updateShift(employeeId, weekKey, shiftId, {
         in_at: record.in_at, out_at: record.out_at, note: record.note || "", source: "manual",
-      }, { weekStartDay, timezone, by: username });
+      }, { timezone, by: username });
 
       if (!updated) return res.status(404).json({ error: "Shift not found" });
       return res.status(200).json({ ok: true, shift: updated });

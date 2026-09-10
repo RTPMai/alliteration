@@ -100,7 +100,6 @@ export default async function handler(req, res) {
     }
 
     const tz = SHOP_TIMEZONE;
-    const weekStartDay = Number(settings.week_start_day) || 0;
 
     /* ---- the name list ---------------------------------------------- */
 
@@ -175,7 +174,9 @@ export default async function handler(req, res) {
     const at = new Date().toISOString();
 
     if (action === "in") {
-      const result = await clockIn(employeeId, { at, weekStartDay, timezone: tz, source: "kiosk" });
+      // No weekStartDay: a punch is filed under the storage anchor, not the
+      // shop's pay-week setting. See lib/crewcore/timeclock.js.
+      const result = await clockIn(employeeId, { at, timezone: tz, source: "kiosk" });
       if (!result.ok && result.reason === "already_in") {
         return res.status(409).json({
           error: `You're already clocked in since ${friendlyTime(result.shift.in_at, tz)}. Tap Clock Out instead.`,
