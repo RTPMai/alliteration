@@ -1,3 +1,4 @@
+// PUT IN: apps/crewcore.js
 /**
  * CrewCore — employee management for the whole team.
  *
@@ -247,6 +248,10 @@ export default {
   .cc-form-grid .full{grid-column:1/-1}
   .cc-form-actions{display:flex;gap:8px;margin-top:14px;justify-content:flex-end}
   .cc-err{color:var(--danger);font-size:12.5px;margin-top:8px}
+  .cc-pdf-read{display:flex;align-items:center;gap:10px;margin:0 0 12px}
+  .cc-pdf-read .hint{margin:0}
+  #iPdfStatus{margin:0 0 12px}
+  #iPdfStatus.is-bad{color:var(--danger)}
 
   .cc-locked{padding:60px 20px;text-align:center;color:var(--muted)}
   .cc-locked h2{color:var(--ink);font-size:17px;margin-bottom:8px}
@@ -1810,12 +1815,19 @@ export default {
       <div class="cc-form">
         <h3>Import catalog</h3>
         <p class="hint">
-          Paste the style lists off the back of SanMar\u2019s order form, one style per line.
-          A full line like &ldquo;F180 Port Authority Therma-Tek Fleece Jacket&rdquo; works, and so
-          does a bare style number. Colours, sizes, photos and prices come from SanMar
-          directly, so there is no price list to attach.
+          Attach SanMar\u2019s offer PDF and the style numbers get read out of it into the
+          boxes below. You can also paste them in by hand, one style per line: a full line
+          like &ldquo;F180 Port Authority Therma-Tek Fleece Jacket&rdquo; works, and so does a
+          bare style number. Colours, sizes, photos and prices come from SanMar directly,
+          so there is no price list to attach.
           <strong>This replaces the current catalog.</strong>
         </p>
+        <div class="cc-pdf-read">
+          <input type="file" id="iPdf" accept="application/pdf,.pdf" hidden>
+          <button class="cc-btn ghost" id="iPdfGo">Read from a PDF</button>
+          <span class="hint" id="iPdfName"></span>
+        </div>
+        <p class="hint" id="iPdfStatus" hidden></p>
         <div class="cc-form-grid">
           <div class="full"><label>50% off styles</label><textarea id="iFifty" rows="8"></textarea></div>
           <div class="full"><label>25% off styles</label><textarea id="iTwentyFive" rows="6"></textarea></div>
@@ -1835,6 +1847,57 @@ export default {
       $('#iGo').disabled = false;
     };
     $('#iCancel').onclick = () => wrap.remove();
+
+    // ---- Read from a PDF -------------------------------------------------
+    //
+    // This FILLS THE BOXES. It never imports. A reader turning NF0A8JEV into
+    // NF0A8IEV would put a garment nobody chose in front of the whole team,
+    // and the first anyone would know is a box arriving. Reading the two
+    // boxes takes four seconds and removes that.
+    const status = (msg, bad) => {
+      const el = $('#iPdfStatus');
+      el.hidden = !msg;
+      el.textContent = msg || '';
+      el.classList.toggle('is-bad', !!bad);
+    };
+    $('#iPdfGo').onclick = () => $('#iPdf').click();
+    $('#iPdf').onchange = async () => {
+      const file = $('#iPdf').files && $('#iPdf').files[0];
+      if (!file) return;
+      $('#iPdfName').textContent = file.name;
+      // Checked here as well as on the server so an obviously wrong file
+      // costs nothing. The server checks the file's own first bytes too,
+      // because a renamed spreadsheet still arrives as application/pdf.
+      if (file.size > 3 * 1024 * 1024) {
+        status('That PDF is ' + (file.size / (1024 * 1024)).toFixed(1) +
+          ' MB and the limit is 3 MB. Send just the pages with the style lists on them.', true);
+        $('#iPdf').value = '';
+        return;
+      }
+      $('#iPdfGo').disabled = true;
+      status('Reading ' + file.name + '\u2026');
+      try {
+        const b64 = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(String(r.result).split(',')[1] || '');
+          r.onerror = () => reject(new Error('Could not read that file.'));
+          r.readAsDataURL(file);
+        });
+        const out = await this._ctx.api.request(ENDPOINTS.ccSamples + '?resource=read-pdf', {
+          method: 'POST', body: { pdf: b64 },
+        });
+        if (out.error) { status(out.error, true); return; }
+        $('#iFifty').value = (out.fifty || []).join('\n');
+        $('#iTwentyFive').value = (out.twentyfive || []).join('\n');
+        status(out.summary || 'Read the PDF. Check both boxes before importing.');
+      } catch (e) {
+        status((e.body && e.body.error) || e.message || 'Could not read that PDF.', true);
+      } finally {
+        $('#iPdfGo').disabled = false;
+        $('#iPdf').value = '';
+      }
+    };
+
     $('#iGo').onclick = async () => {
       $('#iGo').disabled = true;
       const drop = encodeURIComponent(this._sampleDropId);
