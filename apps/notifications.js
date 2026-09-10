@@ -59,7 +59,7 @@
  */
 
 import { ENDPOINTS } from '../js/api.js';
-import { APPS, canAccess } from '../js/registry.js';
+import { APPS, SITE_APPS, canAccess } from '../js/registry.js';
 import {
   TYPES, GENERAL_APP, LINK_TYPE_LABELS, linkTypesForApps, appForLinkType,
 } from '../lib/notifications/schema.js';
@@ -99,7 +99,13 @@ const LINK_SEARCH_HINT = {
   sticky: 'Search the board by title',
 };
 
-const APP_OPTIONS = APPS.map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
+// SITE_APPS as well as APPS. StickySituations is site-level rather than a rail
+// app, and building this list from APPS alone meant it could not be tagged on a
+// hand-off at all. Tagging is not access: CrewCore is admin-gated and has always
+// been taggable by anyone, because a tag says what something is ABOUT and gives
+// nothing away.
+const APP_OPTIONS = APPS.concat(SITE_APPS)
+  .map((a) => ({ id: a.id, name: a.name, accent: a.accent }))
   .concat([{ id: GENERAL_APP, name: 'General', accent: 'var(--muted)' }]);
 
 function appMeta(id) {
@@ -646,7 +652,13 @@ export default {
       const type = link ? link.type : '';
       const id = link ? link.id : '';
       const label = link ? link.label : '';
-      const offered = linkTypesForApps(apps || []);
+      // Only records from apps this person can actually open. Tagging an app is
+      // harmless, but OFFERING to link a record from an app somebody cannot
+      // reach ends in a search box that returns nothing and explains nothing:
+      // the server refuses the search independently, and a silent empty list
+      // reads as "there are none" rather than "not for you".
+      const offered = linkTypesForApps(apps || [])
+        .filter((t) => canAccess(ctx.perms, appForLinkType(t)));
 
       // A stored link whose app has since been untagged still shows, so it can
       // be seen and removed on purpose. Dropping it quietly on the next save

@@ -315,6 +315,50 @@ async function check(name, fn) {
     t.equal(record.link.id, 'SN-00002', 'the id should survive validation');
   });
 
+  /* ---- the app tag has to exist before any of this is reachable --------- */
+
+  await check('every app with linkable records can actually be tagged', async () => {
+    // THIS IS THE ONE THAT WAS MISSING. The link picker keys off the app tag,
+    // so a link type whose app cannot be TAGGED is unreachable no matter how
+    // well the search behind it works. StickySituations was exactly that: it
+    // is site-level rather than a rail app, and both the server allowlist and
+    // the form's option list were built from the rail apps alone.
+    //
+    // Calling linkTypesForApps() directly passes in that state, because it
+    // answers "if this app were ticked" and nothing was checking that it could
+    // be. So this goes through the real route instead.
+    const apps = [...new Set(Object.values(LINK_TYPE_APP))];
+    for (const appId of apps) {
+      const req = {
+        method: 'POST',
+        query: {},
+        body: { title: 'Tag check: ' + appId, types: ['task'], appIds: [appId], assignedTo: 'ryan' },
+        headers: { cookie: await makeCookie(RYAN) },
+      };
+      const res = fakeRes();
+      await route(req, res);
+      t.equal(res.statusCode, 201,
+        appId + ' cannot be tagged on a notification, so its records can never be linked' +
+        (res.body && res.body.details ? ' (' + JSON.stringify(res.body.details) + ')' : ''));
+    }
+  });
+
+  t.test('the form offers site-level apps, not just the rail', () => {
+    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
+    t.assert(/APPS\.concat\(SITE_APPS\)/.test(src),
+      'the app toggles are built from APPS alone, so StickySituations is not selectable');
+  });
+
+  t.test('the picker does not offer links into apps the person cannot open', () => {
+    // The server refuses the search on its own. This is about not putting a
+    // search box in front of somebody that can only ever come back empty,
+    // which reads as "there are none" rather than "not for you".
+    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
+    const picker = src.slice(src.indexOf('function linkPickerHtml'), src.indexOf('function refreshLinkTypes'));
+    t.assert(/canAccess\(ctx\.perms/.test(picker),
+      'the offered link types should be filtered by what the person can open');
+  });
+
   /* ---- where a link opens ---------------------------------------------- */
 
   t.test('every link type has somewhere to open', () => {

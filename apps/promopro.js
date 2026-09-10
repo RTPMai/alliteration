@@ -30,7 +30,7 @@ import {
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
   repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels,
   FOLLOW_UP_METHODS, followUpLabel, chaseNote, lastChasedAt, productSummary,
-  openIsTrusted
+  openIsTrusted, linePriced, pricingState
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 // One list of accepted file types, shared with the upload route, so the
@@ -1611,8 +1611,12 @@ export default {
           '<td class="num">' + esc(l.qty) + '</td>' +
           '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
           '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '–') + '</td>' +
-          '<td class="num">' + money(l.unitCost) + '</td>' +
-          '<td class="num">' + money(lineTotal(l)) + '</td>' +
+          // Matches the vendor's copy word for word. A screen that says $0.00
+          // where the emailed PO says "to be confirmed" is two answers to one
+          // question, and the person reading the screen is the one who has to
+          // chase the price.
+          '<td class="num">' + (linePriced(l) ? money(l.unitCost) : '<span class="pp-hint">to be confirmed</span>') + '</td>' +
+          '<td class="num">' + (linePriced(l) ? money(lineTotal(l)) : '<span class="pp-hint">to be confirmed</span>') + '</td>' +
           (booking
             ? '<td class="num"><input type="number" step="1" style="width:80px;text-align:right" ' +
               'data-recvline="' + i + '" placeholder="' + (short ? esc(short) : '0') + '"></td>'
@@ -1620,8 +1624,14 @@ export default {
         '</tr>';
       }).join('');
 
+      const priceState = pricingState(po);
+      const totalCell = priceState === 'all'
+        ? '<strong>' + money(poTotal(po)) + '</strong>'
+        : priceState === 'none'
+          ? '<span class="pp-hint">to be confirmed</span>'
+          : '<strong>' + money(poTotal(po)) + '</strong><div class="pp-hint">so far, some lines unpriced</div>';
       const totalRow = '<tr><td colspan="6" class="num"><strong>Total</strong></td>' +
-        '<td class="num"><strong>' + money(poTotal(po)) + '</strong></td>' +
+        '<td class="num">' + totalCell + '</td>' +
         (booking ? '<td></td>' : '') + '</tr>';
 
       const status = sum.complete

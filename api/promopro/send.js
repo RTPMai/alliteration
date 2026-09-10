@@ -40,7 +40,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { canEditSession } from "../../lib/promopro/access.js";
 import { getPo, updatePo, getVendors, getSettings } from "../../lib/promopro/store.js";
-import { withSettingDefaults, ccListFor, poTotal, looksLikeEmail, captureState, isOutsourced } from "../../lib/promopro/schema.js";
+import { withSettingDefaults, ccListFor, looksLikeEmail, captureState, isOutsourced } from "../../lib/promopro/schema.js";
 import { renderEmailHtml, renderEmailText } from "../../lib/promopro/document.js";
 import { resendConfigured, sendOne, domainStatusChecked } from "../../lib/mailme/resend-client.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
@@ -131,7 +131,19 @@ export default async function handler(req, res) {
     if (!vendor) problems.push("the vendor on this PO no longer exists");
     else if (!looksLikeEmail(vendor.email)) problems.push("that vendor has no order email set");
     if (!Array.isArray(po.lines) || !po.lines.length) problems.push("the PO has no lines");
-    if (!poTotal(po)) problems.push("the PO totals zero, so the costs are probably not filled in");
+    // A PO WITH NO PRICES ON IT IS ALLOWED OUT.
+    //
+    // This used to refuse the send, on the reasoning that a zero total meant
+    // the costs had been forgotten. Sometimes it does. But sending a purchase
+    // order before a price is agreed and letting the vendor come back with
+    // one is ordinary here, and a rule that guesses at intent and then blocks
+    // has no way to be told it guessed wrong. There was no override, and no
+    // way to add the prices either, because a created PO could not be edited.
+    //
+    // The document no longer claims $0.00 on an unpriced line, it says "to be
+    // confirmed". That is what makes this safe to allow: the failure this
+    // rule was really guarding against was a vendor being told a price that
+    // was not true, and that is now fixed where it was actually happening.
     const fromAddress = settings.fromAddress || process.env.PROMOPRO_FROM || "";
     if (!looksLikeEmail(fromAddress)) {
       problems.push("no from-address is set in Settings");

@@ -569,10 +569,16 @@ t.test('a send re-checks the order immediately before dispatch', () => {
   // A PO can sit as a draft for a week. Nothing about it is trusted as still
   // true at send time, and a send that half works is worse than one that
   // refuses: the vendor may already be producing.
-  ['no longer exists', 'no order email', 'no lines', 'totals zero', 'no from-address']
+  ['no longer exists', 'no order email', 'no lines', 'no from-address']
     .forEach((phrase) => {
       t.assert(sendRoute.includes(phrase), 'the pre-send check is missing: ' + phrase);
     });
+  // "totals zero" was on this list until Sep 2026. A purchase order can
+  // legitimately go out before a price is agreed, and the vendor comes back
+  // with one. See test/promopro-unpriced.test.cjs for what replaced it: the
+  // document no longer claims $0.00 on a line nobody has priced.
+  t.assert(!sendRoute.includes('totals zero'),
+    'the zero-total block came back; unpriced purchase orders are allowed out');
 });
 
 t.test('a vendor hitting Reply reaches a person', () => {
