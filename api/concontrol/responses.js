@@ -3,6 +3,7 @@
 // GET                          the four streams, plus the survey summary
 // POST { what: "import-survey", csv }   paste the sheet export
 // POST { what: "import-signups", csv }  same, for the notify list
+// POST { what: "load-foc26" }          load the FOC26 survey and notify list
 // POST { what: "promote", topic }       turn one asked-for topic into a session idea
 // DELETE ?id=&kind=            remove one imported response, admin only
 //
@@ -24,6 +25,7 @@ import {
   newResponse, newSignup, rowsFromCsv, responseKey, summarise, signupIsUsable,
 } from "../../lib/concontrol/responses.js";
 import { newSession } from "../../lib/concontrol/program.js";
+import { FOC26_SURVEY, FOC26_SIGNUPS } from "../../lib/concontrol/foc26-responses.js";
 import {
   listResponses, saveResponse, updateResponse, deleteResponse, nextResponseId,
   listSignups, saveSignup, deleteSignup, nextSignupId,
@@ -56,6 +58,10 @@ async function gate(sess) {
  */
 async function importSurvey(csv, event, who) {
   const { rows, unknown } = rowsFromCsv(csv);
+  return importSurveyRows(rows, event, who, unknown);
+}
+
+async function importSurveyRows(rows, event, who, unknown) {
   const existing = await listResponses(event);
   const seen = new Set(existing.filter((r) => r.kind === "survey").map((r) => responseKey(r.answers)));
 
@@ -79,7 +85,7 @@ async function importSurvey(csv, event, who) {
     created.push(id);
   }
 
-  return { created: created.length, duplicate, empty, unknownColumns: unknown };
+  return { created: created.length, duplicate, empty, unknownColumns: unknown || [] };
 }
 
 /**
@@ -90,7 +96,10 @@ async function importSurvey(csv, event, who) {
  * refuses them is the shape that loses them.
  */
 async function importSignups(csv, event, who) {
-  const { rows } = rowsFromCsv(csv);
+  return importSignupRows(rowsFromCsv(csv).rows, event, who);
+}
+
+async function importSignupRows(rows, event, who) {
   const existing = await listSignups(event);
   const seen = new Set(existing.map((r) => String((r.answers || {}).email || "").toLowerCase()));
 
@@ -219,6 +228,16 @@ export default async function handler(req, res) {
       if (what === "import-signups") {
         if (!String(b.csv || "").trim()) return res.status(400).json({ error: "Paste the CSV first" });
         return res.status(200).json({ ok: true, ...(await importSignups(b.csv, event, sess.username)) });
+      }
+
+      // The FOC26 data ships with the app so this is one button. Every earlier
+      // version of it asked somebody to export a CSV and paste it, and went
+      // unrun. Same matching as the paste, so pressing it twice is harmless
+      // and a later paste of the same sheet adds nothing.
+      if (what === "load-foc26") {
+        const survey = await importSurveyRows(FOC26_SURVEY, event, sess.username, []);
+        const signups = await importSignupRows(FOC26_SIGNUPS, event, sess.username);
+        return res.status(200).json({ ok: true, survey, signups });
       }
 
       if (what === "promote") {

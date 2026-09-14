@@ -265,6 +265,7 @@ export default {
           <span id="conRespTabs"></span>
           <span class="con-spacer"></span>
           <button class="con-btn ghost" id="conImportOpen">Import from the sheet</button>
+          <button class="con-btn" id="conLoadFoc26">Load the FOC26 responses</button>
         </div>
         <div id="conRespBody"></div>
       </section>
@@ -297,6 +298,7 @@ export default {
     root.querySelector('#conNewSession').addEventListener('click', () => sessionDrawer(null));
     root.querySelector('#conNewSpeaker').addEventListener('click', () => speakerDrawer(null));
     root.querySelector('#conImportOpen').addEventListener('click', () => importDrawer());
+    root.querySelector('#conLoadFoc26').addEventListener('click', (e) => loadFoc26(e.target));
     root.querySelector('#conRespTabs').addEventListener('click', (e) => {
       const t = e.target.closest('[data-rtab]');
       if (!t) return;
@@ -875,7 +877,7 @@ function renderSettings() {
       </div>
       <div class="con-slots">
         <button class="con-slot" data-seed="sponsors">FOC26 sponsors as prospects</button>
-        <button class="con-slot" data-seed="undo-survey">Remove what the survey seeded</button>
+        <button class="con-slot" data-seed="undo-survey">Clear what was seeded in</button>
       </div>
       <div id="conSeedMsg" style="margin-top:10px"></div>
       <div class="con-note" style="margin-top:8px">
@@ -973,7 +975,8 @@ async function runSeed(button, what) {
     if (res.skipped && res.skipped.length) parts.push(`${res.skipped.length} left alone`);
     if (res.removedSessions) parts.push(`${res.removedSessions.length} session ideas removed`);
     if (res.removedSpeakers) parts.push(`${res.removedSpeakers.length} wishlist speakers removed`);
-    const kept = (res.keptSessions || []).concat(res.keptSpeakers || []);
+    if (res.removedSponsors) parts.push(`${res.removedSponsors.length} untouched prospects removed`);
+    const kept = (res.keptSessions || []).concat(res.keptSpeakers || [], res.keptSponsors || []);
     if (kept.length) parts.push(`${kept.length} kept because you had moved them on: ${kept.join(', ')}`);
     msg.innerHTML = `<div class="con-ok">${esc(parts.length ? parts.join(', ') : 'Nothing to do')}${res.skipped && res.skipped.length ? '. Skipped: ' + esc(res.skipped.join(', ')) : '.'}</div>`;
 
@@ -1062,7 +1065,7 @@ function renderSurvey(body) {
   const rows = state.responses.survey || [];
 
   if (!rows.length) {
-    body.innerHTML = '<div class="con-empty"><h3>No survey responses yet</h3><p>Export the Responses tab from the sheet and paste it in with Import from the sheet.</p></div>';
+    body.innerHTML = '<div class="con-empty"><h3>No survey responses yet</h3><p>Press Load the FOC26 responses to bring in the nineteen answers and the notify list. Later surveys come in through Import from the sheet.</p></div>';
     return;
   }
 
@@ -1148,6 +1151,34 @@ function renderSurvey(body) {
     el.style.cursor = 'pointer';
     el.addEventListener('click', () => responseDrawer(el.dataset.openResponse));
   });
+}
+
+/**
+ * Bring in the FOC26 survey and notify list, which ship with the app.
+ *
+ * A button rather than a paste because every version of this that asked for a
+ * CSV export went unrun. Pressing it twice is harmless: the same email and
+ * submitted-at matching the paste uses applies here.
+ */
+async function loadFoc26(button) {
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Loading…';
+  try {
+    const res = await ctx.api.post(ENDPOINTS.conResponses, { what: 'load-foc26' });
+    state.loaded.responses = false;
+    await loadResponses();
+    const s = res.survey || {};
+    const g = res.signups || {};
+    showError('');
+    const msg = [`${s.created} survey responses added`, `${g.created} on the notify list`]
+      .concat(s.duplicate ? [`${s.duplicate} were already here`] : []).join(', ');
+    ctx.root.querySelector('#conRespBody').insertAdjacentHTML('afterbegin', `<div class="con-ok">${esc(msg)}.</div>`);
+  } catch (e) {
+    showError(e.message || 'Could not load them');
+  }
+  button.disabled = false;
+  button.textContent = label;
 }
 
 async function promoteTopic(button, topic) {

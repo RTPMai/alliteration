@@ -1202,6 +1202,66 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.assert(program.SPEAKER_STATUSES.includes('wishlist'), 'the status is still available by hand');
   });
 
+  /* ---------------- the FOC26 data actually loads ---------------- */
+
+  const foc = await import('../lib/concontrol/foc26-responses.js');
+
+  t.test('the survey and the notify list ship with the app', () => {
+    t.equal(foc.FOC26_SURVEY.length, 19, 'nineteen responses');
+    t.equal(foc.FOC26_SIGNUPS.length, 3, 'and three signups');
+  });
+
+  t.test('the two stranded signups are carried, not refused', () => {
+    const bare = foc.FOC26_SIGNUPS.filter((g) => !g.name);
+    t.equal(bare.length, 2, 'two have an email and nothing else');
+    for (const g of bare) t.assert(signupIsUsable(g), `${g.email} is still usable`);
+  });
+
+  t.test('the shipped responses carry the answers the screen reads', () => {
+    const withTopics = foc.FOC26_SURVEY.filter((r) => r.topics);
+    t.equal(withTopics.length, 19, 'every response has its topic picks');
+    const demand = topicDemand(foc.FOC26_SURVEY.map((a, i) => newResponse('RS-' + i, 'FOC27', 'survey', a, 'shipped')));
+    t.equal(demand.rows.length, 26, 'twenty-six distinct topics');
+    t.equal(demand.rows[0].topic, 'Hiring, training and keeping good people', 'most must-haves first');
+  });
+
+  t.test('and the free text somebody actually wrote', () => {
+    const recs = foc.FOC26_SURVEY.map((a, i) => newResponse('RS-' + i, 'FOC27', 'survey', a, 'shipped'));
+    const dream = quotes(recs, 'dream_speaker');
+    t.assert(dream.answered >= 8, 'the dream-speaker answers are there to read');
+    t.assert(dream.rows.some((r) => r.text.indexOf('Tom Raun') !== -1), 'including the long one');
+    const missing = quotes(recs, 'missing_topic');
+    t.assert(missing.answered >= 6, 'and what we did not ask about');
+    t.assert(missing.rows.every((r) => r.text.toLowerCase() !== 'no.'), 'with the polite nos left out');
+  });
+
+  /* ---------------- the undo covers the prospects too ---------------- */
+
+  await t.test('an untouched prior-year prospect is removed, one with a conversation is kept', async () => {
+    const undo = await import('../lib/concontrol/undo-seed.js');
+    const mk = async (company, extra) => {
+      const id = await store.nextSponsorId();
+      await saveSponsor({ ...newSponsor(id, 'ryan'), id, event: 'FOC27', company, source: 'prior-year', ...(extra || {}) });
+      return id;
+    };
+    const untouched = await mk('Untouched Co');
+    const priced = await mk('Priced Co', { committed: 2500 });
+    const named = await mk('Named Co', { contactName: 'A Person' });
+    const moved = await mk('Moved Co', { status: 'talking' });
+
+    const applied = await store.nextSponsorId();
+    await saveSponsor({ ...newSponsor(applied, null), id: applied, event: 'FOC27', company: 'Applied Co', source: 'sponsor-form' });
+
+    const out = await undo.undoSurveySeed('FOC27');
+
+    t.equal(await getSponsor(untouched), null, 'the untouched prospect is gone');
+    t.assert(await getSponsor(priced), 'one you have priced stays');
+    t.assert(await getSponsor(named), 'one with a contact on it stays');
+    t.assert(await getSponsor(moved), 'one you have moved on stays');
+    t.assert(await getSponsor(applied), 'and a real application is never in scope');
+    t.assert(out.keptSponsors.includes('Priced Co'), 'what was kept is named');
+  });
+
   process.exit(t.report());
 })();
 
