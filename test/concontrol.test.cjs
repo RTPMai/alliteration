@@ -569,11 +569,27 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
 
   const { obligationsFor, obligationStates, obligationProgress } = schema;
 
-  t.test('each level carries the promises its own page makes', () => {
-    t.equal(obligationsFor('Silver').length, 5, 'Silver: signage, web, remarks, bag, group social');
-    t.assert(obligationsFor('Gold').length > obligationsFor('Silver').length, 'Gold carries more');
-    t.assert(obligationsFor('Presenting').length > obligationsFor('Gold').length, 'Presenting carries the most');
+  t.test('each level carries exactly what the sponsor page promises it', () => {
+    // Off the live page: Silver has four bullets, Gold adds four, Presenting
+    // adds five, and every level gets the access promise in the box above them.
+    t.equal(obligationsFor('Silver').length, 5, 'access plus Silver\'s four bullets');
+    t.equal(obligationsFor('Gold').length, 9, 'everything in Silver plus four');
+    t.equal(obligationsFor('Presenting').length, 14, 'everything in Gold plus five');
     t.equal(obligationsFor('').length, 0, 'no level promises nothing');
+  });
+
+  t.test('the page sells signage, website and agenda as ONE promise', () => {
+    const silver = obligationsFor('Silver').map((o) => o.key);
+    t.assert(silver.includes('signage'), 'one row');
+    t.equal(silver.includes('web'), false, 'not two: splitting it made a sponsor look half delivered');
+  });
+
+  t.test('Gold and Presenting social are different promises, not one', () => {
+    const gold = obligationsFor('Gold').map((o) => o.key);
+    const pres = obligationsFor('Presenting').map((o) => o.key);
+    t.assert(gold.includes('social-feature'), 'Gold gets dedicated features');
+    t.equal(gold.includes('social-all'), false, 'and not the all-media one');
+    t.assert(pres.includes('social-feature') && pres.includes('social-all'), 'Presenting gets both');
   });
 
   t.test('a Silver sponsor is never asked for a welcome address', () => {
@@ -590,7 +606,7 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
 
   t.test('obligation progress counts only what that level owes', () => {
     const p = obligationProgress({ tier: 'Silver', obligations: { signage: { state: 'done' }, welcome: { state: 'done' } } });
-    t.equal(p.owed, 5, 'five, not thirteen');
+    t.equal(p.owed, 5, 'five, not fourteen');
     t.equal(p.done, 1, 'the welcome tick does not count, Silver never owed it');
   });
 
