@@ -34,7 +34,7 @@ import {
 const APP_IDS = [
   "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
   "crewcore", "mailme", "teletally", "websitewidget", "promopro",
-  "stitchsense", "marketmachine",
+  "stitchsense", "marketmachine", "concontrol",
 ];
 
 // The read gate moved to lib/sitework/access.js in Sep 2026, unchanged, because

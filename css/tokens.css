@@ -337,6 +337,20 @@ body[data-app="marketmachine"] {
   --accent-tint: #F6EBED;
 }
 
+/* ConControl. PROVISIONAL ESPRESSO, not off a logo file.
+   Brown is the one hue nothing else in the rail uses: blue (BackBone), orange
+   (ShopStock), muted purple (ErrorEngine), gold (GivingGauge), green
+   (TravelTrack), raspberry (CrewCore), red (PromoPro), slate (MailMe), navy
+   (TeleTally), teal (WebsiteWidget), magenta (StitchSense) and violet
+   (MarketMachine) are taken, and at rail-dot size a second orange would read
+   as ShopStock. CHECK IT AGAINST THE LOGO LINEUP SHEET and correct it here,
+   in the dark block below, and in the registry's display accent. */
+body[data-app="concontrol"] {
+  --accent:      #6B4423;
+  --accent-deep: #4E3119;
+  --accent-tint: #F3EDE7;
+}
+
 /* ==========================================================================
    COMPATIBILITY ALIASES
    Ported app markup references its own old variable names. Rather than
@@ -625,6 +639,15 @@ html[data-theme="dark"] body[data-app="marketmachine"] {
   --accent:      #C4566A;
   --accent-deep: #D4788A;
   --accent-tint: #331A1F;
+}
+
+/* ConControl's espresso is near black on a dark page, so it is lifted to a
+   tan that still reads as the same colour family. Provisional in the light
+   block; whatever replaces it there needs a matching pass here. */
+html[data-theme="dark"] body[data-app="concontrol"] {
+  --accent:      #C39A6B;
+  --accent-deep: #D9B489;
+  --accent-tint: #2A211A;
 }
 
 /* Sticky note paper is deliberately NOT re-themed. The notes are meant to look

@@ -405,6 +405,37 @@ export const APPS = [
     ],
     defaultView: 'estimate',
     stub: false
+  },
+  {
+    id: 'concontrol',
+    name: 'ConControl',
+    w1: 'Con', w2: 'Control', letter: 'C',
+    role: 'What the event costs and earns',
+    blurb: 'Sponsors, money, sessions, speakers. Flyover Con first.',
+    // The rail letter C is also CrewCore's. That is already true of M
+    // (MailMe / MarketMachine), T (TravelTrack / TeleTally) and S (ShopStock /
+    // StitchSense), so the mark has never been the thing people navigate by.
+    // The accent colour is what has to stay distinct, and this one is nowhere
+    // near CrewCore's raspberry.
+    // PROVISIONAL ACCENT. Espresso, chosen by elimination rather than off a
+    // logo file: blue, orange, muted purple, gold, green, red, raspberry,
+    // slate, navy, teal, magenta and violet are all taken, and brown is the
+    // one hue nothing else in the rail uses. CHECK IT AGAINST THE LOGO LINEUP
+    // SHEET and correct it here and in tokens.css before the team has seen it
+    // long enough for the colour to stick. CrewCore went blue -> red -> the
+    // exact logo red precisely because that check was skipped the first time.
+    accent: '#6B4423',           // display only (rail dot / app mark); tokens.css owns theming
+    //
+    // ONE VIEW ON PURPOSE. Money, Sessions and Speakers are designed and not
+    // built. A tab that opens onto "coming soon" is a tab people stop
+    // clicking, so each one is added here the day it is real. Capacity
+    // Manager's coming-soon card is the counter-example, and it has sat
+    // unbuilt on the BackBone dashboard since July.
+    views: [
+      ['sponsors', 'Sponsors']
+    ],
+    defaultView: 'sponsors',
+    stub: false
   }
 ];
 

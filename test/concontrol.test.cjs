@@ -1,0 +1,579 @@
+/**
+ * ConControl — sponsors.
+ *
+ * Every check here is a real function call against a fake Upstash, not a grep
+ * of the source text. See test/route-imports.test.cjs for why: a refactor once
+ * deleted a function a route still imported, and the whole suite stayed green
+ * because the tests that touched it read the file instead of running it.
+ *
+ * The things worth breaking a build over:
+ *   - a missing committed amount is UNKNOWN, never zero. Every total in this
+ *     app is a number somebody will quote to a sponsor.
+ *   - N/A is a real deliverable state and stays out of the denominator.
+ *   - a PATCH merges. A screen showing six of twelve fields must not blank the
+ *     other six.
+ *   - the public inquiry route cannot set money, status or deliverables.
+ */
+
+const t = require('./harness.cjs');
+
+const kv = new Map();
+global.fetch = async (url, opts) => {
+  const u = String(url);
+
+  if (u.endsWith('/pipeline')) {
+    const cmds = JSON.parse(opts.body);
+    return {
+      ok: true,
+      status: 200,
+      json: async () => cmds.map(([verb, key, val]) => {
+        if (verb === 'SET') { kv.set(key, val); return { result: 'OK' }; }
+        if (verb === 'GET') return { result: kv.has(key) ? kv.get(key) : null };
+        if (verb === 'DEL') { kv.delete(key); return { result: 1 }; }
+        if (verb === 'INCR') {
+          const n = Number(kv.get(key) || 0) + 1;
+          kv.set(key, String(n));
+          return { result: n };
+        }
+        return { result: null };
+      }),
+    };
+  }
+
+  const key = decodeURIComponent((u.match(/\/get\/(.+)$/) || [])[1] || '');
+  return { ok: true, status: 200, json: async () => ({ result: kv.has(key) ? kv.get(key) : null }) };
+};
+
+process.env.KV_REST_API_URL = 'https://fake-upstash.test';
+process.env.KV_REST_API_TOKEN = 'fake-token';
+
+(async () => {
+  const schema = await import('../lib/concontrol/schema.js');
+  const store = await import('../lib/concontrol/store.js');
+
+  const {
+    money, sponsorMoney, paidTotal, deliverableStates, deliverableProgress,
+    sponsorHealth, rollup, validateSponsorPatch, newSponsor,
+    tierAvailability, momentAvailability, momentLabel,
+    DELIVERABLE_KEYS, STATUSES, MOMENT_KEYS, SEED_TIERS,
+  } = schema;
+
+  const {
+    saveSponsor, getSponsor, updateSponsor, deleteSponsor, listSponsors,
+    nextSponsorId, companyKey, findByCompany, getSettings, saveSettings,
+  } = store;
+
+  /* ---------------- money parsing ---------------- */
+
+  t.test('a typed dollar amount parses however it was typed', () => {
+    t.equal(money('$2,500'), 2500, 'currency formatting is stripped');
+    t.equal(money('1000'), 1000, 'a plain number parses');
+    t.equal(money(750.5), 750.5, 'a real number passes through');
+  });
+
+  t.test('an unparseable amount is null, never zero', () => {
+    t.equal(money('about two grand'), null, 'text is not an amount');
+    t.equal(money(''), null, 'empty is not zero');
+    t.equal(money(undefined), null, 'missing is not zero');
+  });
+
+  /* ---------------- the money picture ---------------- */
+
+  t.test('paid is the sum of the payments, not a stored number', () => {
+    const s = { payments: [{ amount: 1000 }, { amount: 500 }, { amount: 250 }] };
+    t.equal(paidTotal(s), 1750, 'three payments add up');
+  });
+
+  t.test('a half payment cannot overwrite the first half', () => {
+    const s = { committed: 2500, payments: [{ amount: 1250 }, { amount: 1250 }] };
+    const m = sponsorMoney(s);
+    t.equal(m.paid, 2500, 'both halves are still there');
+    t.assert(m.paidInFull, 'two halves pay it in full');
+  });
+
+  t.test('no committed amount is unknown, not zero', () => {
+    const m = sponsorMoney({ committed: null, payments: [] });
+    t.equal(m.committed, null, 'committed stays null');
+    t.equal(m.committedKnown, false, 'and is reported as not known');
+    t.equal(m.outstanding, null, 'outstanding is unanswerable, not 0');
+  });
+
+  t.test('outstanding is derived every time, never stored', () => {
+    const m = sponsorMoney({ committed: 2500, outstanding: 99999, payments: [{ amount: 1000 }] });
+    t.equal(m.outstanding, 1500, 'a stale stored balance is ignored');
+  });
+
+  t.test('committed and never invoiced is the thing this app exists to catch', () => {
+    const m = sponsorMoney({ committed: 1000, invoicedAmount: null, payments: [] });
+    t.assert(m.awaitingInvoice, 'said yes in March, never billed');
+  });
+
+  t.test('an invoiced sponsor is not awaiting an invoice', () => {
+    const m = sponsorMoney({ committed: 1000, invoicedAmount: 1000, invoicedAt: '2026-09-01', payments: [] });
+    t.equal(m.awaitingInvoice, false, 'the invoice went out');
+  });
+
+  t.test('overpaying is visible rather than clamped away', () => {
+    const m = sponsorMoney({ committed: 1000, payments: [{ amount: 1200 }] });
+    t.assert(m.overpaid, 'an overpayment is flagged');
+    t.equal(m.outstanding, -200, 'and the balance says so');
+  });
+
+  /* ---------------- deliverables ---------------- */
+
+  t.test('a deliverable nobody has touched reads as open, not done', () => {
+    const states = deliverableStates({});
+    for (const key of DELIVERABLE_KEYS) {
+      t.equal(states[key].state, 'open', key + ' defaults to open');
+    }
+  });
+
+  t.test('N/A is excluded from the denominator', () => {
+    const s = {
+      deliverables: {
+        logo: { state: 'done' },
+        swag: { state: 'done' },
+        social: { state: 'na' },
+        session: { state: 'na' },
+      },
+    };
+    const p = deliverableProgress(s);
+    t.equal(p.done, 2, 'two done');
+    t.equal(p.owed, 2, 'two owed, not four');
+    t.assert(p.complete, 'a Bronze sponsor who sent everything they owed is complete');
+  });
+
+  t.test('one open deliverable means not complete', () => {
+    const p = deliverableProgress({ deliverables: { logo: { state: 'done' }, swag: { state: 'open' } } });
+    t.equal(p.complete, false, 'still waiting on the swag');
+    t.equal(p.open, 3, 'swag plus the two never touched');
+  });
+
+  /* ---------------- health ---------------- */
+
+  t.test('a declined sponsor is closed and gives its reason', () => {
+    const h = sponsorHealth({ status: 'declined' });
+    t.equal(h.level, 'closed', 'declined is closed');
+    t.assert(h.why.length > 0, 'and says which kind of closed');
+  });
+
+  t.test('committed with no amount agreed needs attention', () => {
+    const h = sponsorHealth({ status: 'committed', committed: null });
+    t.equal(h.level, 'attention', 'a yes with no number is a loose end');
+  });
+
+  t.test('an invoice unpaid for a month needs attention, one unpaid for a week does not', () => {
+    const today = new Date('2026-09-11T12:00:00Z');
+    const old = sponsorHealth(
+      { status: 'committed', committed: 1000, invoicedAmount: 1000, invoicedAt: '2026-07-15', payments: [] },
+      today
+    );
+    const fresh = sponsorHealth(
+      { status: 'committed', committed: 1000, invoicedAmount: 1000, invoicedAt: '2026-09-05', payments: [] },
+      today
+    );
+    t.equal(old.level, 'attention', '58 days unpaid is chased');
+    t.equal(fresh.level, 'waiting', '6 days unpaid is just waiting');
+  });
+
+  t.test('paid in full with a logo still missing is not done', () => {
+    const h = sponsorHealth({
+      status: 'committed', committed: 1000, payments: [{ amount: 1000 }],
+      deliverables: { logo: { state: 'open' }, swag: { state: 'na' }, social: { state: 'na' }, session: { state: 'na' } },
+    });
+    t.equal(h.level, 'waiting', 'money in does not mean finished');
+    t.assert(h.why.indexOf('deliverable') !== -1, 'and the reason names what is missing');
+  });
+
+  t.test('paid and everything in is done', () => {
+    const h = sponsorHealth({
+      status: 'committed', committed: 1000, payments: [{ amount: 1000 }],
+      deliverables: {
+        logo: { state: 'done' }, swag: { state: 'done' },
+        social: { state: 'done' }, session: { state: 'na' },
+      },
+    });
+    t.equal(h.level, 'done', 'nothing left to chase');
+  });
+
+  /* ---------------- rollup ---------------- */
+
+  t.test('declined and lost sponsors are kept out of every total', () => {
+    const r = rollup([
+      { status: 'committed', committed: 1000, payments: [{ amount: 1000 }] },
+      { status: 'declined', committed: 5000, payments: [] },
+      { status: 'lost', committed: 2500, payments: [] },
+    ]);
+    t.equal(r.committed, 1000, 'a declined sponsor is not committed money');
+    t.equal(r.sponsorCount, 1, 'and is not counted');
+  });
+
+  t.test('unpriced sponsors are reported, never counted as free', () => {
+    const r = rollup([
+      { status: 'committed', committed: 2500, payments: [{ amount: 500 }] },
+      { status: 'talking', committed: null, payments: [] },
+    ]);
+    t.equal(r.committed, 2500, 'the unknown is not added as zero');
+    t.equal(r.unpriced, 1, 'it is reported separately');
+    t.equal(r.outstanding, 2000, 'outstanding covers only the agreed money');
+  });
+
+  t.test('the rollup counts what is blocked and what is outstanding on deliverables', () => {
+    const r = rollup([
+      { status: 'committed', committed: 1000, invoicedAmount: null, payments: [] },
+      {
+        status: 'committed', committed: 500, invoicedAmount: 500, invoicedAt: '2026-09-10',
+        payments: [{ amount: 500 }],
+        deliverables: { logo: { state: 'done' }, swag: { state: 'open' }, social: { state: 'na' }, session: { state: 'na' } },
+      },
+    ], new Date('2026-09-11T12:00:00Z'));
+    t.equal(r.blocked, 1, 'the never-invoiced one needs a nudge');
+    t.equal(r.deliverablesOpen, 5, 'one open swag, plus all four untouched on the first');
+  });
+
+  /* ---------------- inventory ---------------- */
+
+  t.test('the seeded tiers are the ones on the public page', () => {
+    const by = {};
+    for (const tier of SEED_TIERS) by[tier.name] = tier;
+    t.equal(by.Presenting.amount, 7000, 'Presenting is 7000');
+    t.equal(by.Presenting.slots, 1, 'and there is one of it');
+    t.equal(by.Gold.amount, 2500, 'Gold is 2500');
+    t.equal(by.Gold.slots, 3, 'and there are three');
+    t.equal(by.Silver.amount, 1000, 'Silver is 1000');
+    t.equal(by.Silver.slots, null, 'and unlimited');
+  });
+
+  t.test('a committed sponsor takes a slot, an inquiry does not', () => {
+    const rows = tierAvailability([
+      { status: 'committed', tier: 'Gold' },
+      { status: 'inquiry', tier: 'Gold' },
+      { status: 'talking', tier: 'Gold' },
+    ], null);
+    const gold = rows.find((r) => r.name === 'Gold');
+    t.equal(gold.sold, 1, 'one sold');
+    t.equal(gold.pending, 2, 'two asking');
+    t.equal(gold.left, 2, 'two places still sellable');
+    t.equal(gold.soldOut, false, 'not sold out on the strength of two emails');
+  });
+
+  t.test('an unlimited tier never reports a number left', () => {
+    const silver = tierAvailability([{ status: 'committed', tier: 'Silver' }], null)
+      .find((r) => r.name === 'Silver');
+    t.equal(silver.left, null, 'unlimited has no remainder');
+    t.equal(silver.soldOut, false, 'and never sells out');
+  });
+
+  t.test('the last Presenting slot going reports sold out', () => {
+    const p = tierAvailability([{ status: 'committed', tier: 'Presenting' }], null)
+      .find((r) => r.name === 'Presenting');
+    t.assert(p.soldOut, 'sold out');
+    t.equal(p.left, 0, 'nothing left');
+    t.equal(p.oversold, false, 'exactly full is not oversold');
+  });
+
+  t.test('selling a fourth Gold is flagged rather than absorbed', () => {
+    const gold = tierAvailability([
+      { status: 'committed', tier: 'Gold' }, { status: 'committed', tier: 'Gold' },
+      { status: 'committed', tier: 'Gold' }, { status: 'committed', tier: 'Gold' },
+    ], null).find((r) => r.name === 'Gold');
+    t.assert(gold.oversold, 'four into three is oversold');
+    t.equal(gold.left, 0, 'and nothing is left to sell');
+  });
+
+  t.test('a declined sponsor releases their slot', () => {
+    const gold = tierAvailability([
+      { status: 'committed', tier: 'Gold' },
+      { status: 'declined', tier: 'Gold' },
+      { status: 'lost', tier: 'Gold' },
+    ], null).find((r) => r.name === 'Gold');
+    t.equal(gold.sold, 1, 'a no does not hold a place');
+    t.equal(gold.left, 2, 'the place goes back on the board');
+  });
+
+  t.test('every moment starts open and names itself', () => {
+    const rows = momentAvailability([]);
+    t.equal(rows.length, MOMENT_KEYS.length, 'one row per moment');
+    t.assert(rows.every((r) => r.open), 'all open with no sponsors');
+    t.equal(momentLabel('day-1-lunch'), 'Day 1 lunch', 'and has a readable name');
+  });
+
+  t.test('a claimed moment names who has it', () => {
+    const rows = momentAvailability([
+      { status: 'committed', company: 'SanMar', moments: ['breakfast'] },
+    ]);
+    const b = rows.find((r) => r.key === 'breakfast');
+    t.equal(b.claimedBy, 'SanMar', 'named');
+    t.equal(b.open, false, 'and no longer open');
+  });
+
+  t.test('an inquiry on a moment holds nothing but is visible', () => {
+    const b = momentAvailability([
+      { status: 'talking', company: 'Chipply', moments: ['happy-hour'] },
+    ]).find((r) => r.key === 'happy-hour');
+    t.assert(b.open, 'still sellable');
+    t.equal(b.pendingBy, 'Chipply', 'and the conversation is shown');
+  });
+
+  t.test('two committed sponsors on one moment is reported, not resolved', () => {
+    const b = momentAvailability([
+      { status: 'committed', company: 'SanMar', moments: ['swag-bags'] },
+      { status: 'committed', company: 'SPSI', moments: ['swag-bags'] },
+    ]).find((r) => r.key === 'swag-bags');
+    t.assert(b.conflict, 'flagged as claimed twice');
+  });
+
+  t.test('an unknown moment is refused', () => {
+    t.equal(validateSponsorPatch({ moments: ['karaoke'] }).ok, false, 'not a moment we sell');
+    t.assert(validateSponsorPatch({ moments: ['breakfast'] }).ok, 'a real one passes');
+  });
+
+  t.test('claiming the same moment twice stores it once', () => {
+    const r = validateSponsorPatch({ moments: ['breakfast', 'breakfast'] });
+    t.equal(r.patch.moments.length, 1, 'deduped');
+  });
+
+  /* ---------------- validation ---------------- */
+
+  t.test('a patch carries only the keys the caller sent', () => {
+    const { patch } = validateSponsorPatch({ company: 'SanMar' });
+    t.equal(Object.keys(patch).length, 1, 'one field in, one field out');
+    t.equal('committed' in patch, false, 'an untouched amount is not set to null');
+  });
+
+  t.test('a bad amount is refused rather than rounded to zero', () => {
+    const r = validateSponsorPatch({ committed: 'two and a half grand' });
+    t.equal(r.ok, false, 'refused');
+    t.assert(r.errors.join(' ').indexOf('number') !== -1, 'and says why');
+  });
+
+  t.test('an explicitly cleared amount becomes null, not zero', () => {
+    const r = validateSponsorPatch({ committed: '' });
+    t.assert(r.ok, 'clearing is allowed');
+    t.equal(r.patch.committed, null, 'cleared means unknown');
+  });
+
+  t.test('an unknown status is refused', () => {
+    t.equal(validateSponsorPatch({ status: 'maybe' }).ok, false, 'not a status');
+    for (const s of STATUSES) {
+      t.assert(validateSponsorPatch({ status: s }).ok, s + ' is a status');
+    }
+  });
+
+  t.test('an unknown deliverable key is refused', () => {
+    const r = validateSponsorPatch({ deliverables: { banner: { state: 'done' } } });
+    t.equal(r.ok, false, 'the checklist is fixed');
+  });
+
+  t.test('a zero payment is refused', () => {
+    const r = validateSponsorPatch({ payments: [{ amount: 0 }] });
+    t.equal(r.ok, false, 'a payment of nothing is a typo');
+  });
+
+  t.test('a bad email is refused, an empty one is allowed', () => {
+    t.equal(validateSponsorPatch({ email: 'nope' }).ok, false, 'not an address');
+    t.assert(validateSponsorPatch({ email: '' }).ok, 'no address yet is fine');
+  });
+
+  t.test('an invoice date has to be a date', () => {
+    t.equal(validateSponsorPatch({ invoicedAt: 'last tuesday' }).ok, false, 'refused');
+    t.assert(validateSponsorPatch({ invoicedAt: '2026-09-01' }).ok, 'ISO passes');
+  });
+
+  /* ---------------- store ---------------- */
+
+  t.test('a new sponsor starts with every deliverable open', () => {
+    const s = newSponsor('SP-0001', 'ryan');
+    for (const key of DELIVERABLE_KEYS) {
+      t.equal(s.deliverables[key].state, 'open', key + ' starts open');
+    }
+    t.equal(s.committed, null, 'and with no amount agreed');
+  });
+
+  await t.test('ids run in sequence', async () => {
+    const a = await nextSponsorId();
+    const b = await nextSponsorId();
+    t.equal(a, 'SP-0001', 'first id');
+    t.equal(b, 'SP-0002', 'second id');
+  });
+
+  await t.test('a saved sponsor comes back', async () => {
+    const rec = { ...newSponsor('SP-0100', 'ryan'), company: 'SanMar', committed: 2500 };
+    await saveSponsor(rec);
+    const back = await getSponsor('SP-0100');
+    t.equal(back.company, 'SanMar', 'same company');
+    t.equal(back.committed, 2500, 'same amount');
+  });
+
+  await t.test('a patch merges instead of replacing', async () => {
+    await updateSponsor('SP-0100', { tier: 'Gold' });
+    const back = await getSponsor('SP-0100');
+    t.equal(back.tier, 'Gold', 'the new field landed');
+    t.equal(back.company, 'SanMar', 'and the untouched one survived');
+    t.equal(back.committed, 2500, 'including the money');
+  });
+
+  await t.test('a patch cannot rewrite who created the record or when', async () => {
+    const before = await getSponsor('SP-0100');
+    await updateSponsor('SP-0100', { createdBy: 'someone-else', createdAt: '1999-01-01T00:00:00.000Z', id: 'SP-9999' });
+    const after = await getSponsor('SP-0100');
+    t.equal(after.createdBy, before.createdBy, 'createdBy is pinned');
+    t.equal(after.createdAt, before.createdAt, 'createdAt is pinned');
+    t.equal(after.id, 'SP-0100', 'the id is pinned');
+  });
+
+  await t.test('sponsors are scoped by event', async () => {
+    await saveSponsor({ ...newSponsor('SP-0200', 'ryan'), company: 'Chipply', event: 'FOC28' });
+    const thisYear = await listSponsors('FOC27');
+    const nextYear = await listSponsors('FOC28');
+    t.assert(thisYear.every((s) => s.company !== 'Chipply'), 'next year stays out of this year');
+    t.equal(nextYear.length, 1, 'and is findable on its own');
+  });
+
+  t.test('one company written two ways is one company', () => {
+    t.equal(companyKey('Smith Bros.'), companyKey('Smith Bros LLC'), 'suffix and punctuation ignored');
+    t.assert(companyKey('SanMar') !== companyKey('Sanmar Graphics'), 'but a different company is different');
+  });
+
+  await t.test('a repeat submission finds the record it already made', async () => {
+    const hit = await findByCompany('sanmar', 'FOC27');
+    t.assert(hit && hit.id === 'SP-0100', 'matched case-insensitively');
+  });
+
+  await t.test('deleting removes the record and its index entry', async () => {
+    await saveSponsor({ ...newSponsor('SP-0300', 'ryan'), company: 'Temp' });
+    t.equal(await deleteSponsor('SP-0300'), true, 'deleted');
+    t.equal(await getSponsor('SP-0300'), null, 'and gone');
+    const list = await listSponsors('FOC27');
+    t.assert(list.every((s) => s.id !== 'SP-0300'), 'and out of the list');
+  });
+
+  await t.test('deleting something that is not there says so instead of throwing', async () => {
+    t.equal(await deleteSponsor('SP-9999'), false, 'returns false');
+  });
+
+  /* ---------------- settings ---------------- */
+
+  await t.test('tiers seed themselves so the app works the day it deploys', async () => {
+    const s = await getSettings();
+    t.assert(s.tiers.length >= 4, 'a tier lineup is there without a setup step');
+    t.equal(s.event, 'FOC27', 'and the current event is set');
+  });
+
+  await t.test('a saved tier lineup wins over the seed', async () => {
+    await saveSettings({ tiers: [{ name: 'Runway', amount: 7500 }] });
+    const s = await getSettings();
+    t.equal(s.tiers.length, 1, 'the saved list replaced the seed');
+    t.equal(s.tiers[0].name, 'Runway', 'with the name we saved');
+    t.equal(s.event, 'FOC27', 'and the event survived the partial save');
+  });
+
+  /* ---------------- routes load and gate ---------------- */
+
+  await t.test('both routes load and export a handler', async () => {
+    const sponsors = await import('../api/concontrol/sponsors.js');
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    t.equal(typeof sponsors.default, 'function', 'sponsors route has a handler');
+    t.equal(typeof inquiry.default, 'function', 'inquiry route has a handler');
+  });
+
+  await t.test('the public route refuses anything but POST', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const res = fakeRes();
+    await inquiry.default({ method: 'GET', headers: {}, query: {} }, res);
+    t.equal(res.statusCode, 405, 'GET is not how you submit a form');
+  });
+
+  await t.test('the public route needs a company and a real email', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+
+    const noCompany = fakeRes();
+    await inquiry.default({ method: 'POST', headers: {}, body: { email: 'a@b.com' } }, noCompany);
+    t.equal(noCompany.statusCode, 400, 'no company is refused');
+
+    const badEmail = fakeRes();
+    await inquiry.default({ method: 'POST', headers: {}, body: { company: 'Acme', email: 'nope' } }, badEmail);
+    t.equal(badEmail.statusCode, 400, 'a junk email is refused');
+  });
+
+  await t.test('a public submission cannot make itself paid', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const res = fakeRes();
+    await inquiry.default({
+      method: 'POST',
+      headers: {},
+      body: {
+        company: 'Limitless Transfers', email: 'hi@limitless.test', contactName: 'Pat',
+        // Everything below is a field the form has no business setting.
+        committed: 99999, status: 'committed', payments: [{ amount: 99999 }],
+        deliverables: { logo: { state: 'done' } }, event: 'FOC99',
+      },
+    }, res);
+
+    t.equal(res.statusCode, 201, 'the inquiry is recorded');
+    const rec = await getSponsor(res.body.id);
+    t.equal(rec.committed, null, 'no money was set');
+    t.equal(rec.status, 'inquiry', 'status is inquiry, not committed');
+    t.equal(rec.payments.length, 0, 'no payments were recorded');
+    t.equal(rec.deliverables.logo.state, 'open', 'no deliverable marked done');
+    t.equal(rec.event, 'FOC27', 'an unlisted event falls back to the real one');
+    t.equal(rec.source, 'sponsor-form', 'and it is stamped as coming from the form');
+  });
+
+  await t.test('the form calls it a level and the record calls it a tier', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const res = fakeRes();
+    await inquiry.default({
+      method: 'POST', headers: {},
+      body: { company: 'SPSI', email: 'hi@spsi.test', level: 'Gold' },
+    }, res);
+    const rec = await getSponsor(res.body.id);
+    t.equal(rec.tier, 'Gold', 'the level landed on the tier field');
+    t.assert(rec.notes.indexOf('Gold') !== -1, 'and is written into the note');
+  });
+
+  await t.test('a filled honeypot is answered cheerfully and written nowhere', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const before = (await listSponsors('FOC27')).length;
+    const res = fakeRes();
+    await inquiry.default({
+      method: 'POST', headers: {},
+      body: { company: 'Bot Co', email: 'bot@bot.test', _hp: 'http://spam' },
+    }, res);
+    t.equal(res.statusCode, 200, 'a bot is not told which check caught it');
+    t.equal(res.body.id, null, 'and nothing was created');
+    t.equal((await listSponsors('FOC27')).length, before, 'the list is unchanged');
+  });
+
+  await t.test('submitting twice appends rather than duplicating', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const before = (await listSponsors('FOC27')).length;
+
+    const res = fakeRes();
+    await inquiry.default({
+      method: 'POST',
+      headers: {},
+      body: { company: 'Limitless Transfers LLC', email: 'hi@limitless.test', message: 'Following up' },
+    }, res);
+
+    const after = await listSponsors('FOC27');
+    t.equal(res.body.duplicate, true, 'reported as a repeat');
+    t.equal(after.length, before, 'no second record was created');
+    const rec = await getSponsor(res.body.id);
+    t.assert(rec.notes.indexOf('Following up') !== -1, 'the second message was kept');
+  });
+
+  process.exit(t.report());
+})();
+
+function fakeRes() {
+  return {
+    statusCode: 0,
+    body: null,
+    headers: {},
+    setHeader(k, v) { this.headers[k] = v; },
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { this.body = payload; return this; },
+    end() { return this; },
+  };
+}

@@ -113,7 +113,12 @@ const LIVE_PREFIXES = [
   // an empty library is a real and expected state (nobody has imported the
   // archive yet), and inventing sample designs would put fake stitch counts
   // in front of somebody quoting a real job.
-  '/api/stitchsense/'
+  '/api/stitchsense/',
+  // ConControl: api/concontrol/{sponsors,inquiry}.js are deployed. Live
+  // from the first deploy, so there is no mock block: an empty sponsor list is
+  // a real and expected state for FOC27, and inventing sample sponsors would
+  // put fake committed dollars on a totals strip.
+  '/api/concontrol/'
 ];
 
 function isLive(path) {
@@ -293,6 +298,17 @@ export const ENDPOINTS = {
 
   // ---- Help bot (shell-level, bottom-right bubble) ----
   help:            '/api/help',
+
+  // ---- ConControl ----
+  // Event tracking: sponsors, money, sessions, speakers. Folder route, not a
+  // flat api/concontrol.js, for the same Vercel file-vs-folder conflict
+  // WebsiteWidget and PromoPro hit.
+  conSponsors:      '/api/concontrol/sponsors',
+  // Not called from the front end: the event site's /sponsor page POSTs to it
+  // directly, the same way flyover-con-signup.html calls mmSignup. Listed so
+  // the path has one canonical home rather than being typed into a template
+  // from memory.
+  conInquiry:       '/api/concontrol/inquiry',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',
