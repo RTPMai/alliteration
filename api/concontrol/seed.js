@@ -1,22 +1,16 @@
 // api/concontrol/seed.js — one-time imports, admin only.
 //
-// POST { what: "survey" }    session ideas straight from the FOC26 survey.
-//                            NOT offered as a button any more: the survey
-//                            belongs in Responses, where a person reads it and
-//                            presses "make a session idea" on the rows they
-//                            want. Creating twenty-six at once put a program on
-//                            the board that nobody had agreed to. Kept as a
-//                            route for the case where somebody really does want
-//                            the lot.
-// POST { what: "wishlist" }  the dream-speaker answers, as a wishlist
-// POST { what: "sponsors" }  FOC26's sponsors as FOC27 prospects
+// POST { what: "sponsors" }     FOC26's sponsors as FOC27 prospects
+// POST { what: "undo-survey" }  remove what the earlier survey seeding created
 //
-// The data ships with the app (lib/concontrol/foc26-survey.js), so the body is
-// three words and Settings has a button. The first version took its rows in
-// the request, which meant the deploy landed and nothing happened because
-// nobody was going to paste six kilobytes of JSON into a console. Rows and
-// names ARE still accepted for a future event's import; leaving them out uses
-// what shipped.
+// WHAT IS NOT HERE ANY MORE. The survey and the dream-speaker names used to be
+// imported from here, straight into Sessions and Speakers. That was wrong twice
+// over: it put twenty-six session ideas on a program nobody had agreed to, and
+// it filed answers to a survey question as speaker records. Both are RESPONSES.
+// They live in the Responses screen now, and a topic becomes a session idea
+// when somebody presses the button on its row.
+//
+// "undo-survey" exists because that mistake is already in the live data.
 //
 // WHY A ROUTE AND NOT A SCRIPT. A script would need the Upstash credentials on
 // somebody's laptop, which is a worse place for them than Vercel. This runs
@@ -33,8 +27,8 @@
 import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import { newSponsor, historyEntry, DEFAULT_EVENT } from "../../lib/concontrol/schema.js";
-import { seedSessions, seedWishlist } from "../../lib/concontrol/seed-survey.js";
-import { FOC26_RESPONSES, FOC26_WISHLIST, FOC26_SPONSORS } from "../../lib/concontrol/foc26-survey.js";
+import { FOC26_SPONSORS } from "../../lib/concontrol/foc26-survey.js";
+import { undoSurveySeed } from "../../lib/concontrol/undo-seed.js";
 import {
   getSettings, findByCompany, saveSponsor, nextSponsorId,
 } from "../../lib/concontrol/store.js";
@@ -104,14 +98,8 @@ export default async function handler(req, res) {
     const event = (b.event && String(b.event)) || settings.event || DEFAULT_EVENT;
     const what = String(b.what || "");
 
-    if (what === "survey") {
-      const rows = Array.isArray(b.rows) ? b.rows : FOC26_RESPONSES;
-      return res.status(200).json({ ok: true, ...(await seedSessions(rows, event, sess.username)) });
-    }
-
-    if (what === "wishlist") {
-      const names = Array.isArray(b.names) ? b.names : FOC26_WISHLIST;
-      return res.status(200).json({ ok: true, ...(await seedWishlist(names, event, sess.username)) });
+    if (what === "undo-survey") {
+      return res.status(200).json({ ok: true, ...(await undoSurveySeed(event)) });
     }
 
     if (what === "sponsors") {

@@ -867,14 +867,15 @@ function renderSettings() {
     <div class="con-left" style="max-width:640px">
       <h4>Start from last year</h4>
       <div class="con-note" style="margin-bottom:10px">
-        Two one-time imports, each safe to run twice. Nothing is duplicated on a
-        second run, and anything you have edited or moved on since is left alone.
-        The survey is NOT here: it lands in Responses, where you read it and
-        decide what becomes a session.
+        Safe to press twice. The survey is not here: it lands in Responses, where
+        you read it and decide what becomes a session. The second button takes
+        back the session ideas and wishlist speakers an earlier version put on
+        the program by itself, leaving anything you have since scheduled,
+        confirmed or invited exactly where it is.
       </div>
       <div class="con-slots">
-        <button class="con-slot" data-seed="wishlist">Speakers people asked for</button>
         <button class="con-slot" data-seed="sponsors">FOC26 sponsors as prospects</button>
+        <button class="con-slot" data-seed="undo-survey">Remove what the survey seeded</button>
       </div>
       <div id="conSeedMsg" style="margin-top:10px"></div>
       <div class="con-note" style="margin-top:8px">
@@ -970,6 +971,10 @@ async function runSeed(button, what) {
     if (res.created && res.created.length) parts.push(`${res.created.length} created`);
     if (res.updated && res.updated.length) parts.push(`${res.updated.length} refreshed`);
     if (res.skipped && res.skipped.length) parts.push(`${res.skipped.length} left alone`);
+    if (res.removedSessions) parts.push(`${res.removedSessions.length} session ideas removed`);
+    if (res.removedSpeakers) parts.push(`${res.removedSpeakers.length} wishlist speakers removed`);
+    const kept = (res.keptSessions || []).concat(res.keptSpeakers || []);
+    if (kept.length) parts.push(`${kept.length} kept because you had moved them on: ${kept.join(', ')}`);
     msg.innerHTML = `<div class="con-ok">${esc(parts.length ? parts.join(', ') : 'Nothing to do')}${res.skipped && res.skipped.length ? '. Skipped: ' + esc(res.skipped.join(', ')) : '.'}</div>`;
 
     // The imported records are on other screens, so those caches are now stale.
@@ -1007,11 +1012,14 @@ async function loadResponses() {
   renderResponses();
 }
 
+// The four forms on the event site, in the order somebody meets them: they
+// answer the survey or ask to be told about next year long before they apply
+// to sponsor or speak.
 const RESP_TABS = [
   ['survey', 'Survey'],
-  ['inquiries', 'Sponsor inquiries'],
-  ['proposals', 'Speaker proposals'],
   ['signups', 'Notify list'],
+  ['inquiries', 'Sponsor applications'],
+  ['proposals', 'Speaker applications'],
 ];
 
 function renderResponses() {
@@ -1160,7 +1168,7 @@ async function promoteTopic(button, topic) {
 function renderInquiries(body) {
   const rows = state.responses.inquiries || [];
   if (!rows.length) {
-    body.innerHTML = '<div class="con-empty"><h3>No open sponsor inquiries</h3><p>Anything arriving from the sponsor page lands here until somebody moves it on.</p></div>';
+    body.innerHTML = '<div class="con-empty"><h3>No sponsor applications yet</h3><p>Anything submitted on the sponsor page lands here. A sponsor you added yourself, or a prospect carried over from last year, is not an application and stays on the Sponsors screen.</p></div>';
     return;
   }
   body.innerHTML = `
@@ -1186,7 +1194,7 @@ function renderInquiries(body) {
 function renderProposals(body) {
   const rows = state.responses.proposals || [];
   if (!rows.length) {
-    body.innerHTML = '<div class="con-empty"><h3>No open proposals</h3><p>Anything arriving from the call for speakers lands here, alongside the names people asked for.</p></div>';
+    body.innerHTML = '<div class="con-empty"><h3>No speaker applications yet</h3><p>Anything submitted on the call for speakers lands here. Names people wrote in the survey are answers to a survey question, so they are in the Survey tab under who they would drive to hear.</p></div>';
     return;
   }
   body.innerHTML = `

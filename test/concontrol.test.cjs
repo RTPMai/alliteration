@@ -62,6 +62,7 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     saveSponsor, getSponsor, updateSponsor, deleteSponsor, listSponsors,
     nextSponsorId, companyKey, findByCompany, getSettings, saveSettings,
     listSpeakers, getSpeaker, listSessions, getSession, updateSession, updateSpeaker,
+    saveSession, nextSessionId, saveSpeaker, nextSpeakerId,
   } = store;
 
   /* ---------------- money parsing ---------------- */
@@ -966,148 +967,14 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.assert(rec.notes.indexOf('heat press') !== -1, 'and the practical answers were kept');
   });
 
-  /* ---------------- the survey seed ---------------- */
-
-  const seed = await import('../lib/concontrol/seed-survey.js');
-  const { tallyTopics, usefulText, blurbFor, seedSessions, seedWishlist } = seed;
-
-  const survey = [
-    { topics: 'Short runs | AI live | Burnout', must_have_session: 'AI live' },
-    { topics: 'Short runs | Hiring | Burnout', must_have_session: 'Hiring' },
-    { topics: 'Short runs | AI live', must_have_session: 'AI live' },
-  ];
-
-  t.test('a pipe separated multi-select becomes one row per topic', () => {
-    const rows = tallyTopics(survey);
-    const short = rows.find((r) => r.topic === 'Short runs');
-    t.equal(short.picked, 3, 'picked by all three');
-    t.equal(short.mustHave, 0, 'and nobody named it as the one');
-  });
-
-  t.test('must-haves break the tie, not raw picks', () => {
-    const rows = tallyTopics(survey);
-    t.equal(rows[0].topic, 'AI live', 'two must-haves beats three picks');
-    t.equal(rows[0].picked, 2, 'even on fewer picks');
-  });
-
-  t.test('a must-have nobody listed among their picks is still counted', () => {
-    const rows = tallyTopics([{ topics: 'Short runs', must_have_session: 'Succession' }]);
-    const hit = rows.find((r) => r.topic === 'Succession');
-    t.assert(hit, 'it is in the tally');
-    t.equal(hit.picked, 0, 'with no picks');
-    t.equal(hit.mustHave, 1, 'and the must-have that found it');
-  });
-
-  t.test('the blurb keeps both numbers rather than collapsing them to a rank', () => {
-    const b = blurbFor({ topic: 'X', picked: 7, mustHave: 0, respondents: 19 });
-    t.assert(b.indexOf('7 of the 19') !== -1, 'the picks are there');
-    t.assert(b.indexOf('Nobody named it') !== -1, 'and so is the absence of must-haves');
-  });
-
-  t.test('a polite no is not a topic', () => {
-    t.equal(usefulText('No.'), '', 'refused');
-    t.equal(usefulText('Not that I can think of. But I am sure there is.'), '', 'also refused');
-    t.equal(usefulText('?'), '', 'and that');
-    t.equal(usefulText('more info on SIM process'), 'more info on SIM process', 'a real answer survives');
-  });
-
-  await t.test('the seed creates ideas with no time on them', async () => {
-    const out = await seedSessions(survey, 'FOC27', 'ryan');
-    t.equal(out.created.length, 4, 'one per distinct topic');
-    const made = (await listSessions('FOC27')).filter((s) => s.title === 'Short runs');
-    t.equal(made.length, 1, 'created once');
-    t.equal(made[0].status, 'idea', 'as an idea');
-    t.equal(made[0].start, '', 'with no time, because that is a judgement call');
-  });
-
-  await t.test('running it twice refreshes rather than duplicating', async () => {
-    const out = await seedSessions(survey, 'FOC27', 'ryan');
-    t.equal(out.created.length, 0, 'nothing new');
-    t.equal(out.updated.length, 4, 'all four refreshed');
-    const made = (await listSessions('FOC27')).filter((s) => s.title === 'Short runs');
-    t.equal(made.length, 1, 'still one');
-  });
-
-  await t.test('anything scheduled or moved on is left alone', async () => {
-    const mine = (await listSessions('FOC27')).find((s) => s.title === 'Hiring');
-    await updateSession(mine.id, { start: '10:30', status: 'confirmed' });
-    const out = await seedSessions(survey, 'FOC27', 'ryan');
-    t.assert(out.skipped.includes('Hiring'), 'skipped');
-    const after = await getSession(mine.id);
-    t.equal(after.start, '10:30', 'the time somebody set survived');
-    t.equal(after.status, 'confirmed', 'and so did the decision');
-  });
-
-  await t.test('dream speakers land as a wishlist, not as proposals', async () => {
-    const out = await seedWishlist([
-      { name: 'Tom Raun', company: 'Envision Tees', note: 'Started on a manual press' },
-      { name: 'Michelle Moxley' },
-    ], 'FOC27', 'ryan');
-    t.equal(out.created.length, 2, 'both added');
-    const tom = (await listSpeakers('FOC27')).find((s) => s.name === 'Tom Raun');
-    t.equal(tom.status, 'wishlist', 'asked for, not offered');
-    t.assert(tom.notes.indexOf('manual press') !== -1, 'with the reason somebody gave');
-  });
-
-  await t.test('a wishlist name who has since been invited is not dragged back', async () => {
-    const tom = (await listSpeakers('FOC27')).find((s) => s.name === 'Tom Raun');
-    await updateSpeaker(tom.id, { status: 'invited' });
-    const out = await seedWishlist([{ name: 'Tom Raun' }], 'FOC27', 'ryan');
-    t.assert(out.skipped.includes('Tom Raun'), 'skipped');
-    t.equal((await getSpeaker(tom.id)).status, 'invited', 'still invited');
-  });
-
-  await t.test('a wishlist speaker is never chased for a headshot', async () => {
-    const speakers = await listSpeakers('FOC27');
-    const chased = programBlockers([], speakers).filter((b) => b.kind === 'speaker-materials');
-    t.assert(chased.every((b) => b.name !== 'Michelle Moxley'), 'nobody chases a name off a wish list');
-  });
-
-  await t.test('the seed route refuses a non-admin and an unknown import', async () => {
-    const mod = await import('../api/concontrol/seed.js');
-    t.equal(typeof mod.default, 'function', 'it loads');
-  });
-
-  /* ---------------- the data actually ships ---------------- */
+  /* ---------------- what still ships with the app ---------------- */
 
   const shipped = await import('../lib/concontrol/foc26-survey.js');
 
-  t.test('the survey ships with the app rather than needing a paste', () => {
-    t.equal(shipped.FOC26_RESPONSES.length, 19, 'nineteen responses');
-    t.assert(shipped.FOC26_WISHLIST.length >= 8, 'and the wishlist names');
-    t.equal(shipped.FOC26_SPONSORS.length, 8, 'and last year\'s eight sponsors');
-  });
-
-  t.test('the shipped responses carry no personal data', () => {
-    const keys = new Set();
-    for (const row of shipped.FOC26_RESPONSES) Object.keys(row).forEach((k) => keys.add(k));
-    t.equal(keys.size, 2, 'two fields only');
-    t.assert(keys.has('topics') && keys.has('must_have_session'), 'the two the tally reads');
-    const json = JSON.stringify(shipped.FOC26_RESPONSES);
-    t.equal(json.indexOf('@'), -1, 'no email address anywhere in it');
-  });
-
-  t.test('the shipped survey tallies to the topics we expect', () => {
-    const rows = tallyTopics(shipped.FOC26_RESPONSES);
-    t.equal(rows.length, 26, 'twenty-six distinct topics');
-    t.equal(rows[0].topic, 'Hiring, training and keeping good people', 'most must-haves first');
-    const burnout = rows.find((r) => r.topic.indexOf('Burnout') === 0);
-    t.equal(burnout.picked, 7, 'burnout was picked seven times');
-    t.equal(burnout.mustHave, 0, 'and named as nobody\'s single session');
-  });
-
-  t.test('every shipped wishlist entry is an actual name', () => {
-    for (const entry of shipped.FOC26_WISHLIST) {
-      t.assert(entry.name && entry.name.trim().length > 2, `"${entry.name}" is a name`);
-    }
-  });
-
-  await t.test('the seed route runs with no payload at all', async () => {
-    // The whole point of this change: a body of three words has to be enough.
-    const mod = await import('../api/concontrol/seed.js');
-    t.equal(typeof mod.default, 'function', 'the route loads');
-    const src = await import('fs').then((fs) => fs.readFileSync('api/concontrol/seed.js', 'utf8'));
-    t.assert(src.indexOf('FOC26_RESPONSES') !== -1, 'and falls back to the shipped data');
+  t.test('only last year\'s sponsors ship with the app now', () => {
+    t.equal(shipped.FOC26_SPONSORS.length, 8, "FOC26's eight sponsors");
+    t.equal('FOC26_RESPONSES' in shipped, false, 'the survey copy is gone: it is a response');
+    t.equal('FOC26_WISHLIST' in shipped, false, 'and so are the dream-speaker names');
   });
 
   /* ---------------- the escaped-newline damage ---------------- */
@@ -1255,6 +1122,84 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     const app = fs.readFileSync('apps/concontrol.js', 'utf8');
     t.assert(app.indexOf('data-promote') !== -1, 'a button per row');
     t.equal(app.indexOf('data-seed="survey"'), -1, 'and the bulk survey button is gone');
+  });
+
+  /* ---------------- the four streams are the four forms ---------------- */
+
+  t.test('a stream is defined by the form it came from, not by status', () => {
+    const fs = require('fs');
+    const src = fs.readFileSync('api/concontrol/responses.js', 'utf8');
+    t.assert(src.indexOf('s.source === "sponsor-form"') !== -1, 'sponsor applications filter on source');
+    t.assert(src.indexOf('s.source === "speak-form"') !== -1, 'speaker applications too');
+    t.equal(src.indexOf('status === "inquiry"'), -1, 'and not on status');
+  });
+
+  t.test('the tabs are the four forms, in the order somebody meets them', () => {
+    const app = require('fs').readFileSync('apps/concontrol.js', 'utf8');
+    const tabs = app.slice(app.indexOf('const RESP_TABS'), app.indexOf('const RESP_TABS') + 400);
+    for (const k of ['survey', 'signups', 'inquiries', 'proposals']) {
+      t.assert(tabs.indexOf(`'${k}'`) !== -1, `${k} is a tab`);
+    }
+    t.assert(tabs.indexOf("'survey'") < tabs.indexOf("'inquiries'"), 'survey before applications');
+  });
+
+  await t.test('the undo removes an untouched seeded session and keeps everything else', async () => {
+    const undo = await import('../lib/concontrol/undo-seed.js');
+
+    const mkSession = async (title, notes, extra) => {
+      const id = await nextSessionId();
+      await saveSession({ ...program.newSession(id, 'ryan', 'FOC27'), title, notes, ...(extra || {}) });
+      return id;
+    };
+
+    const untouched = await mkSession('Seeded and untouched', 'Created from the FOC26 audience survey.');
+    const scheduled = await mkSession('Seeded then scheduled', 'Promoted from the survey responses.', { start: '10:30' });
+    const confirmed = await mkSession('Seeded then confirmed', 'Created from the FOC26 audience survey.', { status: 'confirmed' });
+    const mine = await mkSession('Typed by hand', 'My own note');
+
+    const seededSpeaker = await nextSpeakerId();
+    await saveSpeaker({ ...program.newSpeaker(seededSpeaker, 'ryan', 'FOC27'), name: 'Wished For', status: 'wishlist', source: 'survey' });
+    const invited = await nextSpeakerId();
+    await saveSpeaker({ ...program.newSpeaker(invited, 'ryan', 'FOC27'), name: 'Since Invited', status: 'invited', source: 'survey' });
+    const applied = await nextSpeakerId();
+    await saveSpeaker({ ...program.newSpeaker(applied, 'ryan', 'FOC27'), name: 'Applied', status: 'proposed', source: 'speak-form' });
+
+    const out = await undo.undoSurveySeed('FOC27');
+
+    t.equal(await getSession(untouched), null, 'the untouched seeded session is gone');
+    t.assert(await getSession(scheduled), 'one given a time stays');
+    t.assert(await getSession(confirmed), 'one confirmed stays');
+    t.assert(await getSession(mine), 'and one typed by hand is never touched');
+
+    t.equal(await getSpeaker(seededSpeaker), null, 'the wishlist name is gone');
+    t.assert(await getSpeaker(invited), 'somebody since invited stays');
+    t.assert(await getSpeaker(applied), 'and an actual applicant is never in scope');
+
+    t.assert(out.keptSessions.includes('Seeded then scheduled'), 'what was kept is named, not just counted');
+    t.assert(out.keptSpeakers.includes('Since Invited'), 'for speakers too');
+  });
+
+  await t.test('running the undo twice is harmless', async () => {
+    const undo = await import('../lib/concontrol/undo-seed.js');
+    const out = await undo.undoSurveySeed('FOC27');
+    t.equal(out.removedSessions.length, 0, 'nothing left to remove');
+    t.equal(out.removedSpeakers.length, 0, 'nor any speakers');
+  });
+
+  t.test('the undo identifies records by how they were made, not by title', () => {
+    const undoSrc = require('fs').readFileSync('lib/concontrol/undo-seed.js', 'utf8');
+    t.equal(undoSrc.indexOf('title.toLowerCase()'), -1, 'no title matching anywhere in it');
+  });
+
+  t.test('nothing creates a wishlist speaker any more', () => {
+    const fs = require('fs');
+    for (const f of ['api/concontrol/seed.js', 'apps/concontrol.js']) {
+      const src = fs.readFileSync(f, 'utf8');
+      t.equal(src.indexOf('seedWishlist'), -1, `${f} does not seed a wishlist`);
+    }
+    // The status itself stays, so an existing record still renders and somebody
+    // can still mark a name by hand.
+    t.assert(program.SPEAKER_STATUSES.includes('wishlist'), 'the status is still available by hand');
   });
 
   process.exit(t.report());

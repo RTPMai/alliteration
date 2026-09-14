@@ -188,11 +188,16 @@ export default async function handler(req, res) {
 
       return res.status(200).json({
         event,
-        // The four streams. Sponsor and speaker records are already their own
-        // screens; what belongs HERE is the inbound end of each, so this shows
-        // the ones that arrived rather than the whole roster.
-        inquiries: sponsors.filter((s) => s.status === "inquiry"),
-        proposals: speakers.filter((s) => s.status === "proposed" || s.status === "wishlist"),
+        // THE FOUR STREAMS ARE THE FOUR FORMS. What belongs here is what
+        // somebody submitted, so these filter on SOURCE, not on status.
+        //
+        // Status would be wrong in both directions: a sponsor moved from
+        // inquiry to committed still applied, and a sponsor typed in by hand
+        // at status inquiry never did. Prior-year prospects and names off a
+        // wish list are ours, not theirs, and they do not belong on a screen
+        // called Responses.
+        inquiries: sponsors.filter((s) => s.source === "sponsor-form"),
+        proposals: speakers.filter((s) => s.source === "speak-form"),
         survey,
         signups,
         summary: summarise(survey),
