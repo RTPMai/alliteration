@@ -17,6 +17,7 @@
 // the moment they asked, not at the moment somebody got round to it.
 
 import { isRateLimited } from "../../lib/rate-limit.js";
+import { intakeLimit } from "../../lib/concontrol/intake.js";
 import {
   isValidEmail, newSponsor, DEFAULT_EVENT,
 } from "../../lib/concontrol/schema.js";
@@ -25,8 +26,6 @@ import {
 } from "../../lib/concontrol/store.js";
 import { notifyInbound } from "../../lib/concontrol/notify.js";
 
-const MAX_PER_IP = 10;
-const WINDOW_SECONDS = 60 * 60;
 
 // Browsers block a cross-origin fetch() unless the SERVER names the calling
 // origin. Every site that embeds the form needs to be listed here or its
@@ -76,7 +75,9 @@ export default async function handler(req, res) {
   }
 
   try {
-    const limited = await isRateLimited(`con-inquiry:${clientIp(req)}`, MAX_PER_IP, WINDOW_SECONDS);
+    const limit = intakeLimit(req);
+    const bucket = limit.key || clientIp(req);
+    const limited = await isRateLimited(`con-inquiry:${bucket}`, limit.max, limit.windowSeconds);
     if (limited) {
       return res.status(429).json({ error: "Too many submissions. Try again later." });
     }
@@ -86,14 +87,14 @@ export default async function handler(req, res) {
     // HONEYPOT. The form carries a field a person never sees and never fills.
     // Anything in it is a bot, and the answer is a cheerful 200 rather than an
     // error: telling a scraper which check caught it is how it learns to pass.
-    if (clean(b._hp, 50) || clean(b.fax, 50)) {
+    if (clean(b._hp, 50) || clean(b._gotcha, 50) || clean(b.fax, 50)) {
       return res.status(200).json({ ok: true, id: null });
     }
 
     const company = clean(b.company, 200);
     const contactName = clean(b.contactName || b.name, 120);
     const email = clean(b.email, 200).toLowerCase();
-    const message = clean(b.message, 2000);
+    const message = clean(b.message || b.notes, 2000);
 
     if (!company) return res.status(400).json({ error: "Company name is required" });
     if (!email) return res.status(400).json({ error: "Email is required" });

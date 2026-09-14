@@ -13,6 +13,7 @@
 // deletes and a repeat submission updates rather than duplicating.
 
 import { isRateLimited } from "../../lib/rate-limit.js";
+import { intakeLimit } from "../../lib/concontrol/intake.js";
 import { DEFAULT_EVENT } from "../../lib/concontrol/schema.js";
 import { newSpeaker } from "../../lib/concontrol/program.js";
 import {
@@ -20,8 +21,6 @@ import {
 } from "../../lib/concontrol/store.js";
 import { notifyInbound } from "../../lib/concontrol/notify.js";
 
-const MAX_PER_IP = 10;
-const WINDOW_SECONDS = 60 * 60;
 
 const ALLOWED_ORIGINS = [
   "https://www.flyovercon.ink",
@@ -70,18 +69,21 @@ export default async function handler(req, res) {
   }
 
   try {
-    const limited = await isRateLimited(`cc-speak:${clientIp(req)}`, MAX_PER_IP, WINDOW_SECONDS);
+    const limit = intakeLimit(req);
+    const bucket = limit.key || clientIp(req);
+    const limited = await isRateLimited(`cc-speak:${bucket}`, limit.max, limit.windowSeconds);
     if (limited) return res.status(429).json({ error: "Too many submissions. Try again later." });
 
     const b = parseBody(req);
 
     // Honeypot. A cheerful 200 rather than an error: telling a scraper which
     // check caught it is how it learns to pass.
-    if (clean(b._hp, 50) || clean(b.fax, 50)) return res.status(200).json({ ok: true, id: null });
+    if (clean(b._hp, 50) || clean(b._gotcha, 50) || clean(b.fax, 50)) return res.status(200).json({ ok: true, id: null });
 
     const name = clean(b.name || b.contactName, 120);
     const email = clean(b.email, 200).toLowerCase();
-    const topic = clean(b.topic || b.message || b.session, 2000);
+    const topic = clean(b.topic || b.message || b.session || b.session_title, 2000);
+    const notes = clean(b.notes, 4000);
 
     if (!name) return res.status(400).json({ error: "Your name is required" });
     if (!email) return res.status(400).json({ error: "Email is required" });
@@ -110,11 +112,12 @@ export default async function handler(req, res) {
       ...newSpeaker(id, null, event),
       name,
       email,
-      company: clean(b.company, 160),
+      company: clean(b.company || b.shop, 160),
       phone: clean(b.phone, 40),
       topic,
       bio: clean(b.bio, 4000),
       travelNeeded: b.travelNeeded === true || b.travelNeeded === "true" || b.travelNeeded === "yes",
+      notes,
       source: "speak-form",
     };
 

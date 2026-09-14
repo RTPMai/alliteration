@@ -906,6 +906,66 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal((await listSpeakers('FOC27')).length, before, 'and nothing created');
   });
 
+  /* ---------------- intake from our own site ---------------- */
+
+  const intake = await import('../lib/concontrol/intake.js');
+
+  t.test('a missing secret means nobody is the site, not everybody', () => {
+    delete process.env.CONCONTROL_INTAKE_SECRET;
+    t.equal(intake.isOwnSite({ headers: { 'x-intake-secret': 'anything' } }), false,
+      'the undefined !== undefined trap stays shut');
+    t.equal(intake.intakeLimit({ headers: {} }).max, 10, 'and everyone gets the public ceiling');
+  });
+
+  t.test('the right secret earns a bigger bucket and nothing else', () => {
+    process.env.CONCONTROL_INTAKE_SECRET = 'a-real-secret';
+    t.assert(intake.isOwnSite({ headers: { 'x-intake-secret': 'a-real-secret' } }), 'recognised');
+    t.equal(intake.isOwnSite({ headers: { 'x-intake-secret': 'wrong' } }), false, 'a wrong one is not');
+    t.equal(intake.isOwnSite({ headers: {} }), false, 'and no header is not');
+
+    const site = intake.intakeLimit({ headers: { 'x-intake-secret': 'a-real-secret' } });
+    t.assert(site.max > 100, 'the site is not capped at ten an hour');
+    t.equal(site.key, 'site', 'and is bucketed as itself, not by the address it dials from');
+    delete process.env.CONCONTROL_INTAKE_SECRET;
+  });
+
+  t.test('the public caller is still bucketed by address', () => {
+    t.equal(intake.intakeLimit({ headers: {} }).key, null, 'so one abuser cannot spend the site\'s allowance');
+  });
+
+  await t.test('the site sends its message as notes, and that still lands', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const res = fakeRes();
+    await inquiry.default({
+      method: 'POST', headers: {},
+      body: { company: 'Notes Co', email: 'hi@notes.test', notes: 'We want the happy hour' },
+    }, res);
+    const rec = await getSponsor(res.body.id);
+    t.assert(rec.notes.indexOf('happy hour') !== -1, 'the site field name is accepted too');
+  });
+
+  await t.test('the site honeypot is called _gotcha and is honoured', async () => {
+    const inquiry = await import('../api/concontrol/inquiry.js');
+    const before = (await listSponsors('FOC27')).length;
+    const res = fakeRes();
+    await inquiry.default({ method: 'POST', headers: {}, body: { company: 'Bot', email: 'b@b.test', _gotcha: 'x' } }, res);
+    t.equal(res.statusCode, 200, 'answered cheerfully');
+    t.equal((await listSponsors('FOC27')).length, before, 'and nothing written');
+  });
+
+  await t.test('the speak form calls the company a shop, and that maps', async () => {
+    const speak = await import('../api/concontrol/speak.js');
+    const res = fakeRes();
+    await speak.default({
+      method: 'POST', headers: {},
+      body: { name: 'Spencer C', email: 'spencer@limitless.test', shop: 'Limitless Transfers', session_title: 'Transfers, start to finish', notes: 'Equipment: heat press' },
+    }, res);
+    const rec = await getSpeaker(res.body.id);
+    t.equal(rec.company, 'Limitless Transfers', 'shop became company');
+    t.assert(rec.topic.indexOf('Transfers') !== -1, 'session_title became the topic');
+    t.assert(rec.notes.indexOf('heat press') !== -1, 'and the practical answers were kept');
+  });
+
   process.exit(t.report());
 })();
 
