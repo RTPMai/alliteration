@@ -426,15 +426,20 @@ export const APPS = [
     // exact logo red precisely because that check was skipped the first time.
     accent: '#6B4423',           // display only (rail dot / app mark); tokens.css owns theming
     //
-    // ONE VIEW ON PURPOSE. Money, Sessions and Speakers are designed and not
-    // built. A tab that opens onto "coming soon" is a tab people stop
-    // clicking, so each one is added here the day it is real. Capacity
-    // Manager's coming-soon card is the counter-example, and it has sat
-    // unbuilt on the BackBone dashboard since July.
+    // SIX VIEWS, ALL REAL. Each one was added the day it worked rather than
+    // as a coming-soon tab, which is the rule Capacity Manager breaks on the
+    // BackBone dashboard. Settings is in-app rather than shell-level because
+    // what it holds (levels, spend categories, the commitment deadline) is
+    // event data, not accounts.
     views: [
-      ['sponsors', 'Sponsors']
+      ['home', 'Home'],
+      ['sponsors', 'Sponsors'],
+      ['money', 'Money'],
+      ['sessions', 'Sessions'],
+      ['speakers', 'Speakers'],
+      ['settings', 'Settings']
     ],
-    defaultView: 'sponsors',
+    defaultView: 'home',
     stub: false
   }
 ];

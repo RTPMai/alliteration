@@ -22,7 +22,7 @@ import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import {
   validateSponsorPatch, newSponsor, rollup, tierAvailability, momentAvailability,
-  DEFAULT_EVENT,
+  historyEntry, describeChange, DEFAULT_EVENT,
 } from "../../lib/concontrol/schema.js";
 import {
   listSponsors, getSponsor, saveSponsor, updateSponsor, deleteSponsor,
@@ -99,6 +99,7 @@ export default async function handler(req, res) {
       const newId = await nextSponsorId();
       const record = { ...newSponsor(newId, sess.username), ...patch, id: newId };
       if (!record.event) record.event = event;
+      record.history = [historyEntry("created", sess.username, null)];
       await saveSponsor(record);
       return res.status(201).json({ ok: true, sponsor: record });
     }
@@ -115,8 +116,16 @@ export default async function handler(req, res) {
       if (!ok) return res.status(400).json({ error: errors.join("; ") });
       if (!Object.keys(patch).length) return res.status(400).json({ error: "Nothing to update" });
 
-      const sponsor = await updateSponsor(target, patch);
-      if (!sponsor) return res.status(404).json({ error: "Sponsor not found" });
+      const before = await getSponsor(target);
+      if (!before) return res.status(404).json({ error: "Sponsor not found" });
+
+      // One trail line per meaningful move, not per keystroke. describeChange
+      // returns null when nothing worth recording happened, and a trail that
+      // logs everything is a trail nobody reads.
+      const what = describeChange(before, patch);
+      const note = what ? historyEntry(what, sess.username, null) : null;
+
+      const sponsor = await updateSponsor(target, patch, note);
       return res.status(200).json({ ok: true, sponsor });
     }
 

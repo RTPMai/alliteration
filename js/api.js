@@ -309,6 +309,18 @@ export const ENDPOINTS = {
   // the path has one canonical home rather than being typed into a template
   // from memory.
   conInquiry:       '/api/concontrol/inquiry',
+  conLedger:        '/api/concontrol/ledger',
+  conSessions:      '/api/concontrol/sessions',
+  conSpeakers:      '/api/concontrol/speakers',
+  conSettings:      '/api/concontrol/settings',
+  // CSV out. Not fetched through get(): the browser follows it as a download,
+  // so the app builds the href and the seam never sees the response.
+  conExport:        '/api/concontrol/export',
+  // Public, both of them. The event site's /speak page POSTs to the first and
+  // the agenda page READS the second. Listed so the paths have one home rather
+  // than being typed into a template from memory.
+  conSpeak:         '/api/concontrol/speak',
+  conAgenda:        '/api/concontrol/agenda',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',

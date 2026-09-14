@@ -1,19 +1,22 @@
 /**
  * ConControl — the event, tracked in one place.
  *
- * Flyover Con is the first event through it. Sponsors is the first screen,
- * because it is the one with no missing pieces: we know who they are, what
- * they owe, and what they still have to send us. Money, Sessions and Speakers
- * follow, and they are deliberately NOT listed in the registry until they are
- * real. A tab that opens onto "coming soon" is a tab people stop clicking.
+ * Flyover Con is the first event through it. Six screens:
  *
- * WHAT THIS REPLACES. A spreadsheet that held the money fine and could not
- * hold the deliverables at all: a blank cell meant "not yet" or "never owed
- * one" and only the person who typed it knew which. Every deliverable here is
- * open, done, or N/A, and N/A is a decision somebody made.
+ *   home      what is committed, collected, outstanding, and blocked on someone
+ *   sponsors  who is in, what they owe, what we owe them
+ *   money     income and spend in one ledger, budget against actual
+ *   sessions  the program grid, and the source the public agenda reads
+ *   speakers  proposals, confirmations, and what they still have to send
+ *   settings  levels, categories, dates, and who gets told about an inquiry
  *
- * All money and health math lives in lib/concontrol/schema.js, which the
- * server route imports too. Same pattern as poHealth() in PromoPro: one
+ * WHAT THIS REPLACES. A spreadsheet that held the money fine and could not hold
+ * anything else: a blank cell meant "not yet" or "never owed one" and only the
+ * person who typed it knew which, and the schedule lived in the website's
+ * source and in somebody's head at the same time.
+ *
+ * All the arithmetic lives in lib/concontrol/{schema,ledger,program}.js, which
+ * the server routes import too. Same pattern as poHealth() in PromoPro: one
  * function, so a figure on this screen and a figure in an export cannot
  * disagree.
  *
@@ -23,20 +26,40 @@
 import { ENDPOINTS } from '../js/api.js';
 import {
   STATUSES, STATUS_LABELS, DELIVERABLES, DELIVERABLE_KEYS, MOMENTS,
-  sponsorMoney, deliverableStates, deliverableProgress, sponsorHealth, rollup,
-  tierAvailability, momentAvailability,
+  OBLIGATIONS, sponsorMoney, deliverableStates, deliverableProgress,
+  obligationStates, obligationProgress, obligationsFor, sponsorHealth, rollup,
+  tierAvailability, momentAvailability, daysBetween,
 } from '../lib/concontrol/schema.js';
+import {
+  ENTRY_KINDS, ENTRY_STATES, ENTRY_STATE_LABELS,
+} from '../lib/concontrol/ledger.js';
+import {
+  TRACKS, FORMATS, SESSION_STATUSES, SESSION_STATUS_LABELS,
+  SPEAKER_STATUSES, SPEAKER_STATUS_LABELS, SPEAKER_MATERIALS,
+  materialStates, materialProgress,
+} from '../lib/concontrol/program.js';
 
 let ctx = null;
-let state = {
+let view = 'home';
+
+const state = {
+  settings: { event: 'FOC27', eventName: '', eventDate: '', commitBy: '', budget: null, tiers: [], categories: [], inquiryNotifyTo: '', speakNotifyTo: '' },
   sponsors: [],
-  settings: { event: 'FOC27', tiers: [] },
+  entries: [],
+  sessions: [],
+  speakers: [],
+  summary: null,
+  categories: null,
+  conflicts: [],
+  blockers: [],
   canEdit: false,
   canDelete: false,
+  canEditSettings: false,
+  // Money is gated separately: a read-only account cannot see the budget.
+  moneyDenied: false,
+  loaded: { sponsors: false, money: false, program: false },
   filter: 'all',
   search: '',
-  openId: null,
-  loading: true,
   error: null,
 };
 
@@ -57,10 +80,20 @@ function esc(s) {
 
 function prettyDate(iso) {
   if (!iso) return '';
-  const d = new Date(iso + 'T12:00:00Z');
+  const d = new Date(String(iso).slice(0, 10) + 'T12:00:00Z');
   if (Number.isNaN(d.getTime())) return '';
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
 }
+
+function clock(hhmm) {
+  if (!hhmm) return '';
+  const [h, m] = hhmm.split(':').map(Number);
+  const ampm = h >= 12 ? 'pm' : 'am';
+  const hour = h % 12 === 0 ? 12 : h % 12;
+  return `${hour}:${String(m).padStart(2, '0')}${ampm}`;
+}
+
+const trackLabel = (key) => (TRACKS.find((t) => t.key === key) || {}).label || key;
 
 /* ------------------------------------------------------------------ *
  * APP
@@ -71,8 +104,9 @@ export default {
 
   styles: `
     .con-wrap { padding: 18px 20px 60px; }
+    .con-pane { display: none; }
+    .con-pane.on { display: block; }
 
-    /* Totals strip */
     .con-totals { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); margin-bottom: 18px; }
     .con-tot { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; }
     .con-tot .k { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); font-weight: 700; }
@@ -80,25 +114,23 @@ export default {
     .con-tot .sub { font-size: 12px; color: var(--muted); margin-top: 3px; }
     .con-tot.warn .v { color: var(--danger); }
 
-    /* What is left to sell */
     .con-left { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 18px; }
     .con-left h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
     .con-slots { display: flex; flex-wrap: wrap; gap: 6px; }
-    .con-slot { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--line); color: var(--ink); }
+    .con-slot { font-size: 12px; padding: 4px 10px; border-radius: var(--radius-pill); border: 1px solid var(--line); color: var(--ink); background: transparent; font-family: inherit; }
     .con-slot b { font-weight: 700; }
     .con-slot.gone { color: var(--muted); border-style: dashed; }
     .con-slot.bad { color: var(--danger); border-color: var(--danger); font-weight: 600; }
 
-    /* Controls */
     .con-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 14px; }
     .con-bar input[type="search"] { flex: 1 1 200px; min-width: 160px; padding: 7px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--ink); font-size: 13px; }
     .con-chip { padding: 5px 11px; border: 1px solid var(--line); border-radius: var(--radius-pill); background: var(--card); color: var(--muted); font-size: 12px; font-weight: 600; cursor: pointer; }
     .con-chip.on { background: var(--accent-tint); border-color: var(--accent); color: var(--accent-deep); }
-    .con-btn { padding: 7px 13px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; cursor: pointer; }
+    .con-btn { padding: 7px 13px; border: 0; border-radius: var(--radius-sm); background: var(--accent); color: var(--on-accent); font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; }
     .con-btn.ghost { background: transparent; border: 1px solid var(--line); color: var(--ink); }
     .con-btn[disabled] { opacity: .5; cursor: default; }
+    .con-spacer { flex: 1; }
 
-    /* Sponsor cards */
     .con-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); }
     .con-card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; cursor: pointer; text-align: left; width: 100%; font: inherit; color: inherit; }
     .con-card:hover { border-color: var(--accent); }
@@ -121,41 +153,110 @@ export default {
     .con-pip.done { background: var(--accent-tint); border-color: transparent; color: var(--accent-deep); }
     .con-pip.na { opacity: .45; text-decoration: line-through; }
 
+    .con-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .con-table th { text-align: left; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); padding: 6px 8px; border-bottom: 1px solid var(--line); }
+    .con-table td { padding: 8px; border-bottom: 1px solid var(--line); color: var(--ink); }
+    .con-table tr[data-open] { cursor: pointer; }
+    .con-table tr[data-open]:hover td { background: var(--accent-tint); }
+    .con-num { text-align: right; font-variant-numeric: tabular-nums; }
+
+    .con-day { margin-bottom: 22px; }
+    .con-day > h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 8px; }
+    .con-slotrow { display: flex; gap: 8px; align-items: stretch; margin-bottom: 8px; }
+    .con-time { flex: 0 0 74px; font-size: 12px; color: var(--muted); padding-top: 12px; font-variant-numeric: tabular-nums; }
+    .con-sessions { flex: 1; display: grid; gap: 8px; grid-template-columns: 1fr 1fr; }
+    .con-sessions.whole { grid-template-columns: 1fr; }
+    .con-sess { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+    .con-sess:hover { border-color: var(--accent); }
+    .con-sess .t { font-weight: 700; font-size: 13px; color: var(--ink); }
+    .con-sess .m { font-size: 12px; color: var(--muted); margin-top: 3px; }
+    .con-sess.pending { border-style: dashed; }
+
     .con-empty { padding: 44px 20px; text-align: center; color: var(--muted); }
     .con-empty h3 { color: var(--ink); font-size: 16px; margin: 0 0 6px; }
 
-    /* Detail drawer */
     .con-scrim { position: fixed; inset: 0; background: rgba(0,0,0,.38); z-index: 60; }
-    .con-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(520px, 100%); background: var(--card); border-left: 1px solid var(--line); z-index: 61; overflow-y: auto; padding: 18px 20px 60px; }
+    .con-drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(540px, 100%); background: var(--card); border-left: 1px solid var(--line); z-index: 61; overflow-y: auto; padding: 18px 20px 60px; }
     .con-drawer h2 { margin: 0 0 2px; font-size: 18px; color: var(--ink); }
     .con-drawer .close { position: absolute; top: 12px; right: 14px; background: none; border: 0; font-size: 22px; line-height: 1; color: var(--muted); cursor: pointer; }
     .con-sec { margin-top: 20px; }
     .con-sec > h4 { margin: 0 0 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
     .con-field { margin-bottom: 10px; }
     .con-field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 3px; font-weight: 600; }
-    .con-field input, .con-field select, .con-field textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg, var(--card)); color: var(--ink); font: inherit; font-size: 13px; }
+    .con-field input, .con-field select, .con-field textarea { width: 100%; padding: 7px 9px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--bg); color: var(--ink); font: inherit; font-size: 13px; }
     .con-field textarea { min-height: 76px; resize: vertical; }
     .con-two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .con-three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }
     .con-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink); }
     .con-row:last-child { border-bottom: 0; }
     .con-states { display: flex; gap: 4px; }
-    .con-states button { font-size: 11px; padding: 3px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: var(--radius-pill); cursor: pointer; font-weight: 600; }
+    .con-states button { font-size: 11px; padding: 3px 8px; border: 1px solid var(--line); background: transparent; color: var(--muted); border-radius: var(--radius-pill); cursor: pointer; font-weight: 600; font-family: inherit; }
     .con-states button.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .con-actions { display: flex; gap: 8px; margin-top: 22px; flex-wrap: wrap; }
-    .con-err { background: var(--accent-tint); color: var(--danger); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; margin-bottom: 10px; }
+    .con-err { background: var(--danger-tint); color: var(--danger); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; margin-bottom: 10px; }
+    .con-ok { background: var(--accent-tint); color: var(--accent-deep); border-radius: var(--radius-sm); padding: 8px 10px; font-size: 13px; margin-bottom: 10px; }
     .con-note { font-size: 12px; color: var(--muted); line-height: 1.5; }
+    .con-trail { font-size: 12px; color: var(--muted); line-height: 1.6; }
+    .con-trail div { padding: 3px 0; border-bottom: 1px solid var(--line); }
+    .con-trail div:last-child { border-bottom: 0; }
   `,
 
   template: `
     <div class="con-wrap">
-      <div id="conTotals" class="con-totals"></div>
-      <div id="conLeft"></div>
-      <div class="con-bar">
-        <input type="search" id="conSearch" placeholder="Search company or contact" autocomplete="off">
-        <span id="conChips"></span>
-        <button class="con-btn" id="conNew">Add sponsor</button>
-      </div>
-      <div id="conBody"></div>
+      <div id="conErr"></div>
+
+      <section class="con-pane" data-pane="home">
+        <div id="conHomeTotals" class="con-totals"></div>
+        <div id="conHomeLeft"></div>
+        <div id="conHomeBlocked"></div>
+      </section>
+
+      <section class="con-pane" data-pane="sponsors">
+        <div id="conTotals" class="con-totals"></div>
+        <div id="conLeft"></div>
+        <div class="con-bar">
+          <input type="search" id="conSearch" placeholder="Search company or contact" autocomplete="off">
+          <span id="conChips"></span>
+          <span class="con-spacer"></span>
+          <a class="con-btn ghost" id="conExportSponsors" download>Export</a>
+          <a class="con-btn ghost" id="conExportSignage" download>Signage list</a>
+          <button class="con-btn" id="conNew">Add sponsor</button>
+        </div>
+        <div id="conBody"></div>
+      </section>
+
+      <section class="con-pane" data-pane="money">
+        <div id="conMoneyTotals" class="con-totals"></div>
+        <div class="con-bar">
+          <span class="con-spacer"></span>
+          <a class="con-btn ghost" id="conExportLedger" download>Export</a>
+          <button class="con-btn" id="conNewEntry">Add entry</button>
+        </div>
+        <div id="conMoneyBody"></div>
+      </section>
+
+      <section class="con-pane" data-pane="sessions">
+        <div id="conProgramWarn"></div>
+        <div class="con-bar">
+          <span class="con-spacer"></span>
+          <a class="con-btn ghost" id="conExportSessions" download>Export</a>
+          <button class="con-btn" id="conNewSession">Add session</button>
+        </div>
+        <div id="conSessionBody"></div>
+      </section>
+
+      <section class="con-pane" data-pane="speakers">
+        <div class="con-bar">
+          <span class="con-spacer"></span>
+          <a class="con-btn ghost" id="conExportSpeakers" download>Export</a>
+          <button class="con-btn" id="conNewSpeaker">Add speaker</button>
+        </div>
+        <div id="conSpeakerBody"></div>
+      </section>
+
+      <section class="con-pane" data-pane="settings">
+        <div id="conSettingsBody"></div>
+      </section>
     </div>
     <div id="conDrawerHost"></div>
   `,
@@ -166,58 +267,229 @@ export default {
 
     root.querySelector('#conSearch').addEventListener('input', (e) => {
       state.search = e.target.value.toLowerCase();
-      renderList();
+      renderSponsorList();
     });
-
-    root.querySelector('#conNew').addEventListener('click', () => openDrawer(null));
-
     root.querySelector('#conChips').addEventListener('click', (e) => {
       const chip = e.target.closest('[data-filter]');
       if (!chip) return;
       state.filter = chip.dataset.filter;
       renderChips();
-      renderList();
+      renderSponsorList();
     });
 
+    root.querySelector('#conNew').addEventListener('click', () => sponsorDrawer(null));
+    root.querySelector('#conNewEntry').addEventListener('click', () => entryDrawer(null));
+    root.querySelector('#conNewSession').addEventListener('click', () => sessionDrawer(null));
+    root.querySelector('#conNewSpeaker').addEventListener('click', () => speakerDrawer(null));
+
+    wireExport('#conExportSponsors', 'sponsors');
+    wireExport('#conExportSignage', 'signage');
+    wireExport('#conExportLedger', 'ledger');
+    wireExport('#conExportSessions', 'sessions');
+    wireExport('#conExportSpeakers', 'speakers');
+
     renderChips();
-    await load();
+    await loadSponsors();
   },
 
-  showView() {
-    // One view for now. Money, Sessions and Speakers land here as they are
-    // built, and the registry gains a tab each time.
+  showView(next) {
+    view = next || 'home';
+    ctx.root.querySelectorAll('.con-pane').forEach((p) => {
+      p.classList.toggle('on', p.dataset.pane === view);
+    });
+    // Each screen loads the first time it is opened rather than all of it on
+    // mount. Opening Sponsors should not pay for the ledger and the program.
+    if (view === 'money' && !state.loaded.money) loadMoney();
+    if ((view === 'sessions' || view === 'speakers') && !state.loaded.program) loadProgram();
+    if (view === 'settings') loadSettings();
+    if (view === 'home') renderHome();
   },
 };
+
+function wireExport(sel, what) {
+  const el = ctx.root.querySelector(sel);
+  if (el) el.href = `${ENDPOINTS.conExport}?what=${what}`;
+}
 
 /* ------------------------------------------------------------------ *
  * DATA
  * ------------------------------------------------------------------ */
 
-async function load() {
-  state.loading = true;
-  state.error = null;
-  render();
+function showError(msg) {
+  const host = ctx.root.querySelector('#conErr');
+  host.innerHTML = msg ? `<div class="con-err">${esc(msg)}</div>` : '';
+}
+
+async function loadSponsors() {
   try {
     const data = await ctx.api.get(ENDPOINTS.conSponsors);
     state.sponsors = Array.isArray(data.sponsors) ? data.sponsors : [];
     state.settings = data.settings || state.settings;
     state.canEdit = !!data.canEdit;
     state.canDelete = !!data.canDelete;
+    state.loaded.sponsors = true;
+    showError('');
   } catch (e) {
-    state.error = e.message || 'Could not load sponsors';
+    showError(e.message || 'Could not load sponsors');
   }
-  state.loading = false;
-  render();
+  renderSponsors();
+  renderHome();
+}
+
+async function loadSettings() {
+  try {
+    const data = await ctx.api.get(ENDPOINTS.conSettings);
+    state.settings = data.settings || state.settings;
+    state.canEditSettings = !!data.canEdit;
+  } catch (e) {
+    showError(e.message || 'Could not load settings');
+  }
+  renderSettings();
+}
+
+async function loadMoney() {
+  try {
+    const data = await ctx.api.get(ENDPOINTS.conLedger);
+    state.entries = Array.isArray(data.entries) ? data.entries : [];
+    state.summary = data.summary || null;
+    state.categories = data.categories || null;
+    state.settings = data.settings || state.settings;
+    state.moneyDenied = false;
+    state.loaded.money = true;
+  } catch (e) {
+    // A read-only account is refused the budget on purpose, and that is a
+    // sentence rather than an error banner.
+    if (e.status === 403) state.moneyDenied = true;
+    else showError(e.message || 'Could not load the ledger');
+  }
+  renderMoney();
+}
+
+async function loadProgram() {
+  try {
+    const [s, k] = [
+      await ctx.api.get(ENDPOINTS.conSessions),
+      await ctx.api.get(ENDPOINTS.conSpeakers),
+    ];
+    state.sessions = Array.isArray(s.sessions) ? s.sessions : [];
+    state.conflicts = Array.isArray(s.conflicts) ? s.conflicts : [];
+    state.speakers = Array.isArray(k.speakers) ? k.speakers : [];
+    state.blockers = Array.isArray(k.blockers) ? k.blockers : [];
+    state.loaded.program = true;
+  } catch (e) {
+    showError(e.message || 'Could not load the program');
+  }
+  renderSessions();
+  renderSpeakers();
+  renderHome();
 }
 
 /* ------------------------------------------------------------------ *
- * RENDER
+ * HOME
  * ------------------------------------------------------------------ */
 
-function render() {
-  renderTotals();
-  renderInventory();
-  renderList();
+function renderHome() {
+  const host = ctx.root.querySelector('#conHomeTotals');
+  if (!host) return;
+  const t = rollup(state.sponsors);
+  const days = state.settings.commitBy ? -daysBetween(state.settings.commitBy, new Date()) : null;
+
+  const cards = [
+    { k: 'Committed', v: usd(t.committed), sub: `${t.sponsorCount} sponsors` },
+    { k: 'Collected', v: usd(t.collected), sub: t.committed > 0 ? Math.round((t.collected / t.committed) * 100) + '% of committed' : '' },
+    { k: 'Outstanding', v: usd(t.outstanding), sub: t.unpriced ? `${t.unpriced} unpriced, not counted` : '' },
+    { k: 'Needs a nudge', v: String(t.blocked), sub: 'Sponsors waiting on us', warn: t.blocked > 0 },
+  ];
+  if (days !== null) {
+    cards.push({
+      k: 'Commitments by',
+      v: days >= 0 ? `${days} days` : 'Passed',
+      sub: prettyDate(state.settings.commitBy),
+      warn: days !== null && days < 30,
+    });
+  }
+
+  host.innerHTML = cards.map((c) => `
+    <div class="con-tot${c.warn ? ' warn' : ''}">
+      <div class="k">${esc(c.k)}</div>
+      <div class="v">${esc(c.v)}</div>
+      ${c.sub ? `<div class="sub">${esc(c.sub)}</div>` : ''}
+    </div>`).join('');
+
+  ctx.root.querySelector('#conHomeLeft').innerHTML = inventoryHtml();
+  renderBlocked();
+}
+
+/**
+ * Everything waiting on somebody, in one list, newest problem first.
+ *
+ * This is the screen's reason to exist: the four other screens each know their
+ * own half, and the question "what is actually stuck" was the one that needed
+ * opening all of them.
+ */
+function renderBlocked() {
+  const host = ctx.root.querySelector('#conHomeBlocked');
+  const rows = [];
+
+  for (const s of state.sponsors) {
+    const h = sponsorHealth(s);
+    if (h.level === 'attention') rows.push({ what: s.company, why: h.why, go: 'sponsors', id: s.id });
+  }
+  for (const s of state.sponsors) {
+    const o = obligationProgress(s);
+    const m = sponsorMoney(s);
+    if (m.paidInFull && o.owed && !o.complete) {
+      rows.push({ what: s.company, why: `We owe them ${o.open} thing${o.open === 1 ? '' : 's'}`, go: 'sponsors', id: s.id });
+    }
+  }
+  for (const c of state.conflicts) {
+    const label = {
+      'double-booked': 'Two sessions in one slot',
+      'runs-against-whole-room': 'Runs against a whole-room slot',
+      'confirmed-with-no-slot': 'Confirmed with no time set',
+      'confirmed-with-no-speaker': 'Confirmed with no speaker',
+    }[c.kind] || c.kind;
+    rows.push({ what: 'Program', why: label, go: 'sessions', id: c.ids && c.ids[0] });
+  }
+  for (const b of state.blockers) {
+    if (b.kind === 'speaker-materials') {
+      rows.push({ what: b.name || 'Speaker', why: `${b.open} thing${b.open === 1 ? '' : 's'} still to send`, go: 'speakers', id: b.ids[0] });
+    }
+  }
+
+  if (!rows.length) {
+    host.innerHTML = `<div class="con-left"><h4>Waiting on someone</h4><div class="con-note">${state.loaded.program ? 'Nothing is stuck.' : 'Nothing on the sponsor side. Open Sessions or Speakers to check the program.'}</div></div>`;
+    return;
+  }
+
+  host.innerHTML = `
+    <div class="con-left">
+      <h4>Waiting on someone</h4>
+      <table class="con-table">
+        <tbody>
+          ${rows.map((r) => `
+            <tr data-go="${esc(r.go)}" data-id="${esc(r.id || '')}">
+              <td><strong>${esc(r.what)}</strong></td>
+              <td>${esc(r.why)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  host.querySelectorAll('[data-go]').forEach((tr) => {
+    tr.style.cursor = 'pointer';
+    tr.addEventListener('click', () => ctx.go(tr.dataset.go));
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * SPONSORS
+ * ------------------------------------------------------------------ */
+
+function renderSponsors() {
+  renderSponsorTotals();
+  ctx.root.querySelector('#conLeft').innerHTML = inventoryHtml();
+  renderSponsorList();
   ctx.root.querySelector('#conNew').disabled = !state.canEdit;
 }
 
@@ -228,10 +500,9 @@ function renderChips() {
     .join(' ');
 }
 
-function renderTotals() {
+function renderSponsorTotals() {
   const host = ctx.root.querySelector('#conTotals');
   const t = rollup(state.sponsors);
-
   const cards = [
     { k: 'Committed', v: usd(t.committed), sub: t.unpriced ? `${t.unpriced} with no amount agreed` : `${t.sponsorCount} sponsors` },
     { k: 'Collected', v: usd(t.collected), sub: t.committed > 0 ? Math.round((t.collected / t.committed) * 100) + '% of committed' : '' },
@@ -239,30 +510,26 @@ function renderTotals() {
     { k: 'Needs a nudge', v: String(t.blocked), sub: 'Sponsors waiting on us', warn: t.blocked > 0 },
     { k: 'Deliverables open', v: String(t.deliverablesOpen), sub: 'Logos, swag, posts, sessions' },
   ];
-
   host.innerHTML = cards.map((c) => `
     <div class="con-tot${c.warn ? ' warn' : ''}">
       <div class="k">${esc(c.k)}</div>
       <div class="v">${esc(c.v)}</div>
       ${c.sub ? `<div class="sub">${esc(c.sub)}</div>` : ''}
-    </div>
-  `).join('');
+    </div>`).join('');
 }
 
 /**
- * What is still sellable, and who has which moment.
+ * What is still sellable, and who holds each moment.
  *
- * Computed from the same records rather than read off the website, because the
+ * Computed from the records rather than read off the website, because the
  * website prints "3 available" as a static number and has no way to know that
  * two of them are gone.
  */
-function renderInventory() {
-  const host = ctx.root.querySelector('#conLeft');
+function inventoryHtml() {
   const tiers = tierAvailability(state.sponsors, state.settings.tiers);
   const moments = momentAvailability(state.sponsors);
 
-  const capped = tiers.filter((t) => t.slots !== null);
-  const slotChips = capped.map((t) => {
+  const slotChips = tiers.filter((t) => t.slots !== null).map((t) => {
     if (t.oversold) return `<span class="con-slot bad">${esc(t.name)}: ${t.sold} sold, ${t.slots} available</span>`;
     if (t.soldOut) return `<span class="con-slot gone">${esc(t.name)}: sold out${t.pending ? ' · ' + t.pending + ' asking' : ''}</span>`;
     return `<span class="con-slot"><b>${t.left}</b> ${esc(t.name)} left${t.pending ? ' · ' + t.pending + ' in conversation' : ''}</span>`;
@@ -275,50 +542,41 @@ function renderInventory() {
     return `<span class="con-slot"><b>${esc(m.label)}</b> open</span>`;
   });
 
-  host.innerHTML = `
-    <div class="con-left">
-      <h4>Still open</h4>
-      <div class="con-slots">${slotChips.concat(momentChips).join('')}</div>
-    </div>`;
+  return `<div class="con-left"><h4>Still open</h4><div class="con-slots">${slotChips.concat(momentChips).join('')}</div></div>`;
 }
 
-function visible() {
+function visibleSponsors() {
   return state.sponsors.filter((s) => {
     if (state.filter !== 'all' && s.status !== state.filter) return false;
     if (!state.search) return true;
-    const hay = `${s.company} ${s.contactName} ${s.email} ${s.tier}`.toLowerCase();
-    return hay.includes(state.search);
+    return `${s.company} ${s.contactName} ${s.email} ${s.tier}`.toLowerCase().includes(state.search);
   });
 }
 
-function renderList() {
+function renderSponsorList() {
   const host = ctx.root.querySelector('#conBody');
+  const rows = visibleSponsors();
 
-  if (state.loading) { host.innerHTML = '<div class="con-empty">Loading sponsors…</div>'; return; }
-  if (state.error) { host.innerHTML = `<div class="con-err">${esc(state.error)}</div>`; return; }
-
-  const rows = visible();
   if (!rows.length) {
     host.innerHTML = state.sponsors.length
       ? '<div class="con-empty"><h3>Nothing matches</h3><p>Try a different filter.</p></div>'
-      : `<div class="con-empty"><h3>No sponsors yet</h3><p>Add the first one, or wait for an inquiry to come in from the sponsor page.</p></div>`;
+      : '<div class="con-empty"><h3>No sponsors yet</h3><p>Add the first one, or wait for an inquiry to arrive from the sponsor page.</p></div>';
     return;
   }
 
-  host.innerHTML = `<div class="con-grid">${rows.map(card).join('')}</div>`;
+  host.innerHTML = `<div class="con-grid">${rows.map(sponsorCard).join('')}</div>`;
   host.querySelectorAll('[data-open]').forEach((el) => {
-    el.addEventListener('click', () => openDrawer(el.dataset.open));
+    el.addEventListener('click', () => sponsorDrawer(el.dataset.open));
   });
 }
 
-function card(s) {
+function sponsorCard(s) {
   const m = sponsorMoney(s);
   const h = sponsorHealth(s);
   const p = deliverableProgress(s);
+  const o = obligationProgress(s);
   const states = deliverableStates(s);
-  const pct = m.committedKnown && m.committed > 0
-    ? Math.min(100, Math.round((m.paid / m.committed) * 100))
-    : 0;
+  const pct = m.committedKnown && m.committed > 0 ? Math.min(100, Math.round((m.paid / m.committed) * 100)) : 0;
 
   return `
     <button class="con-card" data-open="${esc(s.id)}">
@@ -329,44 +587,346 @@ function card(s) {
         </div>
         ${s.tier ? `<span class="con-tier">${esc(s.tier)}</span>` : ''}
       </div>
-
       <div class="con-money">
         <span>${m.committedKnown ? usd(m.paid) + ' of ' + usd(m.committed) : 'No amount agreed'}</span>
         <span class="muted">${m.committedKnown && m.outstanding > 0 ? usd(m.outstanding) + ' out' : ''}</span>
       </div>
       <div class="con-meter"><i style="width:${pct}%"></i></div>
-
-      <div class="con-why ${esc(h.level)}">
-        <span class="con-dot ${esc(h.level)}"></span>${esc(h.why)}
-      </div>
-
+      <div class="con-why ${esc(h.level)}"><span class="con-dot ${esc(h.level)}"></span>${esc(h.why)}</div>
       <div class="con-deliv">
-        ${DELIVERABLES.map((d) => {
-          const st = states[d.key].state;
-          return `<span class="con-pip ${esc(st)}">${esc(d.label.replace(' received', '').replace(' scheduled', '').replace(' posted', ''))}</span>`;
-        }).join('')}
-        ${p.owed ? `<span class="con-pip">${p.done}/${p.owed}</span>` : ''}
+        ${DELIVERABLES.map((d) => `<span class="con-pip ${esc(states[d.key].state)}">${esc(d.label.split(' ')[0])}</span>`).join('')}
+        ${p.owed ? `<span class="con-pip">They owe ${p.done}/${p.owed}</span>` : ''}
+        ${o.owed ? `<span class="con-pip${o.complete ? ' done' : ''}">We owe ${o.done}/${o.owed}</span>` : ''}
       </div>
-    </button>
-  `;
+    </button>`;
 }
 
 /* ------------------------------------------------------------------ *
- * DRAWER
- *
- * One drawer does both jobs: a new sponsor is an empty one. Two near
- * identical screens for create and edit is how a field gets added to one and
- * forgotten on the other.
+ * MONEY
  * ------------------------------------------------------------------ */
 
-function openDrawer(id) {
-  state.openId = id;
-  const s = id ? state.sponsors.find((x) => x.id === id) : null;
-  const host = ctx.root.querySelector('#conDrawerHost');
-  const ro = !state.canEdit;
+function renderMoney() {
+  const totals = ctx.root.querySelector('#conMoneyTotals');
+  const body = ctx.root.querySelector('#conMoneyBody');
+  ctx.root.querySelector('#conNewEntry').disabled = !state.canEdit || state.moneyDenied;
 
-  // The dropdown says what is left next to each level, so the sold-out answer
-  // is in front of you at the moment you are about to sell one.
+  if (state.moneyDenied) {
+    totals.innerHTML = '';
+    body.innerHTML = '<div class="con-empty"><h3>Not your screen</h3><p>The event budget is not open to read-only accounts. Everything else in ConControl still is.</p></div>';
+    return;
+  }
+
+  const sum = state.summary;
+  if (!sum) { body.innerHTML = '<div class="con-empty">Loading the ledger…</div>'; return; }
+
+  const cards = [
+    { k: 'Money in', v: usd(sum.incomeIn), sub: `${usd(sum.sponsorCollected)} from sponsors` },
+    { k: 'Still expected', v: usd(sum.incomeExpected), sub: 'Committed and not yet paid' },
+    { k: 'Spent', v: usd(sum.spendOut), sub: sum.spend.gaps ? `${sum.spend.gaps} entries with no amount` : '' },
+    { k: 'On the hook', v: usd(sum.spendAhead), sub: `${usd(sum.spend.committed)} committed, ${usd(sum.spend.estimated)} estimated` },
+    { k: 'Position today', v: usd(sum.net), sub: `Projected ${usd(sum.projected)}`, warn: sum.net < 0 },
+  ];
+  if (sum.budget !== null) {
+    cards.push({ k: 'Budget left', v: usd(sum.budgetLeft), sub: `of ${usd(sum.budget)}`, warn: sum.budgetLeft !== null && sum.budgetLeft < 0 });
+  }
+
+  totals.innerHTML = cards.map((c) => `
+    <div class="con-tot${c.warn ? ' warn' : ''}">
+      <div class="k">${esc(c.k)}</div>
+      <div class="v">${esc(c.v)}</div>
+      ${c.sub ? `<div class="sub">${esc(c.sub)}</div>` : ''}
+    </div>`).join('');
+
+  const cats = state.categories || { rows: [], gaps: 0 };
+  const catHtml = cats.rows.length ? `
+    <div class="con-left">
+      <h4>Where it goes</h4>
+      <table class="con-table">
+        <thead><tr><th>Category</th><th class="con-num">Paid</th><th class="con-num">Ahead</th><th class="con-num">Total</th></tr></thead>
+        <tbody>
+          ${cats.rows.map((r) => `
+            <tr>
+              <td>${esc(r.category)}</td>
+              <td class="con-num">${usd(r.paid)}</td>
+              <td class="con-num">${usd(r.ahead)}</td>
+              <td class="con-num"><strong>${usd(r.total)}</strong></td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+      ${cats.gaps ? `<div class="con-note" style="margin-top:8px">${cats.gaps} entr${cats.gaps === 1 ? 'y has' : 'ies have'} no amount yet, and are left out rather than counted as zero.</div>` : ''}
+    </div>` : '';
+
+  const ledgerHtml = state.entries.length ? `
+    <table class="con-table">
+      <thead><tr><th>Date</th><th>Description</th><th>Category</th><th>State</th><th class="con-num">Amount</th></tr></thead>
+      <tbody>
+        ${state.entries.map((e) => `
+          <tr data-open="${esc(e.id)}">
+            <td>${esc(prettyDate(e.date)) || '<span style="opacity:.5">no date</span>'}</td>
+            <td><strong>${esc(e.description)}</strong>${e.vendor ? '<br><span style="opacity:.7">' + esc(e.vendor) + '</span>' : ''}</td>
+            <td>${esc(e.category) || '<span style="opacity:.5">none</span>'}</td>
+            <td>${esc(ENTRY_STATE_LABELS[e.state] || e.state)}${e.kind === 'income' ? ' · income' : ''}</td>
+            <td class="con-num">${e.amount === null ? '<span style="opacity:.5">not set</span>' : usd(e.amount)}</td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`
+    : '<div class="con-empty"><h3>Nothing recorded yet</h3><p>Sponsor money is already counted from the sponsor records. This is for everything else: food, video, venue, print, swag, speaker costs.</p></div>';
+
+  body.innerHTML = catHtml + ledgerHtml;
+  body.querySelectorAll('[data-open]').forEach((el) => {
+    el.addEventListener('click', () => entryDrawer(el.dataset.open));
+  });
+}
+
+/* ------------------------------------------------------------------ *
+ * SESSIONS
+ * ------------------------------------------------------------------ */
+
+function renderSessions() {
+  const warn = ctx.root.querySelector('#conProgramWarn');
+  const body = ctx.root.querySelector('#conSessionBody');
+  ctx.root.querySelector('#conNewSession').disabled = !state.canEdit;
+
+  warn.innerHTML = state.conflicts.length ? `
+    <div class="con-left">
+      <h4>Needs sorting out</h4>
+      <div class="con-slots">
+        ${state.conflicts.map((c) => {
+          const label = {
+            'double-booked': `Two sessions at ${clock(c.start)} in ${trackLabel(c.track)}`,
+            'runs-against-whole-room': `${trackLabel(c.track)} at ${clock(c.start)} runs against a whole-room slot`,
+            'confirmed-with-no-slot': 'A confirmed session has no time',
+            'confirmed-with-no-speaker': 'A confirmed session has no speaker',
+          }[c.kind] || c.kind;
+          return `<span class="con-slot bad">${esc(label)}</span>`;
+        }).join('')}
+      </div>
+    </div>` : '';
+
+  if (!state.sessions.length) {
+    body.innerHTML = '<div class="con-empty"><h3>No sessions yet</h3><p>Build the grid here and the public agenda reads from it, instead of the schedule living in two places.</p></div>';
+    return;
+  }
+
+  const days = Array.from(new Set(state.sessions.map((s) => s.day || 1))).sort();
+  body.innerHTML = days.map((day) => {
+    const mine = state.sessions.filter((s) => (s.day || 1) === day);
+    const times = Array.from(new Set(mine.map((s) => s.start || ''))).sort();
+    return `
+      <div class="con-day">
+        <h3>Day ${day}</h3>
+        ${times.map((time) => {
+          const slot = mine.filter((s) => (s.start || '') === time);
+          const whole = slot.some((s) => s.track === 'all');
+          return `
+            <div class="con-slotrow">
+              <div class="con-time">${time ? esc(clock(time)) : 'no time'}</div>
+              <div class="con-sessions${whole ? ' whole' : ''}">
+                ${slot.map(sessionCard).join('')}
+              </div>
+            </div>`;
+        }).join('')}
+      </div>`;
+  }).join('');
+
+  body.querySelectorAll('[data-open]').forEach((el) => {
+    el.addEventListener('click', () => sessionDrawer(el.dataset.open));
+  });
+}
+
+function sessionCard(s) {
+  const names = (s.speakerIds || [])
+    .map((id) => (state.speakers.find((k) => k.id === id) || {}).name)
+    .filter(Boolean);
+  const pending = s.status !== 'confirmed';
+  return `
+    <button class="con-sess${pending ? ' pending' : ''}" data-open="${esc(s.id)}">
+      <div class="t">${esc(s.title || 'Untitled')}</div>
+      <div class="m">
+        ${esc(trackLabel(s.track))} · ${esc(s.minutes)} min · ${esc(SESSION_STATUS_LABELS[s.status] || s.status)}
+        ${names.length ? '<br>' + esc(names.join(', ')) : (['meal', 'social'].includes(s.format) ? '' : '<br><span style="opacity:.6">no speaker</span>')}
+      </div>
+    </button>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * SPEAKERS
+ * ------------------------------------------------------------------ */
+
+function renderSpeakers() {
+  const body = ctx.root.querySelector('#conSpeakerBody');
+  ctx.root.querySelector('#conNewSpeaker').disabled = !state.canEdit;
+
+  if (!state.speakers.length) {
+    body.innerHTML = '<div class="con-empty"><h3>No speakers yet</h3><p>Proposals from the call-for-speakers page land here, and the ones you pass on stay as next year&rsquo;s list.</p></div>';
+    return;
+  }
+
+  body.innerHTML = `<div class="con-grid">${state.speakers.map(speakerCard).join('')}</div>`;
+  body.querySelectorAll('[data-open]').forEach((el) => {
+    el.addEventListener('click', () => speakerDrawer(el.dataset.open));
+  });
+}
+
+function speakerCard(k) {
+  const p = materialProgress(k);
+  const states = materialStates(k);
+  const sessions = state.sessions.filter((s) => (s.speakerIds || []).includes(k.id));
+  return `
+    <button class="con-card" data-open="${esc(k.id)}">
+      <div class="top">
+        <div>
+          <h3>${esc(k.name)}</h3>
+          <div class="who">${esc(k.company || 'No company given')}</div>
+        </div>
+        <span class="con-tier">${esc(SPEAKER_STATUS_LABELS[k.status] || k.status)}</span>
+      </div>
+      ${k.topic ? `<div class="con-why">${esc(k.topic.slice(0, 120))}${k.topic.length > 120 ? '…' : ''}</div>` : ''}
+      <div class="con-deliv">
+        ${SPEAKER_MATERIALS.map((m) => `<span class="con-pip ${esc(states[m.key].state)}">${esc(m.label.split(' ')[0])}</span>`).join('')}
+      </div>
+      <div class="con-why">
+        ${k.status === 'confirmed'
+          ? `<span class="con-dot ${p.complete ? 'done' : 'waiting'}"></span>${p.complete ? 'Everything in' : p.open + ' still to send'}`
+          : '<span class="con-dot"></span>Not confirmed yet'}
+        ${sessions.length ? ' · ' + sessions.length + ' session' + (sessions.length === 1 ? '' : 's') : ''}
+      </div>
+    </button>`;
+}
+
+/* ------------------------------------------------------------------ *
+ * SETTINGS
+ * ------------------------------------------------------------------ */
+
+function renderSettings() {
+  const host = ctx.root.querySelector('#conSettingsBody');
+  const s = state.settings;
+  const ro = !state.canEditSettings;
+
+  host.innerHTML = `
+    <div class="con-left" style="max-width:640px">
+      <h4>The event</h4>
+      <div class="con-two">
+        <div class="con-field"><label>Code</label><input id="set_event" value="${esc(s.event)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Name</label><input id="set_eventName" value="${esc(s.eventName)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-two">
+        <div class="con-field"><label>First day</label><input id="set_eventDate" type="date" value="${esc(s.eventDate)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Commitments by</label><input id="set_commitBy" type="date" value="${esc(s.commitBy)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-field"><label>Budget, if you set one</label><input id="set_budget" inputmode="decimal" value="${s.budget === null ? '' : esc(s.budget)}" placeholder="Leave blank for no budget" ${ro ? 'disabled' : ''}></div>
+
+      <h4 style="margin-top:20px">Sponsor levels</h4>
+      <div class="con-note" style="margin-bottom:8px">One per line: name, amount, places. Leave places blank for unlimited. A sponsor keeps the level name they were sold at, so renaming one here does not rewrite history.</div>
+      <div class="con-field"><textarea id="set_tiers" ${ro ? 'disabled' : ''}>${esc((s.tiers || []).map((t) => [t.name, t.amount === null || t.amount === undefined ? '' : t.amount, t.slots === null || t.slots === undefined ? '' : t.slots].join(', ')).join('\\n'))}</textarea></div>
+
+      <h4 style="margin-top:20px">Spend categories</h4>
+      <div class="con-field"><textarea id="set_categories" ${ro ? 'disabled' : ''}>${esc((s.categories || []).join('\\n'))}</textarea></div>
+
+      <h4 style="margin-top:20px">Who hears about it</h4>
+      <div class="con-note" style="margin-bottom:8px">A username. When one is set, a sponsor inquiry or a session proposal from the website raises a notification for that person. Left blank, the record is still saved and nobody is told.</div>
+      <div class="con-two">
+        <div class="con-field"><label>Sponsor inquiries</label><input id="set_inquiryNotifyTo" value="${esc(s.inquiryNotifyTo)}" placeholder="Nobody" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Speaker proposals</label><input id="set_speakNotifyTo" value="${esc(s.speakNotifyTo)}" placeholder="Nobody" ${ro ? 'disabled' : ''}></div>
+      </div>
+
+      <div id="conSetMsg"></div>
+      <div class="con-actions">
+        ${ro ? '<div class="con-note">Event settings are admin only. What is here changes what the whole team sees.</div>' : '<button class="con-btn" id="conSaveSettings">Save settings</button>'}
+      </div>
+    </div>`;
+
+  const btn = host.querySelector('#conSaveSettings');
+  if (btn) btn.addEventListener('click', saveSettings);
+}
+
+async function saveSettings() {
+  const v = (id) => {
+    const el = ctx.root.querySelector('#' + id);
+    return el ? el.value.trim() : '';
+  };
+  const msg = ctx.root.querySelector('#conSetMsg');
+
+  const tiers = v('set_tiers').split('\n').map((line) => {
+    const [name, amount, slots] = line.split(',').map((x) => (x || '').trim());
+    return { name, amount: amount === '' ? null : amount, slots: slots === '' ? null : slots };
+  }).filter((t) => t.name);
+
+  const body = {
+    event: v('set_event'),
+    eventName: v('set_eventName'),
+    eventDate: v('set_eventDate'),
+    commitBy: v('set_commitBy'),
+    budget: v('set_budget') === '' ? null : v('set_budget'),
+    tiers,
+    categories: v('set_categories').split('\n').map((x) => x.trim()).filter(Boolean),
+    inquiryNotifyTo: v('set_inquiryNotifyTo'),
+    speakNotifyTo: v('set_speakNotifyTo'),
+  };
+
+  try {
+    const res = await ctx.api.patch(ENDPOINTS.conSettings, body);
+    state.settings = res.settings;
+    msg.innerHTML = '<div class="con-ok">Saved.</div>';
+    renderSponsors();
+    renderHome();
+  } catch (e) {
+    msg.innerHTML = `<div class="con-err">${esc(e.message || 'Could not save')}</div>`;
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * DRAWERS
+ *
+ * One drawer per record type, and each does both jobs: a new record is an
+ * empty one. Separate create and edit screens are how a field gets added to
+ * one and forgotten on the other.
+ * ------------------------------------------------------------------ */
+
+function drawerHost() { return ctx.root.querySelector('#conDrawerHost'); }
+
+function closeDrawer() { drawerHost().innerHTML = ''; }
+
+function openDrawerHtml(title, subtitle, inner) {
+  drawerHost().innerHTML = `
+    <div class="con-scrim" data-close></div>
+    <aside class="con-drawer" role="dialog">
+      <button class="close" data-close aria-label="Close">&times;</button>
+      <h2>${esc(title)}</h2>
+      ${subtitle ? `<div class="con-note">${esc(subtitle)}</div>` : ''}
+      <div id="conFormErr"></div>
+      ${inner}
+    </aside>`;
+  drawerHost().querySelectorAll('[data-close]').forEach((el) => el.addEventListener('click', closeDrawer));
+}
+
+function formError(msg) {
+  const host = ctx.root.querySelector('#conFormErr');
+  if (host) host.innerHTML = msg ? `<div class="con-err">${esc(msg)}</div>` : '';
+}
+
+function val(id) {
+  const el = ctx.root.querySelector('#' + id);
+  return el ? el.value.trim() : '';
+}
+
+function trailHtml(record) {
+  const rows = Array.isArray(record.history) ? record.history.slice().reverse() : [];
+  if (!rows.length) return '';
+  return `
+    <div class="con-sec">
+      <h4>What happened</h4>
+      <div class="con-trail">
+        ${rows.slice(0, 20).map((h) => `<div>${esc(prettyDate(h.at))} · ${esc(h.what)}${h.by ? ' · ' + esc(h.by) : ''}</div>`).join('')}
+      </div>
+    </div>`;
+}
+
+/* ---------------- sponsor drawer ---------------- */
+
+function sponsorDrawer(id) {
+  const s = id ? state.sponsors.find((x) => x.id === id) : null;
+  const ro = !state.canEdit;
   const avail = tierAvailability(state.sponsors, state.settings.tiers);
   const tiers = (state.settings.tiers || []).map((t) => t.name);
   const tierNote = (name) => {
@@ -377,148 +937,144 @@ function openDrawer(id) {
     return ` (${a.left} left)`;
   };
   const m = s ? sponsorMoney(s) : null;
-  const states = deliverableStates(s || {});
+  const dStates = deliverableStates(s || {});
+  const oStates = s ? obligationStates(s) : {};
+  const owed = s ? obligationsFor(s.tier) : [];
 
-  host.innerHTML = `
-    <div class="con-scrim" data-close></div>
-    <aside class="con-drawer" role="dialog" aria-label="Sponsor">
-      <button class="close" data-close aria-label="Close">&times;</button>
-      <h2>${s ? esc(s.company) : 'New sponsor'}</h2>
-      <div class="con-note">${s ? esc(s.id) + ' · ' + esc(s.event || state.settings.event) : esc(state.settings.event)}</div>
-      <div id="conFormErr"></div>
-
-      <div class="con-sec">
-        <h4>Who</h4>
-        <div class="con-field"><label>Company</label><input id="f_company" value="${esc(s && s.company)}" ${ro ? 'disabled' : ''}></div>
-        <div class="con-two">
-          <div class="con-field"><label>Contact</label><input id="f_contactName" value="${esc(s && s.contactName)}" ${ro ? 'disabled' : ''}></div>
-          <div class="con-field"><label>Phone</label><input id="f_phone" value="${esc(s && s.phone)}" ${ro ? 'disabled' : ''}></div>
-        </div>
-        <div class="con-field"><label>Email</label><input id="f_email" type="email" value="${esc(s && s.email)}" ${ro ? 'disabled' : ''}></div>
-        <div class="con-field"><label>Website</label><input id="f_website" value="${esc(s && s.website)}" ${ro ? 'disabled' : ''}></div>
+  openDrawerHtml(
+    s ? s.company : 'New sponsor',
+    s ? `${s.id} · ${s.event || state.settings.event}` : state.settings.event,
+    `
+    <div class="con-sec">
+      <h4>Who</h4>
+      <div class="con-field"><label>Company</label><input id="f_company" value="${esc(s && s.company)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-two">
+        <div class="con-field"><label>Contact</label><input id="f_contactName" value="${esc(s && s.contactName)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Phone</label><input id="f_phone" value="${esc(s && s.phone)}" ${ro ? 'disabled' : ''}></div>
       </div>
+      <div class="con-field"><label>Email</label><input id="f_email" type="email" value="${esc(s && s.email)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-field"><label>Website</label><input id="f_website" value="${esc(s && s.website)}" ${ro ? 'disabled' : ''}></div>
+    </div>
 
-      <div class="con-sec">
-        <h4>The deal</h4>
-        <div class="con-two">
-          <div class="con-field">
-            <label>Tier</label>
-            <select id="f_tier" ${ro ? 'disabled' : ''}>
-              <option value="">Not set</option>
-              ${tiers.map((t) => `<option value="${esc(t)}"${s && s.tier === t ? ' selected' : ''}>${esc(t + tierNote(t))}</option>`).join('')}
-              ${s && s.tier && !tiers.includes(s.tier) ? `<option value="${esc(s.tier)}" selected>${esc(s.tier)}</option>` : ''}
-            </select>
-          </div>
-          <div class="con-field">
-            <label>Status</label>
-            <select id="f_status" ${ro ? 'disabled' : ''}>
-              ${STATUSES.map((k) => `<option value="${k}"${s && s.status === k ? ' selected' : ''}>${esc(STATUS_LABELS[k])}</option>`).join('')}
-            </select>
-          </div>
+    <div class="con-sec">
+      <h4>The deal</h4>
+      <div class="con-two">
+        <div class="con-field"><label>Level</label>
+          <select id="f_tier" ${ro ? 'disabled' : ''}>
+            <option value="">Not set</option>
+            ${tiers.map((t) => `<option value="${esc(t)}"${s && s.tier === t ? ' selected' : ''}>${esc(t + tierNote(t))}</option>`).join('')}
+            ${s && s.tier && !tiers.includes(s.tier) ? `<option value="${esc(s.tier)}" selected>${esc(s.tier)}</option>` : ''}
+          </select>
         </div>
-        <div class="con-two">
-          <div class="con-field"><label>Committed</label><input id="f_committed" inputmode="decimal" value="${s && s.committed !== null && s.committed !== undefined ? esc(s.committed) : ''}" placeholder="Leave blank if not agreed" ${ro ? 'disabled' : ''}></div>
-          <div class="con-field"><label>Invoiced</label><input id="f_invoicedAmount" inputmode="decimal" value="${s && s.invoicedAmount !== null && s.invoicedAmount !== undefined ? esc(s.invoicedAmount) : ''}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Status</label>
+          <select id="f_status" ${ro ? 'disabled' : ''}>
+            ${STATUSES.map((k) => `<option value="${k}"${s && s.status === k ? ' selected' : ''}>${esc(STATUS_LABELS[k])}</option>`).join('')}
+          </select>
         </div>
+      </div>
+      <div class="con-two">
+        <div class="con-field"><label>Committed</label><input id="f_committed" inputmode="decimal" value="${s && s.committed !== null && s.committed !== undefined ? esc(s.committed) : ''}" placeholder="Blank if not agreed" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Invoiced</label><input id="f_invoicedAmount" inputmode="decimal" value="${s && s.invoicedAmount !== null && s.invoicedAmount !== undefined ? esc(s.invoicedAmount) : ''}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-two">
         <div class="con-field"><label>Invoice date</label><input id="f_invoicedAt" type="date" value="${esc(s && s.invoicedAt)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>QuickBooks number</label><input id="f_invoiceNumber" value="${esc(s && s.invoiceNumber)}" placeholder="The invoice stays in QB" ${ro ? 'disabled' : ''}></div>
       </div>
+    </div>
 
-      ${s ? `
-      <div class="con-sec">
-        <h4>Payments · ${usd(m.paid)} received</h4>
-        <div id="conPayments">
-          ${(s.payments || []).length
-            ? (s.payments || []).map((p, i) => `
-                <div class="con-row">
-                  <span>${usd(p.amount)}${p.date ? ' · ' + esc(prettyDate(p.date)) : ''}${p.method ? ' · ' + esc(p.method) : ''}</span>
-                  ${ro ? '' : `<button class="con-btn ghost" data-droppay="${i}">Remove</button>`}
-                </div>`).join('')
-            : '<div class="con-note">Nothing received yet.</div>'}
-        </div>
-        ${ro ? '' : `
-        <div class="con-two" style="margin-top:10px">
-          <div class="con-field"><label>Add payment</label><input id="p_amount" inputmode="decimal" placeholder="Amount"></div>
-          <div class="con-field"><label>Date</label><input id="p_date" type="date"></div>
-        </div>
-        <button class="con-btn ghost" id="conAddPay">Record payment</button>`}
+    ${s ? `
+    <div class="con-sec">
+      <h4>Payments · ${usd(m.paid)} received</h4>
+      <div>
+        ${(s.payments || []).length
+          ? (s.payments || []).map((p, i) => `
+              <div class="con-row">
+                <span>${usd(p.amount)}${p.date ? ' · ' + esc(prettyDate(p.date)) : ''}</span>
+                ${ro ? '' : `<button class="con-btn ghost" data-droppay="${i}">Remove</button>`}
+              </div>`).join('')
+          : '<div class="con-note">Nothing received yet.</div>'}
       </div>
-
-      <div class="con-sec">
-        <h4>Deliverables</h4>
-        ${DELIVERABLES.map((d) => `
-          <div class="con-row">
-            <span title="${esc(d.hint)}">${esc(d.label)}</span>
-            <span class="con-states" data-deliv="${d.key}">
-              ${['open', 'done', 'na'].map((st) => `
-                <button data-state="${st}" class="${states[d.key].state === st ? 'on' : ''}" ${ro ? 'disabled' : ''}>${st === 'na' ? 'N/A' : st === 'done' ? 'Done' : 'Open'}</button>
-              `).join('')}
-            </span>
-          </div>`).join('')}
-        <div class="con-note" style="margin-top:8px">N/A means this sponsor never owed it. It is left out of their count rather than sitting open forever.</div>
+      ${ro ? '' : `
+      <div class="con-two" style="margin-top:10px">
+        <div class="con-field"><label>Add payment</label><input id="p_amount" inputmode="decimal" placeholder="Amount"></div>
+        <div class="con-field"><label>Date</label><input id="p_date" type="date"></div>
       </div>
+      <button class="con-btn ghost" id="conAddPay">Record payment</button>`}
+    </div>
 
-      <div class="con-sec">
-        <h4>Moments claimed</h4>
-        <div class="con-slots" data-moments>
-          ${MOMENTS.map((mm) => {
-            const held = Array.isArray(s.moments) && s.moments.includes(mm.key);
-            return `<button class="con-slot${held ? '' : ' gone'}" data-moment="${mm.key}" ${ro ? 'disabled' : ''}>${held ? '\u2713 ' : ''}${esc(mm.label)}</button>`;
-          }).join('')}
-        </div>
-        <div class="con-note" style="margin-top:8px">Each moment can only be sold once. Claiming one already held by another committed sponsor shows as a conflict on the board rather than quietly replacing them.</div>
-      </div>` : ''}
+    <div class="con-sec">
+      <h4>They owe us</h4>
+      ${DELIVERABLES.map((d) => `
+        <div class="con-row">
+          <span title="${esc(d.hint)}">${esc(d.label)}</span>
+          <span class="con-states" data-deliv="${d.key}">
+            ${['open', 'done', 'na'].map((st) => `<button data-state="${st}" class="${dStates[d.key].state === st ? 'on' : ''}" ${ro ? 'disabled' : ''}>${st === 'na' ? 'N/A' : st === 'done' ? 'Done' : 'Open'}</button>`).join('')}
+          </span>
+        </div>`).join('')}
+      <div class="con-note" style="margin-top:8px">N/A means they never owed it, and it is left out of their count rather than sitting open forever.</div>
+    </div>
 
-      <div class="con-sec">
-        <h4>Notes</h4>
-        <div class="con-field"><textarea id="f_notes" ${ro ? 'disabled' : ''}>${esc(s && s.notes)}</textarea></div>
+    <div class="con-sec">
+      <h4>We owe them</h4>
+      ${owed.length ? owed.map((o) => `
+        <div class="con-row">
+          <span>${esc(o.label)}</span>
+          <span class="con-states" data-oblig="${o.key}">
+            ${['open', 'done'].map((st) => `<button data-state="${st}" class="${(oStates[o.key] || {}).state === st ? 'on' : ''}" ${ro ? 'disabled' : ''}>${st === 'done' ? 'Done' : 'Open'}</button>`).join('')}
+          </span>
+        </div>`).join('')
+        : '<div class="con-note">Set a level and this fills in with what that level promises them.</div>'}
+      <div class="con-note" style="margin-top:8px">Taken from what the sponsor page promises at each level. A sponsor who paid and never got what they were sold is the expensive half of this list.</div>
+    </div>
+
+    <div class="con-sec">
+      <h4>Moments claimed</h4>
+      <div class="con-slots" data-moments>
+        ${MOMENTS.map((mm) => {
+          const held = Array.isArray(s.moments) && s.moments.includes(mm.key);
+          return `<button class="con-slot${held ? '' : ' gone'}" data-moment="${mm.key}" ${ro ? 'disabled' : ''}>${held ? '\u2713 ' : ''}${esc(mm.label)}</button>`;
+        }).join('')}
       </div>
+      <div class="con-note" style="margin-top:8px">Each moment sells once. Claiming one another committed sponsor holds shows as a conflict on the board rather than quietly replacing them.</div>
+    </div>` : ''}
 
-      <div class="con-actions">
-        ${ro ? '<div class="con-note">Your account is read-only in ConControl.</div>' : `<button class="con-btn" id="conSave">${s ? 'Save' : 'Create sponsor'}</button>`}
-        <button class="con-btn ghost" data-close>Close</button>
-        ${s && state.canDelete ? '<button class="con-btn ghost" id="conDelete" style="margin-left:auto">Delete</button>' : ''}
-      </div>
-    </aside>
-  `;
+    <div class="con-sec">
+      <h4>Notes</h4>
+      <div class="con-field"><textarea id="f_notes" ${ro ? 'disabled' : ''}>${esc(s && s.notes)}</textarea></div>
+    </div>
 
-  host.querySelectorAll('[data-close]').forEach((el) => el.addEventListener('click', closeDrawer));
+    ${s ? trailHtml(s) : ''}
 
+    <div class="con-actions">
+      ${ro ? '<div class="con-note">Your account is read-only in ConControl.</div>' : `<button class="con-btn" id="conSave">${s ? 'Save' : 'Create sponsor'}</button>`}
+      <button class="con-btn ghost" data-close>Close</button>
+      ${s && state.canDelete ? '<button class="con-btn ghost" id="conDelete" style="margin-left:auto">Delete</button>' : ''}
+    </div>`
+  );
+
+  const host = drawerHost();
   const save = host.querySelector('#conSave');
-  if (save) save.addEventListener('click', () => submit(s));
-
+  if (save) save.addEventListener('click', () => submitSponsor(s));
   const del = host.querySelector('#conDelete');
-  if (del) del.addEventListener('click', () => remove(s));
-
+  if (del) del.addEventListener('click', () => removeSponsor(s));
   const addPay = host.querySelector('#conAddPay');
   if (addPay) addPay.addEventListener('click', () => addPayment(s));
 
   host.querySelectorAll('[data-droppay]').forEach((el) => {
     el.addEventListener('click', () => dropPayment(s, Number(el.dataset.droppay)));
   });
-
   host.querySelectorAll('[data-moment]').forEach((btn) => {
     btn.addEventListener('click', () => toggleMoment(s, btn.dataset.moment));
   });
-
   host.querySelectorAll('[data-deliv] button').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const key = btn.closest('[data-deliv]').dataset.deliv;
-      setDeliverable(s, key, btn.dataset.state);
-    });
+    btn.addEventListener('click', () => setDeliverable(s, btn.closest('[data-deliv]').dataset.deliv, btn.dataset.state));
+  });
+  host.querySelectorAll('[data-oblig] button').forEach((btn) => {
+    btn.addEventListener('click', () => setObligation(s, btn.closest('[data-oblig]').dataset.oblig, btn.dataset.state));
   });
 }
 
-function closeDrawer() {
-  state.openId = null;
-  ctx.root.querySelector('#conDrawerHost').innerHTML = '';
-}
-
-function readForm() {
-  const root = ctx.root;
-  const val = (id) => {
-    const el = root.querySelector('#' + id);
-    return el ? el.value.trim() : '';
-  };
+function readSponsorForm() {
   return {
     company: val('f_company'),
     contactName: val('f_contactName'),
@@ -530,92 +1086,60 @@ function readForm() {
     committed: val('f_committed') === '' ? null : val('f_committed'),
     invoicedAmount: val('f_invoicedAmount') === '' ? null : val('f_invoicedAmount'),
     invoicedAt: val('f_invoicedAt') === '' ? null : val('f_invoicedAt'),
+    invoiceNumber: val('f_invoiceNumber'),
     notes: val('f_notes'),
   };
 }
 
-function showFormError(msg) {
-  const host = ctx.root.querySelector('#conFormErr');
-  if (host) host.innerHTML = msg ? `<div class="con-err">${esc(msg)}</div>` : '';
-}
-
-async function submit(existing) {
-  const body = readForm();
-  if (!body.company) { showFormError('A sponsor needs a company name'); return; }
-  showFormError('');
+async function submitSponsor(existing) {
+  const body = readSponsorForm();
+  if (!body.company) { formError('A sponsor needs a company name'); return; }
+  formError('');
   try {
-    if (existing) {
-      await ctx.api.patch(ENDPOINTS.conSponsors, { ...body, id: existing.id });
-    } else {
-      await ctx.api.post(ENDPOINTS.conSponsors, body);
-    }
+    if (existing) await ctx.api.patch(ENDPOINTS.conSponsors, { ...body, id: existing.id });
+    else await ctx.api.post(ENDPOINTS.conSponsors, body);
     closeDrawer();
-    await load();
+    await loadSponsors();
   } catch (e) {
-    showFormError(e.message || 'Could not save');
+    formError(e.message || 'Could not save');
   }
 }
 
-async function remove(s) {
+async function removeSponsor(s) {
   if (!s) return;
-  // A sponsor record holds what was agreed and what was paid. Asking once is
-  // the right amount of friction; a soft delete would just be a second list
-  // nobody reads.
   if (!window.confirm(`Delete ${s.company}? This removes the record of what was agreed and paid.`)) return;
   try {
     await ctx.api.del(ENDPOINTS.conSponsors, { query: { id: s.id } });
     closeDrawer();
-    await load();
+    await loadSponsors();
   } catch (e) {
-    showFormError(e.message || 'Could not delete');
+    formError(e.message || 'Could not delete');
   }
 }
 
 async function addPayment(s) {
-  const root = ctx.root;
-  const amount = root.querySelector('#p_amount').value.trim();
-  const date = root.querySelector('#p_date').value.trim();
-  if (!amount) { showFormError('A payment needs an amount'); return; }
-  showFormError('');
-
-  const payments = (s.payments || []).concat([{ amount, date: date || null }]);
-  try {
-    const res = await ctx.api.patch(ENDPOINTS.conSponsors, { id: s.id, payments });
-    await refreshAfterPatch(res);
-  } catch (e) {
-    showFormError(e.message || 'Could not record that payment');
-  }
+  const amount = val('p_amount');
+  const date = val('p_date');
+  if (!amount) { formError('A payment needs an amount'); return; }
+  formError('');
+  await patchSponsor(s, { payments: (s.payments || []).concat([{ amount, date: date || null }]) });
 }
 
 async function dropPayment(s, index) {
-  const payments = (s.payments || []).filter((_, i) => i !== index);
-  try {
-    const res = await ctx.api.patch(ENDPOINTS.conSponsors, { id: s.id, payments });
-    await refreshAfterPatch(res);
-  } catch (e) {
-    showFormError(e.message || 'Could not remove that payment');
-  }
+  await patchSponsor(s, { payments: (s.payments || []).filter((_, i) => i !== index) });
 }
 
 async function toggleMoment(s, key) {
   const held = Array.isArray(s.moments) ? s.moments.slice() : [];
   const i = held.indexOf(key);
-  if (i >= 0) held.splice(i, 1);
-  else held.push(key);
-  try {
-    const res = await ctx.api.patch(ENDPOINTS.conSponsors, { id: s.id, moments: held });
-    await refreshAfterPatch(res);
-  } catch (e) {
-    showFormError(e.message || 'Could not update that');
-  }
+  if (i >= 0) held.splice(i, 1); else held.push(key);
+  await patchSponsor(s, { moments: held });
 }
 
 async function setDeliverable(s, key, next) {
   const current = deliverableStates(s);
   const deliverables = {};
-  for (const k of DELIVERABLE_KEYS) {
-    deliverables[k] = { ...current[k] };
-  }
+  for (const k of DELIVERABLE_KEYS) deliverables[k] = { ...current[k] };
   deliverables[key] = {
     state: next,
     // Stamped only when it is actually done. A date on an open row is a date
@@ -624,25 +1148,340 @@ async function setDeliverable(s, key, next) {
     by: next === 'done' ? (ctx.user && (ctx.user.name || ctx.user.username)) || null : null,
     note: current[key].note,
   };
-  try {
-    const res = await ctx.api.patch(ENDPOINTS.conSponsors, { id: s.id, deliverables });
-    await refreshAfterPatch(res);
-  } catch (e) {
-    showFormError(e.message || 'Could not update that');
-  }
+  await patchSponsor(s, { deliverables });
+}
+
+async function setObligation(s, key, next) {
+  const current = obligationStates(s);
+  const obligations = {};
+  for (const k of Object.keys(current)) obligations[k] = { state: current[k].state, at: current[k].at, by: current[k].by };
+  obligations[key] = {
+    state: next,
+    at: next === 'done' ? new Date().toISOString().slice(0, 10) : null,
+    by: next === 'done' ? (ctx.user && (ctx.user.name || ctx.user.username)) || null : null,
+  };
+  await patchSponsor(s, { obligations });
 }
 
 /**
- * Fold one saved record back into the list and redraw the drawer in place.
- * Reloading the whole list here would close and reopen the drawer under the
- * cursor, which is what made ticking four deliverables in a row unpleasant.
+ * Save one field and redraw the drawer in place. Reloading the whole list here
+ * would close and reopen the drawer under the cursor, which is what made
+ * ticking four things in a row unpleasant.
  */
-async function refreshAfterPatch(res) {
-  const saved = res && res.sponsor;
-  if (!saved) { await load(); return; }
-  const i = state.sponsors.findIndex((x) => x.id === saved.id);
-  if (i >= 0) state.sponsors[i] = saved;
-  else state.sponsors.unshift(saved);
-  render();
-  openDrawer(saved.id);
+async function patchSponsor(s, body) {
+  try {
+    const res = await ctx.api.patch(ENDPOINTS.conSponsors, { id: s.id, ...body });
+    const saved = res && res.sponsor;
+    if (!saved) { await loadSponsors(); return; }
+    const i = state.sponsors.findIndex((x) => x.id === saved.id);
+    if (i >= 0) state.sponsors[i] = saved; else state.sponsors.unshift(saved);
+    renderSponsors();
+    renderHome();
+    sponsorDrawer(saved.id);
+  } catch (e) {
+    formError(e.message || 'Could not update that');
+  }
+}
+
+/* ---------------- ledger drawer ---------------- */
+
+function entryDrawer(id) {
+  const e = id ? state.entries.find((x) => x.id === id) : null;
+  const ro = !state.canEdit;
+  const cats = state.settings.categories || [];
+
+  openDrawerHtml(e ? e.description || 'Entry' : 'New entry', e ? e.id : null, `
+    <div class="con-sec">
+      <div class="con-field"><label>Description</label><input id="e_description" value="${esc(e && e.description)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-three">
+        <div class="con-field"><label>Kind</label>
+          <select id="e_kind" ${ro ? 'disabled' : ''}>
+            ${ENTRY_KINDS.map((k) => `<option value="${k}"${e && e.kind === k ? ' selected' : ''}>${k === 'income' ? 'Income' : 'Spend'}</option>`).join('')}
+          </select>
+        </div>
+        <div class="con-field"><label>State</label>
+          <select id="e_state" ${ro ? 'disabled' : ''}>
+            ${ENTRY_STATES.map((k) => `<option value="${k}"${e && e.state === k ? ' selected' : ''}>${esc(ENTRY_STATE_LABELS[k])}</option>`).join('')}
+          </select>
+        </div>
+        <div class="con-field"><label>Amount</label><input id="e_amount" inputmode="decimal" value="${e && e.amount !== null && e.amount !== undefined ? esc(e.amount) : ''}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-two">
+        <div class="con-field"><label>Category</label>
+          <select id="e_category" ${ro ? 'disabled' : ''}>
+            <option value="">Not set</option>
+            ${cats.map((c) => `<option value="${esc(c)}"${e && e.category === c ? ' selected' : ''}>${esc(c)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="con-field"><label>Date</label><input id="e_date" type="date" value="${esc(e && e.date)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-two">
+        <div class="con-field"><label>Vendor</label><input id="e_vendor" value="${esc(e && e.vendor)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Invoice number</label><input id="e_invoiceNumber" value="${esc(e && e.invoiceNumber)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-field"><label>Notes</label><textarea id="e_notes" ${ro ? 'disabled' : ''}>${esc(e && e.notes)}</textarea></div>
+      <div class="con-note">An estimate is a guess, committed is money promised, paid is money gone. They are counted apart because "we have spent this" and "we are on the hook for this" are different sentences.</div>
+    </div>
+
+    ${e ? trailHtml(e) : ''}
+
+    <div class="con-actions">
+      ${ro ? '' : `<button class="con-btn" id="conSaveEntry">${e ? 'Save' : 'Add entry'}</button>`}
+      <button class="con-btn ghost" data-close>Close</button>
+      ${e && state.canDelete ? '<button class="con-btn ghost" id="conDeleteEntry" style="margin-left:auto">Delete</button>' : ''}
+    </div>`);
+
+  const host = drawerHost();
+  const save = host.querySelector('#conSaveEntry');
+  if (save) save.addEventListener('click', async () => {
+    const body = {
+      description: val('e_description'), kind: val('e_kind'), state: val('e_state'),
+      amount: val('e_amount') === '' ? null : val('e_amount'),
+      category: val('e_category'), date: val('e_date') === '' ? null : val('e_date'),
+      vendor: val('e_vendor'), invoiceNumber: val('e_invoiceNumber'), notes: val('e_notes'),
+    };
+    if (!body.description) { formError('An entry needs a description'); return; }
+    try {
+      if (e) await ctx.api.patch(ENDPOINTS.conLedger, { ...body, id: e.id });
+      else await ctx.api.post(ENDPOINTS.conLedger, body);
+      closeDrawer();
+      await loadMoney();
+    } catch (err) {
+      formError(err.message || 'Could not save');
+    }
+  });
+
+  const del = host.querySelector('#conDeleteEntry');
+  if (del) del.addEventListener('click', async () => {
+    if (!window.confirm('Delete this entry?')) return;
+    try {
+      await ctx.api.del(ENDPOINTS.conLedger, { query: { id: e.id } });
+      closeDrawer();
+      await loadMoney();
+    } catch (err) { formError(err.message || 'Could not delete'); }
+  });
+}
+
+/* ---------------- session drawer ---------------- */
+
+function sessionDrawer(id) {
+  const s = id ? state.sessions.find((x) => x.id === id) : null;
+  const ro = !state.canEdit;
+
+  openDrawerHtml(s ? s.title || 'Session' : 'New session', s ? s.id : null, `
+    <div class="con-sec">
+      <div class="con-field"><label>Title</label><input id="s_title" value="${esc(s && s.title)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-field"><label>Blurb, as it would read on the agenda</label><textarea id="s_blurb" ${ro ? 'disabled' : ''}>${esc(s && s.blurb)}</textarea></div>
+      <div class="con-three">
+        <div class="con-field"><label>Day</label><input id="s_day" type="number" min="1" max="2" value="${esc((s && s.day) || 1)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Start</label><input id="s_start" type="time" value="${esc(s && s.start)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Minutes</label><input id="s_minutes" type="number" min="5" value="${esc((s && s.minutes) || 60)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-three">
+        <div class="con-field"><label>Track</label>
+          <select id="s_track" ${ro ? 'disabled' : ''}>
+            ${TRACKS.map((t) => `<option value="${t.key}"${s && s.track === t.key ? ' selected' : ''}>${esc(t.label)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="con-field"><label>Format</label>
+          <select id="s_format" ${ro ? 'disabled' : ''}>
+            ${FORMATS.map((f) => `<option value="${f}"${s && s.format === f ? ' selected' : ''}>${esc(f)}</option>`).join('')}
+          </select>
+        </div>
+        <div class="con-field"><label>Status</label>
+          <select id="s_status" ${ro ? 'disabled' : ''}>
+            ${SESSION_STATUSES.map((k) => `<option value="${k}"${s && s.status === k ? ' selected' : ''}>${esc(SESSION_STATUS_LABELS[k])}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="con-note">Only confirmed sessions with a day and a time reach the public agenda. Everything else is a plan.</div>
+    </div>
+
+    <div class="con-sec">
+      <h4>Speakers</h4>
+      ${state.speakers.length ? state.speakers.map((k) => `
+        <div class="con-row">
+          <span>${esc(k.name)}${k.company ? ' · ' + esc(k.company) : ''}</span>
+          <span class="con-states">
+            <button data-speaker="${esc(k.id)}" class="${s && (s.speakerIds || []).includes(k.id) ? 'on' : ''}" ${ro || !s ? 'disabled' : ''}>${s && (s.speakerIds || []).includes(k.id) ? 'On it' : 'Add'}</button>
+          </span>
+        </div>`).join('')
+        : '<div class="con-note">No speakers yet. Add them on the Speakers screen first.</div>'}
+      ${s ? '' : '<div class="con-note" style="margin-top:8px">Create the session first, then put speakers on it.</div>'}
+    </div>
+
+    <div class="con-sec">
+      <h4>Sponsored slot</h4>
+      <div class="con-field">
+        <select id="s_sponsorId" ${ro ? 'disabled' : ''}>
+          <option value="">Not sponsored</option>
+          ${state.sponsors.filter((x) => x.status === 'committed').map((x) => `<option value="${esc(x.id)}"${s && s.sponsorId === x.id ? ' selected' : ''}>${esc(x.company)}</option>`).join('')}
+        </select>
+      </div>
+      <div class="con-field"><label>Equipment needed</label><input id="s_equipment" value="${esc(s && s.equipment)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-field"><label>Notes</label><textarea id="s_notes" ${ro ? 'disabled' : ''}>${esc(s && s.notes)}</textarea></div>
+    </div>
+
+    ${s ? trailHtml(s) : ''}
+
+    <div class="con-actions">
+      ${ro ? '' : `<button class="con-btn" id="conSaveSession">${s ? 'Save' : 'Create session'}</button>`}
+      <button class="con-btn ghost" data-close>Close</button>
+      ${s && state.canDelete ? '<button class="con-btn ghost" id="conDeleteSession" style="margin-left:auto">Delete</button>' : ''}
+    </div>`);
+
+  const host = drawerHost();
+
+  host.querySelectorAll('[data-speaker]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ids = (s.speakerIds || []).slice();
+      const key = btn.dataset.speaker;
+      const i = ids.indexOf(key);
+      if (i >= 0) ids.splice(i, 1); else ids.push(key);
+      try {
+        await ctx.api.patch(ENDPOINTS.conSessions, { id: s.id, speakerIds: ids });
+        await loadProgram();
+        sessionDrawer(s.id);
+      } catch (e) { formError(e.message || 'Could not update'); }
+    });
+  });
+
+  const save = host.querySelector('#conSaveSession');
+  if (save) save.addEventListener('click', async () => {
+    const body = {
+      title: val('s_title'), blurb: val('s_blurb'),
+      day: Number(val('s_day')) || 1, start: val('s_start'),
+      minutes: Number(val('s_minutes')) || 60,
+      track: val('s_track'), format: val('s_format'), status: val('s_status'),
+      sponsorId: val('s_sponsorId') || null,
+      equipment: val('s_equipment'), notes: val('s_notes'),
+    };
+    if (!body.title) { formError('A session needs a title'); return; }
+    try {
+      if (s) await ctx.api.patch(ENDPOINTS.conSessions, { ...body, id: s.id });
+      else await ctx.api.post(ENDPOINTS.conSessions, body);
+      closeDrawer();
+      await loadProgram();
+    } catch (e) { formError(e.message || 'Could not save'); }
+  });
+
+  const del = host.querySelector('#conDeleteSession');
+  if (del) del.addEventListener('click', async () => {
+    if (!window.confirm(`Delete "${s.title}"?`)) return;
+    try {
+      await ctx.api.del(ENDPOINTS.conSessions, { query: { id: s.id } });
+      closeDrawer();
+      await loadProgram();
+    } catch (e) { formError(e.message || 'Could not delete'); }
+  });
+}
+
+/* ---------------- speaker drawer ---------------- */
+
+function speakerDrawer(id) {
+  const k = id ? state.speakers.find((x) => x.id === id) : null;
+  const ro = !state.canEdit;
+  const mStates = materialStates(k || {});
+  const theirSessions = k ? state.sessions.filter((s) => (s.speakerIds || []).includes(k.id)) : [];
+
+  openDrawerHtml(k ? k.name : 'New speaker', k ? `${k.id} · ${k.source === 'speak-form' ? 'from the call for speakers' : 'added here'}` : null, `
+    <div class="con-sec">
+      <div class="con-two">
+        <div class="con-field"><label>Name</label><input id="k_name" value="${esc(k && k.name)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Company</label><input id="k_company" value="${esc(k && k.company)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-two">
+        <div class="con-field"><label>Email</label><input id="k_email" type="email" value="${esc(k && k.email)}" ${ro ? 'disabled' : ''}></div>
+        <div class="con-field"><label>Phone</label><input id="k_phone" value="${esc(k && k.phone)}" ${ro ? 'disabled' : ''}></div>
+      </div>
+      <div class="con-field"><label>Status</label>
+        <select id="k_status" ${ro ? 'disabled' : ''}>
+          ${SPEAKER_STATUSES.map((st) => `<option value="${st}"${k && k.status === st ? ' selected' : ''}>${esc(SPEAKER_STATUS_LABELS[st])}</option>`).join('')}
+        </select>
+      </div>
+      <div class="con-field"><label>What they want to teach</label><textarea id="k_topic" ${ro ? 'disabled' : ''}>${esc(k && k.topic)}</textarea></div>
+      <div class="con-field"><label>Bio, as it would print</label><textarea id="k_bio" ${ro ? 'disabled' : ''}>${esc(k && k.bio)}</textarea></div>
+      <div class="con-field"><label>Headshot link</label><input id="k_headshot" value="${esc(k && k.headshot)}" ${ro ? 'disabled' : ''}></div>
+      <div class="con-field"><label>Travel and lodging</label><textarea id="k_travelNotes" ${ro ? 'disabled' : ''}>${esc(k && k.travelNotes)}</textarea></div>
+    </div>
+
+    ${k ? `
+    <div class="con-sec">
+      <h4>What they still owe us</h4>
+      ${SPEAKER_MATERIALS.map((m) => `
+        <div class="con-row">
+          <span>${esc(m.label)}</span>
+          <span class="con-states" data-material="${m.key}">
+            ${['open', 'done', 'na'].map((st) => `<button data-state="${st}" class="${mStates[m.key].state === st ? 'on' : ''}" ${ro ? 'disabled' : ''}>${st === 'na' ? 'N/A' : st === 'done' ? 'Done' : 'Open'}</button>`).join('')}
+          </span>
+        </div>`).join('')}
+      <div class="con-note" style="margin-top:8px">Only confirmed speakers get chased. Asking somebody for a headshot before they have said yes is how a proposal turns into a no.</div>
+    </div>
+
+    ${theirSessions.length ? `
+    <div class="con-sec">
+      <h4>Their sessions</h4>
+      ${theirSessions.map((s) => `<div class="con-row"><span>${esc(s.title)}</span><span class="con-note">Day ${esc(s.day)} ${esc(clock(s.start))}</span></div>`).join('')}
+    </div>` : ''}
+
+    <div class="con-sec">
+      <h4>Notes</h4>
+      <div class="con-field"><textarea id="k_notes" ${ro ? 'disabled' : ''}>${esc(k && k.notes)}</textarea></div>
+    </div>
+
+    ${trailHtml(k)}` : ''}
+
+    <div class="con-actions">
+      ${ro ? '' : `<button class="con-btn" id="conSaveSpeaker">${k ? 'Save' : 'Add speaker'}</button>`}
+      <button class="con-btn ghost" data-close>Close</button>
+      ${k && state.canDelete ? '<button class="con-btn ghost" id="conDeleteSpeaker" style="margin-left:auto">Delete</button>' : ''}
+    </div>`);
+
+  const host = drawerHost();
+
+  host.querySelectorAll('[data-material] button').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const key = btn.closest('[data-material]').dataset.material;
+      const current = materialStates(k);
+      const materials = {};
+      for (const mk of Object.keys(current)) materials[mk] = { state: current[mk].state, at: current[mk].at, by: current[mk].by };
+      materials[key] = {
+        state: btn.dataset.state,
+        at: btn.dataset.state === 'done' ? new Date().toISOString().slice(0, 10) : null,
+        by: btn.dataset.state === 'done' ? (ctx.user && (ctx.user.name || ctx.user.username)) || null : null,
+      };
+      try {
+        await ctx.api.patch(ENDPOINTS.conSpeakers, { id: k.id, materials });
+        await loadProgram();
+        speakerDrawer(k.id);
+      } catch (e) { formError(e.message || 'Could not update'); }
+    });
+  });
+
+  const save = host.querySelector('#conSaveSpeaker');
+  if (save) save.addEventListener('click', async () => {
+    const body = {
+      name: val('k_name'), company: val('k_company'), email: val('k_email'),
+      phone: val('k_phone'), status: val('k_status'), topic: val('k_topic'),
+      bio: val('k_bio'), headshot: val('k_headshot'),
+      travelNotes: val('k_travelNotes'), notes: val('k_notes'),
+    };
+    if (!body.name) { formError('A speaker needs a name'); return; }
+    try {
+      if (k) await ctx.api.patch(ENDPOINTS.conSpeakers, { ...body, id: k.id });
+      else await ctx.api.post(ENDPOINTS.conSpeakers, body);
+      closeDrawer();
+      await loadProgram();
+    } catch (e) { formError(e.message || 'Could not save'); }
+  });
+
+  const del = host.querySelector('#conDeleteSpeaker');
+  if (del) del.addEventListener('click', async () => {
+    if (!window.confirm(`Delete ${k.name}? A proposal you passed on is next year's list.`)) return;
+    try {
+      await ctx.api.del(ENDPOINTS.conSpeakers, { query: { id: k.id } });
+      closeDrawer();
+      await loadProgram();
+    } catch (e) { formError(e.message || 'Could not delete'); }
+  });
 }

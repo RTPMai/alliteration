@@ -23,6 +23,7 @@ import {
 import {
   saveSponsor, nextSponsorId, findByCompany, getSettings, updateSponsor,
 } from "../../lib/concontrol/store.js";
+import { notifyInbound } from "../../lib/concontrol/notify.js";
 
 const MAX_PER_IP = 10;
 const WINDOW_SECONDS = 60 * 60;
@@ -121,6 +122,12 @@ export default async function handler(req, res) {
     if (existing) {
       const notes = [existing.notes, note].filter(Boolean).join("\n\n");
       await updateSponsor(existing.id, { notes });
+      await notifyInbound({
+        to: settings.inquiryNotifyTo,
+        title: `${existing.company} got back in touch about sponsoring`,
+        detail: message || note,
+        by: "Sponsor form",
+      });
       return res.status(200).json({ ok: true, id: existing.id, duplicate: true });
     }
 
@@ -139,6 +146,17 @@ export default async function handler(req, res) {
     };
 
     await saveSponsor(record);
+
+    // The record landing somewhere nobody looks is a quieter version of the
+    // email this replaced. Fails soft: a nudge that cannot be raised never
+    // costs the inquiry.
+    await notifyInbound({
+      to: settings.inquiryNotifyTo,
+      title: `Sponsor inquiry from ${company}${level ? " (" + level + ")" : ""}`,
+      detail: [contactName, email, message].filter(Boolean).join("\n"),
+      by: "Sponsor form",
+    });
+
     return res.status(201).json({ ok: true, id });
   } catch (e) {
     console.error("concontrol inquiry route error:", e);

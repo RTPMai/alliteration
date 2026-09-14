@@ -61,6 +61,7 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
   const {
     saveSponsor, getSponsor, updateSponsor, deleteSponsor, listSponsors,
     nextSponsorId, companyKey, findByCompany, getSettings, saveSettings,
+    listSpeakers, getSpeaker,
   } = store;
 
   /* ---------------- money parsing ---------------- */
@@ -561,6 +562,348 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal(after.length, before, 'no second record was created');
     const rec = await getSponsor(res.body.id);
     t.assert(rec.notes.indexOf('Following up') !== -1, 'the second message was kept');
+  });
+
+  /* ---------------- what we owe them ---------------- */
+
+  const { obligationsFor, obligationStates, obligationProgress } = schema;
+
+  t.test('each level carries the promises its own page makes', () => {
+    t.equal(obligationsFor('Silver').length, 5, 'Silver: signage, web, remarks, bag, group social');
+    t.assert(obligationsFor('Gold').length > obligationsFor('Silver').length, 'Gold carries more');
+    t.assert(obligationsFor('Presenting').length > obligationsFor('Gold').length, 'Presenting carries the most');
+    t.equal(obligationsFor('').length, 0, 'no level promises nothing');
+  });
+
+  t.test('a Silver sponsor is never asked for a welcome address', () => {
+    const keys = obligationsFor('Silver').map((o) => o.key);
+    t.equal(keys.includes('welcome'), false, 'not their level');
+    t.equal(keys.includes('branding'), false, 'nor event branding');
+    t.assert(obligationsFor('Presenting').map((o) => o.key).includes('welcome'), 'but Presenting is');
+  });
+
+  t.test('an untouched obligation reads as open, not done', () => {
+    const states = obligationStates({ tier: 'Gold' });
+    t.assert(Object.values(states).every((s) => s.state === 'open'), 'nothing is done by default');
+  });
+
+  t.test('obligation progress counts only what that level owes', () => {
+    const p = obligationProgress({ tier: 'Silver', obligations: { signage: { state: 'done' }, welcome: { state: 'done' } } });
+    t.equal(p.owed, 5, 'five, not thirteen');
+    t.equal(p.done, 1, 'the welcome tick does not count, Silver never owed it');
+  });
+
+  t.test('paid in full, everything received, but we still owe them, is not done', () => {
+    const s = {
+      status: 'committed', tier: 'Presenting', committed: 7000, payments: [{ amount: 7000 }],
+      deliverables: { logo: { state: 'done' }, swag: { state: 'done' }, social: { state: 'done' }, session: { state: 'done' } },
+      obligations: { signage: { state: 'open' } },
+    };
+    const h = sponsorHealth(s);
+    t.equal(h.level, 'waiting', 'their side being finished is not the whole answer');
+    t.assert(h.why.indexOf('we owe') !== -1, 'and the reason says which side');
+  });
+
+  /* ---------------- history ---------------- */
+
+  const { historyEntry, describeChange } = schema;
+
+  t.test('a trail line records what changed in words', () => {
+    const before = { status: 'talking', tier: 'Gold', committed: null, payments: [], moments: [] };
+    const what = describeChange(before, { status: 'committed', committed: 2500 });
+    t.assert(what.indexOf('status') !== -1, 'names the status move');
+    t.assert(what.indexOf('committed') !== -1, 'and the money');
+  });
+
+  t.test('a patch that changes nothing worth recording gets no trail line', () => {
+    const before = { status: 'committed', tier: 'Gold', committed: 2500, payments: [], moments: [] };
+    t.equal(describeChange(before, { notes: 'called them' }), null, 'notes are not trail-worthy');
+    t.equal(describeChange(before, { status: 'committed' }), null, 'nor a status set to what it already was');
+  });
+
+  await t.test('the trail is appended by the store and cannot be shortened by a caller', async () => {
+    const rec = { ...newSponsor('SP-0700', 'ryan'), company: 'Trail Co', history: [historyEntry('created', 'ryan')] };
+    await saveSponsor(rec);
+    await updateSponsor('SP-0700', { notes: 'x' }, historyEntry('first move', 'ryan'));
+    // A caller sending its own short history must not win.
+    await updateSponsor('SP-0700', { history: [] }, historyEntry('second move', 'ryan'));
+    const back = await getSponsor('SP-0700');
+    t.equal(back.history.length, 3, 'created plus two moves, nothing lost');
+    t.equal(back.history[2].what, 'second move', 'in order');
+  });
+
+  t.test('history is not a patchable field', () => {
+    const r = validateSponsorPatch({ history: [], company: 'X' });
+    t.equal('history' in r.patch, false, 'the validator never lets it through');
+  });
+
+  /* ---------------- the ledger ---------------- */
+
+  const ledger = await import('../lib/concontrol/ledger.js');
+  const { validateEntryPatch, newEntry, budgetSummary, byCategory } = ledger;
+
+  t.test('spend is counted in three buckets, not one', () => {
+    const sum = budgetSummary([
+      { kind: 'spend', state: 'paid', amount: 1000 },
+      { kind: 'spend', state: 'committed', amount: 500 },
+      { kind: 'spend', state: 'estimate', amount: 250 },
+    ], [], null);
+    t.equal(sum.spend.paid, 1000, 'money gone');
+    t.equal(sum.spend.committed, 500, 'money promised');
+    t.equal(sum.spend.estimated, 250, 'money guessed');
+    t.equal(sum.spendOut, 1000, 'spent means spent');
+    t.equal(sum.spendAhead, 750, 'and the rest is ahead of us');
+  });
+
+  t.test('sponsor money is read off the sponsors, never re-entered', () => {
+    const sum = budgetSummary([], [
+      { status: 'committed', committed: 2500, payments: [{ amount: 1000 }] },
+    ], null);
+    t.equal(sum.sponsorCollected, 1000, 'collected comes from the payments');
+    t.equal(sum.sponsorCommitted, 2500, 'committed from the agreement');
+    t.equal(sum.incomeExpected, 1500, 'and the gap is what is still expected');
+  });
+
+  t.test('a declined sponsor is not income', () => {
+    const sum = budgetSummary([], [{ status: 'declined', committed: 5000, payments: [] }], null);
+    t.equal(sum.sponsorCommitted, 0, 'a no is not money');
+  });
+
+  t.test('an entry with no amount is a gap, never a zero', () => {
+    const sum = budgetSummary([{ kind: 'spend', state: 'paid', amount: null }], [], null);
+    t.equal(sum.spend.paid, 0, 'nothing is added');
+    t.equal(sum.spend.gaps, 1, 'and the unknown is reported');
+  });
+
+  t.test('the budget reports what is left against everything promised, not just spent', () => {
+    const sum = budgetSummary([
+      { kind: 'spend', state: 'paid', amount: 4000 },
+      { kind: 'spend', state: 'committed', amount: 3000 },
+    ], [], 10000);
+    t.equal(sum.budgetLeft, 3000, '10000 less 4000 spent and 3000 on the hook');
+  });
+
+  t.test('by category sorts biggest first and names its gaps', () => {
+    const out = byCategory([
+      { kind: 'spend', state: 'paid', amount: 100, category: 'Food and drink' },
+      { kind: 'spend', state: 'committed', amount: 900, category: 'Video and photo' },
+      { kind: 'spend', state: 'paid', amount: null, category: 'Food and drink' },
+      { kind: 'income', state: 'paid', amount: 500, category: 'Food and drink' },
+    ]);
+    t.equal(out.rows[0].category, 'Video and photo', 'biggest first');
+    t.equal(out.gaps, 1, 'the amountless entry is counted as a gap');
+    t.equal(out.rows.find((r) => r.category === 'Food and drink').total, 100, 'income is not spend');
+  });
+
+  t.test('a negative amount is refused with a reason', () => {
+    const r = validateEntryPatch({ amount: -50 }, null);
+    t.equal(r.ok, false, 'refused');
+    t.assert(r.errors.join(' ').indexOf('refund') !== -1, 'and says what to do instead');
+  });
+
+  t.test('a category off the list is refused rather than becoming its own row', () => {
+    t.equal(validateEntryPatch({ category: 'Fireworks' }, ['Food and drink']).ok, false, 'not a category');
+    t.assert(validateEntryPatch({ category: 'Food and drink' }, ['Food and drink']).ok, 'a real one passes');
+  });
+
+  t.test('a new entry starts as an estimate, which is the honest default', () => {
+    const e = newEntry('LE-0001', 'ryan', 'FOC27');
+    t.equal(e.state, 'estimate', 'nothing is paid until somebody says so');
+    t.equal(e.amount, null, 'and no amount is invented');
+  });
+
+  /* ---------------- the program ---------------- */
+
+  const program = await import('../lib/concontrol/program.js');
+  const {
+    validateSessionPatch, newSession, scheduleConflicts, publicAgenda,
+    validateSpeakerPatch, newSpeaker, materialProgress, programBlockers, isTime,
+  } = program;
+
+  t.test('a start time has to be a time', () => {
+    t.assert(isTime('09:00'), 'morning');
+    t.assert(isTime('14:30'), 'afternoon');
+    t.equal(isTime('9am'), false, 'not how it is stored');
+    t.equal(isTime('25:00'), false, 'not a real hour');
+  });
+
+  // These fixtures carry a speaker, because a confirmed session without one is
+  // its own separate finding and would otherwise be counted here too.
+  const slot = (id, day, start, track, status) => ({
+    id, day, start, track, status, format: 'session', speakerIds: ['SK-1'],
+  });
+  const clashes = (rows) => scheduleConflicts(rows).filter(
+    (c) => c.kind === 'double-booked' || c.kind === 'runs-against-whole-room'
+  );
+
+  t.test('two sessions in one track at one time is reported', () => {
+    const c = clashes([slot('SE-1', 1, '10:30', 'a', 'confirmed'), slot('SE-2', 1, '10:30', 'a', 'confirmed')]);
+    t.equal(c.length, 1, 'one conflict');
+    t.equal(c[0].kind, 'double-booked', 'named');
+  });
+
+  t.test('the two tracks running at once is not a conflict', () => {
+    const c = clashes([slot('SE-1', 1, '10:30', 'a', 'confirmed'), slot('SE-2', 1, '10:30', 'b', 'confirmed')]);
+    t.equal(c.length, 0, 'Gate A and Gate B are meant to run together');
+  });
+
+  t.test('nothing runs against lunch', () => {
+    const c = clashes([slot('SE-1', 1, '11:45', 'all', 'confirmed'), slot('SE-2', 1, '11:45', 'a', 'confirmed')]);
+    t.equal(c[0].kind, 'runs-against-whole-room', 'a whole-room slot blocks the tracks');
+  });
+
+  t.test('a cancelled session stops conflicting with anything', () => {
+    const c = clashes([slot('SE-1', 1, '10:30', 'a', 'confirmed'), slot('SE-2', 1, '10:30', 'a', 'cancelled')]);
+    t.equal(c.length, 0, 'it is not on the grid any more');
+  });
+
+  t.test('a confirmed session with no slot and no speaker is both', () => {
+    const c = scheduleConflicts([{ id: 'SE-9', day: 1, start: '', track: 'a', status: 'confirmed', format: 'session', speakerIds: [] }]);
+    const kinds = c.map((x) => x.kind);
+    t.assert(kinds.includes('confirmed-with-no-slot'), 'no time');
+    t.assert(kinds.includes('confirmed-with-no-speaker'), 'no speaker');
+  });
+
+  t.test('lunch needs no speaker', () => {
+    const c = scheduleConflicts([{ id: 'SE-9', day: 1, start: '11:45', track: 'all', status: 'confirmed', format: 'meal', speakerIds: [] }]);
+    t.equal(c.length, 0, 'a meal is not missing anybody');
+  });
+
+  t.test('the public agenda carries only confirmed, scheduled sessions', () => {
+    const speakers = [{ id: 'SK-1', name: 'Meghan', company: 'Chipply', bio: 'b', headshot: 'h', email: 'private@example.test', phone: '555' }];
+    const agenda = publicAgenda([
+      { id: 'SE-1', day: 1, start: '09:00', track: 'a', status: 'confirmed', title: 'Live', minutes: 60, speakerIds: ['SK-1'], format: 'session' },
+      { id: 'SE-2', day: 1, start: '10:30', track: 'a', status: 'held', title: 'Not yet', minutes: 60, speakerIds: [], format: 'session' },
+      { id: 'SE-3', day: 1, start: '', track: 'a', status: 'confirmed', title: 'No slot', minutes: 60, speakerIds: [], format: 'session' },
+    ], speakers);
+    t.equal(agenda.length, 1, 'one session is public');
+    t.equal(agenda[0].title, 'Live', 'the confirmed one');
+  });
+
+  t.test('the public agenda never leaks a speaker email or phone', () => {
+    const speakers = [{ id: 'SK-1', name: 'Meghan', company: 'Chipply', bio: 'b', headshot: 'h', email: 'private@example.test', phone: '555-0100' }];
+    const agenda = publicAgenda([
+      { id: 'SE-1', day: 1, start: '09:00', track: 'a', status: 'confirmed', title: 'Live', minutes: 60, speakerIds: ['SK-1'], format: 'session' },
+    ], speakers);
+    const json = JSON.stringify(agenda);
+    t.equal(json.indexOf('private@example.test'), -1, 'no email');
+    t.equal(json.indexOf('555-0100'), -1, 'no phone');
+    t.assert(json.indexOf('Meghan') !== -1, 'the name is public, which is the point');
+  });
+
+  t.test('the agenda runs in the order the day does', () => {
+    const agenda = publicAgenda([
+      { id: 'SE-2', day: 2, start: '09:00', track: 'a', status: 'confirmed', title: 'B', minutes: 60, speakerIds: [], format: 'session' },
+      { id: 'SE-1', day: 1, start: '14:00', track: 'a', status: 'confirmed', title: 'A', minutes: 60, speakerIds: [], format: 'session' },
+    ], []);
+    t.equal(agenda[0].title, 'A', 'day one first');
+  });
+
+  t.test('a session cannot point at a speaker who does not exist', () => {
+    const r = validateSessionPatch({ speakerIds: ['SK-404'] }, ['SK-1']);
+    t.equal(r.ok, false, 'refused');
+    t.assert(validateSessionPatch({ speakerIds: ['SK-1'] }, ['SK-1']).ok, 'a real one passes');
+  });
+
+  t.test('an unknown track or format is refused', () => {
+    t.equal(validateSessionPatch({ track: 'gate-c' }, []).ok, false, 'there are two tracks and a whole room');
+    t.equal(validateSessionPatch({ format: 'keynote' }, []).ok, false, 'not a format we use');
+  });
+
+  t.test('a new session starts as an idea, not confirmed', () => {
+    t.equal(newSession('SE-1', 'ryan', 'FOC27').status, 'idea', 'nothing is confirmed by existing');
+  });
+
+  t.test('speaker materials drop N/A from the count', () => {
+    const p = materialProgress({
+      materials: {
+        bio: { state: 'done' }, headshot: { state: 'done' }, title: { state: 'done' },
+        slides: { state: 'done' }, av: { state: 'done' }, travel: { state: 'na' },
+      },
+    });
+    t.equal(p.owed, 5, 'a local speaker owes no travel arrangement');
+    t.assert(p.complete, 'and is finished');
+  });
+
+  t.test('only confirmed speakers are chased', () => {
+    const blockers = programBlockers([], [
+      { id: 'SK-1', name: 'A', status: 'proposed', materials: {} },
+      { id: 'SK-2', name: 'B', status: 'confirmed', materials: {} },
+    ]);
+    const chased = blockers.filter((b) => b.kind === 'speaker-materials');
+    t.equal(chased.length, 1, 'one of the two');
+    t.equal(chased[0].name, 'B', 'the one who said yes');
+  });
+
+  t.test('a new speaker starts as proposed with everything outstanding', () => {
+    const k = newSpeaker('SK-1', 'ryan', 'FOC27');
+    t.equal(k.status, 'proposed', 'proposing is not confirming');
+    t.equal(materialProgress(k).done, 0, 'and nothing has arrived');
+  });
+
+  t.test('a bad speaker email is refused', () => {
+    t.equal(validateSpeakerPatch({ email: 'nope' }).ok, false, 'not an address');
+    t.assert(validateSpeakerPatch({ email: '' }).ok, 'none yet is fine');
+  });
+
+  /* ---------------- the rest of the routes ---------------- */
+
+  await t.test('every route loads and exports a handler', async () => {
+    for (const name of ['sponsors', 'inquiry', 'ledger', 'sessions', 'speakers', 'settings', 'speak', 'agenda', 'export']) {
+      const mod = await import(`../api/concontrol/${name}.js`);
+      t.equal(typeof mod.default, 'function', `${name} has a handler`);
+    }
+  });
+
+  await t.test('the agenda route is public, read only, and answers with a list', async () => {
+    const agenda = await import('../api/concontrol/agenda.js');
+    const post = fakeRes();
+    await agenda.default({ method: 'POST', headers: {}, query: {} }, post);
+    t.equal(post.statusCode, 405, 'nothing can be written through it');
+
+    const get = fakeRes();
+    await agenda.default({ method: 'GET', headers: {}, query: {} }, get);
+    t.equal(get.statusCode, 200, 'and a read works with no session');
+    t.assert(Array.isArray(get.body.agenda), 'returning an agenda');
+  });
+
+  await t.test('the speak form cannot confirm itself onto the program', async () => {
+    const speak = await import('../api/concontrol/speak.js');
+    const res = fakeRes();
+    await speak.default({
+      method: 'POST', headers: {},
+      body: {
+        name: 'Matt Richardson', email: 'matt@atonal.test', company: 'Atonal Headwear',
+        topic: 'Hat decorating',
+        status: 'confirmed', materials: { bio: { state: 'done' } },
+      },
+    }, res);
+    t.equal(res.statusCode, 201, 'the proposal is recorded');
+    const rec = await getSpeaker(res.body.id);
+    t.equal(rec.status, 'proposed', 'not confirmed');
+    t.equal(rec.materials.bio.state, 'open', 'and nothing marked received');
+    t.equal(rec.source, 'speak-form', 'stamped as coming from the form');
+  });
+
+  await t.test('the same speaker submitting twice updates rather than duplicating', async () => {
+    const speak = await import('../api/concontrol/speak.js');
+    const before = (await listSpeakers('FOC27')).length;
+    const res = fakeRes();
+    await speak.default({
+      method: 'POST', headers: {},
+      body: { name: 'Matt R', email: 'MATT@ATONAL.TEST', topic: 'Another idea' },
+    }, res);
+    t.equal(res.body.duplicate, true, 'matched on email, case ignored');
+    t.equal((await listSpeakers('FOC27')).length, before, 'no second record');
+  });
+
+  await t.test('a filled honeypot on the speak form writes nothing', async () => {
+    const speak = await import('../api/concontrol/speak.js');
+    const before = (await listSpeakers('FOC27')).length;
+    const res = fakeRes();
+    await speak.default({ method: 'POST', headers: {}, body: { name: 'Bot', email: 'b@b.test', _hp: 'x' } }, res);
+    t.equal(res.statusCode, 200, 'answered cheerfully');
+    t.equal((await listSpeakers('FOC27')).length, before, 'and nothing created');
   });
 
   process.exit(t.report());
