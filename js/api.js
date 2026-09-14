@@ -321,6 +321,8 @@ export const ENDPOINTS = {
   // than being typed into a template from memory.
   conSpeak:         '/api/concontrol/speak',
   conAgenda:        '/api/concontrol/agenda',
+  // One-time imports, admin only. Last year's survey, last year's sponsors.
+  conSeed:          '/api/concontrol/seed',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',

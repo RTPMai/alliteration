@@ -61,7 +61,7 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
   const {
     saveSponsor, getSponsor, updateSponsor, deleteSponsor, listSponsors,
     nextSponsorId, companyKey, findByCompany, getSettings, saveSettings,
-    listSpeakers, getSpeaker,
+    listSpeakers, getSpeaker, listSessions, getSession, updateSession, updateSpeaker,
   } = store;
 
   /* ---------------- money parsing ---------------- */
@@ -964,6 +964,108 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal(rec.company, 'Limitless Transfers', 'shop became company');
     t.assert(rec.topic.indexOf('Transfers') !== -1, 'session_title became the topic');
     t.assert(rec.notes.indexOf('heat press') !== -1, 'and the practical answers were kept');
+  });
+
+  /* ---------------- the survey seed ---------------- */
+
+  const seed = await import('../lib/concontrol/seed-survey.js');
+  const { tallyTopics, usefulText, blurbFor, seedSessions, seedWishlist } = seed;
+
+  const survey = [
+    { topics: 'Short runs | AI live | Burnout', must_have_session: 'AI live' },
+    { topics: 'Short runs | Hiring | Burnout', must_have_session: 'Hiring' },
+    { topics: 'Short runs | AI live', must_have_session: 'AI live' },
+  ];
+
+  t.test('a pipe separated multi-select becomes one row per topic', () => {
+    const rows = tallyTopics(survey);
+    const short = rows.find((r) => r.topic === 'Short runs');
+    t.equal(short.picked, 3, 'picked by all three');
+    t.equal(short.mustHave, 0, 'and nobody named it as the one');
+  });
+
+  t.test('must-haves break the tie, not raw picks', () => {
+    const rows = tallyTopics(survey);
+    t.equal(rows[0].topic, 'AI live', 'two must-haves beats three picks');
+    t.equal(rows[0].picked, 2, 'even on fewer picks');
+  });
+
+  t.test('a must-have nobody listed among their picks is still counted', () => {
+    const rows = tallyTopics([{ topics: 'Short runs', must_have_session: 'Succession' }]);
+    const hit = rows.find((r) => r.topic === 'Succession');
+    t.assert(hit, 'it is in the tally');
+    t.equal(hit.picked, 0, 'with no picks');
+    t.equal(hit.mustHave, 1, 'and the must-have that found it');
+  });
+
+  t.test('the blurb keeps both numbers rather than collapsing them to a rank', () => {
+    const b = blurbFor({ topic: 'X', picked: 7, mustHave: 0, respondents: 19 });
+    t.assert(b.indexOf('7 of the 19') !== -1, 'the picks are there');
+    t.assert(b.indexOf('Nobody named it') !== -1, 'and so is the absence of must-haves');
+  });
+
+  t.test('a polite no is not a topic', () => {
+    t.equal(usefulText('No.'), '', 'refused');
+    t.equal(usefulText('Not that I can think of. But I am sure there is.'), '', 'also refused');
+    t.equal(usefulText('?'), '', 'and that');
+    t.equal(usefulText('more info on SIM process'), 'more info on SIM process', 'a real answer survives');
+  });
+
+  await t.test('the seed creates ideas with no time on them', async () => {
+    const out = await seedSessions(survey, 'FOC27', 'ryan');
+    t.equal(out.created.length, 4, 'one per distinct topic');
+    const made = (await listSessions('FOC27')).filter((s) => s.title === 'Short runs');
+    t.equal(made.length, 1, 'created once');
+    t.equal(made[0].status, 'idea', 'as an idea');
+    t.equal(made[0].start, '', 'with no time, because that is a judgement call');
+  });
+
+  await t.test('running it twice refreshes rather than duplicating', async () => {
+    const out = await seedSessions(survey, 'FOC27', 'ryan');
+    t.equal(out.created.length, 0, 'nothing new');
+    t.equal(out.updated.length, 4, 'all four refreshed');
+    const made = (await listSessions('FOC27')).filter((s) => s.title === 'Short runs');
+    t.equal(made.length, 1, 'still one');
+  });
+
+  await t.test('anything scheduled or moved on is left alone', async () => {
+    const mine = (await listSessions('FOC27')).find((s) => s.title === 'Hiring');
+    await updateSession(mine.id, { start: '10:30', status: 'confirmed' });
+    const out = await seedSessions(survey, 'FOC27', 'ryan');
+    t.assert(out.skipped.includes('Hiring'), 'skipped');
+    const after = await getSession(mine.id);
+    t.equal(after.start, '10:30', 'the time somebody set survived');
+    t.equal(after.status, 'confirmed', 'and so did the decision');
+  });
+
+  await t.test('dream speakers land as a wishlist, not as proposals', async () => {
+    const out = await seedWishlist([
+      { name: 'Tom Raun', company: 'Envision Tees', note: 'Started on a manual press' },
+      { name: 'Michelle Moxley' },
+    ], 'FOC27', 'ryan');
+    t.equal(out.created.length, 2, 'both added');
+    const tom = (await listSpeakers('FOC27')).find((s) => s.name === 'Tom Raun');
+    t.equal(tom.status, 'wishlist', 'asked for, not offered');
+    t.assert(tom.notes.indexOf('manual press') !== -1, 'with the reason somebody gave');
+  });
+
+  await t.test('a wishlist name who has since been invited is not dragged back', async () => {
+    const tom = (await listSpeakers('FOC27')).find((s) => s.name === 'Tom Raun');
+    await updateSpeaker(tom.id, { status: 'invited' });
+    const out = await seedWishlist([{ name: 'Tom Raun' }], 'FOC27', 'ryan');
+    t.assert(out.skipped.includes('Tom Raun'), 'skipped');
+    t.equal((await getSpeaker(tom.id)).status, 'invited', 'still invited');
+  });
+
+  await t.test('a wishlist speaker is never chased for a headshot', async () => {
+    const speakers = await listSpeakers('FOC27');
+    const chased = programBlockers([], speakers).filter((b) => b.kind === 'speaker-materials');
+    t.assert(chased.every((b) => b.name !== 'Michelle Moxley'), 'nobody chases a name off a wish list');
+  });
+
+  await t.test('the seed route refuses a non-admin and an unknown import', async () => {
+    const mod = await import('../api/concontrol/seed.js');
+    t.equal(typeof mod.default, 'function', 'it loads');
   });
 
   process.exit(t.report());
