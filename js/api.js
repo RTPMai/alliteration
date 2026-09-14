@@ -323,6 +323,9 @@ export const ENDPOINTS = {
   conAgenda:        '/api/concontrol/agenda',
   // One-time imports, admin only. Last year's survey, last year's sponsors.
   conSeed:          '/api/concontrol/seed',
+  // What people sent us: survey answers, notify signups, and the inbound end
+  // of the sponsor and speaker streams.
+  conResponses:     '/api/concontrol/responses',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',

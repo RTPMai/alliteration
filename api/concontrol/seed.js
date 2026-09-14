@@ -1,6 +1,13 @@
 // api/concontrol/seed.js — one-time imports, admin only.
 //
-// POST { what: "survey" }    session ideas from the FOC26 audience survey
+// POST { what: "survey" }    session ideas straight from the FOC26 survey.
+//                            NOT offered as a button any more: the survey
+//                            belongs in Responses, where a person reads it and
+//                            presses "make a session idea" on the rows they
+//                            want. Creating twenty-six at once put a program on
+//                            the board that nobody had agreed to. Kept as a
+//                            route for the case where somebody really does want
+//                            the lot.
 // POST { what: "wishlist" }  the dream-speaker answers, as a wishlist
 // POST { what: "sponsors" }  FOC26's sponsors as FOC27 prospects
 //

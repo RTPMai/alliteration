@@ -1148,6 +1148,115 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal(back.tiers[0].name, 'Presenting', 'no splitting where there is nothing to split');
   });
 
+  /* ---------------- responses ---------------- */
+
+  const resp = await import('../lib/concontrol/responses.js');
+  const {
+    parseCsv, rowsFromCsv, newResponse, newSignup, summarise, tally, quotes,
+    topicDemand, isRealAnswer, responseKey, signupIsUsable, SURVEY_QUESTIONS,
+  } = resp;
+
+  t.test('a comma inside an answer does not shift every column after it', () => {
+    const grid = parseCsv('name,note\n"Ryan","Pricing, and, commas"\n');
+    t.equal(grid[1].length, 2, 'two fields, not four');
+    t.equal(grid[1][1], 'Pricing, and, commas', 'the sentence survived whole');
+  });
+
+  t.test('a quote and a line break inside an answer survive too', () => {
+    const grid = parseCsv('a,b\n"he said ""no""","line one\nline two"\n');
+    t.equal(grid[1][0], 'he said "no"', 'doubled quotes unescape');
+    t.assert(grid[1][1].indexOf('\n') !== -1, 'the line break is kept inside the field');
+    t.equal(grid.length, 2, 'and did not start a new row');
+  });
+
+  t.test('a column this app has never heard of is kept, not dropped', () => {
+    const { rows, unknown } = rowsFromCsv('name,brand_new_question\nRyan,something\n');
+    t.equal(rows[0].brand_new_question, 'something', 'the answer is there');
+    t.assert(unknown.includes('brand_new_question'), 'and it is reported so somebody notices');
+  });
+
+  t.test('a polite non-answer is left out of the findings', () => {
+    t.equal(isRealAnswer('No.'), false, 'refused');
+    t.equal(isRealAnswer('?'), false, 'and that');
+    t.equal(isRealAnswer('Unsure.'), false, 'and that');
+    t.assert(isRealAnswer('more info on SIM process'), 'a real answer stays');
+  });
+
+  const sample = [
+    { topics: 'A | B | C', must_have_session: 'A', price: '$50 is right', missing_topic: 'Fundraising', name: 'Pat', company: 'Pat Co', email: 'pat@x.test', submitted_at: '2026-08-26T10:00:00Z' },
+    { topics: 'B | C', must_have_session: 'B', price: '$50 is right', missing_topic: 'No.', name: 'Sam', company: 'Sam Co', email: 'sam@x.test', submitted_at: '2026-08-27T10:00:00Z' },
+    { topics: 'B', must_have_session: 'B', price: 'I would pay $100', name: 'Jo', email: 'jo@x.test', submitted_at: '2026-08-28T10:00:00Z' },
+  ].map((a, i) => newResponse('RS-' + i, 'FOC27', 'survey', a, 'csv'));
+
+  t.test('a count is out of the people who answered that question, not everybody', () => {
+    const block = tally(sample, 'price');
+    t.equal(block.answered, 3, 'all three answered price');
+    const missing = tally(sample, 'missing_topic');
+    t.equal(missing, null, 'free text is never counted');
+  });
+
+  t.test('topic demand keeps both numbers side by side', () => {
+    const d = topicDemand(sample);
+    t.equal(d.rows[0].topic, 'B', 'two must-haves first');
+    t.equal(d.rows[0].picked, 3, 'picked by all three');
+    const c = d.rows.find((r) => r.topic === 'C');
+    t.equal(c.mustHave, 0, 'and a topic nobody must-haved still shows');
+  });
+
+  t.test('free text is listed with who said it, minus the noise', () => {
+    const block = quotes(sample, 'missing_topic');
+    t.equal(block.answered, 1, 'one real answer, the "No." dropped');
+    t.equal(block.rows[0].who, 'Pat', 'attributed');
+    t.equal(block.rows[0].shop, 'Pat Co', 'with their shop');
+  });
+
+  t.test('the summary is generated from the catalog, so a new question appears', () => {
+    const sum = summarise(sample);
+    t.equal(sum.respondents, 3, 'three responses');
+    t.assert(sum.headline.length > 0, 'the headline questions are there');
+    t.assert(sum.text.some((b) => b.key === 'missing_topic'), 'and the free text');
+    const keys = SURVEY_QUESTIONS.map((q) => q.key);
+    t.assert(keys.indexOf('topics') < keys.indexOf('price'), 'in the catalog order');
+  });
+
+  t.test('an anonymous responder still has a name to show', () => {
+    const rec = newResponse('RS-9', 'FOC27', 'survey', { email: 'x@y.test' }, 'csv');
+    t.equal(resp.responderName(rec), 'x@y.test', 'falls back to the email');
+    t.equal(resp.responderName(newResponse('RS-8', 'FOC27', 'survey', {}, 'csv')), 'Anonymous', 'then to Anonymous');
+  });
+
+  t.test('the same shop answering two different surveys is two responses', () => {
+    const a = responseKey({ email: 'r@x.test', submitted_at: '2024-01-01' });
+    const b = responseKey({ email: 'r@x.test', submitted_at: '2026-08-26' });
+    t.assert(a !== b, 'email alone would have folded them together');
+  });
+
+  t.test('an email with no name is still a usable signup', () => {
+    t.assert(signupIsUsable({ email: 'printzall@yahoo.com' }), 'the two stranded ones are not refused');
+    t.equal(signupIsUsable({ name: 'Somebody' }), false, 'but an email is required');
+    t.equal(signupIsUsable({ email: 'nope' }), false, 'and it has to be one');
+  });
+
+  t.test('a signup keeps only the four fields it is', () => {
+    const rec = newSignup('NS-1', 'FOC27', { email: 'A@B.TEST', name: 'A', city_state: 'Ames', secret: 'x' }, 'csv');
+    t.equal(rec.answers.email, 'a@b.test', 'lowercased');
+    t.equal('secret' in rec.answers, false, 'and nothing else carried over');
+  });
+
+  await t.test('the responses route loads and gates', async () => {
+    const mod = await import('../api/concontrol/responses.js');
+    t.equal(typeof mod.default, 'function', 'it loads');
+    const src = await import('fs').then((fs) => fs.readFileSync('api/concontrol/responses.js', 'utf8'));
+    t.assert(src.indexOf('read-only accounts') !== -1, 'and refuses read-only accounts in words');
+  });
+
+  t.test('promoting is one topic at a time, not the lot', () => {
+    const fs = require('fs');
+    const app = fs.readFileSync('apps/concontrol.js', 'utf8');
+    t.assert(app.indexOf('data-promote') !== -1, 'a button per row');
+    t.equal(app.indexOf('data-seed="survey"'), -1, 'and the bulk survey button is gone');
+  });
+
   process.exit(t.report());
 })();
 

@@ -433,6 +433,7 @@ export const APPS = [
     // event data, not accounts.
     views: [
       ['home', 'Home'],
+      ['responses', 'Responses'],
       ['sponsors', 'Sponsors'],
       ['money', 'Money'],
       ['sessions', 'Sessions'],

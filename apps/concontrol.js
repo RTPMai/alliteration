@@ -34,6 +34,9 @@ import {
   ENTRY_KINDS, ENTRY_STATES, ENTRY_STATE_LABELS,
 } from '../lib/concontrol/ledger.js';
 import {
+  responderName, responderShop, SURVEY_QUESTIONS,
+} from '../lib/concontrol/responses.js';
+import {
   TRACKS, FORMATS, SESSION_STATUSES, SESSION_STATUS_LABELS,
   SPEAKER_STATUSES, SPEAKER_STATUS_LABELS, SPEAKER_MATERIALS,
   materialStates, materialProgress,
@@ -57,7 +60,10 @@ const state = {
   canEditSettings: false,
   // Money is gated separately: a read-only account cannot see the budget.
   moneyDenied: false,
-  loaded: { sponsors: false, money: false, program: false },
+  loaded: { sponsors: false, money: false, program: false, responses: false },
+  responses: { inquiries: [], proposals: [], survey: [], signups: [], summary: null },
+  responsesDenied: false,
+  responseTab: 'survey',
   filter: 'all',
   search: '',
   error: null,
@@ -254,6 +260,15 @@ export default {
         <div id="conSpeakerBody"></div>
       </section>
 
+      <section class="con-pane" data-pane="responses">
+        <div class="con-bar">
+          <span id="conRespTabs"></span>
+          <span class="con-spacer"></span>
+          <button class="con-btn ghost" id="conImportOpen">Import from the sheet</button>
+        </div>
+        <div id="conRespBody"></div>
+      </section>
+
       <section class="con-pane" data-pane="settings">
         <div id="conSettingsBody"></div>
       </section>
@@ -281,6 +296,13 @@ export default {
     root.querySelector('#conNewEntry').addEventListener('click', () => entryDrawer(null));
     root.querySelector('#conNewSession').addEventListener('click', () => sessionDrawer(null));
     root.querySelector('#conNewSpeaker').addEventListener('click', () => speakerDrawer(null));
+    root.querySelector('#conImportOpen').addEventListener('click', () => importDrawer());
+    root.querySelector('#conRespTabs').addEventListener('click', (e) => {
+      const t = e.target.closest('[data-rtab]');
+      if (!t) return;
+      state.responseTab = t.dataset.rtab;
+      renderResponses();
+    });
 
     wireExport('#conExportSponsors', 'sponsors');
     wireExport('#conExportSignage', 'signage');
@@ -301,6 +323,7 @@ export default {
     // mount. Opening Sponsors should not pay for the ledger and the program.
     if (view === 'money' && !state.loaded.money) loadMoney();
     if ((view === 'sessions' || view === 'speakers') && !state.loaded.program) loadProgram();
+    if (view === 'responses' && !state.loaded.responses) loadResponses();
     if (view === 'settings') loadSettings();
     if (view === 'home') renderHome();
   },
@@ -844,19 +867,17 @@ function renderSettings() {
     <div class="con-left" style="max-width:640px">
       <h4>Start from last year</h4>
       <div class="con-note" style="margin-bottom:10px">
-        Three one-time imports, each safe to run twice. Nothing is duplicated on
-        a second run, and anything you have edited, scheduled or confirmed since
-        is left alone.
+        Two one-time imports, each safe to run twice. Nothing is duplicated on a
+        second run, and anything you have edited or moved on since is left alone.
+        The survey is NOT here: it lands in Responses, where you read it and
+        decide what becomes a session.
       </div>
       <div class="con-slots">
-        <button class="con-slot" data-seed="survey">Session ideas from the FOC26 survey</button>
         <button class="con-slot" data-seed="wishlist">Speakers people asked for</button>
         <button class="con-slot" data-seed="sponsors">FOC26 sponsors as prospects</button>
       </div>
       <div id="conSeedMsg" style="margin-top:10px"></div>
       <div class="con-note" style="margin-top:8px">
-        The session ideas arrive with no day and no time on them. How many of
-        twenty-six topics fit into two days is your call, not an importer's.
         Prior-year sponsors arrive with no committed amount: they sponsored last
         year, they have not agreed to anything for this one.
       </div>
@@ -962,6 +983,340 @@ async function runSeed(button, what) {
 
   button.disabled = false;
   button.textContent = label;
+}
+
+
+/* ------------------------------------------------------------------ *
+ * RESPONSES
+ *
+ * Four streams, four tabs. Nothing here writes to the program by itself: a
+ * topic becomes a session idea when somebody presses the button on its row,
+ * which is the whole reason this screen exists rather than an importer.
+ * ------------------------------------------------------------------ */
+
+async function loadResponses() {
+  try {
+    const data = await ctx.api.get(ENDPOINTS.conResponses);
+    state.responses = data;
+    state.responsesDenied = false;
+    state.loaded.responses = true;
+  } catch (e) {
+    if (e.status === 403) state.responsesDenied = true;
+    else showError(e.message || 'Could not load responses');
+  }
+  renderResponses();
+}
+
+const RESP_TABS = [
+  ['survey', 'Survey'],
+  ['inquiries', 'Sponsor inquiries'],
+  ['proposals', 'Speaker proposals'],
+  ['signups', 'Notify list'],
+];
+
+function renderResponses() {
+  const tabs = ctx.root.querySelector('#conRespTabs');
+  const body = ctx.root.querySelector('#conRespBody');
+  if (!tabs) return;
+
+  if (state.responsesDenied) {
+    tabs.innerHTML = '';
+    body.innerHTML = '<div class="con-empty"><h3>Not your screen</h3><p>People wrote candidly about their own shops here, so responses are not open to read-only accounts.</p></div>';
+    return;
+  }
+
+  const r = state.responses;
+  const counts = {
+    survey: (r.survey || []).length,
+    inquiries: (r.inquiries || []).length,
+    proposals: (r.proposals || []).length,
+    signups: (r.signups || []).length,
+  };
+
+  tabs.innerHTML = RESP_TABS.map(([k, label]) =>
+    `<button class="con-chip${state.responseTab === k ? ' on' : ''}" data-rtab="${k}">${esc(label)} ${counts[k]}</button>`
+  ).join(' ');
+
+  if (state.responseTab === 'survey') return renderSurvey(body);
+  if (state.responseTab === 'inquiries') return renderInquiries(body);
+  if (state.responseTab === 'proposals') return renderProposals(body);
+  return renderSignups(body);
+}
+
+/**
+ * The survey, laid out in the order the question catalog declares.
+ *
+ * Generated, not hand written, so a question added to the form next year shows
+ * up here correctly without anybody editing this file.
+ */
+function renderSurvey(body) {
+  const sum = state.responses.summary;
+  const rows = state.responses.survey || [];
+
+  if (!rows.length) {
+    body.innerHTML = '<div class="con-empty"><h3>No survey responses yet</h3><p>Export the Responses tab from the sheet and paste it in with Import from the sheet.</p></div>';
+    return;
+  }
+
+  const acted = new Set();
+  for (const rec of rows) for (const t of (rec.actedOn || [])) acted.add(t);
+
+  const demand = (sum && sum.topics) || { rows: [], respondents: rows.length };
+
+  const topicTable = `
+    <div class="con-left">
+      <h4>What to teach, as ${demand.respondents} shops asked for it</h4>
+      <div class="con-note" style="margin-bottom:8px">
+        Picked is how many chose it among their five. Must-have is how many named
+        it as the one session they would not miss. The two disagree in useful
+        ways, so they are not collapsed into a rank.
+      </div>
+      <table class="con-table">
+        <thead><tr><th>Topic</th><th class="con-num">Picked</th><th class="con-num">Must-have</th><th></th></tr></thead>
+        <tbody>
+          ${demand.rows.map((row) => `
+            <tr>
+              <td>${esc(row.topic)}</td>
+              <td class="con-num">${row.picked}</td>
+              <td class="con-num">${row.mustHave ? '<strong>' + row.mustHave + '</strong>' : '<span style="opacity:.4">0</span>'}</td>
+              <td class="con-num">${acted.has(row.topic)
+                ? '<span class="con-pip done">On the program</span>'
+                : (state.responses.canEdit ? `<button class="con-slot" data-promote="${esc(row.topic)}">Make a session idea</button>` : '')}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  const countBlocks = [].concat(sum.headline || [], sum.counts || [])
+    .filter((b) => b.key !== 'topics' && b.key !== 'must_have_session')
+    .map((b) => `
+      <div class="con-left">
+        <h4>${esc(b.label)} · ${b.answered} answered</h4>
+        <table class="con-table">
+          <tbody>
+            ${b.rows.map((row) => `
+              <tr>
+                <td>${esc(row.value)}</td>
+                <td class="con-num" style="width:60px">${row.count}</td>
+                <td style="width:120px">
+                  <div class="con-meter"><i style="width:${Math.round(row.share * 100)}%"></i></div>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>`).join('');
+
+  const textBlocks = (sum.text || []).map((b) => `
+    <div class="con-left">
+      <h4>${esc(b.label)} · ${b.answered} answered</h4>
+      ${b.rows.map((row) => `
+        <div class="con-row" style="align-items:flex-start">
+          <span style="flex:1">${esc(row.text)}</span>
+          <span class="con-note" style="white-space:nowrap">${esc(row.who)}${row.shop ? ', ' + esc(row.shop) : ''}</span>
+        </div>`).join('')}
+    </div>`).join('');
+
+  const people = `
+    <div class="con-left">
+      <h4>Who answered</h4>
+      <table class="con-table">
+        <tbody>
+          ${rows.map((rec) => `
+            <tr data-open-response="${esc(rec.id)}">
+              <td><strong>${esc(responderName(rec))}</strong></td>
+              <td>${esc(responderShop(rec))}</td>
+              <td class="con-note">${esc(prettyDate(rec.submittedAt))}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+
+  body.innerHTML = topicTable + countBlocks + textBlocks + people;
+
+  body.querySelectorAll('[data-promote]').forEach((el) => {
+    el.addEventListener('click', () => promoteTopic(el, el.dataset.promote));
+  });
+  body.querySelectorAll('[data-open-response]').forEach((el) => {
+    el.style.cursor = 'pointer';
+    el.addEventListener('click', () => responseDrawer(el.dataset.openResponse));
+  });
+}
+
+async function promoteTopic(button, topic) {
+  button.disabled = true;
+  button.textContent = 'Adding…';
+  try {
+    await ctx.api.post(ENDPOINTS.conResponses, { what: 'promote', topic });
+    state.loaded.program = false;
+    await loadResponses();
+    await loadProgram();
+  } catch (e) {
+    showError(e.message || 'Could not add that');
+    button.disabled = false;
+    button.textContent = 'Make a session idea';
+  }
+}
+
+function renderInquiries(body) {
+  const rows = state.responses.inquiries || [];
+  if (!rows.length) {
+    body.innerHTML = '<div class="con-empty"><h3>No open sponsor inquiries</h3><p>Anything arriving from the sponsor page lands here until somebody moves it on.</p></div>';
+    return;
+  }
+  body.innerHTML = `
+    <div class="con-left">
+      <table class="con-table">
+        <thead><tr><th>Company</th><th>Contact</th><th>Level asked about</th><th>Arrived</th></tr></thead>
+        <tbody>
+          ${rows.map((s) => `
+            <tr data-open-sponsor="${esc(s.id)}">
+              <td><strong>${esc(s.company)}</strong></td>
+              <td>${esc(s.contactName || s.email)}</td>
+              <td>${esc(s.tier) || '<span style="opacity:.5">not said</span>'}</td>
+              <td class="con-note">${esc(prettyDate(s.createdAt))}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  body.querySelectorAll('[data-open-sponsor]').forEach((el) => {
+    el.addEventListener('click', () => { ctx.go('sponsors'); sponsorDrawer(el.dataset.openSponsor); });
+  });
+}
+
+function renderProposals(body) {
+  const rows = state.responses.proposals || [];
+  if (!rows.length) {
+    body.innerHTML = '<div class="con-empty"><h3>No open proposals</h3><p>Anything arriving from the call for speakers lands here, alongside the names people asked for.</p></div>';
+    return;
+  }
+  body.innerHTML = `
+    <div class="con-left">
+      <table class="con-table">
+        <thead><tr><th>Name</th><th>Shop</th><th>What they want to teach</th><th></th></tr></thead>
+        <tbody>
+          ${rows.map((k) => `
+            <tr data-open-speaker="${esc(k.id)}">
+              <td><strong>${esc(k.name)}</strong></td>
+              <td>${esc(k.company)}</td>
+              <td>${esc((k.topic || '').slice(0, 90))}${(k.topic || '').length > 90 ? '…' : ''}</td>
+              <td class="con-note">${esc(SPEAKER_STATUS_LABELS[k.status] || k.status)}</td>
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+  body.querySelectorAll('[data-open-speaker]').forEach((el) => {
+    el.addEventListener('click', () => { ctx.go('speakers'); speakerDrawer(el.dataset.openSpeaker); });
+  });
+}
+
+function renderSignups(body) {
+  const rows = state.responses.signups || [];
+  if (!rows.length) {
+    body.innerHTML = '<div class="con-empty"><h3>Nobody on the notify list yet</h3><p>Paste the sheet tab in with Import from the sheet.</p></div>';
+    return;
+  }
+  body.innerHTML = `
+    <div class="con-left">
+      <div class="con-note" style="margin-bottom:8px">
+        These people asked to be told about FOC27. They belong in MailMe's Flyover
+        Con list as well; this is the record of who asked and when.
+      </div>
+      <table class="con-table">
+        <thead><tr><th>Name</th><th>Email</th><th>Where</th><th>Asked</th></tr></thead>
+        <tbody>
+          ${rows.map((r) => {
+            const a = r.answers || {};
+            return `
+            <tr>
+              <td>${esc(a.name) || '<span style="opacity:.5">not given</span>'}</td>
+              <td>${esc(a.email)}</td>
+              <td>${esc(a.city_state) || '<span style="opacity:.5">not given</span>'}</td>
+              <td class="con-note">${esc(prettyDate(r.submittedAt))}</td>
+            </tr>`;
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+/** One person's whole survey, every question they answered, as they wrote it. */
+function responseDrawer(id) {
+  const rec = (state.responses.survey || []).find((r) => r.id === id);
+  if (!rec) return;
+  const a = rec.answers || {};
+
+  const blocks = SURVEY_QUESTIONS
+    .filter((q) => q.kind !== 'contact' && String(a[q.key] || '').trim())
+    .map((q) => `
+      <div class="con-sec">
+        <h4>${esc(q.label)}</h4>
+        <div style="font-size:13px;color:var(--ink);line-height:1.6">
+          ${q.kind === 'multi'
+            ? String(a[q.key]).split('|').map((x) => `<div>${esc(x.trim())}</div>`).join('')
+            : esc(a[q.key])}
+        </div>
+      </div>`).join('');
+
+  openDrawerHtml(
+    responderName(rec),
+    [responderShop(rec), a.city_state, prettyDate(rec.submittedAt)].filter(Boolean).join(' · '),
+    `${a.email ? `<div class="con-note">${esc(a.email)}</div>` : ''}
+     ${blocks}
+     <div class="con-actions"><button class="con-btn ghost" data-close>Close</button></div>`
+  );
+}
+
+/** Paste the sheet export. See the route for why this is not a file in the repo. */
+function importDrawer() {
+  openDrawerHtml('Import from the sheet', null, `
+    <div class="con-sec">
+      <div class="con-note" style="margin-bottom:10px">
+        In the Google Sheet, File, Download, Comma separated values, then open
+        the file and paste the whole thing here. Safe to paste the same export
+        twice: a response already here is matched on email and time and skipped.
+      </div>
+      <div class="con-field">
+        <label>Which tab</label>
+        <select id="imp_kind">
+          <option value="import-survey">Responses, the survey</option>
+          <option value="import-signups">Notify, the mailing list</option>
+        </select>
+      </div>
+      <div class="con-field">
+        <label>Paste the CSV</label>
+        <textarea id="imp_csv" style="min-height:220px;font-family:monospace;font-size:12px"></textarea>
+      </div>
+      <div id="impMsg"></div>
+      <div class="con-actions">
+        <button class="con-btn" id="impRun">Import</button>
+        <button class="con-btn ghost" data-close>Close</button>
+      </div>
+    </div>`);
+
+  drawerHost().querySelector('#impRun').addEventListener('click', async () => {
+    const msg = ctx.root.querySelector('#impMsg');
+    const csv = ctx.root.querySelector('#imp_csv').value;
+    if (!csv.trim()) { msg.innerHTML = '<div class="con-err">Paste the CSV first.</div>'; return; }
+    msg.innerHTML = '<div class="con-note">Working…</div>';
+    try {
+      const res = await ctx.api.post(ENDPOINTS.conResponses, {
+        what: ctx.root.querySelector('#imp_kind').value,
+        csv,
+      });
+      const bits = [`${res.created} added`];
+      if (res.duplicate) bits.push(`${res.duplicate} already here`);
+      if (res.empty) bits.push(`${res.empty} blank`);
+      if (res.unusable) bits.push(`${res.unusable} with no usable email`);
+      msg.innerHTML = `<div class="con-ok">${esc(bits.join(', '))}.${
+        res.unknownColumns && res.unknownColumns.length
+          ? ' Kept columns this app does not know about: ' + esc(res.unknownColumns.join(', ')) + '.'
+          : ''}</div>`;
+      state.loaded.responses = false;
+      await loadResponses();
+    } catch (e) {
+      msg.innerHTML = `<div class="con-err">${esc(e.message || 'Import failed')}</div>`;
+    }
+  });
 }
 
 /* ------------------------------------------------------------------ *
