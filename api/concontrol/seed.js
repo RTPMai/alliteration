@@ -1,8 +1,15 @@
 // api/concontrol/seed.js — one-time imports, admin only.
 //
-// POST { what: "survey", rows: [...] }     session ideas from the audience survey
-// POST { what: "wishlist", names: [...] }  the dream-speaker answers
-// POST { what: "sponsors", rows: [...] }   last year's sponsors as this year's prospects
+// POST { what: "survey" }    session ideas from the FOC26 audience survey
+// POST { what: "wishlist" }  the dream-speaker answers, as a wishlist
+// POST { what: "sponsors" }  FOC26's sponsors as FOC27 prospects
+//
+// The data ships with the app (lib/concontrol/foc26-survey.js), so the body is
+// three words and Settings has a button. The first version took its rows in
+// the request, which meant the deploy landed and nothing happened because
+// nobody was going to paste six kilobytes of JSON into a console. Rows and
+// names ARE still accepted for a future event's import; leaving them out uses
+// what shipped.
 //
 // WHY A ROUTE AND NOT A SCRIPT. A script would need the Upstash credentials on
 // somebody's laptop, which is a worse place for them than Vercel. This runs
@@ -20,6 +27,7 @@ import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import { newSponsor, historyEntry, DEFAULT_EVENT } from "../../lib/concontrol/schema.js";
 import { seedSessions, seedWishlist } from "../../lib/concontrol/seed-survey.js";
+import { FOC26_RESPONSES, FOC26_WISHLIST, FOC26_SPONSORS } from "../../lib/concontrol/foc26-survey.js";
 import {
   getSettings, findByCompany, saveSponsor, nextSponsorId,
 } from "../../lib/concontrol/store.js";
@@ -90,18 +98,18 @@ export default async function handler(req, res) {
     const what = String(b.what || "");
 
     if (what === "survey") {
-      if (!Array.isArray(b.rows)) return res.status(400).json({ error: "rows must be a list of survey responses" });
-      return res.status(200).json({ ok: true, ...(await seedSessions(b.rows, event, sess.username)) });
+      const rows = Array.isArray(b.rows) ? b.rows : FOC26_RESPONSES;
+      return res.status(200).json({ ok: true, ...(await seedSessions(rows, event, sess.username)) });
     }
 
     if (what === "wishlist") {
-      if (!Array.isArray(b.names)) return res.status(400).json({ error: "names must be a list" });
-      return res.status(200).json({ ok: true, ...(await seedWishlist(b.names, event, sess.username)) });
+      const names = Array.isArray(b.names) ? b.names : FOC26_WISHLIST;
+      return res.status(200).json({ ok: true, ...(await seedWishlist(names, event, sess.username)) });
     }
 
     if (what === "sponsors") {
-      if (!Array.isArray(b.rows)) return res.status(400).json({ error: "rows must be a list" });
-      return res.status(200).json({ ok: true, ...(await seedSponsors(b.rows, event, sess.username)) });
+      const rows = Array.isArray(b.rows) ? b.rows : FOC26_SPONSORS;
+      return res.status(200).json({ ok: true, ...(await seedSponsors(rows, event, sess.username)) });
     }
 
     return res.status(400).json({ error: `Nothing to import called "${what}"` });

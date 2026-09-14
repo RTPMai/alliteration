@@ -818,10 +818,14 @@ function renderSettings() {
 
       <h4 style="margin-top:20px">Sponsor levels</h4>
       <div class="con-note" style="margin-bottom:8px">One per line: name, amount, places. Leave places blank for unlimited. A sponsor keeps the level name they were sold at, so renaming one here does not rewrite history.</div>
-      <div class="con-field"><textarea id="set_tiers" ${ro ? 'disabled' : ''}>${esc((s.tiers || []).map((t) => [t.name, t.amount === null || t.amount === undefined ? '' : t.amount, t.slots === null || t.slots === undefined ? '' : t.slots].join(', ')).join('\\n'))}</textarea></div>
+      <div class="con-field"><textarea id="set_tiers" ${ro ? 'disabled' : ''}>${esc((s.tiers || []).map((t) => [t.name, t.amount === null || t.amount === undefined ? '' : t.amount, t.slots === null || t.slots === undefined ? '' : t.slots].join(', ')).join('\n'))}</textarea></div>
+
+      ${ro ? '' : '<button class="con-slot" data-defaults="tiers" style="margin-bottom:12px">Refill with the FOC27 levels</button>'}
 
       <h4 style="margin-top:20px">Spend categories</h4>
-      <div class="con-field"><textarea id="set_categories" ${ro ? 'disabled' : ''}>${esc((s.categories || []).join('\\n'))}</textarea></div>
+      <div class="con-field"><textarea id="set_categories" ${ro ? 'disabled' : ''}>${esc((s.categories || []).join('\n'))}</textarea></div>
+
+      ${ro ? '' : '<button class="con-slot" data-defaults="categories" style="margin-bottom:12px">Refill with the default categories</button>'}
 
       <h4 style="margin-top:20px">Who hears about it</h4>
       <div class="con-note" style="margin-bottom:8px">A username. When one is set, a sponsor inquiry or a session proposal from the website raises a notification for that person. Left blank, the record is still saved and nobody is told.</div>
@@ -834,10 +838,52 @@ function renderSettings() {
       <div class="con-actions">
         ${ro ? '<div class="con-note">Event settings are admin only. What is here changes what the whole team sees.</div>' : '<button class="con-btn" id="conSaveSettings">Save settings</button>'}
       </div>
-    </div>`;
+    </div>
+
+    ${ro ? '' : `
+    <div class="con-left" style="max-width:640px">
+      <h4>Start from last year</h4>
+      <div class="con-note" style="margin-bottom:10px">
+        Three one-time imports, each safe to run twice. Nothing is duplicated on
+        a second run, and anything you have edited, scheduled or confirmed since
+        is left alone.
+      </div>
+      <div class="con-slots">
+        <button class="con-slot" data-seed="survey">Session ideas from the FOC26 survey</button>
+        <button class="con-slot" data-seed="wishlist">Speakers people asked for</button>
+        <button class="con-slot" data-seed="sponsors">FOC26 sponsors as prospects</button>
+      </div>
+      <div id="conSeedMsg" style="margin-top:10px"></div>
+      <div class="con-note" style="margin-top:8px">
+        The session ideas arrive with no day and no time on them. How many of
+        twenty-six topics fit into two days is your call, not an importer's.
+        Prior-year sponsors arrive with no committed amount: they sponsored last
+        year, they have not agreed to anything for this one.
+      </div>
+    </div>`}`;
 
   const btn = host.querySelector('#conSaveSettings');
   if (btn) btn.addEventListener('click', saveSettings);
+
+  // Refill, not save. The box is filled and nothing is written until Save is
+  // pressed, so a misclick costs one undo rather than the lineup.
+  host.querySelectorAll('[data-defaults]').forEach((el) => {
+    el.addEventListener('click', () => {
+      if (el.dataset.defaults === 'tiers') {
+        ctx.root.querySelector('#set_tiers').value = SEED_TIERS
+          .map((t) => [t.name, t.amount === null ? '' : t.amount, t.slots === null ? '' : t.slots].join(', '))
+          .join('\n');
+      } else {
+        ctx.root.querySelector('#set_categories').value = SEED_CATEGORIES.join('\n');
+      }
+      ctx.root.querySelector('#conSetMsg').innerHTML =
+        '<div class="con-ok">Filled in. Nothing is saved until you press Save settings.</div>';
+    });
+  });
+
+  host.querySelectorAll('[data-seed]').forEach((el) => {
+    el.addEventListener('click', () => runSeed(el, el.dataset.seed));
+  });
 }
 
 async function saveSettings() {
@@ -847,7 +893,14 @@ async function saveSettings() {
   };
   const msg = ctx.root.querySelector('#conSetMsg');
 
-  const tiers = v('set_tiers').split('\n').map((line) => {
+  // Split on real newlines AND on a literal backslash-n. The textarea used to
+  // be filled with the literal, so a box that has not been retyped since still
+  // holds one long line, and splitting only on newlines would save the whole
+  // lineup as a single tier called "Presenting, 7000, 1\\nGold...". That is
+  // exactly what happened once, and it collapsed five levels into one.
+  const lines = (text) => text.split(/\r?\n|\\n/).map((x) => x.trim()).filter(Boolean);
+
+  const tiers = lines(v('set_tiers')).map((line) => {
     const [name, amount, slots] = line.split(',').map((x) => (x || '').trim());
     return { name, amount: amount === '' ? null : amount, slots: slots === '' ? null : slots };
   }).filter((t) => t.name);
@@ -859,7 +912,7 @@ async function saveSettings() {
     commitBy: v('set_commitBy'),
     budget: v('set_budget') === '' ? null : v('set_budget'),
     tiers,
-    categories: v('set_categories').split('\n').map((x) => x.trim()).filter(Boolean),
+    categories: lines(v('set_categories')),
     inquiryNotifyTo: v('set_inquiryNotifyTo'),
     speakNotifyTo: v('set_speakNotifyTo'),
   };
@@ -873,6 +926,42 @@ async function saveSettings() {
   } catch (e) {
     msg.innerHTML = `<div class="con-err">${esc(e.message || 'Could not save')}</div>`;
   }
+}
+
+/**
+ * Run one of the one-time imports and say in words what it did.
+ *
+ * "Imported" on its own is not a result. Created, refreshed and skipped are
+ * three different outcomes, and on a second run the interesting number is the
+ * skipped one, because that is the importer declining to overwrite a decision
+ * somebody made.
+ */
+async function runSeed(button, what) {
+  const msg = ctx.root.querySelector('#conSeedMsg');
+  const label = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Working…';
+  msg.innerHTML = '';
+
+  try {
+    const res = await ctx.api.post(ENDPOINTS.conSeed, { what });
+    const parts = [];
+    if (res.created && res.created.length) parts.push(`${res.created.length} created`);
+    if (res.updated && res.updated.length) parts.push(`${res.updated.length} refreshed`);
+    if (res.skipped && res.skipped.length) parts.push(`${res.skipped.length} left alone`);
+    msg.innerHTML = `<div class="con-ok">${esc(parts.length ? parts.join(', ') : 'Nothing to do')}${res.skipped && res.skipped.length ? '. Skipped: ' + esc(res.skipped.join(', ')) : '.'}</div>`;
+
+    // The imported records are on other screens, so those caches are now stale.
+    state.loaded.program = false;
+    state.loaded.sponsors = false;
+    await loadSponsors();
+    await loadProgram();
+  } catch (e) {
+    msg.innerHTML = `<div class="con-err">${esc(e.message || 'Import failed')}</div>`;
+  }
+
+  button.disabled = false;
+  button.textContent = label;
 }
 
 /* ------------------------------------------------------------------ *

@@ -1068,6 +1068,86 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal(typeof mod.default, 'function', 'it loads');
   });
 
+  /* ---------------- the data actually ships ---------------- */
+
+  const shipped = await import('../lib/concontrol/foc26-survey.js');
+
+  t.test('the survey ships with the app rather than needing a paste', () => {
+    t.equal(shipped.FOC26_RESPONSES.length, 19, 'nineteen responses');
+    t.assert(shipped.FOC26_WISHLIST.length >= 8, 'and the wishlist names');
+    t.equal(shipped.FOC26_SPONSORS.length, 8, 'and last year\'s eight sponsors');
+  });
+
+  t.test('the shipped responses carry no personal data', () => {
+    const keys = new Set();
+    for (const row of shipped.FOC26_RESPONSES) Object.keys(row).forEach((k) => keys.add(k));
+    t.equal(keys.size, 2, 'two fields only');
+    t.assert(keys.has('topics') && keys.has('must_have_session'), 'the two the tally reads');
+    const json = JSON.stringify(shipped.FOC26_RESPONSES);
+    t.equal(json.indexOf('@'), -1, 'no email address anywhere in it');
+  });
+
+  t.test('the shipped survey tallies to the topics we expect', () => {
+    const rows = tallyTopics(shipped.FOC26_RESPONSES);
+    t.equal(rows.length, 26, 'twenty-six distinct topics');
+    t.equal(rows[0].topic, 'Hiring, training and keeping good people', 'most must-haves first');
+    const burnout = rows.find((r) => r.topic.indexOf('Burnout') === 0);
+    t.equal(burnout.picked, 7, 'burnout was picked seven times');
+    t.equal(burnout.mustHave, 0, 'and named as nobody\'s single session');
+  });
+
+  t.test('every shipped wishlist entry is an actual name', () => {
+    for (const entry of shipped.FOC26_WISHLIST) {
+      t.assert(entry.name && entry.name.trim().length > 2, `"${entry.name}" is a name`);
+    }
+  });
+
+  await t.test('the seed route runs with no payload at all', async () => {
+    // The whole point of this change: a body of three words has to be enough.
+    const mod = await import('../api/concontrol/seed.js');
+    t.equal(typeof mod.default, 'function', 'the route loads');
+    const src = await import('fs').then((fs) => fs.readFileSync('api/concontrol/seed.js', 'utf8'));
+    t.assert(src.indexOf('FOC26_RESPONSES') !== -1, 'and falls back to the shipped data');
+  });
+
+  /* ---------------- the escaped-newline damage ---------------- */
+
+  await t.test('a lineup saved as one escaped line is split back apart on read', async () => {
+    // Exactly what was in storage after the Settings textarea wrote a literal
+    // backslash-n between entries and somebody pressed Save.
+    await saveSettings({
+      tiers: [{ name: 'Presenting, 7000, 1\\nGold, 2500, 3\\nSilver, 1000, ', amount: null, slots: null }],
+      categories: ['Food and drink\\nVideo and photo\\nVenue and setup'],
+    });
+    const back = await getSettings();
+
+    t.equal(back.tiers.length, 3, 'three levels came back, not one');
+    t.equal(back.tiers[0].name, 'Presenting', 'names are names again');
+    t.equal(back.tiers[0].amount, 7000, 'with their amounts');
+    t.equal(back.tiers[1].slots, 3, 'and their places');
+    t.equal(back.tiers[2].slots, null, 'a blank places field is unlimited, not zero');
+
+    t.equal(back.categories.length, 3, 'three categories came back');
+    t.equal(back.categories[0], 'Food and drink', 'cleanly');
+  });
+
+  await t.test('a healthy lineup is left exactly alone by the repair', async () => {
+    await saveSettings({
+      tiers: [{ name: 'Presenting', amount: 7000, slots: 1 }, { name: 'Gold', amount: 2500, slots: 3 }],
+      categories: ['Food and drink', 'Video and photo'],
+    });
+    const back = await getSettings();
+    t.equal(back.tiers.length, 2, 'still two');
+    t.equal(back.tiers[0].slots, 1, 'untouched');
+    t.equal(back.categories.length, 2, 'and two categories');
+  });
+
+  await t.test('a level name that legitimately has a comma in it survives a save', async () => {
+    await saveSettings({ tiers: [{ name: 'Presenting', amount: 7000, slots: 1 }] });
+    const back = await getSettings();
+    t.equal(back.tiers[0].name, 'Presenting', 'no splitting where there is nothing to split');
+  });
+
   process.exit(t.report());
 })();
 
