@@ -14,7 +14,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import {
-  sponsorMoney, deliverableStates, obligationStates, momentLabel,
+  sponsorMoney, deliverableStates, obligationStates, momentLabel, PAYMENT_KIND_LABELS,
   STATUS_LABELS, DEFAULT_EVENT,
 } from "../../lib/concontrol/schema.js";
 import { ENTRY_STATE_LABELS } from "../../lib/concontrol/ledger.js";
@@ -71,8 +71,8 @@ export default async function handler(req, res) {
     if (what === "sponsors") {
       const sponsors = await listSponsors(event);
       headers = ["Id", "Company", "Contact", "Email", "Phone", "Level", "Status",
-        "Committed", "Invoiced", "Invoice number", "Paid", "Outstanding",
-        "Moments", "They owe us", "We owe them", "Notes"];
+        "Committed", "Invoiced", "Invoice number", "Paid", "Cash", "Credit",
+        "In kind", "Outstanding", "Moments", "They owe us", "We owe them", "Notes"];
       rows = sponsors.map((s) => {
         const m = sponsorMoney(s);
         const d = deliverableStates(s);
@@ -82,7 +82,8 @@ export default async function handler(req, res) {
         return [
           s.id, s.company, s.contactName, s.email, s.phone, s.tier,
           STATUS_LABELS[s.status] || s.status,
-          m.committed, m.invoiced, s.invoiceNumber, m.paid, m.outstanding,
+          m.committed, m.invoiced, s.invoiceNumber,
+          m.paid, m.cash, m.credit, m.inKind, m.outstanding,
           (s.moments || []).map(momentLabel).join("; "),
           theirs, ours, s.notes,
         ];
@@ -98,12 +99,19 @@ export default async function handler(req, res) {
           const d = order.indexOf(a.tier) - order.indexOf(b.tier);
           return d !== 0 ? d : String(a.company).localeCompare(String(b.company));
         });
-      headers = ["Level", "Company", "Logo received", "Website", "Moments"];
+      headers = ["Level", "Company", "Logo received", "How they paid", "Website", "Moments"];
       rows = sponsors.map((s) => {
         const d = deliverableStates(s);
+        const m = sponsorMoney(s);
+        const how = [
+          m.cash ? "cash" : "",
+          m.credit ? "credit" : "",
+          m.inKind ? "in kind" : "",
+        ].filter(Boolean).join(" + ") || "nothing yet";
         return [
           s.tier, s.company,
           d.logo.state === "done" ? "yes" : "NO",
+          how,
           s.website,
           (s.moments || []).map(momentLabel).join("; "),
         ];

@@ -1328,6 +1328,84 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.equal(bags.open, false, 'and not offered to anybody else');
   });
 
+  /* ---------------- cash, credit and in kind ---------------- */
+
+  const { paidByKind, PAYMENT_KINDS } = schema;
+
+  t.test('a payment with no kind recorded is cash', () => {
+    // Every payment written before this existed was a check. Reading them as
+    // unknown would turn a year of real money into a question mark.
+    const k = paidByKind({ payments: [{ amount: 1000 }] });
+    t.equal(k.cash, 1000, 'counted as cash');
+    t.equal(k.value, 0, 'and nothing sitting outside the bank');
+  });
+
+  t.test('a credit satisfies the sponsor and stays out of the cash total', () => {
+    const sanmar = { tier: 'Presenting', status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] };
+    const m = sponsorMoney(sanmar);
+    t.equal(m.paid, 7000, 'they have paid in full');
+    t.assert(m.paidInFull, 'so nothing is owed');
+    t.equal(m.outstanding, 0, 'and nothing is outstanding');
+    t.equal(m.cash, 0, 'but none of it is in the bank');
+    t.equal(m.credit, 7000, 'it is a credit');
+    t.equal(m.nonCash, 7000, 'reported apart');
+  });
+
+  t.test('a credit sponsor still holds their place and is owed everything', () => {
+    const sanmar = { tier: 'Presenting', status: 'inquiry', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] };
+    t.assert(schema.hasTakenPlace(sanmar), 'a credit is still paying');
+    t.equal(obligationProgress({ ...sanmar, obligations: {} }).owed, 14, 'and they are owed the whole level');
+  });
+
+  t.test('a mixed sponsor splits three ways and adds back up', () => {
+    const mixed = { committed: 5000, payments: [
+      { amount: 2000, kind: 'cash' }, { amount: 2000, kind: 'credit' }, { amount: 1000, kind: 'in-kind' },
+    ] };
+    const m = sponsorMoney(mixed);
+    t.equal(m.cash, 2000, 'cash');
+    t.equal(m.credit, 2000, 'credit');
+    t.equal(m.inKind, 1000, 'in kind');
+    t.equal(m.paid, 5000, 'and they add up to what was agreed');
+    t.equal(m.nonCash, 3000, 'with three of it outside the bank');
+  });
+
+  t.test('the rollup keeps cash apart from value', () => {
+    const r = rollup([
+      { status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] },
+      { status: 'committed', committed: 1000, payments: [{ amount: 1000, kind: 'cash' }] },
+    ]);
+    t.equal(r.collected, 8000, 'eight thousand delivered');
+    t.equal(r.cash, 1000, 'one thousand of it in the bank');
+    t.equal(r.nonCash, 7000, 'seven thousand not');
+  });
+
+  t.test('an unknown payment kind is refused rather than silently made cash', () => {
+    const r = validateSponsorPatch({ payments: [{ amount: 100, kind: 'barter' }] });
+    t.equal(r.ok, false, 'refused');
+    for (const k of PAYMENT_KINDS) {
+      t.assert(validateSponsorPatch({ payments: [{ amount: 100, kind: k }] }).ok, `${k} is accepted`);
+    }
+  });
+
+  t.test('a credit is never counted as money in the bank', () => {
+    const sum = ledger.budgetSummary([], [
+      { status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] },
+    ], null);
+    t.equal(sum.incomeIn, 0, 'nothing arrived');
+    t.equal(sum.sponsorNonCash, 7000, 'but seven thousand is covered');
+    t.equal(sum.sponsorCollected, 7000, 'and the sponsor has delivered in full');
+  });
+
+  t.test('spending against a credit still shows as spend, which is the honest picture', () => {
+    // A credit only saves money if we actually spend it there. The ledger
+    // records what was spent; this app does not pretend the credit shrank.
+    const sum = ledger.budgetSummary([{ kind: 'spend', state: 'paid', amount: 3000, category: 'Swag and bags' }], [
+      { status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] },
+    ], null);
+    t.equal(sum.spendOut, 3000, 'three thousand went out');
+    t.equal(sum.net, -3000, 'and the cash position says so');
+  });
+
   process.exit(t.report());
 })();
 
