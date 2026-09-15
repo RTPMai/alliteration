@@ -1278,6 +1278,56 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     t.assert(out.keptSponsors.includes('Priced Co'), 'what was kept is named');
   });
 
+  /* ---------------- money beats the dropdown ---------------- */
+
+  const { hasTakenPlace } = schema;
+
+  t.test('a sponsor who has paid has taken their place, whatever the dropdown says', () => {
+    const paid = { tier: 'Presenting', status: 'inquiry', committed: 7000, payments: [{ amount: 7000 }] };
+    t.assert(hasTakenPlace(paid), 'the money is the evidence');
+    const avail = tierAvailability([paid], null).find((r) => r.name === 'Presenting');
+    t.assert(avail.soldOut, 'so Presenting is sold out');
+    t.equal(avail.pending, 0, 'and they are not also counted as a conversation');
+  });
+
+  t.test('an agreed amount with nothing paid is not enough on its own', () => {
+    const agreed = { tier: 'Gold', status: 'talking', committed: 2500, payments: [] };
+    t.equal(hasTakenPlace(agreed), false, 'a number we wrote down is not a yes');
+    const avail = tierAvailability([agreed], null).find((r) => r.name === 'Gold');
+    t.equal(avail.left, 3, 'all three places still sellable');
+    t.equal(avail.pending, 1, 'with the conversation shown');
+  });
+
+  t.test('a declined sponsor who once paid a deposit still releases the place', () => {
+    const gone = { tier: 'Gold', status: 'declined', committed: 2500, payments: [{ amount: 500 }] };
+    t.equal(hasTakenPlace(gone), false, 'a no is a no');
+  });
+
+  t.test('paid but still marked as an inquiry is said out loud', () => {
+    const h = sponsorHealth({ tier: 'Presenting', status: 'inquiry', committed: 7000, payments: [{ amount: 7000 }] });
+    t.equal(h.level, 'attention', 'flagged');
+    t.assert(h.why.indexOf('still marked as') !== -1, 'and the reason names the mismatch');
+    t.assert(h.why.indexOf('7,000') !== -1, 'with the money that arrived');
+  });
+
+  t.test('once the status is set to committed the flag goes away', () => {
+    const h = sponsorHealth({
+      tier: 'Silver', status: 'committed', committed: 1000, payments: [{ amount: 1000 }],
+      deliverables: { logo: { state: 'na' }, swag: { state: 'na' }, social: { state: 'na' }, session: { state: 'na' } },
+      obligations: {},
+    });
+    t.assert(h.level !== 'attention', 'nothing to chase about the record itself');
+  });
+
+  t.test('a moment claimed by somebody who paid is claimed, not pending', () => {
+    const rows = momentAvailability([
+      { company: 'SanMar', status: 'inquiry', moments: ['swag-bags'], payments: [{ amount: 7000 }] },
+    ]);
+    const bags = rows.find((r) => r.key === 'swag-bags');
+    t.equal(bags.claimedBy, 'SanMar', 'named as the holder');
+    t.equal(bags.open, false, 'and not offered to anybody else');
+  });
+
   process.exit(t.report());
 })();
 
