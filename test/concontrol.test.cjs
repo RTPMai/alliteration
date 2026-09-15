@@ -1387,23 +1387,40 @@ process.env.KV_REST_API_TOKEN = 'fake-token';
     }
   });
 
-  t.test('a credit is never counted as money in the bank', () => {
+  t.test('a credit covers the budget at face value', () => {
+    // We were going to spend that money with them regardless, so the credit is
+    // worth its face value: it simply never leaves.
     const sum = ledger.budgetSummary([], [
       { status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] },
     ], null);
-    t.equal(sum.incomeIn, 0, 'nothing arrived');
-    t.equal(sum.sponsorNonCash, 7000, 'but seven thousand is covered');
-    t.equal(sum.sponsorCollected, 7000, 'and the sponsor has delivered in full');
+    t.equal(sum.incomeIn, 7000, 'seven thousand covered');
+    t.equal(sum.cashIn, 0, 'and nothing in the bank, which is a different question');
+    t.equal(sum.sponsorCovering, 7000, 'all of it counts against the budget');
   });
 
-  t.test('spending against a credit still shows as spend, which is the honest picture', () => {
-    // A credit only saves money if we actually spend it there. The ledger
-    // records what was spent; this app does not pretend the credit shrank.
+  t.test('the budget position and the bank position are both answerable', () => {
     const sum = ledger.budgetSummary([{ kind: 'spend', state: 'paid', amount: 3000, category: 'Swag and bags' }], [
       { status: 'committed', committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] },
     ], null);
-    t.equal(sum.spendOut, 3000, 'three thousand went out');
-    t.equal(sum.net, -3000, 'and the cash position says so');
+    t.equal(sum.net, 4000, 'four thousand ahead on the budget');
+    t.equal(sum.cashNet, -3000, 'three thousand down in the bank');
+  });
+
+  t.test('value we would never have bought is not budget relief', () => {
+    const sum = ledger.budgetSummary([], [
+      { status: 'committed', committed: 2500, payments: [{ amount: 2500, kind: 'in-kind', offsets: false }] },
+    ], null);
+    t.equal(sum.incomeIn, 0, 'it does not cover anything');
+    t.equal(sum.sponsorExtra, 2500, 'and is reported as extra rather than hidden');
+    t.equal(sum.sponsorCollected, 2500, 'the sponsor has still paid in full');
+  });
+
+  t.test('a payment written before the offsets field existed still counts', () => {
+    // Absent means yes. Reading old records as "not budget relief" would wipe
+    // out money somebody had already banked on.
+    const m = sponsorMoney({ committed: 7000, payments: [{ amount: 7000, kind: 'credit' }] });
+    t.equal(m.covering, 7000, 'counted');
+    t.equal(m.extra, 0, 'and nothing sitting outside the budget');
   });
 
   process.exit(t.report());

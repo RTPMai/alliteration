@@ -532,9 +532,9 @@ function renderSponsorTotals() {
   const cards = [
     { k: 'Committed', v: usd(t.committed), sub: t.unpriced ? `${t.unpriced} with no amount agreed` : `${t.sponsorCount} sponsors` },
     { k: 'Collected', v: usd(t.collected), sub: t.committed > 0 ? Math.round((t.collected / t.committed) * 100) + '% of committed' : '' },
-    // Cash and value are never added together on a card. A credit is real
-    // dollars and is not in the bank, and a total that mixes them is a number
-    // somebody will quote and be wrong about.
+    // Covering leads because it is what the budget runs on. Cash stays visible
+    // as a subset, because "has a check actually arrived" is a different
+    // question and it still gets asked.
     { k: 'Of that, cash', v: usd(t.cash), sub: t.nonCash ? usd(t.nonCash) + ' in credit and in kind' : 'All of it' },
     { k: 'Outstanding', v: usd(t.outstanding), sub: t.unpriced ? 'Excludes the unpriced' : '' },
     { k: 'Needs a nudge', v: String(t.blocked), sub: 'Sponsors waiting on us', warn: t.blocked > 0 },
@@ -652,13 +652,17 @@ function renderMoney() {
   if (!sum) { body.innerHTML = '<div class="con-empty">Loading the ledger…</div>'; return; }
 
   const cards = [
-    { k: 'Cash in', v: usd(sum.incomeIn), sub: `${usd(sum.sponsorCash)} of it from sponsors` },
-    { k: 'Covered, not cash', v: usd(sum.sponsorNonCash), sub: sum.sponsorNonCash ? 'Credits and in kind, never in the bank' : 'Nothing so far' },
+    { k: 'Money in', v: usd(sum.incomeIn), sub: sum.sponsorNonCash ? `${usd(sum.cashIn)} of it cash, the rest credit and in kind` : 'All cash' },
+    { k: 'In the bank', v: usd(sum.cashIn), sub: 'Cash that has actually arrived' },
     { k: 'Still expected', v: usd(sum.incomeExpected), sub: 'Committed and not yet paid' },
     { k: 'Spent', v: usd(sum.spendOut), sub: sum.spend.gaps ? `${sum.spend.gaps} entries with no amount` : '' },
     { k: 'On the hook', v: usd(sum.spendAhead), sub: `${usd(sum.spend.committed)} committed, ${usd(sum.spend.estimated)} estimated` },
     { k: 'Position today', v: usd(sum.net), sub: `Projected ${usd(sum.projected)}`, warn: sum.net < 0 },
   ];
+  if (sum.sponsorExtra) {
+    // Deliberately outside every budget figure above it.
+    cards.push({ k: 'Extra, not budget', v: usd(sum.sponsorExtra), sub: 'Things we would never have bought' });
+  }
   if (sum.budget !== null) {
     cards.push({ k: 'Budget left', v: usd(sum.budgetLeft), sub: `of ${usd(sum.budget)}`, warn: sum.budgetLeft !== null && sum.budgetLeft < 0 });
   }
@@ -1480,7 +1484,7 @@ function sponsorDrawer(id) {
         ${(s.payments || []).length
           ? (s.payments || []).map((p, i) => `
               <div class="con-row">
-                <span>${usd(p.amount)} · ${esc(PAYMENT_KIND_LABELS[p.kind] || PAYMENT_KIND_LABELS.cash)}${p.date ? ' · ' + esc(prettyDate(p.date)) : ''}</span>
+                <span>${usd(p.amount)} · ${esc(PAYMENT_KIND_LABELS[p.kind] || PAYMENT_KIND_LABELS.cash)}${p.offsets === false ? ' · not budget relief' : ''}${p.date ? ' · ' + esc(prettyDate(p.date)) : ''}</span>
                 ${ro ? '' : `<button class="con-btn ghost" data-droppay="${i}">Remove</button>`}
               </div>`).join('')
           : '<div class="con-note">Nothing received yet.</div>'}
@@ -1495,8 +1499,12 @@ function sponsorDrawer(id) {
         </div>
         <div class="con-field"><label>Date</label><input id="p_date" type="date"></div>
       </div>
+      <label class="con-note" style="display:flex;gap:6px;align-items:center;margin-bottom:8px">
+        <input type="checkbox" id="p_offsets" checked style="width:auto">
+        Comes off money we were going to spend anyway
+      </label>
       <button class="con-btn ghost" id="conAddPay">Record payment</button>
-      <div class="con-note" style="margin-top:8px">A credit on our account with them, or something they provide directly, counts as paid and is kept out of the cash total. It is real money and it is not in the bank.</div>`}
+      <div class="con-note" style="margin-top:8px">A credit with a supplier we buy from regardless is worth its face value to the budget: the money simply never leaves. Untick the box for something we are glad to have and were never going to buy, and it stays out of every budget figure.</div>`}
     </div>
 
     <div class="con-sec">
@@ -1619,7 +1627,15 @@ async function addPayment(s) {
   const date = val('p_date');
   if (!amount) { formError('A payment needs an amount'); return; }
   formError('');
-  await patchSponsor(s, { payments: (s.payments || []).concat([{ amount, kind: val('p_kind') || 'cash', date: date || null }]) });
+  const offsetsEl = ctx.root.querySelector('#p_offsets');
+  await patchSponsor(s, {
+    payments: (s.payments || []).concat([{
+      amount,
+      kind: val('p_kind') || 'cash',
+      offsets: offsetsEl ? offsetsEl.checked : true,
+      date: date || null,
+    }]),
+  });
 }
 
 async function dropPayment(s, index) {
