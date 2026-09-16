@@ -295,39 +295,26 @@ export const APPS = [
     id: 'marketmachine',
     name: 'MarketMachine',
     w1: 'Market', w2: 'Machine', letter: 'M',
-    role: 'Every campaign, every channel',
-    blurb: 'Campaigns across email, mail, ads, events and calls, with what each one cost.',
-    accent: '#6E1E2B',           // display only (rail dot / app mark); tokens.css owns theming. PROVISIONAL: see the note in tokens.css, this needs checking against the logo lineup sheet.
-    // OWNS THE CAMPAIGN OF RECORD. MailMe grew a Campaigns tab because email
-    // was the first channel P&M automated, but a real campaign is rarely only
-    // email: a spring school push is a postcard drop, a booth, a paid social
-    // run and an email, all aimed at the same people over the same weeks.
-    // Keeping the campaign inside the email tool made the other five channels
-    // invisible and made "did that work" unanswerable.
+    role: 'Every campaign, start to finish',
+    blurb: 'Campaign checklists in six stages, with owners, due dates, and approvals.',
+    accent: '#6E1E2B',           // display only (rail dot / app mark); tokens.css owns theming.
+    // REBUILT Sept 2026 (phase 1 of Jacob's handoff, approved by Ryan). A
+    // campaign has a type, and the type lays out an ordered checklist across
+    // six stages: create, plan, build, prelaunch review, launch, track. Postal,
+    // Digital Platform and the rest are campaigns of their own; an External
+    // Trade Show holds them as connected campaigns.
     //
-    // MailMe keeps EMAIL: composing, suppression, the cold ramp, domain
-    // reputation, CAN-SPAM. None of that has an analogue in a postcard drop,
-    // which is exactly why it does not belong in a planner.
+    // ADMIN ONLY FOR NOW, enforced in api/marketmachine/campaigns.js on the
+    // account's Admin flag. Anyone else signed in gets campaign names and ids,
+    // which MailMe needs for its "part of a campaign" picker, and nothing more.
     //
-    // The link is ONE pointer and MailMe holds it (marketingCampaignId on its
-    // own records). MarketMachine asks "which of your emails belong to me"
-    // rather than keeping its own list, because two copies of one fact drift
-    // the first time an email is deleted.
-    //
-    // Reading is open to any signed-in user: a campaign plan is something AMs
-    // need to see without asking. Writing is can_edit, deleting is admin.
+    // View KEYS are kept where the screen survived: `campaigns` and `calendar`
+    // are baked into stored layouts and deep links. `calendar` is labelled
+    // Timeline now. Data Entry and Definitions were retired with the old
+    // hand-typed channel numbers.
     views: [
       ['campaigns', 'Campaigns'],
-      ['calendar', 'Calendar'],
-      // Data Entry is a screen rather than a form buried inside a campaign.
-      // Entering last week's numbers is a recurring chore across several
-      // campaigns at once, and making somebody open each campaign to do it is
-      // how the numbers stop getting entered.
-      ['entry', 'Data Entry'],
-      // Definitions is generated from the metric catalog, so it cannot drift
-      // from the maths. It exists to end the "these numbers look low" argument
-      // before it starts.
-      ['definitions', 'Definitions'],
+      ['calendar', 'Timeline'],
       ['settings', 'Settings']
     ],
     defaultView: 'campaigns',

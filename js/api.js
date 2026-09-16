@@ -235,15 +235,12 @@ export const ENDPOINTS = {
   // provider dashboard from memory.
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
-  // MarketMachine. Campaigns of record across every channel; MailMe is one of
-  // them. See lib/marketmachine/store.js for why the link between them points
-  // this way rather than the other.
+  // MarketMachine. Campaigns, their ordered checklists, and the events that
+  // hold connected campaigns. Admin only for now; everyone else gets names and
+  // ids for MailMe's picker. See api/marketmachine/campaigns.js.
   mkCampaigns:     '/api/marketmachine/campaigns',
+  // The list BackBone's lead form reads. Edited in MarketMachine Settings.
   mkInitiatives:   '/api/marketmachine/initiatives',
-  // Dated performance rows: one per period, per channel, per creative. The
-  // hand-entered half of the app, and the same shape a CSV import or a future
-  // GA4 / platform connector writes into.
-  mkEntries:       '/api/marketmachine/entries',
   // The industry vocabulary, served by the initiatives route under a kind
   // parameter. Named separately here so callers never build query strings by
   // hand, which is how the seam stops being one.
