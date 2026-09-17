@@ -104,6 +104,7 @@ export default {
       printavoChecking: false,
       calculations: [],
       calcEditing: false,
+      scorecardEditing: false,
       calcMsg: null,
       openStep: null,        // step key whose details are expanded
       stepMsg: {},           // step key -> { cls, text }
@@ -170,6 +171,8 @@ export default {
         children: Array.isArray(d.children) ? d.children : [],
         connections: d.connections || null,
         calculations: Array.isArray(d.calculations) ? d.calculations : [],
+        advisories: Array.isArray(d.advisories) ? d.advisories : [],
+        scorecard: Array.isArray(d.scorecard) ? d.scorecard : [],
       };
       if (Array.isArray(d.accountManagers)) state.accountManagers = d.accountManagers;
       if (d.today) state.today = d.today;
@@ -203,6 +206,7 @@ export default {
       state.connMsg = null;
       state.printavo = {};
       state.calcEditing = false;
+      state.scorecardEditing = false;
       state.calcMsg = null;
       showPane('detail');
       const det = $('#mkDetailPane');
@@ -329,6 +333,20 @@ export default {
         if (el) el.focus();
         return;
       }
+      if (d.scorecardSave) {
+        const key = d.scorecardSave;
+        const val = (f) => { const el = root.querySelector(`#mkSc-${key}-${f}`); return el ? el.value : ''; };
+        try {
+          await api.patch(ENDPOINTS.mkCampaigns,
+            { key, target: val('target'), actual: val('actual'), range: val('range'), source: val('source'), notes: val('notes') },
+            { query: { id: state.detail.campaign.id, scorecard: 1 } });
+          state.calcMsg = { cls: 'ok', text: 'Scorecard row saved.' };
+        } catch (e) {
+          state.calcMsg = { cls: 'err', text: e.message || 'That row was not saved.' };
+        }
+        await refreshDetailKeepingPlace();
+        return;
+      }
       if (d.connCancel) { state.connAdding = null; ui.renderDetail(); return; }
       if (d.connSave) {
         const el = root.querySelector('#mkConnRef-' + d.connSave);
@@ -415,6 +433,7 @@ export default {
           });
           break;
         }
+        case 'scorecard-edit': state.scorecardEditing = !state.scorecardEditing; ui.renderDetail(); break;
         case 'calc-edit': state.calcEditing = !state.calcEditing; state.calcMsg = null; ui.renderDetail(); break;
         case 'start-email': {
           const c = state.detail.campaign;

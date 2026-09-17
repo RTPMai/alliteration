@@ -9,8 +9,8 @@
  * one screen can call another's without importing it and creating a loop.
  */
 
-import { CALC_INPUTS } from '../../lib/marketmachine/calculations.js';
-import { esc, fmtStamp, fmtMoney } from './format.js';
+import { CALC_INPUTS, inputsFor } from '../../lib/marketmachine/calculations.js';
+import { esc, fmtDate, fmtStamp, fmtMoney } from './format.js';
 
 export default function makeCalc(app) {
   const { state, api, root, ui } = app;
@@ -19,6 +19,7 @@ export default function makeCalc(app) {
     function fmtCalcValue(v, unit, input) {
       if (v === null || v === undefined) return '';
       if (input && input.display) return esc(input.display);
+      if (unit === 'date') return esc(fmtDate(v));
       if (unit === 'money') return fmtMoney(v);
       if (unit === 'percent') return esc(v) + '%';
       return esc(Number(v).toLocaleString());
@@ -41,10 +42,12 @@ export default function makeCalc(app) {
             ? `<div class="st">${esc(k.status || 'Not enough to calculate yet')}</div>`
             : `<div class="r${k.unit === 'percent' && k.value < 0 ? ' neg' : ''}">${fmtCalcValue(k.value, k.unit)}${k.unit === 'orders' ? ' <span style="font-size:14px;font-weight:600;color:var(--muted)">orders</span>' : ''}</div>`}
           <div class="f">${esc(k.formula)}</div>
+          ${k.flag ? `<div class="st" style="color:var(--danger-dk)">${esc(k.flag)}</div>` : ''}
           <table><tbody>${k.inputs.map((i) => `<tr>
             <td>${esc(i.label)}<div class="src">${esc(i.source)}${i.by ? ', ' + esc(i.by) : ''}</div></td>
             <td class="v">${i.value === null ? '<span class="src">Missing</span>' : fmtCalcValue(i.value, inputUnit(i.label), i)}</td>
           </tr>`).join('')}</tbody></table>
+          ${k.note ? `<div class="up" style="color:var(--muted)">${esc(k.note)}</div>` : ''}
           <div class="up">${k.updatedAt ? 'Last updated ' + esc(fmtStamp(k.updatedAt)) : 'Nothing entered yet'}</div>
         </div>`).join('');
 
@@ -53,13 +56,14 @@ export default function makeCalc(app) {
         <div class="mk-card"><div class="mk-card-hd"><h3>Numbers that are typed in</h3>
           <span class="meta">Leave a number blank when it is not known. Blank is not zero.</span></div>
           <div class="mk-card-bd">
-            <div class="mk-inputs">${Object.entries(CALC_INPUTS).filter(([, spec]) => !spec.strategic || meta.parent).map(([key, spec]) => {
+            <div class="mk-inputs">${inputsFor(c.type).filter((spec) => !spec.strategic || meta.parent).map((spec) => {
+              const key = spec.key;
               const cur = inputs[key] || {};
               return `<div class="mk-field">
                 <label for="mkCalc-${key}">${esc(spec.label)}${spec.kind === 'percent' ? ' (%)' : spec.kind === 'money' ? ' ($)' : ''}</label>
                 ${spec.hint ? `<div class="hint">${esc(spec.hint)}</div>` : ''}
-                <input type="text" id="mkCalc-${key}" inputmode="decimal" value="${cur.value != null ? esc(cur.value) : ''}">
-                ${spec.kind !== 'count' ? `<input type="text" id="mkCalcSrc-${key}" maxlength="200" style="margin-top:6px"
+                <input type="${spec.kind === 'date' ? 'date' : 'text'}" id="mkCalc-${key}"${spec.kind === 'date' ? '' : ' inputmode="decimal"'} value="${cur.value != null ? esc(cur.value) : ''}">
+                ${spec.kind !== 'count' && spec.kind !== 'date' ? `<input type="text" id="mkCalcSrc-${key}" maxlength="200" style="margin-top:6px"
                   placeholder="Where it came from, e.g. Apparelytics 2025 average" value="${esc(cur.source || '')}">` : ''}
                 ${cur.at ? `<div class="hint" style="margin-top:4px">Set by ${esc(cur.by || 'someone')}, ${esc(fmtStamp(cur.at))}</div>` : ''}
               </div>`;
@@ -67,15 +71,59 @@ export default function makeCalc(app) {
             <button class="mk-btn" data-act="calc-save-all">Save numbers</button>
           </div></div>` : '';
 
+      const warnings = (state.detail && state.detail.advisories) || [];
+      const warningBlock = warnings.length ? warnings.map((w) =>
+        `<div class="mk-notice">${esc(w.text)}</div>`).join('') : '';
+
       return `
         <h2 style="font-size:17px;font-weight:800;margin:26px 0 6px">calculations.</h2>
+        ${warningBlock}
         <div class="mk-scope" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
           <span>Every number shows where it came from. Connected leads and TravelTrack receipts are read live; everything else is typed.</span>
           <button class="mk-btn ghost sm" data-act="calc-edit">${state.calcEditing ? 'Done entering numbers' : 'Enter numbers'}</button>
         </div>
         ${msgBox(state.calcMsg)}
         ${editor}
-        <div class="mk-calcs">${cards}</div>`;
+        <div class="mk-calcs">${cards}</div>
+        ${scorecardCard(c)}`;
+    }
+
+    /**
+     * The results scorecard the campaign's master asks for. Source and
+     * limitation are columns, not extras: every master asks for them on every
+     * row, so a number is never left on screen with nobody able to say where
+     * it came from or what it leaves out.
+     */
+    function scorecardCard(c) {
+      const rows = (state.detail && state.detail.scorecard) || [];
+      if (!rows.length) return '';
+      const editing = state.scorecardEditing;
+      return `
+        <div class="mk-card">
+          <div class="mk-card-hd"><h3>Results scorecard</h3>
+            <div class="mk-actions"><span class="meta">${rows.filter((r) => r.filled).length} of ${rows.length} filled in</span>
+              <button class="mk-btn ghost sm" data-act="scorecard-edit">${editing ? 'Done' : 'Fill in'}</button></div></div>
+          <div class="mk-card-bd flush mk-wrap">
+            <table class="mk-table"><thead><tr>
+              <th>Metric</th><th>Target</th><th>Actual</th><th>Date range</th><th>Source</th><th>Notes or limitation</th>${editing ? '<th></th>' : ''}
+            </tr></thead><tbody>
+              ${rows.map((r) => editing ? `<tr>
+                <td class="co">${esc(r.label)}</td>
+                ${['target', 'actual', 'range', 'source'].map((f) =>
+                  `<td><input type="text" id="mkSc-${r.key}-${f}" value="${esc(r[f])}" style="width:100%;padding:5px 7px;border:1px solid var(--line);border-radius:var(--radius-sm);font:inherit;font-size:12.5px;background:var(--card);color:var(--ink)"></td>`).join('')}
+                <td><input type="text" id="mkSc-${r.key}-notes" value="${esc(r.notes)}" style="width:100%;padding:5px 7px;border:1px solid var(--line);border-radius:var(--radius-sm);font:inherit;font-size:12.5px;background:var(--card);color:var(--ink)"></td>
+                <td><button class="mk-btn sm" data-scorecard-save="${esc(r.key)}">Save</button></td>
+              </tr>` : `<tr>
+                <td class="co">${esc(r.label)}</td>
+                <td>${esc(r.target) || '<span class="who">Not set</span>'}</td>
+                <td>${esc(r.actual) || '<span class="who">Not set</span>'}</td>
+                <td>${esc(r.range)}</td>
+                <td>${esc(r.source) || '<span class="who">No source given</span>'}</td>
+                <td>${esc(r.notes)}${r.at ? `<div class="who">${esc(r.by || 'Someone')}, ${esc(fmtStamp(r.at))}</div>` : ''}</td>
+              </tr>`).join('')}
+            </tbody></table>
+          </div>
+        </div>`;
     }
 
   return { fmtCalcValue, inputUnit, calculationsSection };

@@ -173,11 +173,14 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
 
   /* ================= catalog ================= */
 
-  t.test('all thirteen campaign types from the handoff, and nothing extra', () => {
+  t.test('every campaign type with an approved master, and nothing extra', () => {
+    // Thirteen from the handoff, plus Try On Day, whose own master arrived in
+    // September and which Ryan confirmed is a real campaign, not the one the
+    // business decided not to pursue.
     const want = ['Digital Platform', 'Poll Sending', 'Picks with Personality', 'Referral', 'Sampling', 'Postal',
       'In-Order Gifting', 'This One Is On Us', 'Christmas Gifting', 'Parade Day', 'Live Screen Printing',
-      'Live Customization', 'External Trade Show'];
-    t.equal(cat.CAMPAIGN_TYPES.length, 13, 'thirteen types');
+      'Live Customization', 'External Trade Show', 'Try On Day'];
+    t.equal(cat.CAMPAIGN_TYPES.length, 14, 'fourteen types');
     want.forEach((l) => t.assert(cat.CAMPAIGN_TYPES.some((x) => x.label === l), l + ' is missing'));
     cat.CAMPAIGN_TYPES.forEach((x) => t.assert(cat.FAMILIES.some((f) => f.key === x.family), x.label + ' has no family'));
   });

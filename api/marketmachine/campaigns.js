@@ -15,6 +15,7 @@
 // PATCH  ?id=&connect=1 -> connect or disconnect a TravelTrack trip, a
 //                        BackBone lead, or a Printavo invoice number
 // PATCH  ?id=&calc=1  -> set or clear one typed calculation input
+// PATCH  ?id=&scorecard=1 -> set or clear one results scorecard row
 // GET    ?options=connections -> the trips and leads to pick from
 // GET    ?id=&printavo=1      -> current Printavo status of this campaign's
 //                        invoices (on demand; Printavo is slow)
@@ -41,9 +42,9 @@ import { progress, headerDates, childSummary, isMine, pickerShape } from "../../
 import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
   childrenOf, legacyCount, clearLegacy, accountManagers,
-  linkConnection, connectionOptions, connectionDetail, invoiceStatuses, setCalcInput,
+  linkConnection, connectionOptions, connectionDetail, invoiceStatuses, setCalcInput, setScorecardRow,
 } from "../../lib/marketmachine/store.js";
-import { computeCalculations } from "../../lib/marketmachine/calculations.js";
+import { computeCalculations, advisories, scorecardRows } from "../../lib/marketmachine/calculations.js";
 import { isParentType } from "../../lib/marketmachine/catalog.js";
 import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
 import { todayCentral } from "../../lib/marketmachine/dates.js";
@@ -117,6 +118,8 @@ export default async function handler(req, res) {
           children: childrenOf(id, all).map((c) => childSummary(c, today)),
           connections,
           calculations: computeCalculations(campaign, connections, { strategic: isParentType(campaign.type) }),
+          advisories: advisories(campaign),
+          scorecard: scorecardRows(campaign),
           accountManagers: people.options,
           today,
         });
@@ -161,7 +164,9 @@ export default async function handler(req, res) {
     if (req.method === "PATCH") {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
       const body = parseBody(req);
-      const out = q.calc
+      const out = q.scorecard
+        ? await setScorecardRow(id, body, session)
+        : q.calc
         ? await setCalcInput(id, body, session)
         : q.connect
         ? await linkConnection(id, body, session)
