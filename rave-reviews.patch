@@ -1,0 +1,2767 @@
+From 38a0747173c5057fb491608c2a52a2599e9edeb0 Mon Sep 17 00:00:00 2001
+From: Claude <claude@anthropic.com>
+Date: Thu, 17 Sep 2026 16:27:24 +0000
+Subject: [PATCH] RaveReviews: Google review request after pickup or shipping,
+ replaces the Zapier zap
+
+---
+ api/notifications.js                |   2 +-
+ api/reviews/cron.js                 |  51 +++
+ api/reviews/requests.js             | 105 +++++
+ api/reviews/settings.js             | 122 ++++++
+ api/sitework.js                     |   2 +-
+ apps/reviews.js                     | 517 +++++++++++++++++++++++
+ css/tokens.css                      |  20 +
+ js/api.js                           |  14 +-
+ js/registry.js                      |  28 ++
+ lib/help/access.js                  |   2 +-
+ lib/help/content.js                 |  37 ++
+ lib/reviews/access.js               |  15 +
+ lib/reviews/deps.js                 |  38 ++
+ lib/reviews/engine.js               | 290 +++++++++++++
+ lib/reviews/printavo.js             | 196 +++++++++
+ lib/reviews/schema.js               | 303 ++++++++++++++
+ lib/reviews/store.js                | 164 ++++++++
+ test/marketmachine-samples.test.cjs |  18 +-
+ test/reviews.test.cjs               | 618 ++++++++++++++++++++++++++++
+ vercel.json                         |   4 +
+ 20 files changed, 2527 insertions(+), 19 deletions(-)
+ create mode 100644 api/reviews/cron.js
+ create mode 100644 api/reviews/requests.js
+ create mode 100644 api/reviews/settings.js
+ create mode 100644 apps/reviews.js
+ create mode 100644 lib/reviews/access.js
+ create mode 100644 lib/reviews/deps.js
+ create mode 100644 lib/reviews/engine.js
+ create mode 100644 lib/reviews/printavo.js
+ create mode 100644 lib/reviews/schema.js
+ create mode 100644 lib/reviews/store.js
+ create mode 100644 test/reviews.test.cjs
+
+diff --git a/api/notifications.js b/api/notifications.js
+index 0a8b11f..0a43b42 100644
+--- a/api/notifications.js
++++ b/api/notifications.js
+@@ -255,7 +255,7 @@ const APP_IDS = [
+   // Added when each app landed. This list is hand-synced, so an app missing
+   // from it cannot be tagged on a hand-off even though it exists in the rail:
+   // promopro and stitchsense were both in that state.
+-  "promopro", "stitchsense", "marketmachine", "concontrol",
++  "promopro", "stitchsense", "marketmachine", "concontrol", "reviews",
+   // Site-level, not in the rail with the rest. It was missing here until Sep
+   // 2026, which meant a hand-off could not be tagged StickySituations at all,
+   // and the sticky link type added the same week was unreachable because the
+diff --git a/api/reviews/cron.js b/api/reviews/cron.js
+new file mode 100644
+index 0000000..20c5967
+--- /dev/null
++++ b/api/reviews/cron.js
+@@ -0,0 +1,51 @@
++// PUT IN: api/reviews/cron.js
++// api/reviews/cron.js: the scheduled run. Find newly picked up and shipped
++// orders in Printavo, then send whatever has waited long enough.
++//
++// Called by Vercel cron only (see vercel.json). No session: Vercel sends
++// "Authorization: Bearer <CRON_SECRET>", checked with safeEqual, and a
++// missing CRON_SECRET refuses everything rather than letting anyone in.
++//
++// The two halves fail separately. A Printavo outage still lets yesterday's
++// queue go out, and a Resend outage still lets today's pickups get queued.
++
++import { safeEqual } from "../../lib/session.js";
++import { realDeps } from "../../lib/reviews/deps.js";
++import { detect, sendDue } from "../../lib/reviews/engine.js";
++
++export const config = { maxDuration: 60 };
++
++function authorizedCron(req) {
++  const cronSecret = process.env.CRON_SECRET;
++  return !!cronSecret && safeEqual(req.headers["authorization"] || "", "Bearer " + cronSecret);
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (!authorizedCron(req)) return res.status(401).json({ error: "Unauthorized" });
++
++  const deps = realDeps();
++  const started = Date.now();
++  const out = { ok: true };
++
++  try {
++    const settings = await deps.store.getSettings();
++    try {
++      out.check = await detect(deps, { settings, now: Date.now(), deadline: started + 40000 });
++    } catch (e) {
++      out.ok = false;
++      out.check = { at: new Date().toISOString(), error: (e && e.message) || String(e) };
++      try { await deps.store.patchState({ lastCheck: out.check }); } catch (e2) { /* reported below anyway */ }
++    }
++    try {
++      out.send = await sendDue(deps, { settings, now: Date.now() });
++    } catch (e) {
++      out.ok = false;
++      out.send = { at: new Date().toISOString(), error: (e && e.message) || String(e) };
++      try { await deps.store.patchState({ lastSend: out.send }); } catch (e2) { /* reported below anyway */ }
++    }
++    return res.status(200).json(out);
++  } catch (e) {
++    return res.status(500).json({ error: (e && e.message) || String(e) });
++  }
++}
+diff --git a/api/reviews/requests.js b/api/reviews/requests.js
+new file mode 100644
+index 0000000..5f5fad2
+--- /dev/null
++++ b/api/reviews/requests.js
+@@ -0,0 +1,105 @@
++// PUT IN: api/reviews/requests.js
++// api/reviews/requests.js: the list, and the buttons on it.
++//
++//   GET                      recent requests (newest first) plus counts
++//   GET ?kind=reviewed       customers marked as having left a review
++//   POST { action, ... }
++//     cancel    { id }                 queued or failed -> cancelled
++//     restore   { id }                 cancelled/skipped/failed -> queued
++//     send      { id, force }          send now; 409 asks before overriding a skip rule
++//     reviewed  { email, invoiceId }   mark a customer as having reviewed
++//     unreviewed{ email }              take them back off
++//
++// Admin only, checked here on every request. Hiding the app from the rail is
++// not access control.
++
++import { requireAuth } from "../../lib/session.js";
++import { permsFor } from "../../lib/users.js";
++import { canUseReviews, DENIED } from "../../lib/reviews/access.js";
++import { realDeps } from "../../lib/reviews/deps.js";
++import { countByStatus } from "../../lib/reviews/schema.js";
++import { sendNow, cancel, restore, markReviewed, unmarkReviewed } from "../../lib/reviews/engine.js";
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    const perms = await permsFor(sess.username);
++    if (!canUseReviews(perms)) return res.status(403).json({ error: DENIED });
++
++    const deps = realDeps();
++    const store = deps.store;
++    const by = sess.name || sess.username;
++
++    if (req.method === "GET") {
++      if (req.query && req.query.kind === "reviewed") {
++        const map = await store.getReviewed();
++        const reviewed = Object.keys(map).map((email) => Object.assign({ email }, map[email] || {}))
++          .sort((a, b) => String(b.at || "").localeCompare(String(a.at || "")));
++        return res.status(200).json({ reviewed });
++      }
++      const limit = Math.min(1000, Math.max(1, parseInt((req.query && req.query.limit) || "500", 10) || 500));
++      const ids = await store.recentIds(limit);
++      const records = await store.getRecords(ids);
++      const [reviewed, settings, state] = await Promise.all([store.getReviewed(), store.getSettings(), store.getState()]);
++      records.forEach((r) => { r.customer_reviewed = !!(r.email && reviewed[r.email]); });
++      return res.status(200).json({
++        records,
++        counts: countByStatus(records),
++        enabled: !!settings.enabled,
++        seeded: !!state.seededAt,
++        lastCheck: state.lastCheck || null,
++        lastSend: state.lastSend || null,
++      });
++    }
++
++    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
++
++    const body = parseBody(req);
++    const now = Date.now();
++    const id = body.id != null ? String(body.id) : "";
++
++    switch (body.action) {
++      case "cancel": {
++        const r = await cancel(deps, id, { now, by });
++        return res.status(r.ok ? 200 : 409).json(r.ok ? r : { error: r.reason, record: r.record || null });
++      }
++      case "restore": {
++        const r = await restore(deps, id, { now, by });
++        return res.status(r.ok ? 200 : 409).json(r.ok ? r : { error: r.reason, record: r.record || null });
++      }
++      case "send": {
++        const settings = await store.getSettings();
++        const r = await sendNow(deps, id, { settings, now, force: body.force === true, by });
++        if (r.outcome === "sent") return res.status(200).json({ ok: true, record: r.record });
++        if (r.outcome === "needs_confirm") {
++          return res.status(409).json({ error: r.reason, needsConfirm: true, reason: r.reason, record: r.record });
++        }
++        const code = r.outcome === "retry" || r.outcome === "failed" ? 502 : 409;
++        return res.status(code).json({ error: r.reason || "Not sent", outcome: r.outcome, record: r.record || null });
++      }
++      case "reviewed": {
++        const r = await markReviewed(deps, body.email, { now, by, invoiceId: body.invoiceId || null });
++        return res.status(r.ok ? 200 : 400).json(r.ok ? r : { error: r.reason });
++      }
++      case "unreviewed": {
++        const r = await unmarkReviewed(deps, body.email);
++        return res.status(r.ok ? 200 : 400).json(r.ok ? r : { error: r.reason });
++      }
++      default:
++        return res.status(400).json({ error: "Unknown action" });
++    }
++  } catch (e) {
++    return res.status(500).json({ error: (e && e.message) || String(e) });
++  }
++}
+diff --git a/api/reviews/settings.js b/api/reviews/settings.js
+new file mode 100644
+index 0000000..5678e3d
+--- /dev/null
++++ b/api/reviews/settings.js
+@@ -0,0 +1,122 @@
++// PUT IN: api/reviews/settings.js
++// api/reviews/settings.js: the email text, the switch, and the checks.
++//
++//   GET                         settings, defaults, last check and last send
++//   PUT  { ...settings }        save (judged as a whole, see validateSettings)
++//   POST { action: "test", to, settings? }   one preview email, touches nothing
++//   POST { action: "check" }    ask Printavo what it would find, saves nothing
++//   POST { action: "run" }      do exactly what the cron does, right now
++//
++// Admin only, checked here on every request.
++
++import { requireAuth } from "../../lib/session.js";
++import { permsFor } from "../../lib/users.js";
++import { canUseReviews, DENIED } from "../../lib/reviews/access.js";
++import { realDeps, configuration } from "../../lib/reviews/deps.js";
++import { validateSettings, renderEmail, normalizeEmail, DEFAULT_SETTINGS, PLACEHOLDERS } from "../../lib/reviews/schema.js";
++import { walkTriggerOrders } from "../../lib/reviews/printavo.js";
++import { detect, sendDue } from "../../lib/reviews/engine.js";
++
++export const config = { maxDuration: 60 };
++
++function parseBody(req) {
++  let b = req.body;
++  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
++  return b && typeof b === "object" ? b : {};
++}
++
++export default async function handler(req, res) {
++  res.setHeader("Cache-Control", "no-store");
++  if (req.method === "OPTIONS") return res.status(200).end();
++
++  const sess = requireAuth(req, res);
++  if (!sess) return;
++
++  try {
++    const perms = await permsFor(sess.username);
++    if (!canUseReviews(perms)) return res.status(403).json({ error: DENIED });
++
++    const deps = realDeps();
++    const store = deps.store;
++
++    if (req.method === "GET") {
++      const [settings, state] = await Promise.all([store.getSettings(), store.getState()]);
++      return res.status(200).json({
++        settings, defaults: DEFAULT_SETTINGS, placeholders: PLACEHOLDERS,
++        state, configured: configuration(),
++      });
++    }
++
++    if (req.method === "PUT" || req.method === "PATCH") {
++      const current = await store.getSettings();
++      const v = validateSettings(parseBody(req), current);
++      if (!v.ok) return res.status(400).json({ error: v.errors.join(". "), errors: v.errors });
++      await store.saveSettings(v.settings);
++      return res.status(200).json({ ok: true, settings: v.settings });
++    }
++
++    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
++
++    const body = parseBody(req);
++
++    if (body.action === "test") {
++      const to = normalizeEmail(body.to);
++      if (!to) return res.status(400).json({ error: "Enter an email address to send the test to" });
++      // Preview what is on screen, saved or not, so the text can be checked
++      // before anybody commits to it.
++      const current = await store.getSettings();
++      const v = validateSettings(body.settings || {}, current);
++      if (!v.ok) return res.status(400).json({ error: v.errors.join(". "), errors: v.errors });
++      const sample = Object.assign({ first_name: "Tony", visual_id: "54781", order_nickname: "Sample order" }, body.sample || {});
++      const msg = renderEmail(v.settings, sample);
++      const r = await deps.send({
++        from: msg.from, to: [to], subject: "[TEST] " + msg.subject, text: msg.text,
++        reply_to: msg.replyTo || undefined,
++      });
++      return res.status(200).json({ ok: true, to, subject: "[TEST] " + msg.subject, id: (r && r.id) || null });
++    }
++
++    if (body.action === "check") {
++      const settings = await store.getSettings();
++      const seen = await store.getSeen();
++      const sample = [];
++      let fresh = 0;
++      const walk = await walkTriggerOrders({
++        gql: deps.gql, statuses: settings.statuses, lookbackDays: settings.lookbackDays,
++        now: Date.now(), deadline: Date.now() + 40000,
++        onPage: async (orders) => {
++          orders.forEach((o) => {
++            if (!seen[o.invoiceId]) fresh++;
++            if (sample.length < 5) sample.push({ visualId: o.visualId, nickname: o.nickname, status: o.statusName, hasEmail: !!normalizeEmail(o.email), firstName: o.firstName });
++          });
++        },
++      });
++      return res.status(200).json({
++        ok: true, mode: walk.mode, complete: walk.complete, pages: walk.pages, found: walk.found,
++        notYetSeen: fresh, matchedStatuses: walk.matchedStatuses.map((s) => s.name),
++        missingStatuses: walk.missingStatuses, sample,
++      });
++    }
++
++    if (body.action === "run") {
++      const settings = await store.getSettings();
++      const started = Date.now();
++      const out = {};
++      try { out.check = await detect(deps, { settings, now: Date.now(), deadline: started + 35000 }); }
++      catch (e) {
++        out.check = { at: new Date().toISOString(), error: (e && e.message) || String(e) };
++        await store.patchState({ lastCheck: out.check });
++      }
++      try { out.send = await sendDue(deps, { settings, now: Date.now() }); }
++      catch (e) {
++        out.send = { at: new Date().toISOString(), error: (e && e.message) || String(e) };
++        await store.patchState({ lastSend: out.send });
++      }
++      return res.status(200).json(Object.assign({ ok: true }, out));
++    }
++
++    return res.status(400).json({ error: "Unknown action" });
++  } catch (e) {
++    return res.status(500).json({ error: (e && e.message) || String(e) });
++  }
++}
+diff --git a/api/sitework.js b/api/sitework.js
+index ddbf07c..c4e4534 100644
+--- a/api/sitework.js
++++ b/api/sitework.js
+@@ -34,7 +34,7 @@ import {
+ const APP_IDS = [
+   "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
+   "crewcore", "mailme", "teletally", "websitewidget", "promopro",
+-  "stitchsense", "marketmachine", "concontrol",
++  "stitchsense", "marketmachine", "concontrol", "reviews",
+ ];
+ 
+ // The read gate moved to lib/sitework/access.js in Sep 2026, unchanged, because
+diff --git a/apps/reviews.js b/apps/reviews.js
+new file mode 100644
+index 0000000..2c297f1
+--- /dev/null
++++ b/apps/reviews.js
+@@ -0,0 +1,517 @@
++// PUT IN: apps/reviews.js
++/**
++ * apps/reviews.js: RaveReviews (PROVISIONAL NAME).
++ *
++ * The Google review request that goes to a customer three days after their
++ * order is picked up or shipped. Replaces two Printavo automations feeding a
++ * Zapier zap. The id is `reviews` so the name can change without touching
++ * storage keys, routes or saved links.
++ *
++ * Three views:
++ *   requests   every request: waiting, sent, skipped (with the reason),
++ *              cancelled, failed. Cancel, Restore, Send now, Left a review.
++ *   reviewed   customers who have left a review. They are never asked again.
++ *   settings   the on/off switch, the email text, and two checks: a test
++ *              email to yourself, and "what would Printavo give us right now".
++ *
++ * Admin only, enforced in api/reviews/*.js on the Admin flag. Every call goes
++ * through ctx.api and ENDPOINTS, and tokens.css owns every colour.
++ */
++
++import { ENDPOINTS } from '../js/api.js';
++import { DEFAULT_SETTINGS, PLACEHOLDERS, renderEmail } from '../lib/reviews/schema.js';
++
++function esc(s) {
++  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
++    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
++  }[c]));
++}
++
++function when(iso) {
++  if (!iso) return '';
++  const d = new Date(iso);
++  if (isNaN(d.getTime())) return '';
++  return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
++}
++
++function day(iso) {
++  if (!iso) return '';
++  const d = new Date(iso);
++  if (isNaN(d.getTime())) return '';
++  return d.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
++}
++
++const STATUS_LABEL = {
++  queued: 'Waiting', sent: 'Sent', skipped: 'Skipped', cancelled: 'Cancelled', failed: 'Failed'
++};
++
++export default {
++  id: 'reviews',
++
++  styles: `
++  .rv-wrap{max-width:1180px}
++  .rv-hd{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:16px}
++  .rv-hd h1{font-size:24px;font-weight:800;letter-spacing:-.02em;margin:0}
++  .rv-hd .sub{font-size:13px;color:var(--muted);margin-top:3px;max-width:64ch}
++  .rv-pane[hidden]{display:none}
++
++  .rv-btn{border:1px solid var(--line);background:var(--card);color:var(--ink);font-family:inherit;
++    font-size:12.5px;font-weight:600;padding:7px 12px;border-radius:var(--radius-sm);cursor:pointer}
++  .rv-btn:hover{border-color:var(--muted)}
++  .rv-btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
++  .rv-btn.primary:hover{background:var(--accent-deep)}
++  .rv-btn.danger{color:var(--danger);border-color:var(--danger-line)}
++  .rv-btn.small{padding:4px 9px;font-size:11.5px}
++  .rv-btn:disabled{opacity:.5;cursor:default}
++
++  .rv-msg{font-size:12.5px;border-radius:var(--radius-sm);padding:9px 11px;margin-bottom:14px}
++  .rv-msg.err{background:var(--danger-tint);color:var(--danger)}
++  .rv-msg.ok{background:var(--success-tint);color:var(--success-dk)}
++  .rv-msg.warn{background:var(--warn-tint);color:var(--warn-dk)}
++
++  .rv-strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-bottom:16px}
++  .rv-card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:11px 13px}
++  .rv-card .k{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted)}
++  .rv-card .v{font-size:14px;font-weight:700;margin-top:3px}
++  .rv-card .d{font-size:12px;color:var(--muted);margin-top:2px}
++  .rv-on{color:var(--success-dk)}
++  .rv-off{color:var(--warn-dk)}
++  .rv-bad{color:var(--danger)}
++
++  .rv-bar{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:12px}
++  .rv-chip{border:1px solid var(--line);background:var(--card);color:var(--muted);font-family:inherit;
++    font-size:11.5px;font-weight:600;padding:5px 11px;border-radius:999px;cursor:pointer}
++  .rv-chip[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
++  .rv-chip .ct{opacity:.75;margin-left:5px;font-weight:500}
++
++  .rv-tablewrap{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm)}
++  table.rv-t{width:100%;border-collapse:collapse;font-size:13px}
++  .rv-t th{text-align:left;font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);
++    padding:9px 12px;border-bottom:1px solid var(--line);white-space:nowrap}
++  .rv-t td{padding:9px 12px;border-bottom:1px solid var(--line-soft);vertical-align:top}
++  .rv-t tr:last-child td{border-bottom:0}
++  .rv-t .muted{color:var(--muted);font-size:12px}
++  .rv-t .acts{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
++  .rv-empty{padding:28px;text-align:center;color:var(--muted)}
++
++  .rv-pill{display:inline-block;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;
++    background:var(--line-soft);color:var(--muted)}
++  .rv-pill.queued{background:var(--accent-tint);color:var(--accent-deep)}
++  .rv-pill.sent{background:var(--success-tint);color:var(--success-dk)}
++  .rv-pill.failed{background:var(--danger-tint);color:var(--danger)}
++  .rv-pill.skipped{background:var(--warn-tint);color:var(--warn-dk)}
++
++  .rv-form{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:16px;margin-bottom:16px}
++  .rv-form h2{font-size:15px;margin:0 0 10px}
++  .rv-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}
++  .rv-field label{display:block;font-size:12px;font-weight:600;margin-bottom:4px}
++  .rv-field .hint{font-size:11.5px;color:var(--muted);margin-top:3px}
++  .rv-field input[type="text"],.rv-field input[type="email"],.rv-field input[type="number"],.rv-field textarea{
++    width:100%;box-sizing:border-box;font-family:inherit;font-size:13px;padding:7px 9px;
++    border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--card);color:var(--ink)}
++  .rv-field textarea{min-height:320px;line-height:1.5}
++  .rv-field textarea.short{min-height:60px}
++  .rv-switch{display:flex;align-items:center;gap:9px;font-size:14px;font-weight:700}
++  .rv-switch input{width:18px;height:18px}
++  .rv-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:12px}
++  .rv-preview{white-space:pre-wrap;font-size:13px;line-height:1.5;background:var(--line-soft);
++    border-radius:var(--radius-sm);padding:12px;margin-top:8px}
++  .rv-preview .subj{font-weight:700;margin-bottom:8px}
++  .rv-code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
++  `,
++
++  template: `
++    <div class="rv-wrap">
++      <div class="rv-hd">
++        <div>
++          <h1>RaveReviews</h1>
++          <div class="sub">The Google review request that goes out after an order is picked up or shipped. Customers who have left a review are never asked again.</div>
++        </div>
++      </div>
++      <div id="rvMsg"></div>
++
++      <section class="rv-pane" data-pane="requests">
++        <div class="rv-strip" id="rvStrip"></div>
++        <div class="rv-bar" id="rvBar"></div>
++        <div class="rv-tablewrap" id="rvTable"><div class="rv-empty">Loading…</div></div>
++      </section>
++
++      <section class="rv-pane" data-pane="reviewed" hidden>
++        <div class="rv-form">
++          <h2>Mark a customer as reviewed</h2>
++          <div class="rv-row" style="margin-top:0">
++            <input type="email" id="rvRevEmail" placeholder="customer@example.com" class="rv-code" />
++            <button class="rv-btn primary" id="rvRevAdd">Add</button>
++          </div>
++          <div class="muted" style="margin-top:8px;font-size:12px">Google does not tell us who left a review, only a display name, so this list is kept by hand. You can also mark someone from a Sent row on Requests.</div>
++        </div>
++        <div class="rv-tablewrap" id="rvRevTable"><div class="rv-empty">Loading…</div></div>
++      </section>
++
++      <section class="rv-pane" data-pane="settings" hidden>
++        <div id="rvSettings"><div class="rv-empty">Loading…</div></div>
++      </section>
++    </div>
++  `,
++
++  async mount(ctx) {
++    const root = ctx.root;
++    const $ = (sel) => root.querySelector(sel);
++    const api = ctx.api;
++
++    let records = [];
++    let filter = 'queued';
++    let listMeta = {};
++    let settingsData = null;
++    let current = 'requests';
++
++    function flash(text, kind) {
++      const el = $('#rvMsg');
++      if (!text) { el.innerHTML = ''; return; }
++      el.innerHTML = `<div class="rv-msg ${kind || 'ok'}">${esc(text)}</div>`;
++    }
++
++    const errText = (e) => (e && e.message) || String(e);
++
++    /* ---------------- requests ---------------- */
++
++    async function loadRequests() {
++      try {
++        const r = await api.get(ENDPOINTS.rvRequests);
++        records = (r && r.records) || [];
++        listMeta = r || {};
++        renderStrip();
++        renderBar();
++        renderTable();
++      } catch (e) {
++        $('#rvTable').innerHTML = `<div class="rv-empty">${esc(errText(e))}</div>`;
++      }
++    }
++
++    function renderStrip() {
++      const m = listMeta;
++      const c = m.lastCheck;
++      const s = m.lastSend;
++      const checkLine = !c ? '<div class="v">Not run yet</div><div class="d">Runs four times a day during business hours</div>'
++        : c.error ? `<div class="v rv-bad">Failed</div><div class="d">${esc(when(c.at))}: ${esc(c.error)}</div>`
++        : `<div class="v">${esc(when(c.at))}</div><div class="d">${c.found} at those statuses, ${c.queued} newly queued${c.complete ? '' : ', still working through the list'}${(c.missingStatuses || []).length ? '. Not found in Printavo: ' + esc(c.missingStatuses.join(', ')) : ''}</div>`;
++      const sendLine = !s ? '<div class="v">Nothing sent yet</div>'
++        : s.error ? `<div class="v rv-bad">Failed</div><div class="d">${esc(when(s.at))}: ${esc(s.error)}</div>`
++        : !s.enabled ? `<div class="v">${esc(when(s.at))}</div><div class="d">Sending was off</div>`
++        : `<div class="v">${esc(when(s.at))}</div><div class="d">${s.sent} sent, ${s.skipped} skipped${s.errors && s.errors.length ? ', ' + s.errors.length + ' errors' : ''}</div>`;
++      $('#rvStrip').innerHTML = `
++        <div class="rv-card"><div class="k">Sending</div>
++          <div class="v ${m.enabled ? 'rv-on' : 'rv-off'}">${m.enabled ? 'On' : 'Off'}</div>
++          <div class="d">${m.enabled ? 'Emails go out when they are due' : 'Orders still get queued. Turn it on in Settings.'}</div></div>
++        <div class="rv-card"><div class="k">Last Printavo check</div>${checkLine}</div>
++        <div class="rv-card"><div class="k">Last send</div>${sendLine}</div>
++        ${m.seeded ? '' : '<div class="rv-card"><div class="k">First run</div><div class="v rv-off">Not finished</div><div class="d">The first check records orders already at pickup so nobody gets a late duplicate. Nothing is queued until it finishes.</div></div>'}
++      `;
++    }
++
++    function renderBar() {
++      const counts = listMeta.counts || {};
++      const chips = [['queued', 'Waiting'], ['sent', 'Sent'], ['skipped', 'Skipped'], ['cancelled', 'Cancelled'], ['failed', 'Failed'], ['all', 'All']];
++      $('#rvBar').innerHTML = chips.map(([k, label]) =>
++        `<button class="rv-chip" data-filter="${k}" aria-pressed="${filter === k}">${label}<span class="ct">${counts[k] || 0}</span></button>`
++      ).join('');
++    }
++
++    function rowActions(r) {
++      const b = [];
++      if (r.status === 'queued' || r.status === 'failed') {
++        b.push(`<button class="rv-btn small primary" data-act="send" data-id="${esc(r.id)}">Send now</button>`);
++        b.push(`<button class="rv-btn small danger" data-act="cancel" data-id="${esc(r.id)}">Cancel</button>`);
++      }
++      if (r.status === 'skipped' || r.status === 'cancelled') {
++        b.push(`<button class="rv-btn small" data-act="restore" data-id="${esc(r.id)}">Put back in line</button>`);
++        b.push(`<button class="rv-btn small" data-act="send" data-id="${esc(r.id)}">Send now</button>`);
++      }
++      if (r.email && !r.customer_reviewed && r.status !== 'queued') {
++        b.push(`<button class="rv-btn small" data-act="reviewed" data-email="${esc(r.email)}" data-invoice="${esc(r.invoice_id)}">Left a review</button>`);
++      }
++      return b.join('');
++    }
++
++    function renderTable() {
++      const list = filter === 'all' ? records : records.filter((r) => r.status === filter);
++      if (!list.length) {
++        const empty = {
++          queued: 'Nothing waiting. Orders show up here after the next Printavo check finds them at pickup or shipped.',
++          sent: 'Nothing sent yet.', skipped: 'Nothing skipped.', cancelled: 'Nothing cancelled.', failed: 'No failures.', all: 'No requests yet.'
++        };
++        $('#rvTable').innerHTML = `<div class="rv-empty">${esc(empty[filter] || 'Nothing here.')}</div>`;
++        return;
++      }
++      const rows = list.map((r) => {
++        const whenCol = r.status === 'sent' ? `Sent ${esc(when(r.sent_at))}`
++          : r.status === 'queued' ? `Sends ${esc(day(r.send_after))}`
++          : r.status === 'skipped' ? `Skipped ${esc(when(r.skipped_at))}`
++          : r.status === 'cancelled' ? `Cancelled ${esc(when(r.cancelled_at))}${r.cancelled_by ? ' by ' + esc(r.cancelled_by) : ''}`
++          : esc(when(r.detected_at));
++        const reason = r.status === 'skipped' ? r.skip_reason
++          : (r.status === 'failed' || (r.status === 'queued' && r.last_error)) ? r.last_error : '';
++        return `<tr>
++          <td><strong>#${esc(r.visual_id)}</strong><div class="muted">${esc(r.order_nickname)}</div></td>
++          <td>${esc(r.customer_name || r.first_name || '')}<div class="muted rv-code">${esc(r.email || r.email_raw || 'no email')}</div>
++            ${r.customer_reviewed ? '<div class="muted">Has left a review</div>' : ''}</td>
++          <td><div class="muted">${esc(r.trigger_status)}</div><div class="muted">Found ${esc(when(r.detected_at))}</div></td>
++          <td><span class="rv-pill ${esc(r.status)}">${esc(STATUS_LABEL[r.status] || r.status)}</span>
++            <div class="muted">${whenCol}</div>${reason ? `<div class="muted">${esc(reason)}</div>` : ''}</td>
++          <td><div class="acts">${rowActions(r)}</div></td>
++        </tr>`;
++      }).join('');
++      $('#rvTable').innerHTML = `<table class="rv-t"><thead><tr>
++        <th>Order</th><th>Customer</th><th>Trigger</th><th>Status</th><th></th></tr></thead><tbody>${rows}</tbody></table>`;
++    }
++
++    $('#rvBar').addEventListener('click', (ev) => {
++      const b = ev.target.closest('[data-filter]');
++      if (!b) return;
++      filter = b.dataset.filter;
++      renderBar();
++      renderTable();
++    });
++
++    async function act(body, btn) {
++      if (btn) btn.disabled = true;
++      try {
++        await api.post(ENDPOINTS.rvRequests, body);
++        return { ok: true };
++      } catch (e) {
++        return { ok: false, err: e };
++      } finally {
++        if (btn) btn.disabled = false;
++      }
++    }
++
++    $('#rvTable').addEventListener('click', async (ev) => {
++      const btn = ev.target.closest('[data-act]');
++      if (!btn) return;
++      const a = btn.dataset.act;
++      flash('');
++
++      if (a === 'send') {
++        let r = await act({ action: 'send', id: btn.dataset.id }, btn);
++        // A 409 arrives as a thrown error, so the question is read off the
++        // error body, not a response.
++        const body = r.err && r.err.body;
++        if (!r.ok && body && body.needsConfirm) {
++          if (!window.confirm(`This one would normally be skipped: ${body.reason}.\n\nSend it anyway?`)) return;
++          r = await act({ action: 'send', id: btn.dataset.id, force: true }, btn);
++        }
++        if (r.ok) flash('Sent.');
++        else flash(errText(r.err), 'err');
++      } else if (a === 'cancel') {
++        const r = await act({ action: 'cancel', id: btn.dataset.id }, btn);
++        if (!r.ok) flash(errText(r.err), 'err');
++      } else if (a === 'restore') {
++        const r = await act({ action: 'restore', id: btn.dataset.id }, btn);
++        if (r.ok) flash('Back in line. It sends on its original date, or at the next run if that has passed.');
++        else flash(errText(r.err), 'err');
++      } else if (a === 'reviewed') {
++        const r = await act({ action: 'reviewed', email: btn.dataset.email, invoiceId: btn.dataset.invoice }, btn);
++        if (r.ok) flash(`${btn.dataset.email} will not be asked again.`);
++        else flash(errText(r.err), 'err');
++      }
++      loadRequests();
++    });
++
++    /* ---------------- reviewed ---------------- */
++
++    async function loadReviewed() {
++      try {
++        const r = await api.get(ENDPOINTS.rvRequests, { kind: 'reviewed' });
++        const list = (r && r.reviewed) || [];
++        if (!list.length) {
++          $('#rvRevTable').innerHTML = '<div class="rv-empty">Nobody marked yet.</div>';
++          return;
++        }
++        $('#rvRevTable').innerHTML = `<table class="rv-t"><thead><tr><th>Customer email</th><th>Marked</th><th></th></tr></thead><tbody>${
++          list.map((x) => `<tr><td class="rv-code">${esc(x.email)}</td>
++            <td class="muted">${esc(when(x.at))}${x.by ? ' by ' + esc(x.by) : ''}</td>
++            <td><div class="acts"><button class="rv-btn small" data-unrev="${esc(x.email)}">Remove</button></div></td></tr>`).join('')
++        }</tbody></table>`;
++      } catch (e) {
++        $('#rvRevTable').innerHTML = `<div class="rv-empty">${esc(errText(e))}</div>`;
++      }
++    }
++
++    $('#rvRevAdd').addEventListener('click', async () => {
++      const email = $('#rvRevEmail').value.trim();
++      if (!email) return;
++      const r = await act({ action: 'reviewed', email }, $('#rvRevAdd'));
++      if (r.ok) { $('#rvRevEmail').value = ''; flash(`${email} will not be asked again.`); }
++      else flash(errText(r.err), 'err');
++      loadReviewed();
++    });
++
++    $('#rvRevTable').addEventListener('click', async (ev) => {
++      const b = ev.target.closest('[data-unrev]');
++      if (!b) return;
++      const r = await act({ action: 'unreviewed', email: b.dataset.unrev }, b);
++      if (!r.ok) flash(errText(r.err), 'err');
++      loadReviewed();
++    });
++
++    /* ---------------- settings ---------------- */
++
++    async function loadSettings() {
++      try {
++        settingsData = await api.get(ENDPOINTS.rvSettings);
++        renderSettings();
++      } catch (e) {
++        $('#rvSettings').innerHTML = `<div class="rv-empty">${esc(errText(e))}</div>`;
++      }
++    }
++
++    function formValues() {
++      const v = (id) => $('#' + id).value;
++      return {
++        enabled: $('#rvEnabled').checked,
++        fromName: v('rvFromName'), fromEmail: v('rvFromEmail'), replyTo: v('rvReplyTo'),
++        subject: v('rvSubject'), body: v('rvBody'),
++        statuses: v('rvStatuses').split('\n').map((x) => x.trim()).filter(Boolean),
++        delayDays: Number(v('rvDelay')), repeatGapDays: Number(v('rvGap')),
++        lookbackDays: Number(v('rvLookback')), maxPerRun: Number(v('rvMax')),
++      };
++    }
++
++    function renderPreview() {
++      const msg = renderEmail(Object.assign({}, DEFAULT_SETTINGS, formValues()),
++        { first_name: 'Tony', visual_id: '54781', order_nickname: 'Sample order' });
++      $('#rvPreview').innerHTML = `<div class="subj">${esc(msg.subject)}</div>${esc(msg.text)}`;
++    }
++
++    function renderSettings() {
++      const s = (settingsData && settingsData.settings) || DEFAULT_SETTINGS;
++      const cfg = (settingsData && settingsData.configured) || {};
++      const missing = [];
++      if (!cfg.resend) missing.push('RESEND_API_KEY');
++      if (!cfg.printavo) missing.push('PRINTAVO_API_TOKEN / PRINTAVO_EMAIL');
++      if (!cfg.cronSecret) missing.push('CRON_SECRET');
++
++      $('#rvSettings').innerHTML = `
++        ${missing.length ? `<div class="rv-msg err">Missing in Vercel: ${esc(missing.join(', '))}</div>` : ''}
++        <div class="rv-form">
++          <label class="rv-switch"><input type="checkbox" id="rvEnabled" ${s.enabled ? 'checked' : ''} /> Send review requests automatically</label>
++          <div class="muted" style="font-size:12px;margin-top:6px">Off still finds and queues orders, so you can see what would go out. Turn the Printavo "ZAP&gt;" automations off before turning this on, or customers get two emails.</div>
++        </div>
++
++        <div class="rv-form">
++          <h2>The email</h2>
++          <div class="rv-grid">
++            <div class="rv-field"><label for="rvFromName">From name</label><input type="text" id="rvFromName" value="${esc(s.fromName)}" /></div>
++            <div class="rv-field"><label for="rvFromEmail">From address</label><input type="email" id="rvFromEmail" class="rv-code" value="${esc(s.fromEmail)}" />
++              <div class="hint">Must be on pmapparel.com</div></div>
++            <div class="rv-field"><label for="rvReplyTo">Replies go to</label><input type="email" id="rvReplyTo" class="rv-code" value="${esc(s.replyTo)}" /></div>
++          </div>
++          <div class="rv-field" style="margin-top:12px"><label for="rvSubject">Subject</label><input type="text" id="rvSubject" value="${esc(s.subject)}" /></div>
++          <div class="rv-field" style="margin-top:12px"><label for="rvBody">Text</label><textarea id="rvBody">${esc(s.body)}</textarea>
++            <div class="hint">Fill-ins: ${PLACEHOLDERS.map((p) => `<span class="rv-code">${esc(p.key)}</span> ${esc(p.label)}`).join(' · ')}</div></div>
++          <div class="rv-field" style="margin-top:12px"><label>Preview</label><div class="rv-preview" id="rvPreview"></div></div>
++          <div class="rv-row">
++            <input type="email" id="rvTestTo" class="rv-code" placeholder="send a test to…" />
++            <button class="rv-btn" id="rvTest">Send test</button>
++          </div>
++        </div>
++
++        <div class="rv-form">
++          <h2>Timing and rules</h2>
++          <div class="rv-grid">
++            <div class="rv-field"><label for="rvDelay">Days to wait after pickup</label><input type="number" id="rvDelay" min="0" max="60" value="${esc(s.delayDays)}" /></div>
++            <div class="rv-field"><label for="rvGap">Days before the same address can be asked again</label><input type="number" id="rvGap" min="0" max="365" value="${esc(s.repeatGapDays)}" />
++              <div class="hint">Stops two emails when a customer has two orders picked up close together. 0 turns it off.</div></div>
++            <div class="rv-field"><label for="rvMax">Emails per run, at most</label><input type="number" id="rvMax" min="1" max="100" value="${esc(s.maxPerRun)}" />
++              <div class="hint">Four runs a day. Resend's free plan allows 100 a day across every app.</div></div>
++            <div class="rv-field"><label for="rvLookback">Days back to look in Printavo</label><input type="number" id="rvLookback" min="7" max="365" value="${esc(s.lookbackDays)}" />
++              <div class="hint">By production date.</div></div>
++          </div>
++          <div class="rv-field" style="margin-top:12px"><label for="rvStatuses">Printavo statuses that trigger the email, one per line</label>
++            <textarea id="rvStatuses" class="short rv-code">${esc((s.statuses || []).join('\n'))}</textarea>
++            <div class="hint">Emoji and capitals do not matter.</div></div>
++          <div class="rv-row">
++            <button class="rv-btn primary" id="rvSave">Save settings</button>
++            <button class="rv-btn" id="rvCheck">Check Printavo</button>
++            <button class="rv-btn" id="rvRun">Run now</button>
++          </div>
++          <div id="rvCheckOut"></div>
++        </div>
++      `;
++      renderPreview();
++      ['rvSubject', 'rvBody', 'rvFromName'].forEach((id) => $('#' + id).addEventListener('input', renderPreview));
++
++      $('#rvSave').addEventListener('click', async (ev) => {
++        const btn = ev.currentTarget;
++        btn.disabled = true;
++        try {
++          const r = await api.put(ENDPOINTS.rvSettings, formValues());
++          settingsData.settings = r.settings;
++          flash('Settings saved.');
++        } catch (e) { flash(errText(e), 'err'); }
++        finally { btn.disabled = false; }
++      });
++
++      $('#rvTest').addEventListener('click', async (ev) => {
++        const btn = ev.currentTarget;
++        const to = $('#rvTestTo').value.trim();
++        if (!to) { flash('Enter an address for the test.', 'warn'); return; }
++        btn.disabled = true;
++        try {
++          const r = await api.post(ENDPOINTS.rvSettings, { action: 'test', to, settings: formValues() });
++          flash(`Test sent to ${r.to}. Nothing was queued or counted.`);
++        } catch (e) { flash(errText(e), 'err'); }
++        finally { btn.disabled = false; }
++      });
++
++      $('#rvCheck').addEventListener('click', async (ev) => {
++        const btn = ev.currentTarget;
++        btn.disabled = true;
++        $('#rvCheckOut').innerHTML = '<div class="rv-msg warn" style="margin-top:12px">Asking Printavo. This can take up to a minute.</div>';
++        try {
++          const r = await api.post(ENDPOINTS.rvSettings, { action: 'check' });
++          const sample = (r.sample || []).map((o) =>
++            `#${esc(o.visualId)} ${esc(o.nickname)} · ${esc(o.status)} · ${o.firstName ? esc(o.firstName) : 'no first name'} · ${o.hasEmail ? 'has email' : 'NO EMAIL'}`).join('<br>');
++          $('#rvCheckOut').innerHTML = `<div class="rv-msg ${r.missingStatuses && r.missingStatuses.length ? 'warn' : 'ok'}" style="margin-top:12px">
++            Found ${r.found} order${r.found === 1 ? '' : 's'} at ${esc((r.matchedStatuses || []).join(', ') || 'those statuses')} in the last ${esc(formValues().lookbackDays)} days, ${r.notYetSeen} not seen before.
++            ${r.complete ? '' : 'Stopped before the end of the list; the scheduled run carries on where it stops.'}
++            ${r.missingStatuses && r.missingStatuses.length ? '<br>Not found in Printavo: ' + esc(r.missingStatuses.join(', ')) : ''}
++            <br><span class="muted">Method: ${r.mode === 'statusIds' ? 'filtered by status' : 'scanned by production date'}. Nothing was saved.</span>
++            ${sample ? '<br><br>' + sample : ''}</div>`;
++        } catch (e) {
++          $('#rvCheckOut').innerHTML = `<div class="rv-msg err" style="margin-top:12px">${esc(errText(e))}</div>`;
++        } finally { btn.disabled = false; }
++      });
++
++      $('#rvRun').addEventListener('click', async (ev) => {
++        const btn = ev.currentTarget;
++        btn.disabled = true;
++        flash('Running. This can take up to a minute.', 'warn');
++        try {
++          const r = await api.post(ENDPOINTS.rvSettings, { action: 'run' });
++          const c = r.check || {};
++          const s = r.send || {};
++          const parts = [];
++          parts.push(c.error ? `Printavo check failed: ${c.error}` : `Printavo: ${c.found} found, ${c.queued} newly queued${c.baseline ? ', ' + c.baseline + ' recorded as already handled' : ''}`);
++          parts.push(s.error ? `Sending failed: ${s.error}` : !s.enabled ? 'Sending is off' : `${s.sent} sent, ${s.skipped} skipped`);
++          flash(parts.join('. ') + '.', c.error || s.error ? 'err' : 'ok');
++        } catch (e) { flash(errText(e), 'err'); }
++        finally { btn.disabled = false; }
++      });
++    }
++
++    this._show = (view) => {
++      current = ['requests', 'reviewed', 'settings'].includes(view) ? view : 'requests';
++      root.querySelectorAll('[data-pane]').forEach((p) => { p.hidden = p.dataset.pane !== current; });
++      flash('');
++      if (current === 'requests') loadRequests();
++      if (current === 'reviewed') loadReviewed();
++      if (current === 'settings') loadSettings();
++    };
++    this._show(current);
++  },
++
++  showView(view) {
++    if (typeof this._show === 'function') this._show(view);
++  }
++};
+diff --git a/css/tokens.css b/css/tokens.css
+index e160a4e..4de1628 100644
+--- a/css/tokens.css
++++ b/css/tokens.css
+@@ -351,6 +351,18 @@ body[data-app="concontrol"] {
+   --accent-tint: #F3EDE7;
+ }
+ 
++/* RaveReviews. PROVISIONAL OLIVE, not off a logo file, chosen by elimination
++   the same way ConControl's espresso was: every clear hue near the others in
++   the rail is taken, and olive sits between TravelTrack's green and the golds
++   without reading as either at rail-dot size. CHECK IT AGAINST THE LOGO LINEUP
++   SHEET and correct it here, in the dark block below, and in the registry's
++   display accent. */
++body[data-app="reviews"] {
++  --accent:      #76871C;
++  --accent-deep: #5A6815;
++  --accent-tint: #F2F5E4;
++}
++
+ /* ==========================================================================
+    COMPATIBILITY ALIASES
+    Ported app markup references its own old variable names. Rather than
+@@ -650,6 +662,14 @@ html[data-theme="dark"] body[data-app="concontrol"] {
+   --accent-tint: #2A211A;
+ }
+ 
++/* RaveReviews' olive is lifted for the dark page, same family. Provisional
++   along with the light block. */
++html[data-theme="dark"] body[data-app="reviews"] {
++  --accent:      #8C9F2B;
++  --accent-deep: #A6B84A;
++  --accent-tint: #242A14;
++}
++
+ /* Sticky note paper is deliberately NOT re-themed. The notes are meant to look
+    like paper on a board, and pale paper on a dark board is what a real board
+    looks like. --sticky-ink stays dark because it sits on the paper, not on the
+diff --git a/js/api.js b/js/api.js
+index c1c4c4c..ae8f60e 100644
+--- a/js/api.js
++++ b/js/api.js
+@@ -118,7 +118,11 @@ const LIVE_PREFIXES = [
+   // from the first deploy, so there is no mock block: an empty sponsor list is
+   // a real and expected state for FOC27, and inventing sample sponsors would
+   // put fake committed dollars on a totals strip.
+-  '/api/concontrol/'
++  '/api/concontrol/',
++  // RaveReviews: api/reviews/{requests,settings,cron}.js. Live from the first
++  // deploy with no mock block: an empty queue is the real first-day state, and
++  // invented sample customers on a screen with a Send now button is a bad idea.
++  '/api/reviews/'
+ ];
+ 
+ function isLive(path) {
+@@ -324,6 +328,14 @@ export const ENDPOINTS = {
+   // of the sponsor and speaker streams.
+   conResponses:     '/api/concontrol/responses',
+ 
++  // ---- RaveReviews ----
++  // Admin only, checked in each route. rvCron is not called from the front
++  // end: Vercel cron calls it with CRON_SECRET. Listed so the path has one
++  // home rather than being typed into vercel.json from memory.
++  rvRequests:       '/api/reviews/requests',
++  rvSettings:       '/api/reviews/settings',
++  rvCron:           '/api/reviews/cron',
++
+   // ---- WebsiteWidget ----
+   wwStats:         '/api/websitewidget/stats',
+   wwSites:         '/api/websitewidget/sites',
+diff --git a/js/registry.js b/js/registry.js
+index 6894b5f..bbd347f 100644
+--- a/js/registry.js
++++ b/js/registry.js
+@@ -429,6 +429,34 @@ export const APPS = [
+     ],
+     defaultView: 'home',
+     stub: false
++  },
++  {
++    id: 'reviews',
++    // PROVISIONAL NAME AND ACCENT (Sep 17 2026). Neither is off the logo
++    // lineup sheet yet. The id is `reviews` precisely so the name can change
++    // without moving storage keys, routes or saved links: change `name`, `w1`,
++    // `w2`, `letter` here and the accent in tokens.css, nothing else.
++    name: 'RaveReviews',
++    w1: 'Rave', w2: 'Reviews', letter: 'R',
++    role: 'Who we ask for a review',
++    blurb: 'The Google review request after pickup or shipping.',
++    accent: '#76871C',           // display only (rail dot / app mark); tokens.css owns theming. PROVISIONAL, see tokens.css
++    // Replaces two Printavo automations ("ZAP> Order Shipped", "ZAP> Order
++    // Ready for Pick Up") feeding a Zapier zap. A scheduled check finds
++    // orders newly at ORDER SHIPPED or PICKED-UP, queues a request, and sends
++    // it three days later through Resend. Customers marked as having left a
++    // review are never asked again.
++    //
++    // ADMIN ONLY, enforced in api/reviews/*.js on the account's Admin flag
++    // (superuser === true). Ticking the app on an account puts it in the rail
++    // and every request still answers 403.
++    views: [
++      ['requests', 'Requests'],
++      ['reviewed', 'Reviewed'],
++      ['settings', 'Settings']
++    ],
++    defaultView: 'requests',
++    stub: false
+   }
+ ];
+ 
+diff --git a/lib/help/access.js b/lib/help/access.js
+index 5e3bf2e..17aea3c 100644
+--- a/lib/help/access.js
++++ b/lib/help/access.js
+@@ -19,6 +19,6 @@
+ export const APP_ACCESS_IDS = [
+   "backbone", "shopstock", "errorengine", "givinggauge", "traveltrack",
+   "promopro", "crewcore", "mailme", "marketmachine", "teletally",
+-  "websitewidget", "stitchsense", "concontrol",
++  "websitewidget", "stitchsense", "concontrol", "reviews",
+   "notifications", "settings", "stickies",
+ ];
+diff --git a/lib/help/content.js b/lib/help/content.js
+index 4dac568..6a2f4e0 100644
+--- a/lib/help/content.js
++++ b/lib/help/content.js
+@@ -819,6 +819,43 @@ ONE LOGIN EVERYWHERE. Changing somebody's role changes it across every app at
+ once, because there is only one account.`,
+   },
+ 
++  {
++    app: "reviews",
++    title: "RaveReviews (Google review requests)",
++    keywords: ["review", "reviews", "google review", "google", "rave", "raves",
++      "review request", "picked up", "pickup", "shipped", "zapier", "zap", "feedback"],
++    body: `RaveReviews sends the email asking a customer for a Google review,
++three days after their order is picked up or shipped. It replaced two Printavo
++automations that fed a Zapier zap. It is admin only.
++
++HOW AN ORDER GETS IN. Four times a day during business hours it asks Printavo
++which invoices are sitting at ORDER SHIPPED or PICKED-UP. Printavo does not
++record when a status changed, so the first check that finds an order there
++counts as its pickup, to within a few hours. The order is queued with a send
++date three days later. The very first check after it was installed only
++recorded the orders already at those statuses, because Zapier had already
++emailed them.
++
++WHAT THE CUSTOMER GETS. A plain text email from P&M Apparel, subject the
++invoice number and order nickname, greeting them by first name. The text is
++editable in Settings, with a preview and a Send test button.
++
++WHO IS SKIPPED, decided on the day it would send, not the day it was queued:
++anyone marked as having already left a review, anyone on MailMe's do not
++email list (unsubscribed, bounced or complained), anyone with no usable email
++on the Printavo contact, and an address that was already sent a request in
++the last seven days, so two orders picked up the same week send one email.
++Repeat customers who have not reviewed are asked again on a new order. Google
++does not tell us who reviewed, so that list is kept by hand.
++
++THREE SCREENS. Requests shows every request as Waiting, Sent, Skipped with the
++reason, Cancelled or Failed, with Send now, Cancel, Put back in line and Left a
++review buttons. Send now asks before overriding a skip. Reviewed is the list of
++customers who will never be asked again. Settings holds the on and off switch,
++the email text, the timing, the Printavo statuses, Check Printavo (what it
++would find right now, saving nothing) and Run now.`,
++  },
++
+   {
+     app: "stickies",
+     title: "StickySituations (building the platform)",
+diff --git a/lib/reviews/access.js b/lib/reviews/access.js
+new file mode 100644
+index 0000000..2f22493
+--- /dev/null
++++ b/lib/reviews/access.js
+@@ -0,0 +1,15 @@
++// PUT IN: lib/reviews/access.js
++// lib/reviews/access.js: who may use RaveReviews.
++//
++// ADMIN ONLY: the per-account Admin flag, strictly `superuser === true`.
++// Roles are gone (Sep 2026) and a truthy check is how the CrewCore trap
++// happened, so this is the whole rule. Ticking the app on somebody's account
++// can put it in their rail, and every route still answers 403.
++//
++// ESM. Do NOT convert to module.exports.
++
++export function canUseReviews(perms) {
++  return !!perms && perms.superuser === true;
++}
++
++export const DENIED = "RaveReviews is admin only.";
+diff --git a/lib/reviews/deps.js b/lib/reviews/deps.js
+new file mode 100644
+index 0000000..2b76094
+--- /dev/null
++++ b/lib/reviews/deps.js
+@@ -0,0 +1,38 @@
++// PUT IN: lib/reviews/deps.js
++// lib/reviews/deps.js: the real storage, Printavo, Resend and suppression
++// list, wired together for the api/ routes. The engine never imports these
++// itself, which is what lets the tests hand it fakes instead.
++//
++// ESM. Do NOT convert to module.exports.
++
++import { defaultStore } from "./store.js";
++import { gql, isConfigured as printavoConfigured } from "../promopro/printavo-lookup.js";
++import { sendOne as resendSendOne, resendConfigured } from "../mailme/resend-client.js";
++import { getSuppression } from "../mailme/store.js";
++
++export function realDeps() {
++  return {
++    store: defaultStore(),
++    gql,
++    send: (message) => resendSendOne(message),
++    // MailMe's do not email list. Bounces and complaints from these emails
++    // land there too, through MailMe's Resend webhook, so a bad address stops
++    // being asked without anybody doing anything.
++    getSuppression: async () => {
++      try { return await getSuppression(); }
++      catch (e) {
++        // Unreadable is not the same as empty. Refuse to send rather than
++        // email somebody who unsubscribed because a storage call blinked.
++        throw new Error("Could not read MailMe's do not email list, so nothing was sent: " + ((e && e.message) || e));
++      }
++    },
++  };
++}
++
++export function configuration() {
++  return {
++    printavo: printavoConfigured(),
++    resend: resendConfigured(),
++    cronSecret: !!process.env.CRON_SECRET,
++  };
++}
+diff --git a/lib/reviews/engine.js b/lib/reviews/engine.js
+new file mode 100644
+index 0000000..07275da
+--- /dev/null
++++ b/lib/reviews/engine.js
+@@ -0,0 +1,290 @@
++// PUT IN: lib/reviews/engine.js
++// lib/reviews/engine.js: what the cron and the buttons actually do.
++//
++// Two halves, kept apart on purpose:
++//
++//   INTAKE   detect() turns "this order is at PICKED-UP" into a queued record.
++//            It knows nothing about sending. Today its source is a Printavo
++//            status check; if that ever changes (a webhook, a different sync),
++//            only detect() changes and the queue does not notice.
++//   SENDING  sendDue() / sendOne() take queued records to sent or skipped.
++//            They know nothing about Printavo.
++//
++// Everything is passed in (store, gql, sender, suppression reader, clock), so
++// the tests run these exact functions against fakes. The api/ routes are thin
++// wrappers that supply the real ones.
++//
++// ESM. Do NOT convert to module.exports.
++
++import { buildRecord, decideSkip, renderEmail, isDue, MAX_ATTEMPTS, normalizeEmail } from "./schema.js";
++import { walkTriggerOrders } from "./printavo.js";
++
++const iso = (ms) => new Date(ms).toISOString();
++
++/* ------------------------------------------------------------------ *
++ * INTAKE
++ * ------------------------------------------------------------------ */
++
++/**
++ * Queue one order unless it has been seen before. Exported on its own so a
++ * future source can call it without the Printavo walk.
++ *
++ * `seeding` is true until the first complete check has finished. Every order
++ * found then was already at its status BEFORE this app existed, which means
++ * Zapier has emailed it or is about to. Those are remembered and never queued.
++ */
++export async function intakeOrder(deps, order, { seen, seeding, settings, now }) {
++  const id = String(order.invoiceId || "");
++  if (!id || seen[id]) return "seen";
++  const at = iso(now);
++  await deps.store.markSeen(id, at);
++  seen[id] = at;
++  if (seeding) return "baseline";
++  const existing = await deps.store.getRecord(id);
++  if (existing) return "exists";
++  await deps.store.insertRecord(buildRecord(order, settings, at));
++  return "queued";
++}
++
++export async function detect(deps, { settings, now, deadline }) {
++  const store = deps.store;
++  const state = await store.getState();
++  const seen = await store.getSeen();
++  const seeding = !state.seededAt;
++  const tally = { queued: 0, baseline: 0 };
++
++  const walk = await walkTriggerOrders({
++    gql: deps.gql,
++    statuses: settings.statuses,
++    lookbackDays: settings.lookbackDays,
++    cursor: state.pollCursor || null,
++    now,
++    deadline,
++    pauseMs: deps.pauseMs,
++    onPage: async (orders) => {
++      for (const order of orders) {
++        const r = await intakeOrder(deps, order, { seen, seeding, settings, now });
++        if (tally[r] != null) tally[r]++;
++      }
++    },
++  });
++
++  const summary = {
++    at: iso(now),
++    complete: walk.complete,
++    mode: walk.mode,
++    pages: walk.pages,
++    found: walk.found,
++    queued: tally.queued,
++    baseline: tally.baseline,
++    matchedStatuses: walk.matchedStatuses.map((s) => s.name),
++    missingStatuses: walk.missingStatuses,
++    error: null,
++  };
++  await store.patchState({
++    pollCursor: walk.complete ? null : walk.cursor,
++    lastCheck: summary,
++    seededAt: state.seededAt || (walk.complete ? iso(now) : null),
++  });
++  return summary;
++}
++
++/* ------------------------------------------------------------------ *
++ * SENDING
++ * ------------------------------------------------------------------ */
++
++async function loadContext(deps, settings, now) {
++  const [reviewed, lastSent, suppression] = await Promise.all([
++    deps.store.getReviewed(),
++    deps.store.getLastSent(),
++    deps.getSuppression ? deps.getSuppression() : Promise.resolve({}),
++  ]);
++  return { reviewed, lastSent, suppression: suppression || {}, settings, now };
++}
++
++function note(rec, what, by, at, extra) {
++  rec.history = Array.isArray(rec.history) ? rec.history : [];
++  rec.history.push(Object.assign({ at, what, by: by || "system" }, extra || {}));
++  if (rec.history.length > 30) rec.history = rec.history.slice(-30);
++}
++
++/**
++ * Send or skip ONE record. The only place an email leaves.
++ *
++ * opts: { force, by, allowStatuses }
++ *   force          send even if a skip rule says no. Send now asks first.
++ *   allowStatuses  which statuses may be sent from. The cron sends only
++ *                  queued; Send now may also revive failed, skipped, cancelled.
++ *
++ * Returns { outcome: "sent"|"skipped"|"failed"|"retry"|"refused"|"locked"
++ *   |"needs_confirm", reason?, record? }
++ */
++export async function sendOne(deps, id, ctx, opts) {
++  const o = opts || {};
++  const store = deps.store;
++  const allow = o.allowStatuses || ["queued"];
++  if (!(await store.lock(id))) return { outcome: "locked", reason: "Another send for this order is already running" };
++  try {
++    const rec = await store.getRecord(id);
++    if (!rec) { await store.dequeue(id); return { outcome: "refused", reason: "No such request" }; }
++    if (!allow.includes(rec.status)) {
++      if (rec.status !== "queued") await store.dequeue(id);
++      return { outcome: "refused", reason: rec.status === "sent" ? "This request was already sent" : `This request is ${rec.status}`, record: rec };
++    }
++
++    const at = iso(ctx.now);
++    const reason = decideSkip(rec, ctx);
++    if (reason && !o.force) {
++      if (o.confirmSkips) return { outcome: "needs_confirm", reason, record: rec };
++      rec.status = "skipped";
++      rec.skip_reason = reason;
++      rec.skipped_at = at;
++      note(rec, "skipped", o.by, at, { reason });
++      await store.saveRecord(rec);
++      await store.dequeue(id);
++      return { outcome: "skipped", reason, record: rec };
++    }
++
++    const email = normalizeEmail(rec.email);
++    if (!email) {
++      return { outcome: "refused", reason: reason || "No usable email address", record: rec };
++    }
++
++    const msg = renderEmail(ctx.settings, rec);
++    try {
++      const result = await deps.send({
++        from: msg.from,
++        to: [email],
++        subject: msg.subject,
++        text: msg.text,
++        reply_to: msg.replyTo || undefined,
++      });
++      rec.status = "sent";
++      rec.sent_at = at;
++      rec.message_id = (result && (result.id || (result.data && result.data.id))) || null;
++      rec.skip_reason = null;
++      rec.last_error = null;
++      rec.subject_sent = msg.subject;
++      note(rec, o.force ? "sent (override)" : "sent", o.by, at, o.force && reason ? { overrode: reason } : null);
++      await store.saveRecord(rec);
++      await store.dequeue(id);
++      await store.setLastSent(email, at);
++      ctx.lastSent[email] = at;
++      return { outcome: "sent", record: rec };
++    } catch (e) {
++      const message = (e && e.message) || String(e);
++      rec.attempts = (Number(rec.attempts) || 0) + 1;
++      rec.last_error = message;
++      const quota = e && (e.status === 429);
++      if (rec.attempts >= MAX_ATTEMPTS && !quota) {
++        rec.status = "failed";
++        note(rec, "failed", o.by, at, { error: message });
++        await store.saveRecord(rec);
++        await store.dequeue(id);
++        return { outcome: "failed", reason: message, record: rec };
++      }
++      // A rate limit or daily cap is not this customer's fault and does not
++      // count toward giving up on them; it waits for the next run.
++      if (quota) rec.attempts = Math.max(0, rec.attempts - 1);
++      if (rec.status !== "queued") { rec.status = "queued"; await store.enqueue(id); }
++      note(rec, "send error, will retry", o.by, at, { error: message });
++      await store.saveRecord(rec);
++      return { outcome: "retry", reason: message, record: rec, quota };
++    }
++  } finally {
++    await store.unlock(id);
++  }
++}
++
++export async function sendDue(deps, { settings, now }) {
++  const out = { at: iso(now), enabled: !!settings.enabled, sent: 0, skipped: 0, failed: 0, retry: 0, due: 0, left: 0, errors: [] };
++  if (!settings.enabled) return out;
++
++  const ids = await deps.store.queueIds();
++  const records = await deps.store.getRecords(ids);
++  const due = records.filter((r) => isDue(r, now)).sort((a, b) => a.send_after.localeCompare(b.send_after));
++  out.due = due.length;
++  const ctx = await loadContext(deps, settings, now);
++  const cap = Number(settings.maxPerRun) || 20;
++
++  for (const rec of due) {
++    if (out.sent >= cap) break;
++    const r = await sendOne(deps, rec.id, ctx, { by: "schedule" });
++    if (out[r.outcome] != null) out[r.outcome]++;
++    if (r.outcome === "failed" || r.outcome === "retry") out.errors.push(`${rec.visual_id || rec.id}: ${r.reason}`);
++    if (r.quota) break;   // the provider said stop; everyone else waits too
++  }
++  out.left = Math.max(0, due.length - out.sent - out.skipped - out.failed);
++  await deps.store.patchState({ lastSend: out });
++  return out;
++}
++
++/** Send now, from the screen. Asks before overriding a skip rule. */
++export async function sendNow(deps, id, { settings, now, force, by }) {
++  const ctx = await loadContext(deps, settings, now);
++  return sendOne(deps, id, ctx, {
++    force: !!force,
++    confirmSkips: !force,
++    by,
++    allowStatuses: ["queued", "failed", "skipped", "cancelled"],
++  });
++}
++
++export async function cancel(deps, id, { now, by }) {
++  const store = deps.store;
++  if (!(await store.lock(id))) return { ok: false, reason: "This request is being sent right now" };
++  try {
++    const rec = await store.getRecord(id);
++    if (!rec) return { ok: false, reason: "No such request" };
++    if (!["queued", "failed"].includes(rec.status)) return { ok: false, reason: `Cannot cancel a request that is ${rec.status}`, record: rec };
++    const at = iso(now);
++    rec.status = "cancelled";
++    rec.cancelled_at = at;
++    rec.cancelled_by = by || null;
++    note(rec, "cancelled", by, at);
++    await store.saveRecord(rec);
++    await store.dequeue(id);
++    return { ok: true, record: rec };
++  } finally {
++    await store.unlock(id);
++  }
++}
++
++/** Undo a cancel or a skip. It goes back in line, never straight out the door. */
++export async function restore(deps, id, { now, by }) {
++  const store = deps.store;
++  if (!(await store.lock(id))) return { ok: false, reason: "This request is being sent right now" };
++  try {
++    const rec = await store.getRecord(id);
++    if (!rec) return { ok: false, reason: "No such request" };
++    if (!["cancelled", "skipped", "failed"].includes(rec.status)) return { ok: false, reason: `Cannot restore a request that is ${rec.status}`, record: rec };
++    const at = iso(now);
++    rec.status = "queued";
++    rec.skip_reason = null;
++    rec.cancelled_at = null;
++    rec.cancelled_by = null;
++    rec.attempts = 0;
++    rec.last_error = null;
++    note(rec, "restored", by, at);
++    await store.saveRecord(rec);
++    await store.enqueue(id);
++    return { ok: true, record: rec };
++  } finally {
++    await store.unlock(id);
++  }
++}
++
++export async function markReviewed(deps, email, { now, by, invoiceId }) {
++  const e = normalizeEmail(email);
++  if (!e) return { ok: false, reason: "That is not an email address" };
++  const entry = { at: iso(now), by: by || null, invoice_id: invoiceId || null };
++  await deps.store.setReviewed(e, entry);
++  return { ok: true, email: e, entry };
++}
++
++export async function unmarkReviewed(deps, email) {
++  const e = normalizeEmail(email);
++  if (!e) return { ok: false, reason: "That is not an email address" };
++  await deps.store.removeReviewed(e);
++  return { ok: true, email: e };
++}
+diff --git a/lib/reviews/printavo.js b/lib/reviews/printavo.js
+new file mode 100644
+index 0000000..57ec765
+--- /dev/null
++++ b/lib/reviews/printavo.js
+@@ -0,0 +1,196 @@
++// PUT IN: lib/reviews/printavo.js
++// lib/reviews/printavo.js: find orders sitting at a trigger status.
++//
++// PRINTAVO DOES NOT SAY WHEN A STATUS CHANGED. It stores the current status
++// and nothing about the moment it moved. So this file answers a narrower
++// question, "which invoices are at PICKED-UP or ORDER SHIPPED right now", and
++// lib/reviews/engine.js remembers what it has already seen. The first check
++// that finds an order there is its pickup moment, to within a few hours.
++//
++// Field and argument names are ASKED of Printavo's schema, never assumed, the
++// same way api/printavo-sync.js and lib/promopro/printavo-lookup.js work.
++// Guessed names have already cost this repo round trips (`styleNumber`,
++// `name` on Imprint, CREATED_AT_DESC).
++//
++// TWO WAYS TO FIND THEM, best first:
++//   statusIds   invoices(statusIds: [...]) returns only the orders at those
++//               statuses. A few calls.
++//   scan        no such argument: page every invoice in the production-date
++//               window and compare status names here. Slower, same answer.
++// Neither is chosen silently: the result says which one ran, and a status
++// name that matches nothing in Printavo is reported by name.
++//
++// `gql` is passed in so the tests drive a fake Printavo. The real one comes
++// from lib/promopro/printavo-lookup.js, which already handles 429 retries.
++//
++// ESM. Do NOT convert to module.exports.
++
++import { normStatus, isTriggerStatus } from "./schema.js";
++
++const PAGE = 25;
++const PAUSE_MS = 700;   // Printavo allows 10 requests per 5 seconds per email
++
++function named(t) {
++  let x = t;
++  while (x && !x.name && x.ofType) x = x.ofType;
++  return x ? x.name : null;
++}
++
++async function typeFields(gql, name) {
++  const d = await gql(`query{__type(name:"${name}"){fields{name args{name type{name kind ofType{name kind}}} type{name kind ofType{name kind ofType{name kind}}}}}}`);
++  const out = {};
++  ((d && d.__type && d.__type.fields) || []).forEach((f) => {
++    out[f.name] = { type: named(f.type), args: (f.args || []).map((a) => a.name), argTypes: f.args || [] };
++  });
++  return out;
++}
++
++const pick = (fields, candidates) => candidates.find((c) => fields[c]) || null;
++
++/** What this account's schema supports. Cached per warm function. */
++let _plan = null;
++let _planAt = 0;
++export function _resetPlan() { _plan = null; _planAt = 0; }
++
++export async function discoverPlan(gql) {
++  if (_plan && Date.now() - _planAt < 30 * 60 * 1000) return _plan;
++  const root = await typeFields(gql, "Query");
++  if (!root.invoices) throw new Error("Printavo has no invoices query on this account");
++  const inv = await typeFields(gql, "Invoice");
++  const contactType = inv.contact && inv.contact.type;
++  const contact = contactType ? await typeFields(gql, contactType) : {};
++
++  const plan = {
++    invoiceArgs: root.invoices.args,
++    hasStatusIds: root.invoices.args.includes("statusIds"),
++    hasWindow: root.invoices.args.includes("inProductionAfter"),
++    hasStatusesRoot: !!root.statuses,
++    statusesArgs: root.statuses ? root.statuses.argTypes : [],
++    nickname: pick(inv, ["nickname", "orderNickname", "name"]),
++    hasStatus: !!inv.status,
++    hasContact: !!inv.contact,
++    firstName: pick(contact, ["firstName", "first_name"]),
++    fullName: pick(contact, ["fullName", "name"]),
++    email: pick(contact, ["email", "emailAddress", "primaryEmail"]),
++  };
++  if (!plan.hasStatus) throw new Error("Printavo invoices carry no status field on this account");
++  _plan = plan;
++  _planAt = Date.now();
++  return plan;
++}
++
++/** Every status name and id Printavo has, merged across status types. */
++export async function listStatuses(gql, plan) {
++  if (!plan.hasStatusesRoot) return [];
++  const byId = new Map();
++  const walk = async (extraArg) => {
++    let after = null;
++    for (let i = 0; i < 20; i++) {
++      const a = after ? `,after:"${after}"` : "";
++      const d = await gql(`query{statuses(first:${PAGE}${extraArg}${a}){nodes{id name} pageInfo{hasNextPage endCursor}}}`);
++      const conn = d && d.statuses;
++      ((conn && conn.nodes) || []).forEach((n) => { if (n && n.id) byId.set(String(n.id), { id: String(n.id), name: n.name }); });
++      if (!conn || !conn.pageInfo || !conn.pageInfo.hasNextPage) break;
++      after = conn.pageInfo.endCursor;
++    }
++  };
++  try {
++    await walk("");
++  } catch (e) {
++    // Some schemas require a status TYPE. Ask which values exist and walk each.
++    const typeArg = (plan.statusesArgs || []).find((x) => x.name === "type");
++    const enumName = typeArg && named(typeArg.type);
++    if (!enumName) throw e;
++    const d = await gql(`query{__type(name:"${enumName}"){enumValues{name}}}`);
++    const values = ((d && d.__type && d.__type.enumValues) || []).map((v) => v.name);
++    if (!values.length) throw e;
++    for (const v of values) await walk(`,type:${v}`);
++  }
++  return Array.from(byId.values());
++}
++
++function selection(plan) {
++  const contactBits = [plan.firstName, plan.fullName, plan.email].filter(Boolean).join(" ");
++  const contact = plan.hasContact && contactBits ? ` contact{${contactBits}}` : "";
++  const nick = plan.nickname ? ` ${plan.nickname}` : "";
++  return `nodes{id visualId${nick} status{id name}${contact}} pageInfo{hasNextPage endCursor}`;
++}
++
++function toOrder(node, plan) {
++  const c = (node && node.contact) || {};
++  return {
++    invoiceId: String(node.id),
++    visualId: node.visualId != null ? String(node.visualId) : "",
++    nickname: plan.nickname ? (node[plan.nickname] || "") : "",
++    statusName: (node.status && node.status.name) || "",
++    firstName: plan.firstName ? (c[plan.firstName] || "") : "",
++    fullName: plan.fullName ? (c[plan.fullName] || "") : "",
++    email: plan.email ? (c[plan.email] || "") : "",
++  };
++}
++
++/**
++ * Walk the orders at a trigger status, handing each page to onPage as it
++ * arrives so progress is saved even when time runs out mid-walk.
++ *
++ * opts: { gql, statuses, lookbackDays, cursor, deadline (ms), now (ms),
++ *         onPage(orders), pauseMs }
++ * Returns { complete, cursor, mode, pages, found, matchedStatuses,
++ *           missingStatuses }
++ */
++export async function walkTriggerOrders(opts) {
++  const o = opts || {};
++  const gql = o.gql;
++  const pause = o.pauseMs == null ? PAUSE_MS : o.pauseMs;
++  const now = o.now || Date.now();
++  const plan = await discoverPlan(gql);
++
++  const wanted = (o.statuses || []).filter((s) => normStatus(s));
++  const all = await listStatuses(gql, plan);
++  const matched = all.filter((st) => isTriggerStatus(st.name, wanted));
++  const missing = wanted.filter((w) => !all.some((st) => normStatus(st.name) === normStatus(w)));
++
++  let mode;
++  if (plan.hasStatusIds && matched.length) mode = "statusIds";
++  else if (plan.hasWindow) mode = "scan";
++  else {
++    throw new Error("Printavo cannot filter invoices by status or by production date on this account, so there is no bounded way to find picked up orders");
++  }
++  // Nothing in Printavo carries any of these names, and we could list them:
++  // a statusIds walk would return nothing and look like a quiet week.
++  if (plan.hasStatusesRoot && all.length && !matched.length) {
++    throw new Error(`None of these statuses exist in Printavo: ${wanted.join(", ")}`);
++  }
++
++  const since = new Date(now - (Number(o.lookbackDays) || 45) * 86400000).toISOString();
++  const statusArg = mode === "statusIds" ? `,statusIds:[${matched.map((m) => JSON.stringify(m.id)).join(",")}]` : "";
++  const windowArg = plan.hasWindow ? `,inProductionAfter:"${since}"` : "";
++  const sel = selection(plan);
++
++  let cursor = o.cursor || null;
++  let pages = 0;
++  let found = 0;
++  const deadline = o.deadline || (now + 45000);
++
++  for (;;) {
++    if (Date.now() >= deadline) {
++      return { complete: false, cursor, mode, pages, found, matchedStatuses: matched, missingStatuses: missing };
++    }
++    const after = cursor ? `,after:"${cursor}"` : "";
++    const d = await gql(`query{invoices(first:${PAGE}${statusArg}${windowArg}${after}){${sel}}}`);
++    const conn = d && d.invoices;
++    const nodes = (conn && conn.nodes) || [];
++    pages++;
++    const orders = nodes
++      .filter((n) => n && n.id && n.status && isTriggerStatus(n.status.name, wanted))
++      .map((n) => toOrder(n, plan));
++    found += orders.length;
++    if (o.onPage && orders.length) await o.onPage(orders);
++
++    if (!conn || !conn.pageInfo || !conn.pageInfo.hasNextPage) {
++      return { complete: true, cursor: null, mode, pages, found, matchedStatuses: matched, missingStatuses: missing };
++    }
++    cursor = conn.pageInfo.endCursor;
++    if (pause) await new Promise((r) => setTimeout(r, pause));
++  }
++}
+diff --git a/lib/reviews/schema.js b/lib/reviews/schema.js
+new file mode 100644
+index 0000000..3fede26
+--- /dev/null
++++ b/lib/reviews/schema.js
+@@ -0,0 +1,303 @@
++// PUT IN: lib/reviews/schema.js
++// lib/reviews/schema.js: RaveReviews: the review request email after pickup.
++//
++// WHAT THIS REPLACES. Two Printavo automations ("ZAP> Order Shipped" and
++// "ZAP> Order Ready for Pick Up") emailed a Zapier parser when an order hit
++// ORDER SHIPPED or PICKED-UP. Zapier looked the invoice up, waited three
++// days, and sent the customer a plain text email from Outlook asking for a
++// Google review. Nothing remembered who had already reviewed, so a repeat
++// customer was asked on every order forever.
++//
++// PURE. No imports, no Node builtins, no storage. The screen imports this
++// file straight into the browser (for the placeholders and defaults) and the
++// tests call every rule in it directly. Anything that decides WHETHER an
++// email goes out lives here, so the cron, the Send now button and the tests
++// all ask the same function and cannot disagree.
++//
++// ESM. Do NOT convert to module.exports.
++
++export const KEY_PREFIX = "reviews_data";
++
++export const keys = {
++  record: (id) => `${KEY_PREFIX}:req:${id}`,
++  index: () => `${KEY_PREFIX}:index`,          // sorted set, score = detected time
++  queue: () => `${KEY_PREFIX}:queue`,          // set of ids still waiting to send
++  seen: () => `${KEY_PREFIX}:seen`,            // hash: printavo invoice id -> first seen
++  reviewed: () => `${KEY_PREFIX}:reviewed`,    // hash: email -> { at, by, note }
++  lastSent: () => `${KEY_PREFIX}:last_sent`,   // hash: email -> ISO of last request sent
++  settings: () => `${KEY_PREFIX}:settings`,
++  state: () => `${KEY_PREFIX}:state`,
++  lock: (id) => `${KEY_PREFIX}:lock:${id}`,
++};
++
++export const STATUSES = ["queued", "sent", "skipped", "cancelled", "failed"];
++
++// A send that errors is retried on the next run. Three strikes and it stops
++// and waits for a person, so one bad address cannot fail every run forever.
++export const MAX_ATTEMPTS = 3;
++
++export const PLACEHOLDERS = [
++  { key: "{first_name}", label: "Customer first name (\"there\" if Printavo has none)" },
++  { key: "{visual_id}", label: "Printavo invoice number" },
++  { key: "{order_nickname}", label: "Printavo order nickname" },
++];
++
++// Word for word from the Zapier step, Sep 17 2026.
++export const DEFAULT_SUBJECT = "{visual_id} - {order_nickname}";
++
++export const DEFAULT_BODY = [
++  "Hey {first_name},",
++  "",
++  "We hope you\u2019re enjoying your recent order from P&M Apparel.",
++  "",
++  "If anything missed the mark, please let us know. We want every order to be right, and we are always happy to fix issues quickly.",
++  "",
++  "If everything landed the way it should, we would really appreciate a quick Google review. It helps others find us and helps our team keep doing what we do well.",
++  "",
++  "You can leave a review here:",
++  "https://www.google.com/maps/place//data=!4m3!3m2!1s0x87ee82254922cdef:0x555585b24fe33cf9!12e1?source=g.page.m.dd._&laa=lu-desktop-reviews-dialog-review-solicitation",
++  "",
++  "And if you know someone else who could use custom apparel, referrals from happy customers mean a lot to us.",
++  "",
++  "Thanks again for choosing P&M Apparel.",
++  "",
++  "Cheers,",
++  "The P&M Apparel Team",
++].join("\n");
++
++// The two Printavo statuses the old automations fired on, as they are named
++// there. Matching ignores the emoji and case (see normStatus), so these can
++// be typed plainly in Settings.
++export const DEFAULT_STATUSES = ["ORDER SHIPPED", "PICKED-UP"];
++
++export const DEFAULT_SETTINGS = {
++  // OFF until somebody turns it on. Detection still runs and fills the queue,
++  // so the first thing anyone sees is what WOULD go out, not what already did.
++  enabled: false,
++  delayDays: 3,
++  fromName: "P&M Apparel",
++  fromEmail: "Ryan@pmapparel.com",
++  replyTo: "Ryan@pmapparel.com",
++  subject: DEFAULT_SUBJECT,
++  body: DEFAULT_BODY,
++  statuses: DEFAULT_STATUSES.slice(),
++  // Repeat customers are asked again on a new order unless they have left a
++  // review. This only stops the SAME address getting two in quick succession,
++  // which is what two orders picked up the same week would otherwise do.
++  // 0 turns it off.
++  repeatGapDays: 7,
++  // How far back (by Printavo production date) each check looks. Orders do
++  // not sit at PICKED-UP forever in a way that matters here; a bounded window
++  // keeps each check to a few Printavo calls instead of every invoice ever.
++  lookbackDays: 45,
++  // Resend's free tier is 100 emails a day, shared with MailMe and PromoPro.
++  // Four runs a day at this cap stays under it.
++  maxPerRun: 20,
++};
++
++const DAY_MS = 24 * 60 * 60 * 1000;
++
++/** "🙌 PICKED-UP 🙌" and "picked up" are the same status. */
++export function normStatus(s) {
++  return String(s || "")
++    .replace(/[^\x00-\x7F]/g, " ")
++    .replace(/[\s\-_]+/g, " ")
++    .replace(/[^A-Za-z0-9()%& ]/g, "")
++    .trim()
++    .toUpperCase();
++}
++
++export function isTriggerStatus(name, statuses) {
++  const n = normStatus(name);
++  if (!n) return false;
++  return (statuses || []).some((s) => normStatus(s) === n);
++}
++
++const EMAIL_RE = /^[^\s@<>(),;:"]+@[^\s@<>(),;:"]+\.[^\s@<>(),;:"]{2,}$/;
++
++/** Lowercased and trimmed, or "" when it is not an email address at all. */
++export function normalizeEmail(e) {
++  const v = String(e == null ? "" : e).trim().toLowerCase();
++  return EMAIL_RE.test(v) ? v : "";
++}
++
++/**
++ * First name from what Printavo gives us. A real firstName wins; otherwise the
++ * first word of the full name. Returns "" rather than guessing from an email.
++ */
++export function firstNameOf(contact) {
++  const c = contact || {};
++  const first = String(c.firstName || "").trim();
++  if (first) return first.split(/\s+/)[0];
++  const full = String(c.fullName || "").trim();
++  return full ? full.split(/\s+/)[0] : "";
++}
++
++function fill(template, rec) {
++  const first = String((rec && rec.first_name) || "").trim();
++  return String(template || "")
++    .split("{first_name}").join(first || "there")
++    .split("{visual_id}").join(String((rec && rec.visual_id) || "").trim())
++    .split("{order_nickname}").join(String((rec && rec.order_nickname) || "").trim());
++}
++
++/**
++ * The email exactly as the customer gets it. A blank nickname would leave
++ * "54781 - " in the subject, so a dangling separator is trimmed off either end.
++ */
++export function renderEmail(settings, rec) {
++  const s = Object.assign({}, DEFAULT_SETTINGS, settings || {});
++  let subject = fill(s.subject, rec).replace(/\s+/g, " ").trim();
++  subject = subject.replace(/^[\s\-\u2013\u2014:|]+/, "").replace(/[\s\-\u2013\u2014:|]+$/, "").trim();
++  if (!subject) subject = "Your recent order from P&M Apparel";
++  const text = fill(s.body, rec).replace(/\r\n/g, "\n");
++  const name = String(s.fromName || "").replace(/[<>"]/g, "").trim();
++  const from = name ? `${name} <${s.fromEmail}>` : s.fromEmail;
++  return { from, subject, text, replyTo: s.replyTo || "" };
++}
++
++export function sendAfterFor(detectedAtIso, delayDays) {
++  const t = new Date(detectedAtIso).getTime();
++  const d = Number.isFinite(Number(delayDays)) ? Number(delayDays) : DEFAULT_SETTINGS.delayDays;
++  return new Date(t + d * DAY_MS).toISOString();
++}
++
++/**
++ * One queued request from one Printavo order. `order` is what
++ * lib/reviews/printavo.js hands back.
++ */
++export function buildRecord(order, settings, nowIso) {
++  const o = order || {};
++  const s = Object.assign({}, DEFAULT_SETTINGS, settings || {});
++  return {
++    id: String(o.invoiceId),
++    invoice_id: String(o.invoiceId),
++    visual_id: o.visualId != null ? String(o.visualId) : "",
++    order_nickname: String(o.nickname || "").trim(),
++    customer_name: String(o.fullName || "").trim(),
++    first_name: firstNameOf({ firstName: o.firstName, fullName: o.fullName }),
++    email: normalizeEmail(o.email),
++    email_raw: String(o.email || "").trim(),
++    trigger_status: String(o.statusName || "").trim(),
++    detected_at: nowIso,
++    send_after: sendAfterFor(nowIso, s.delayDays),
++    status: "queued",
++    sent_at: null,
++    message_id: null,
++    skip_reason: null,
++    skipped_at: null,
++    cancelled_at: null,
++    cancelled_by: null,
++    attempts: 0,
++    last_error: null,
++    history: [{ at: nowIso, what: "queued", by: "printavo" }],
++  };
++}
++
++export function isDue(rec, nowMs) {
++  return !!rec && rec.status === "queued" && new Date(rec.send_after).getTime() <= nowMs;
++}
++
++/**
++ * THE SKIP RULES, checked at SEND time, never at intake. A customer who
++ * reviews on day two must not get asked on day three because they were
++ * queued on day zero.
++ *
++ * ctx: { reviewed, suppression, lastSent } are maps keyed by lowercased email,
++ * plus settings and now (ms). Returns a reason in plain words, or null to send.
++ */
++export function decideSkip(rec, ctx) {
++  const c = ctx || {};
++  const s = Object.assign({}, DEFAULT_SETTINGS, c.settings || {});
++  const email = normalizeEmail(rec && rec.email);
++  if (!email) {
++    return rec && rec.email_raw
++      ? `The Printavo contact's email is not a usable address (${rec.email_raw})`
++      : "No email on the Printavo contact";
++  }
++  if (c.reviewed && c.reviewed[email]) return "Already left a review";
++
++  const sup = c.suppression && c.suppression[email];
++  if (sup) {
++    const why = (sup && sup.status) || "unsubscribed";
++    return `On MailMe's do not email list (${why})`;
++  }
++
++  const gap = Number(s.repeatGapDays) || 0;
++  const last = c.lastSent && c.lastSent[email];
++  if (gap > 0 && last) {
++    const since = (Number(c.now) || Date.now()) - new Date(last).getTime();
++    if (since >= 0 && since < gap * DAY_MS) {
++      const days = Math.floor(since / DAY_MS);
++      const when = days === 0 ? "earlier today" : days === 1 ? "yesterday" : `${days} days ago`;
++      return `Already sent a request to this address ${when}`;
++    }
++  }
++  return null;
++}
++
++/**
++ * Settings as a whole, judged after the patch is applied, so a request that
++ * only mentions one field cannot leave another one broken.
++ */
++export function validateSettings(patch, current) {
++  const base = Object.assign({}, DEFAULT_SETTINGS, current || {});
++  const p = patch && typeof patch === "object" ? patch : {};
++  const next = Object.assign({}, base);
++  const errors = [];
++
++  if ("enabled" in p) next.enabled = p.enabled === true;
++
++  const intIn = (k, lo, hi, label) => {
++    if (!(k in p)) return;
++    const n = Number(p[k]);
++    if (!Number.isInteger(n) || n < lo || n > hi) errors.push(`${label} must be a whole number from ${lo} to ${hi}`);
++    else next[k] = n;
++  };
++  intIn("delayDays", 0, 60, "Days to wait");
++  intIn("repeatGapDays", 0, 365, "Days between requests to the same address");
++  intIn("lookbackDays", 7, 365, "Days to look back in Printavo");
++  intIn("maxPerRun", 1, 100, "Emails per run");
++
++  ["fromName", "fromEmail", "replyTo", "subject", "body"].forEach((k) => {
++    if (k in p) next[k] = String(p[k] == null ? "" : p[k]);
++  });
++  next.fromName = next.fromName.replace(/[<>"\r\n]/g, "").trim();
++  next.subject = next.subject.replace(/[\r\n]+/g, " ").trim();
++  next.body = next.body.replace(/\r\n/g, "\n");
++
++  if ("statuses" in p) {
++    const list = Array.isArray(p.statuses) ? p.statuses : String(p.statuses || "").split(/\n|,/);
++    const clean = [];
++    list.forEach((x) => {
++      const raw = String(x || "").trim();
++      if (raw && !clean.some((y) => normStatus(y) === normStatus(raw))) clean.push(raw);
++    });
++    next.statuses = clean;
++  }
++
++  if (!normalizeEmail(next.fromEmail)) errors.push("From address must be an email address");
++  else if (!/@pmapparel\.com$/i.test(next.fromEmail.trim())) {
++    errors.push("From address must be on pmapparel.com, the domain verified in Resend");
++  }
++  if (next.replyTo && !normalizeEmail(next.replyTo)) errors.push("Reply-to must be an email address or blank");
++  if (!next.subject) errors.push("Subject cannot be blank");
++  if (!next.body.trim()) errors.push("Email text cannot be blank");
++  if (!next.statuses.length) errors.push("At least one Printavo status has to trigger the email");
++
++  next.fromEmail = next.fromEmail.trim();
++  next.replyTo = next.replyTo.trim();
++  return { ok: errors.length === 0, errors, settings: next };
++}
++
++/** Counts for the filter chips. */
++export function countByStatus(records) {
++  const out = { all: 0 };
++  STATUSES.forEach((st) => { out[st] = 0; });
++  (records || []).forEach((r) => {
++    if (!r) return;
++    out.all++;
++    if (out[r.status] != null) out[r.status]++;
++  });
++  return out;
++}
+diff --git a/lib/reviews/store.js b/lib/reviews/store.js
+new file mode 100644
+index 0000000..f4254fa
+--- /dev/null
++++ b/lib/reviews/store.js
+@@ -0,0 +1,164 @@
++// PUT IN: lib/reviews/store.js
++// lib/reviews/store.js: RaveReviews storage, under the reviews_data: prefix.
++//
++// WHY REDIS HASHES AND SETS HERE, when most stores in this repo keep a JSON
++// array under one key. Three things write to this app at the same moment for
++// real: the cron marking orders seen and sending, a person pressing Send now,
++// and a person marking a customer as reviewed. A read-modify-write of one big
++// JSON blob loses whichever write finished second. HSET / SADD / SREM change
++// one entry and leave the rest alone, so nothing has to be careful.
++//
++// createStore(kv) takes the storage client as an argument so the tests run the
++// real store against an in-memory one. The default export talks to Upstash.
++//
++// lib/ never imports from api/.
++//
++// ESM. Do NOT convert to module.exports.
++
++import { keys, DEFAULT_SETTINGS } from "./schema.js";
++
++/* ------------------------------------------------------------------ *
++ * UPSTASH
++ * ------------------------------------------------------------------ */
++
++function upstashConfig() {
++  const url = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
++  const token = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
++  if (!url || !token) throw new Error("Upstash not configured (KV_REST_API_URL / KV_REST_API_TOKEN)");
++  return { url: url.replace(/\/+$/, ""), token };
++}
++
++async function command(args) {
++  const { url, token } = upstashConfig();
++  const r = await fetch(url, {
++    method: "POST",
++    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
++    body: JSON.stringify(args),
++    cache: "no-store",
++  });
++  if (!r.ok) throw new Error(`Storage command ${args[0]} failed (${r.status})`);
++  const j = await r.json();
++  if (j && j.error) throw new Error(`Storage command ${args[0]} failed: ${j.error}`);
++  return j ? j.result : null;
++}
++
++function pairsToObject(flat) {
++  const out = {};
++  if (Array.isArray(flat)) {
++    for (let i = 0; i + 1 < flat.length; i += 2) out[flat[i]] = flat[i + 1];
++  } else if (flat && typeof flat === "object") {
++    Object.assign(out, flat);
++  }
++  return out;
++}
++
++export const upstashKv = {
++  get: (k) => command(["GET", k]),
++  set: (k, v) => command(["SET", k, v]),
++  setNx: async (k, v, ttlSec) => (await command(["SET", k, v, "NX", "EX", String(ttlSec)])) === "OK",
++  del: (k) => command(["DEL", k]),
++  mget: async (ks) => (ks.length ? command(["MGET", ...ks]) : []),
++  hset: (k, f, v) => command(["HSET", k, f, v]),
++  hdel: (k, f) => command(["HDEL", k, f]),
++  hgetall: async (k) => pairsToObject(await command(["HGETALL", k])),
++  sadd: (k, m) => command(["SADD", k, m]),
++  srem: (k, m) => command(["SREM", k, m]),
++  smembers: async (k) => (await command(["SMEMBERS", k])) || [],
++  zadd: (k, score, m) => command(["ZADD", k, String(score), m]),
++  zrevrange: async (k, start, stop) => (await command(["ZREVRANGE", k, String(start), String(stop)])) || [],
++};
++
++/* ------------------------------------------------------------------ *
++ * THE STORE
++ * ------------------------------------------------------------------ */
++
++function parse(raw) {
++  let v = raw;
++  for (let i = 0; i < 3 && typeof v === "string"; i++) {
++    try { v = JSON.parse(v); } catch (e) { return null; }
++  }
++  return v && typeof v === "object" ? v : null;
++}
++
++export function createStore(kv) {
++  const readJsonHash = async (key) => {
++    const flat = await kv.hgetall(key);
++    const out = {};
++    Object.keys(flat || {}).forEach((f) => {
++      const v = flat[f];
++      const parsed = typeof v === "string" && /^[\[{"]/.test(v) ? parse(v) : null;
++      out[f] = parsed != null ? parsed : v;
++    });
++    return out;
++  };
++
++  return {
++    async getSettings() {
++      const s = parse(await kv.get(keys.settings()));
++      return Object.assign({}, DEFAULT_SETTINGS, s || {});
++    },
++    async saveSettings(settings) {
++      await kv.set(keys.settings(), JSON.stringify(settings));
++      return settings;
++    },
++
++    async getState() {
++      return parse(await kv.get(keys.state())) || {};
++    },
++    /** State is only written by the cron and the Run now button, one at a time. */
++    async patchState(patch) {
++      const next = Object.assign({}, await this.getState(), patch || {});
++      await kv.set(keys.state(), JSON.stringify(next));
++      return next;
++    },
++
++    async getSeen() { return kv.hgetall(keys.seen()); },
++    async markSeen(invoiceId, iso) { await kv.hset(keys.seen(), String(invoiceId), iso); },
++    async forgetSeen(invoiceId) { await kv.hdel(keys.seen(), String(invoiceId)); },
++
++    async getReviewed() { return readJsonHash(keys.reviewed()); },
++    async setReviewed(email, entry) {
++      await kv.hset(keys.reviewed(), email, JSON.stringify(entry || {}));
++    },
++    async removeReviewed(email) { await kv.hdel(keys.reviewed(), email); },
++
++    async getLastSent() { return kv.hgetall(keys.lastSent()); },
++    async setLastSent(email, iso) { await kv.hset(keys.lastSent(), email, iso); },
++
++    async getRecord(id) { return parse(await kv.get(keys.record(id))); },
++    async getRecords(ids) {
++      if (!ids || !ids.length) return [];
++      const raws = await kv.mget(ids.map((id) => keys.record(id)));
++      return (raws || []).map(parse).filter(Boolean);
++    },
++    async saveRecord(rec) {
++      await kv.set(keys.record(rec.id), JSON.stringify(rec));
++      return rec;
++    },
++    /** A new record: stored, indexed for the list, and queued. */
++    async insertRecord(rec) {
++      await this.saveRecord(rec);
++      await kv.zadd(keys.index(), new Date(rec.detected_at).getTime(), rec.id);
++      if (rec.status === "queued") await kv.sadd(keys.queue(), rec.id);
++      return rec;
++    },
++    async recentIds(limit) { return kv.zrevrange(keys.index(), 0, Math.max(0, (limit || 500) - 1)); },
++
++    async queueIds() { return kv.smembers(keys.queue()); },
++    async enqueue(id) { await kv.sadd(keys.queue(), id); },
++    async dequeue(id) { await kv.srem(keys.queue(), id); },
++
++    /**
++     * One sender at a time per record. The cron and a Send now press landing
++     * in the same second would otherwise both see "queued" and both send.
++     */
++    async lock(id, ttlSec) { return kv.setNx(keys.lock(id), "1", ttlSec || 120); },
++    async unlock(id) { await kv.del(keys.lock(id)); },
++  };
++}
++
++let _default = null;
++export function defaultStore() {
++  if (!_default) _default = createStore(upstashKv);
++  return _default;
++}
+diff --git a/test/marketmachine-samples.test.cjs b/test/marketmachine-samples.test.cjs
+index 09dcc8e..6afc009 100644
+--- a/test/marketmachine-samples.test.cjs
++++ b/test/marketmachine-samples.test.cjs
+@@ -234,21 +234,9 @@ Promise.all([
+ 
+   /* ---- the route -------------------------------------------------------- */
+ 
+-  t.test('the route is superuser gated and never trusts the rail', () => {
+-    const src = read('api/marketmachine/samples.js');
+-    t.assert(/requireAuth/.test(src), 'no auth check');
+-    t.assert(/superuser === true/.test(src), 'no superuser check');
+-  });
+-
+-  t.test('load refuses to run twice', () => {
+-    const src = read('api/marketmachine/samples.js');
+-    t.assert(/409/.test(src), 'a second load should be refused, not duplicated');
+-  });
+-
+-  t.test('clear empties the per-campaign rows key as well as the campaign', () => {
+-    const src = read('api/marketmachine/samples.js');
+-    t.assert(/mmKeys\.entries/.test(src), 'rows would be orphaned under their own key');
+-  });
++  // api/marketmachine/samples.js was deleted in Sep 2026 with the sample
++  // campaigns themselves (Ryan's call during the MarketMachine rebuild). Its
++  // three route checks went with it; they read a file that no longer exists.
+ 
+   t.test('lib/marketmachine/samples.js imports nothing from api/', () => {
+     const src = read('lib/marketmachine/samples.js');
+diff --git a/test/reviews.test.cjs b/test/reviews.test.cjs
+new file mode 100644
+index 0000000..413675e
+--- /dev/null
++++ b/test/reviews.test.cjs
+@@ -0,0 +1,618 @@
++// PUT IN: test/reviews.test.cjs
++/**
++ * RaveReviews: the review request after pickup.
++ *
++ * What would actually hurt here, in order:
++ *
++ *   1. A CUSTOMER GETS THE EMAIL TWICE. From two orders the same week, from
++ *      the cron and a Send now press landing together, from the first run
++ *      re-emailing everybody Zapier already asked, or from the same invoice
++ *      being found at both statuses.
++ *   2. A CUSTOMER WHO REVIEWED, OR UNSUBSCRIBED, GETS ASKED ANYWAY. The skip
++ *      rules run at SEND time, so marking someone on day two protects them on
++ *      day three.
++ *   3. IT QUIETLY SENDS NOTHING. A status name that matches nothing in
++ *      Printavo has to be an error you can read, not an empty queue that
++ *      looks like a slow week.
++ *
++ * Every check calls the real functions: the real store against an in-memory
++ * Redis, the real engine, the real Printavo walker against a fake Printavo.
++ * Grepping for a function name proves the letters are there, not that the
++ * code runs.
++ */
++
++const fs = require('fs');
++const path = require('path');
++const t = require('./harness.cjs');
++
++const ROOT = path.join(__dirname, '..');
++const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
++const DAY = 86400000;
++
++/* ---- an in-memory Redis with the commands the store uses ---------------- */
++
++function memoryKv() {
++  const str = new Map(), hash = new Map(), sets = new Map(), zsets = new Map(), locks = new Set();
++  const h = (k) => { if (!hash.has(k)) hash.set(k, new Map()); return hash.get(k); };
++  const s = (k) => { if (!sets.has(k)) sets.set(k, new Set()); return sets.get(k); };
++  const z = (k) => { if (!zsets.has(k)) zsets.set(k, new Map()); return zsets.get(k); };
++  return {
++    _locks: locks,
++    get: async (k) => (str.has(k) ? str.get(k) : null),
++    set: async (k, v) => { str.set(k, v); return 'OK'; },
++    setNx: async (k) => { if (locks.has(k)) return false; locks.add(k); return true; },
++    del: async (k) => { locks.delete(k); str.delete(k); return 1; },
++    mget: async (ks) => ks.map((k) => (str.has(k) ? str.get(k) : null)),
++    hset: async (k, f, v) => { h(k).set(f, v); return 1; },
++    hdel: async (k, f) => { h(k).delete(f); return 1; },
++    hgetall: async (k) => Object.fromEntries(h(k)),
++    sadd: async (k, m) => { s(k).add(m); return 1; },
++    srem: async (k, m) => { s(k).delete(m); return 1; },
++    smembers: async (k) => Array.from(s(k)),
++    zadd: async (k, score, m) => { z(k).set(m, Number(score)); return 1; },
++    zrevrange: async (k, a, b) => Array.from(z(k).entries()).sort((x, y) => y[1] - x[1]).map((e) => e[0]).slice(a, b + 1),
++  };
++}
++
++/* ---- a fake Printavo ---------------------------------------------------- */
++
++const PICKED = { id: 'st-9', name: '🙌 PICKED-UP 🙌' };
++const SHIPPED = { id: 'st-8', name: '🚀 ORDER SHIPPED 🚀' };
++const OTHER = { id: 'st-1', name: 'READY TO ORDER' };
++
++function inv(id, status, email, extra) {
++  return Object.assign({
++    id: String(id), visualId: String(50000 + Number(id)), nickname: 'Order ' + id, status,
++    contact: { firstName: 'Tony', fullName: 'Tony Huffman', email },
++  }, extra || {});
++}
++
++// The shape lib/reviews/printavo.js hands the engine, for the rules that
++// never touch Printavo.
++function order(id, email) {
++  return { invoiceId: String(id), visualId: String(50000 + Number(id)), nickname: 'Order ' + id,
++    statusName: PICKED.name, firstName: 'Tony', fullName: 'Tony Huffman', email };
++}
++
++function fakePrintavo(opts) {
++  const o = Object.assign({ statusIds: true, window: true, statusesRoot: true, statuses: [PICKED, SHIPPED, OTHER], invoices: [] }, opts || {});
++  const calls = [];
++  const gql = async (q) => {
++    calls.push(q);
++    if (q.includes('__type(name:"Query")')) {
++      const args = [{ name: 'first' }, { name: 'after' }];
++      if (o.statusIds) args.push({ name: 'statusIds' });
++      if (o.window) args.push({ name: 'inProductionAfter' });
++      const fields = [{ name: 'invoices', args, type: { name: 'InvoiceConnection' } }];
++      if (o.statusesRoot) fields.push({ name: 'statuses', args: [{ name: 'first' }, { name: 'after' }], type: { name: 'StatusConnection' } });
++      return { __type: { fields } };
++    }
++    if (q.includes('__type(name:"Invoice")')) {
++      return { __type: { fields: ['id', 'visualId', 'nickname', 'status'].map((name) => ({ name, args: [], type: { name: 'X' } }))
++        .concat([{ name: 'contact', args: [], type: { kind: 'NON_NULL', ofType: { name: 'Contact' } } }]) } };
++    }
++    if (q.includes('__type(name:"Contact")')) {
++      return { __type: { fields: ['firstName', 'fullName', 'email'].map((name) => ({ name, args: [], type: { name: 'String' } })) } };
++    }
++    if (q.includes('statuses(')) {
++      return { statuses: { nodes: o.statuses, pageInfo: { hasNextPage: false, endCursor: null } } };
++    }
++    if (q.includes('invoices(')) {
++      let list = o.invoices.slice();
++      const m = q.match(/statusIds:\[([^\]]*)\]/);
++      if (m) {
++        const ids = JSON.parse('[' + m[1] + ']');
++        list = list.filter((i) => ids.includes(i.status.id));
++      }
++      const after = (q.match(/after:"(\d+)"/) || [])[1];
++      const start = after ? Number(after) : 0;
++      const page = list.slice(start, start + 25);
++      const next = start + 25 < list.length;
++      return { invoices: { nodes: page, pageInfo: { hasNextPage: next, endCursor: next ? String(start + 25) : null } } };
++    }
++    throw new Error('fake Printavo got an unexpected query: ' + q);
++  };
++  return { gql, calls, o };
++}
++
++(async () => {
++  const S = await import('../lib/reviews/schema.js');
++  const { createStore } = await import('../lib/reviews/store.js');
++  const E = await import('../lib/reviews/engine.js');
++  const P = await import('../lib/reviews/printavo.js');
++  const A = await import('../lib/reviews/access.js');
++
++  const T0 = Date.parse('2026-09-21T15:00:00Z');
++
++  function world(opts) {
++    const o = opts || {};
++    const kv = memoryKv();
++    const store = createStore(kv);
++    const printavo = fakePrintavo(o.printavo);
++    const sent = [];
++    let sendImpl = o.send || (async (m) => ({ id: 'msg-' + (sent.length + 1) }));
++    const deps = {
++      store, gql: printavo.gql, pauseMs: 0,
++      send: async (m) => { const r = await sendImpl(m); sent.push(m); return r; },
++      getSuppression: o.getSuppression || (async () => ({})),
++    };
++    return {
++      kv, store, printavo, sent, deps,
++      setSend: (fn) => { sendImpl = fn; },
++      settings: Object.assign({}, S.DEFAULT_SETTINGS, { enabled: true }, o.settings || {}),
++    };
++  }
++
++  const detect = (w, now) => { P._resetPlan(); return E.detect(w.deps, { settings: w.settings, now, deadline: Date.now() + 10000 }); };
++
++  /* ======================================================================= *
++   * THE EMAIL
++   * ======================================================================= */
++
++  t.test('Printavo status names match with the emoji and capitals ignored', () => {
++    t.equal(S.isTriggerStatus('🙌 PICKED-UP 🙌', S.DEFAULT_STATUSES), true);
++    t.equal(S.isTriggerStatus('🚀 ORDER SHIPPED 🚀', S.DEFAULT_STATUSES), true);
++    t.equal(S.isTriggerStatus('picked up', S.DEFAULT_STATUSES), true);
++    t.equal(S.isTriggerStatus('READY TO ORDER', S.DEFAULT_STATUSES), false);
++    t.equal(S.isTriggerStatus('', S.DEFAULT_STATUSES), false);
++  });
++
++  t.test('the default email is the Zapier email, word for word where it matters', () => {
++    const m = S.renderEmail(S.DEFAULT_SETTINGS, { first_name: 'Tony', visual_id: '54781', order_nickname: 'City Laundering Food Visitor' });
++    t.equal(m.subject, '54781 - City Laundering Food Visitor');
++    t.assert(m.text.startsWith('Hey Tony,\n\nWe hope you\u2019re enjoying your recent order from P&M Apparel.'), 'greeting and first line');
++    t.assert(m.text.includes('https://www.google.com/maps/place//data=!4m3!3m2!1s0x87ee82254922cdef:0x555585b24fe33cf9!12e1?source=g.page.m.dd._&laa=lu-desktop-reviews-dialog-review-solicitation'), 'review link intact');
++    t.assert(m.text.includes('referrals from happy customers mean a lot to us.'), 'referral line');
++    t.assert(m.text.endsWith('Cheers,\nThe P&M Apparel Team'), 'sign off');
++    t.equal(m.from, 'P&M Apparel <Ryan@pmapparel.com>');
++  });
++
++  t.test('no first name reads "Hey there," rather than "Hey ,"', () => {
++    const m = S.renderEmail(S.DEFAULT_SETTINGS, { first_name: '', visual_id: '1', order_nickname: 'x' });
++    t.assert(m.text.startsWith('Hey there,'), m.text.slice(0, 20));
++  });
++
++  t.test('a blank nickname does not leave a dangling dash in the subject', () => {
++    t.equal(S.renderEmail(S.DEFAULT_SETTINGS, { visual_id: '54781', order_nickname: '' }).subject, '54781');
++  });
++
++  t.test('first name comes from firstName, else the first word of the full name', () => {
++    t.equal(S.firstNameOf({ firstName: 'Tony', fullName: 'Anthony Huffman' }), 'Tony');
++    t.equal(S.firstNameOf({ fullName: 'Tony Huffman' }), 'Tony');
++    t.equal(S.firstNameOf({}), '');
++  });
++
++  t.test('a request is due three days after the order was found', () => {
++    const rec = S.buildRecord(order(1, 'Huffmantony4@gmail.com'), S.DEFAULT_SETTINGS, new Date(T0).toISOString());
++    t.equal(rec.send_after, new Date(T0 + 3 * DAY).toISOString());
++    t.equal(rec.email, 'huffmantony4@gmail.com', 'email is lowercased so a review mark matches whatever case Printavo used');
++    t.equal(S.isDue(rec, T0 + 3 * DAY - 1), false);
++    t.equal(S.isDue(rec, T0 + 3 * DAY), true);
++  });
++
++  /* ======================================================================= *
++   * SKIP RULES
++   * ======================================================================= */
++
++  const rec = (email) => S.buildRecord(order(1, email), S.DEFAULT_SETTINGS, new Date(T0).toISOString());
++  const ctx = (extra) => Object.assign({ reviewed: {}, suppression: {}, lastSent: {}, settings: S.DEFAULT_SETTINGS, now: T0 }, extra || {});
++
++  t.test('a customer with nothing against them is sent', () => {
++    t.equal(S.decideSkip(rec('a@b.com'), ctx()), null);
++  });
++
++  t.test('a customer who already left a review is skipped', () => {
++    t.equal(S.decideSkip(rec('A@B.com'), ctx({ reviewed: { 'a@b.com': { at: 'x' } } })), 'Already left a review');
++  });
++
++  t.test('an address on MailMe\'s do not email list is skipped, saying why', () => {
++    const r = S.decideSkip(rec('a@b.com'), ctx({ suppression: { 'a@b.com': { status: 'bounced' } } }));
++    t.assert(/do not email/.test(r) && /bounced/.test(r), r);
++  });
++
++  t.test('no email, and an email that is not an address, are skipped with different reasons', () => {
++    t.equal(S.decideSkip(rec(''), ctx()), 'No email on the Printavo contact');
++    t.assert(/not a usable address \(tony at gmail\)/.test(S.decideSkip(rec('tony at gmail'), ctx())));
++  });
++
++  t.test('the same address asked two days ago is skipped; eight days ago is asked', () => {
++    t.assert(/2 days ago/.test(S.decideSkip(rec('a@b.com'), ctx({ lastSent: { 'a@b.com': new Date(T0 - 2 * DAY).toISOString() } }))));
++    t.equal(S.decideSkip(rec('a@b.com'), ctx({ lastSent: { 'a@b.com': new Date(T0 - 8 * DAY).toISOString() } })), null);
++  });
++
++  t.test('a repeat gap of 0 turns that rule off', () => {
++    const c = ctx({ settings: Object.assign({}, S.DEFAULT_SETTINGS, { repeatGapDays: 0 }), lastSent: { 'a@b.com': new Date(T0 - 60000).toISOString() } });
++    t.equal(S.decideSkip(rec('a@b.com'), c), null);
++  });
++
++  /* ======================================================================= *
++   * SETTINGS
++   * ======================================================================= */
++
++  t.test('settings refuse a from address Resend cannot send as', () => {
++    const v = S.validateSettings({ fromEmail: 'ryan@gmail.com' });
++    t.equal(v.ok, false);
++    t.assert(v.errors.join(' ').includes('pmapparel.com'));
++  });
++
++  t.test('settings refuse an empty status list, and fold duplicate spellings', () => {
++    t.equal(S.validateSettings({ statuses: [] }).ok, false);
++    const v = S.validateSettings({ statuses: ['PICKED-UP', '🙌 picked up 🙌', 'ORDER SHIPPED'] });
++    t.equal(v.ok, true);
++    t.equal(v.settings.statuses.length, 2);
++  });
++
++  t.test('saving one field leaves every other field as it was', () => {
++    const v = S.validateSettings({ delayDays: 5 }, Object.assign({}, S.DEFAULT_SETTINGS, { subject: 'Custom' }));
++    t.equal(v.settings.delayDays, 5);
++    t.equal(v.settings.subject, 'Custom');
++  });
++
++  t.test('the switch is only on when it is literally true', () => {
++    t.equal(S.validateSettings({ enabled: 'true' }).settings.enabled, false);
++    t.equal(S.validateSettings({ enabled: true }).settings.enabled, true);
++  });
++
++  /* ======================================================================= *
++   * INTAKE AND DEDUPE
++   * ======================================================================= */
++
++  await t.test('the first run records orders already at pickup and queues none of them', async () => {
++    const w = world({ printavo: { invoices: [inv(1, PICKED, 'a@b.com'), inv(2, SHIPPED, 'c@d.com'), inv(3, OTHER, 'e@f.com')] } });
++    const r = await detect(w, T0);
++    t.equal(r.baseline, 2, 'both trigger statuses recorded');
++    t.equal(r.queued, 0, 'Zapier already emailed these');
++    t.equal((await w.store.queueIds()).length, 0);
++    t.assert((await w.store.getState()).seededAt, 'seeded after a complete first check');
++  });
++
++  await t.test('a first run that runs out of time does not count as the baseline', async () => {
++    const w = world({ printavo: { invoices: [inv(1, PICKED, 'a@b.com')] } });
++    P._resetPlan();
++    const r = await E.detect(w.deps, { settings: w.settings, now: T0, deadline: Date.now() - 1 });
++    t.equal(r.complete, false);
++    t.equal((await w.store.getState()).seededAt, null, 'an unfinished first pass must not start queuing on the next run');
++  });
++
++  await t.test('after the baseline, a newly picked up order is queued exactly once', async () => {
++    const w = world({ printavo: { invoices: [inv(1, PICKED, 'a@b.com')] } });
++    await detect(w, T0);
++    w.printavo.o.invoices.push(inv(2, PICKED, 'c@d.com'));
++    const r1 = await detect(w, T0 + 3600000);
++    const r2 = await detect(w, T0 + 7200000);
++    t.equal(r1.queued, 1);
++    t.equal(r2.queued, 0, 'the same order found again is not queued again');
++    t.equal((await w.store.queueIds()).join(), '2');
++  });
++
++  await t.test('an order that moves from shipped to picked up gets one request, not two', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await detect(w, T0);
++    w.printavo.o.invoices.push(inv(5, SHIPPED, 'a@b.com'));
++    await detect(w, T0 + 3600000);
++    w.printavo.o.invoices[0] = inv(5, PICKED, 'a@b.com');
++    const r = await detect(w, T0 + 7200000);
++    t.equal(r.queued, 0);
++    t.equal((await w.store.recentIds()).length, 1);
++  });
++
++  await t.test('a long list is walked page by page and every order is found', async () => {
++    const many = Array.from({ length: 60 }, (_, i) => inv(100 + i, PICKED, `p${i}@b.com`));
++    const w = world({ printavo: { invoices: [] } });
++    await detect(w, T0);
++    w.printavo.o.invoices = many;
++    const r = await detect(w, T0 + 3600000);
++    t.equal(r.found, 60);
++    t.equal(r.queued, 60);
++    t.equal(r.pages, 3);
++  });
++
++  /* ======================================================================= *
++   * SENDING
++   * ======================================================================= */
++
++  async function queued(w, orders) {
++    await detect(w, T0);                       // baseline, empty
++    w.printavo.o.invoices.push(...orders);
++    await detect(w, T0 + 1000);
++  }
++
++  await t.test('nothing is sent while the switch is off, and the queue keeps it', async () => {
++    const w = world({ printavo: { invoices: [] }, settings: { enabled: false } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    const r = await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(r.sent, 0);
++    t.equal(w.sent.length, 0);
++    t.equal((await w.store.queueIds()).length, 1);
++  });
++
++  await t.test('nothing is sent before three days are up', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 2 * DAY });
++    t.equal(w.sent.length, 0);
++  });
++
++  await t.test('a due request is sent to the customer, recorded, and leaves the queue', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'Huffmantony4@gmail.com', { nickname: 'City Laundering' })]);
++    const r = await E.sendDue(w.deps, { settings: w.settings, now: T0 + 3 * DAY + 5000 });
++    t.equal(r.sent, 1);
++    t.equal(w.sent[0].to[0], 'huffmantony4@gmail.com');
++    t.equal(w.sent[0].subject, '50001 - City Laundering');
++    t.equal(w.sent[0].reply_to, 'Ryan@pmapparel.com');
++    const stored = await w.store.getRecord('1');
++    t.equal(stored.status, 'sent');
++    t.equal(stored.message_id, 'msg-1');
++    t.equal((await w.store.queueIds()).length, 0);
++    t.assert((await w.store.getLastSent())['huffmantony4@gmail.com'], 'last sent recorded for the repeat rule');
++  });
++
++  await t.test('two orders for the same customer in one run send one email', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'same@b.com'), inv(2, SHIPPED, 'SAME@b.com')]);
++    const r = await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 1);
++    t.equal(r.skipped, 1);
++    const recs = await w.store.getRecords(['1', '2']);
++    t.assert(recs.some((x) => x.status === 'skipped' && /earlier today/.test(x.skip_reason)), 'the second says why');
++  });
++
++  await t.test('a customer marked reviewed after being queued is not asked', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'Reviewer@b.com')]);
++    await E.markReviewed(w.deps, 'reviewer@B.com', { now: T0 + DAY, by: 'Ryan' });
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 0);
++    t.equal((await w.store.getRecord('1')).skip_reason, 'Already left a review');
++  });
++
++  await t.test('a repeat customer who has not reviewed is asked again on a later order', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'repeat@b.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    w.printavo.o.invoices.push(inv(2, PICKED, 'repeat@b.com'));
++    await detect(w, T0 + 30 * DAY);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 34 * DAY });
++    t.equal(w.sent.length, 2);
++  });
++
++  await t.test('...and not once they are marked as reviewed', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'repeat@b.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    await E.markReviewed(w.deps, 'repeat@b.com', { now: T0 + 5 * DAY });
++    w.printavo.o.invoices.push(inv(2, PICKED, 'repeat@b.com'));
++    await detect(w, T0 + 30 * DAY);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 34 * DAY });
++    t.equal(w.sent.length, 1);
++  });
++
++  await t.test('unsubscribed in MailMe is skipped', async () => {
++    const w = world({ printavo: { invoices: [] }, getSuppression: async () => ({ 'gone@b.com': { status: 'unsubscribed' } }) });
++    await queued(w, [inv(1, PICKED, 'gone@b.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 0);
++  });
++
++  await t.test('an unreadable do not email list stops the run rather than sending blind', async () => {
++    const w = world({ printavo: { invoices: [] }, getSuppression: async () => { throw new Error('storage blinked'); } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    let threw = false;
++    try { await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY }); } catch (e) { threw = true; }
++    t.equal(threw, true);
++    t.equal(w.sent.length, 0);
++    t.equal((await w.store.getRecord('1')).status, 'queued');
++  });
++
++  await t.test('a cancelled request is never sent, and putting it back queues it again', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    t.equal((await E.cancel(w.deps, '1', { now: T0, by: 'Ryan' })).ok, true);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 0);
++    t.equal((await E.restore(w.deps, '1', { now: T0 + 4 * DAY, by: 'Ryan' })).ok, true);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 1);
++  });
++
++  await t.test('a sent request cannot be cancelled', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal((await E.cancel(w.deps, '1', { now: T0 })).ok, false);
++  });
++
++  await t.test('Send now asks before overriding a skip rule, and sends only when told to', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'fan@b.com')]);
++    await E.markReviewed(w.deps, 'fan@b.com', { now: T0 });
++    const ask = await E.sendNow(w.deps, '1', { settings: w.settings, now: T0 });
++    t.equal(ask.outcome, 'needs_confirm');
++    t.equal(ask.reason, 'Already left a review');
++    t.equal(w.sent.length, 0, 'asking sends nothing');
++    t.equal((await w.store.getRecord('1')).status, 'queued', 'asking changes nothing');
++    const go = await E.sendNow(w.deps, '1', { settings: w.settings, now: T0, force: true, by: 'Ryan' });
++    t.equal(go.outcome, 'sent');
++    const h = (await w.store.getRecord('1')).history.pop();
++    t.equal(h.overrode, 'Already left a review', 'the override is on the record');
++  });
++
++  await t.test('Send now works whether or not automatic sending is on', async () => {
++    const w = world({ printavo: { invoices: [] }, settings: { enabled: false } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    t.equal((await E.sendNow(w.deps, '1', { settings: w.settings, now: T0 })).outcome, 'sent');
++  });
++
++  await t.test('Send now on something already sent does not send it again', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    await E.sendNow(w.deps, '1', { settings: w.settings, now: T0 });
++    const again = await E.sendNow(w.deps, '1', { settings: w.settings, now: T0, force: true });
++    t.equal(again.outcome, 'refused');
++    t.equal(w.sent.length, 1);
++  });
++
++  await t.test('a send already in progress on that order blocks a second one', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    await w.store.lock('1');
++    const r = await E.sendNow(w.deps, '1', { settings: w.settings, now: T0 });
++    t.equal(r.outcome, 'locked');
++    t.equal(w.sent.length, 0);
++  });
++
++  await t.test('the lock is released after a send that throws', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    w.setSend(async () => { throw new Error('boom'); });
++    await E.sendNow(w.deps, '1', { settings: w.settings, now: T0 });
++    t.equal(await w.store.lock('1'), true, 'a failed send must not leave the order locked forever');
++  });
++
++  await t.test('a failing send is retried, then gives up after three tries', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com')]);
++    w.setSend(async () => { throw new Error('Resend said no'); });
++    const now = T0 + 4 * DAY;
++    await E.sendDue(w.deps, { settings: w.settings, now });
++    t.equal((await w.store.getRecord('1')).status, 'queued');
++    t.equal((await w.store.getRecord('1')).attempts, 1);
++    await E.sendDue(w.deps, { settings: w.settings, now });
++    await E.sendDue(w.deps, { settings: w.settings, now });
++    const r = await w.store.getRecord('1');
++    t.equal(r.status, 'failed');
++    t.equal(r.last_error, 'Resend said no');
++    t.equal((await w.store.queueIds()).length, 0);
++  });
++
++  await t.test('hitting the daily limit stops the run and costs nobody a try', async () => {
++    const w = world({ printavo: { invoices: [] } });
++    await queued(w, [inv(1, PICKED, 'a@b.com'), inv(2, PICKED, 'c@d.com')]);
++    let calls = 0;
++    w.setSend(async () => { calls++; const e = new Error('daily quota'); e.status = 429; throw e; });
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(calls, 1, 'the second customer is not tried after the provider said stop');
++    const recs = await w.store.getRecords(['1', '2']);
++    t.assert(recs.every((x) => x.status === 'queued' && x.attempts === 0), JSON.stringify(recs.map((x) => [x.status, x.attempts])));
++  });
++
++  await t.test('a run sends no more than the per-run cap and leaves the rest queued', async () => {
++    const w = world({ printavo: { invoices: [] }, settings: { maxPerRun: 2 } });
++    await queued(w, [inv(1, PICKED, 'a@b.com'), inv(2, PICKED, 'c@d.com'), inv(3, PICKED, 'e@f.com')]);
++    await E.sendDue(w.deps, { settings: w.settings, now: T0 + 4 * DAY });
++    t.equal(w.sent.length, 2);
++    t.equal((await w.store.queueIds()).length, 1);
++  });
++
++  /* ======================================================================= *
++   * PRINTAVO
++   * ======================================================================= */
++
++  await t.test('Printavo is asked only for orders at the two statuses, by id', async () => {
++    P._resetPlan();
++    const p = fakePrintavo({ invoices: [inv(1, PICKED, 'a@b.com'), inv(2, OTHER, 'c@d.com'), inv(3, SHIPPED, 'e@f.com')] });
++    const got = [];
++    const r = await P.walkTriggerOrders({ gql: p.gql, statuses: S.DEFAULT_STATUSES, lookbackDays: 45, now: T0, pauseMs: 0, onPage: async (o) => got.push(...o) });
++    t.equal(r.mode, 'statusIds');
++    const q = p.calls.find((c) => c.includes('invoices('));
++    t.assert(/statusIds:\["st-9","st-8"\]/.test(q) || /statusIds:\["st-8","st-9"\]/.test(q), q);
++    t.assert(/inProductionAfter:"2026-08-07/.test(q), 'bounded by the lookback window: ' + q);
++    t.equal(got.map((o) => o.invoiceId).sort().join(), '1,3');
++    t.equal(got[0].firstName, 'Tony');
++    t.equal(got[0].email, 'a@b.com');
++    t.equal(got[0].nickname, 'Order 1');
++  });
++
++  await t.test('without a status filter it scans the window and matches names itself', async () => {
++    P._resetPlan();
++    const p = fakePrintavo({ statusIds: false, invoices: [inv(1, PICKED, 'a@b.com'), inv(2, OTHER, 'c@d.com')] });
++    const got = [];
++    const r = await P.walkTriggerOrders({ gql: p.gql, statuses: S.DEFAULT_STATUSES, now: T0, pauseMs: 0, onPage: async (o) => got.push(...o) });
++    t.equal(r.mode, 'scan');
++    t.equal(got.map((o) => o.invoiceId).join(), '1');
++  });
++
++  await t.test('a status name that is not in Printavo is reported by name', async () => {
++    P._resetPlan();
++    const p = fakePrintavo({ invoices: [] });
++    const r = await P.walkTriggerOrders({ gql: p.gql, statuses: ['PICKED-UP', 'DELIVERED'], now: T0, pauseMs: 0 });
++    t.equal(r.missingStatuses.join(), 'DELIVERED');
++  });
++
++  await t.test('if none of the names exist in Printavo it is an error, not a quiet empty queue', async () => {
++    P._resetPlan();
++    const p = fakePrintavo({ invoices: [] });
++    let msg = '';
++    try { await P.walkTriggerOrders({ gql: p.gql, statuses: ['PICKUP COMPLETE'], now: T0, pauseMs: 0 }); } catch (e) { msg = e.message; }
++    t.assert(/None of these statuses exist in Printavo: PICKUP COMPLETE/.test(msg), msg);
++  });
++
++  await t.test('with no way to bound the search it refuses rather than walking every invoice ever', async () => {
++    P._resetPlan();
++    const p = fakePrintavo({ statusIds: false, window: false, invoices: [] });
++    let msg = '';
++    try { await P.walkTriggerOrders({ gql: p.gql, statuses: S.DEFAULT_STATUSES, now: T0, pauseMs: 0 }); } catch (e) { msg = e.message; }
++    t.assert(/cannot filter/.test(msg), msg);
++  });
++
++  await t.test('a failed check is recorded, not thrown away', async () => {
++    const w = world({ printavo: { statusIds: false, window: false } });
++    let threw = false;
++    try { await detect(w, T0); } catch (e) { threw = true; }
++    t.equal(threw, true, 'detect throws so the route can record it');
++  });
++
++  /* ======================================================================= *
++   * ACCESS AND WIRING
++   * ======================================================================= */
++
++  t.test('only the Admin flag, strictly true, opens RaveReviews', () => {
++    t.equal(A.canUseReviews({ superuser: true }), true);
++    t.equal(A.canUseReviews({ superuser: 'true' }), false);
++    t.equal(A.canUseReviews({ role: 'admin', tabs: ['reviews'] }), false, 'a ticked app is not admin');
++    t.equal(A.canUseReviews(null), false);
++  });
++
++  t.test('both screen routes check admin before touching anything else', () => {
++    ['api/reviews/requests.js', 'api/reviews/settings.js'].forEach((f) => {
++      const src = read(f);
++      const gate = src.indexOf('canUseReviews(perms)');
++      t.assert(gate > 0, f + ' has no admin check');
++      t.assert(gate < src.indexOf('realDeps()'), f + ' reaches storage before the admin check');
++      t.assert(src.indexOf('requireAuth(req, res)') < gate, f + ' checks admin before signing in');
++    });
++  });
++
++  await t.test('the cron refuses a call without CRON_SECRET', async () => {
++    const saved = process.env.CRON_SECRET;
++    delete process.env.CRON_SECRET;
++    const { default: handler } = await import('../api/reviews/cron.js');
++    let code = 0;
++    const res = { setHeader() {}, status(c) { code = c; return this; }, json() { return this; } };
++    await handler({ headers: { authorization: 'Bearer undefined' } }, res);
++    t.equal(code, 401, 'an unset secret must not match "Bearer undefined"');
++    if (saved !== undefined) process.env.CRON_SECRET = saved;
++  });
++
++  await t.test('the app is registered, reachable through the seam, and scheduled', async () => {
++    const reg = await import('../js/registry.js');
++    const app = reg.getApp('reviews');
++    t.assert(app, 'not in the registry');
++    t.equal(reg.viewKeys(app).join(), 'requests,reviewed,settings');
++    const { ENDPOINTS } = await import('../js/api.js');
++    t.equal(ENDPOINTS.rvRequests, '/api/reviews/requests');
++    t.equal(ENDPOINTS.rvSettings, '/api/reviews/settings');
++    const crons = JSON.parse(read('vercel.json')).crons;
++    t.assert(crons.some((c) => c.path === ENDPOINTS.rvCron), 'no cron calls the review run');
++    t.assert(fs.existsSync(path.join(ROOT, 'api/reviews/cron.js')), 'the cron path has no file behind it');
++  });
++
++  t.test('lib/reviews imports nothing from api/', () => {
++    fs.readdirSync(path.join(ROOT, 'lib/reviews')).forEach((f) => {
++      t.assert(!/from\s+["'][^"']*\/api\//.test(read('lib/reviews/' + f)), f + ' imports from api/');
++    });
++  });
++
++  process.exit(t.report());
++})();
+diff --git a/vercel.json b/vercel.json
+index 83cfd5f..f31796f 100644
+--- a/vercel.json
++++ b/vercel.json
+@@ -21,6 +21,10 @@
+     {
+       "path": "/api/promopro/cron-chase",
+       "schedule": "30 13 * * 1-5"
++    },
++    {
++      "path": "/api/reviews/cron",
++      "schedule": "15 14,17,20,23 * * *"
+     }
+   ],
+   "headers": [
+-- 
+2.43.0
+

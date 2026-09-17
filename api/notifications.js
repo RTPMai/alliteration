@@ -255,7 +255,7 @@ const APP_IDS = [
   // Added when each app landed. This list is hand-synced, so an app missing
   // from it cannot be tagged on a hand-off even though it exists in the rail:
   // promopro and stitchsense were both in that state.
-  "promopro", "stitchsense", "marketmachine", "concontrol",
+  "promopro", "stitchsense", "marketmachine", "concontrol", "reviews",
   // Site-level, not in the rail with the rest. It was missing here until Sep
   // 2026, which meant a hand-off could not be tagged StickySituations at all,
   // and the sticky link type added the same week was unreachable because the

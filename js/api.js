@@ -118,7 +118,11 @@ const LIVE_PREFIXES = [
   // from the first deploy, so there is no mock block: an empty sponsor list is
   // a real and expected state for FOC27, and inventing sample sponsors would
   // put fake committed dollars on a totals strip.
-  '/api/concontrol/'
+  '/api/concontrol/',
+  // RaveReviews: api/reviews/{requests,settings,cron}.js. Live from the first
+  // deploy with no mock block: an empty queue is the real first-day state, and
+  // invented sample customers on a screen with a Send now button is a bad idea.
+  '/api/reviews/'
 ];
 
 function isLive(path) {
@@ -323,6 +327,14 @@ export const ENDPOINTS = {
   // What people sent us: survey answers, notify signups, and the inbound end
   // of the sponsor and speaker streams.
   conResponses:     '/api/concontrol/responses',
+
+  // ---- RaveReviews ----
+  // Admin only, checked in each route. rvCron is not called from the front
+  // end: Vercel cron calls it with CRON_SECRET. Listed so the path has one
+  // home rather than being typed into vercel.json from memory.
+  rvRequests:       '/api/reviews/requests',
+  rvSettings:       '/api/reviews/settings',
+  rvCron:           '/api/reviews/cron',
 
   // ---- WebsiteWidget ----
   wwStats:         '/api/websitewidget/stats',

@@ -351,6 +351,18 @@ body[data-app="concontrol"] {
   --accent-tint: #F3EDE7;
 }
 
+/* RaveReviews. PROVISIONAL OLIVE, not off a logo file, chosen by elimination
+   the same way ConControl's espresso was: every clear hue near the others in
+   the rail is taken, and olive sits between TravelTrack's green and the golds
+   without reading as either at rail-dot size. CHECK IT AGAINST THE LOGO LINEUP
+   SHEET and correct it here, in the dark block below, and in the registry's
+   display accent. */
+body[data-app="reviews"] {
+  --accent:      #76871C;
+  --accent-deep: #5A6815;
+  --accent-tint: #F2F5E4;
+}
+
 /* ==========================================================================
    COMPATIBILITY ALIASES
    Ported app markup references its own old variable names. Rather than
@@ -648,6 +660,14 @@ html[data-theme="dark"] body[data-app="concontrol"] {
   --accent:      #C39A6B;
   --accent-deep: #D9B489;
   --accent-tint: #2A211A;
+}
+
+/* RaveReviews' olive is lifted for the dark page, same family. Provisional
+   along with the light block. */
+html[data-theme="dark"] body[data-app="reviews"] {
+  --accent:      #8C9F2B;
+  --accent-deep: #A6B84A;
+  --accent-tint: #242A14;
 }
 
 /* Sticky note paper is deliberately NOT re-themed. The notes are meant to look

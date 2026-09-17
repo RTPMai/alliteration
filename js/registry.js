@@ -429,6 +429,34 @@ export const APPS = [
     ],
     defaultView: 'home',
     stub: false
+  },
+  {
+    id: 'reviews',
+    // PROVISIONAL NAME AND ACCENT (Sep 17 2026). Neither is off the logo
+    // lineup sheet yet. The id is `reviews` precisely so the name can change
+    // without moving storage keys, routes or saved links: change `name`, `w1`,
+    // `w2`, `letter` here and the accent in tokens.css, nothing else.
+    name: 'RaveReviews',
+    w1: 'Rave', w2: 'Reviews', letter: 'R',
+    role: 'Who we ask for a review',
+    blurb: 'The Google review request after pickup or shipping.',
+    accent: '#76871C',           // display only (rail dot / app mark); tokens.css owns theming. PROVISIONAL, see tokens.css
+    // Replaces two Printavo automations ("ZAP> Order Shipped", "ZAP> Order
+    // Ready for Pick Up") feeding a Zapier zap. A scheduled check finds
+    // orders newly at ORDER SHIPPED or PICKED-UP, queues a request, and sends
+    // it three days later through Resend. Customers marked as having left a
+    // review are never asked again.
+    //
+    // ADMIN ONLY, enforced in api/reviews/*.js on the account's Admin flag
+    // (superuser === true). Ticking the app on an account puts it in the rail
+    // and every request still answers 403.
+    views: [
+      ['requests', 'Requests'],
+      ['reviewed', 'Reviewed'],
+      ['settings', 'Settings']
+    ],
+    defaultView: 'requests',
+    stub: false
   }
 ];
 

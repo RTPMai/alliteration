@@ -21,6 +21,10 @@
     {
       "path": "/api/promopro/cron-chase",
       "schedule": "30 13 * * 1-5"
+    },
+    {
+      "path": "/api/reviews/cron",
+      "schedule": "15 14,17,20,23 * * *"
     }
   ],
   "headers": [

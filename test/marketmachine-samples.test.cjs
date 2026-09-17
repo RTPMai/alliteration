@@ -234,21 +234,9 @@ Promise.all([
 
   /* ---- the route -------------------------------------------------------- */
 
-  t.test('the route is superuser gated and never trusts the rail', () => {
-    const src = read('api/marketmachine/samples.js');
-    t.assert(/requireAuth/.test(src), 'no auth check');
-    t.assert(/superuser === true/.test(src), 'no superuser check');
-  });
-
-  t.test('load refuses to run twice', () => {
-    const src = read('api/marketmachine/samples.js');
-    t.assert(/409/.test(src), 'a second load should be refused, not duplicated');
-  });
-
-  t.test('clear empties the per-campaign rows key as well as the campaign', () => {
-    const src = read('api/marketmachine/samples.js');
-    t.assert(/mmKeys\.entries/.test(src), 'rows would be orphaned under their own key');
-  });
+  // api/marketmachine/samples.js was deleted in Sep 2026 with the sample
+  // campaigns themselves (Ryan's call during the MarketMachine rebuild). Its
+  // three route checks went with it; they read a file that no longer exists.
 
   t.test('lib/marketmachine/samples.js imports nothing from api/', () => {
     const src = read('lib/marketmachine/samples.js');
