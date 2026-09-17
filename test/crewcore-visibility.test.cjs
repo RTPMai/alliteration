@@ -347,6 +347,27 @@ async function check(name, fn) {
       'the Time Clock view must guard on it too, not only the rail');
   });
 
+  await t.test('the rail caps CrewCore at the self-serve views, whatever is ticked', async () => {
+    // The server half of this rule has been covered since August. The RAIL
+    // half had none until Sept 2026, when allowedViews() was edited for
+    // MarketMachine and nothing failed. A cap with no test is a cap until
+    // somebody touches the function.
+    const reg = await import('../js/registry.js');
+    const capped = reg.allowedViews({
+      superuser: false,
+      tabs: ['crewcore', 'crewcore:dashboard', 'crewcore:roster', 'crewcore:settings', 'crewcore:stipend'],
+    }, 'crewcore');
+    t.assert(!capped.includes('roster'), 'the whole team roster is not handed out by a tick');
+    t.assert(!capped.includes('settings'), 'nor CrewCore Settings');
+    t.assert(capped.includes('dashboard') && capped.includes('stipend'), 'the self-serve views survive');
+
+    const plain = reg.allowedViews({ superuser: false, tabs: ['crewcore'] }, 'crewcore');
+    t.assert(!plain.includes('roster'), 'and an account with nothing narrowed gets no roster either');
+
+    const admin = reg.allowedViews({ superuser: true, tabs: ['crewcore'] }, 'crewcore');
+    t.assert(admin.includes('roster'), 'an Admin still gets everything');
+  });
+
   process.exit(t.report());
 })().catch((e) => {
   console.log('  FAIL crewcore-visibility suite could not run: ' + (e && e.stack ? e.stack : e));

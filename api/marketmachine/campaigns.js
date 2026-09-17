@@ -53,6 +53,7 @@ import { computeCalculations, advisories, scorecardRows } from "../../lib/market
 import { isParentType } from "../../lib/marketmachine/catalog.js";
 import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
 import { myTasks, canTickStep } from "../../lib/marketmachine/tasks.js";
+import { isMarketMachineAdmin } from "../../lib/marketmachine/access.js";
 import { todayCentral } from "../../lib/marketmachine/dates.js";
 
 const ADMIN_ONLY = "MarketMachine is admin only for now.";
@@ -67,7 +68,10 @@ async function accountFor(sess) {
   const user = sess && sess.username ? await getUser(sess.username) : null;
   return {
     user,
-    admin: !!(user && user.superuser === true),
+    // The platform Admin flag, or the Campaigns grant on this account. See
+    // lib/marketmachine/access.js: it is the one definition, and the rail
+    // reads it too.
+    admin: isMarketMachineAdmin(user),
     session: { username: sess.username, name: (user && user.name) || sess.name || sess.username },
   };
 }

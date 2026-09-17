@@ -22,6 +22,7 @@
 // with the server routes and the screen. lib/crewcore/schema.js has no
 // imports of its own, so it is safe to pull into the browser.
 import { isCrewCoreAdmin } from '../lib/crewcore/schema.js';
+import { SELF_SERVE_VIEWS as MM_SELF_SERVE } from '../lib/marketmachine/access.js';
 
 /**
  * Views an app shows to somebody who is NOT an administrator of it, used by
@@ -33,10 +34,10 @@ const SELF_SERVE_VIEWS = {
   crewcore: ['dashboard', 'timeclock', 'stipend', 'kudos', 'reviews', 'handbook'],
   // MARKETMACHINE, Sept 2026. Ticking the app on somebody's account is how
   // they get their tasks, and it must not also hand them the campaign screens.
-  // Same shape as CrewCore's rule and for the same reason, with one
-  // difference: there is no MarketMachine admin role, so the per-account Admin
-  // flag is the only thing that lifts it, and that is handled above.
-  marketmachine: ['tasks'],
+  // Whatever IS ticked for them is honoured, so ticking Campaigns is how Jacob
+  // gets the whole app without the platform Admin flag. One definition, in
+  // lib/marketmachine/access.js, which the server reads as well.
+  marketmachine: MM_SELF_SERVE,
 };
 
 export const APPS = [
@@ -699,8 +700,18 @@ export function allowedViews(perms, appId) {
     roleName: perms && perms.role,
   });
   if (selfServe && !appAdmin) {
+    // Two shapes of the same idea, and the difference is deliberate.
+    //
+    // CrewCore's list is a CAP: no checkbox may hand somebody the roster or
+    // the team's time clock, so whatever is ticked gets filtered down to it.
+    //
+    // MarketMachine's is a DEFAULT: an account with nothing narrowed gets My
+    // tasks, and what you tick for a person is what they get. That is how
+    // Jacob has the whole campaign side without the platform Admin flag, which
+    // would also give him pay, reviews and accounts.
+    const isCap = appId === 'crewcore';
     scoped = scoped.length
-      ? scoped.filter((v) => selfServe.includes(v))
+      ? (isCap ? scoped.filter((v) => selfServe.includes(v)) : scoped)
       : selfServe.slice();
   }
 

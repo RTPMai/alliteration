@@ -301,14 +301,67 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks',
       'so the rail shows her one screen, not four');
 
-    // Ticking a campaign screen on her account does not lift the ceiling.
-    const forced = { ...perms, tabs: perms.tabs.concat(['marketmachine:campaigns', 'marketmachine:settings']) };
-    t.equal(reg.allowedViews(forced, 'marketmachine').join(','), 'tasks',
-      'a per-view tick cannot hand out the campaign screens');
+    // What IS ticked for a person is what they get: that is how Jacob has the
+    // whole app without the platform Admin flag. The default, with nothing
+    // ticked, stays My tasks, which is the part that matters for everyone
+    // else. The next test covers the granting side.
+    const widened = { ...perms, tabs: perms.tabs.concat(['marketmachine:campaigns']) };
+    t.equal(reg.allowedViews(widened, 'marketmachine').join(','), 'tasks,campaigns',
+      'ticking a screen grants that screen, and only that screen');
+    const plain = { ...perms, tabs: ['marketmachine'] };
+    t.equal(reg.allowedViews(plain, 'marketmachine').join(','), 'tasks',
+      'and an account with nothing narrowed still gets My tasks only, never everything');
 
     const admin = await users.permsFor('ryan');
     t.equal(reg.allowedViews(admin, 'marketmachine').join(','), 'tasks,campaigns,calendar,settings',
       'an Admin still gets all four');
+  });
+
+  await t.test('ticking Campaigns gives the whole app, and nothing outside it', async () => {
+    const reg = await import('../js/registry.js');
+    const users = await import('../lib/users.js');
+    const access = await import('../lib/marketmachine/access.js');
+
+    // Jacob: MarketMachine granted, all four screens ticked, and NOT an Admin.
+    kv.set('alliteration:users', JSON.stringify({
+      ryan: { username: 'ryan', name: 'Ryan Toney', superuser: true, access: { apps: [] } },
+      hannah: { username: 'hannah', name: 'Hannah Posey', access: { apps: ['marketmachine'], can_edit: true } },
+      jacob: { username: 'jacob', name: 'Jacob Whitman', access: {
+        apps: ['marketmachine'], views: { marketmachine: ['tasks', 'campaigns', 'calendar', 'settings'] }, can_edit: true } },
+    }));
+    const JACOB_U = { username: 'jacob', name: 'Jacob Whitman' };
+
+    const perms = await users.permsFor('jacob');
+    t.assert(!perms.superuser, 'he is not a platform Admin');
+    t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks,campaigns,calendar,settings',
+      'but he gets all four MarketMachine screens');
+    t.assert(access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'campaigns'] } } }),
+      'Campaigns is the switch');
+    t.assert(!access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'calendar'] } } }),
+      'and Timeline alone is not');
+
+    const list = await call({ as: JACOB_U });
+    t.equal(list.statusCode, 200, 'the campaign list opens for him');
+    t.assert(!list.body.limited, 'in full, not the names-only version');
+    const id = list.body.campaigns[0].id;
+    const detail = await call({ as: JACOB_U, query: { id } });
+    t.equal(detail.statusCode, 200, 'so does a campaign');
+    t.assert(detail.body.calculations && detail.body.connections, 'with its numbers and connections');
+    t.equal((await call({ as: JACOB_U, method: 'POST', body: { type: 'postal', name: 'Jacob made this' } })).statusCode, 201,
+      'and he can create one');
+    t.equal((await call({ as: JACOB_U, method: 'PATCH', query: { id, step: 'prelaunch_review' }, body: { done: true } })).statusCode, 200,
+      'and work any step, the same as an Admin inside this app');
+
+    // Nothing outside MarketMachine moved.
+    t.assert(!perms.tabs.includes('crewcore'), 'he did not gain CrewCore');
+    t.assert(!perms.tabs.includes('settings'), 'nor the accounts screen');
+    t.assert(perms.tabs.filter((x) => x.indexOf(':') === -1).join(',') === 'marketmachine',
+      'MarketMachine is still the only app he was given');
+
+    // And an ordinary grant is unchanged by any of this.
+    t.equal(reg.allowedViews(await users.permsFor('hannah'), 'marketmachine').join(','), 'tasks',
+      'somebody with the plain grant still gets My tasks only');
+    t.equal((await call({ as: HANNAH_U, query: { id } })).statusCode, 403, 'and is still refused a campaign');
   });
 
   await t.test('the ceiling is a second gate, not the only one', async () => {

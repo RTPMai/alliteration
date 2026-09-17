@@ -344,7 +344,10 @@ export default {
         // Registry views are [id, label] pairs, not objects.
         const views = (a.views || []).map((v) =>
           Array.isArray(v) ? { id: v[0], name: v[1] || v[0] } : v);
-        const picked = draft.views[a.id] || [];
+        // MarketMachine reads an empty list as My tasks only, so the boxes
+        // must show that rather than everything ticked.
+        const picked = draft.views[a.id]
+          || (a.id === 'marketmachine' ? ['tasks'] : []);
         return '<div class="acc-app' + (on ? ' on' : '') + '" data-acc-block="' + esc(a.id) + '">' +
           '<button type="button" class="app-toggle' + (on ? ' on' : '') +
             '" data-acc-app="' + esc(a.id) + '" style="--c:' + esc(a.accent) + '">' +
@@ -354,7 +357,9 @@ export default {
                 '<label><input type="checkbox" data-acc-view="' + esc(a.id) + '" value="' + esc(v.id) + '"' +
                   (!picked.length || picked.indexOf(v.id) !== -1 ? ' checked' : '') + '> ' +
                   esc(v.name) + '</label>').join('') +
-              '<div class="hint">All ticked means every screen. Untick to narrow.</div></div>'
+              '<div class="hint">' + (a.id === 'marketmachine'
+                ? 'My tasks only, unless you tick more. Ticking Campaigns gives the whole app: budgets, numbers and everyone\'s work.'
+                : 'All ticked means every screen. Untick to narrow.') + '</div></div>'
             : '') +
         '</div>';
       };
@@ -444,7 +449,12 @@ export default {
             // All of them is the same as no narrowing at all, and storing it
             // would silently freeze the list on the day it was saved: a view
             // added later would not appear for this person.
-            if (ticked.length === all.length) delete draft.views[id];
+            //
+            // MARKETMACHINE IS THE EXCEPTION, Sept 2026: there, no narrowing
+            // means My tasks only, so "all four ticked" has to be stored as
+            // the four rather than thrown away as "no narrowing". Ticking
+            // Campaigns is what gives somebody the whole app.
+            if (ticked.length === all.length && id !== 'marketmachine') delete draft.views[id];
             else draft.views[id] = ticked;
             say('');
           });
