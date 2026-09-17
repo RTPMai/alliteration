@@ -287,5 +287,39 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     t.equal(r.statusCode, 200, 'an Admin is not blocked by whose name is on it');
   });
 
+  /* ================= who sees the app at all ================= */
+
+  await t.test('ticking MarketMachine on an account gives My tasks and nothing else', async () => {
+    const reg = await import('../js/registry.js');
+    const users = await import('../lib/users.js');
+
+    const perms = await users.permsFor('hannah');
+    t.assert(perms.tabs.includes('marketmachine'), 'she can open the app');
+    const mm = perms.tabs.filter((x) => x.startsWith('marketmachine:'));
+    t.equal(mm.join(','), 'marketmachine:tasks', 'and the only screen she is granted is My tasks');
+
+    t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks',
+      'so the rail shows her one screen, not four');
+
+    // Ticking a campaign screen on her account does not lift the ceiling.
+    const forced = { ...perms, tabs: perms.tabs.concat(['marketmachine:campaigns', 'marketmachine:settings']) };
+    t.equal(reg.allowedViews(forced, 'marketmachine').join(','), 'tasks',
+      'a per-view tick cannot hand out the campaign screens');
+
+    const admin = await users.permsFor('ryan');
+    t.equal(reg.allowedViews(admin, 'marketmachine').join(','), 'tasks,campaigns,calendar,settings',
+      'an Admin still gets all four');
+  });
+
+  await t.test('the ceiling is a second gate, not the only one', async () => {
+    // Even with the rail told to show her everything, the server still
+    // refuses: the campaign screens are Admin only in the route.
+    const list = await call({ as: RYAN });
+    const id = list.body.campaigns[0].id;
+    t.equal((await call({ as: HANNAH_U, query: { id } })).statusCode, 403, 'the campaign page is still refused');
+    t.equal((await call({ as: HANNAH_U, query: { options: 'connections' } })).statusCode, 200, 'the picker read is the only exception');
+    t.assert((await call({ as: HANNAH_U, query: { options: 'connections' } })).body.limited, 'and it is marked limited');
+  });
+
   process.exit(t.report());
 })().catch((e) => { console.error(e); process.exit(1); });

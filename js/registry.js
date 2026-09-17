@@ -31,6 +31,12 @@ import { isCrewCoreAdmin } from '../lib/crewcore/schema.js';
  */
 const SELF_SERVE_VIEWS = {
   crewcore: ['dashboard', 'timeclock', 'stipend', 'kudos', 'reviews', 'handbook'],
+  // MARKETMACHINE, Sept 2026. Ticking the app on somebody's account is how
+  // they get their tasks, and it must not also hand them the campaign screens.
+  // Same shape as CrewCore's rule and for the same reason, with one
+  // difference: there is no MarketMachine admin role, so the per-account Admin
+  // flag is the only thing that lifts it, and that is handled above.
+  marketmachine: ['tasks'],
 };
 
 export const APPS = [
@@ -685,11 +691,14 @@ export function allowedViews(perms, appId) {
   // admin role, never a role checkbox) is narrowed to the self-serve views,
   // whatever their role does or does not list. permsFor() does the same on
   // the server, so this is the second of two gates, not the only one.
+  // CrewCore has its own definition of an administrator; every other app on
+  // the list is lifted by the Admin flag alone, which returned above.
   const selfServe = SELF_SERVE_VIEWS[appId];
-  if (selfServe && !isCrewCoreAdmin({
+  const appAdmin = appId === 'crewcore' && isCrewCoreAdmin({
     superuser: perms && perms.superuser,
     roleName: perms && perms.role,
-  })) {
+  });
+  if (selfServe && !appAdmin) {
     scoped = scoped.length
       ? scoped.filter((v) => selfServe.includes(v))
       : selfServe.slice();
