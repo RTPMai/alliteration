@@ -10,7 +10,7 @@
  */
 
 import { CALC_INPUTS, inputsFor } from '../../lib/marketmachine/calculations.js';
-import { esc, fmtDate, fmtStamp, fmtMoney } from './format.js';
+import { esc, fmtDate, fmtStamp, fmtMoney, msgBox } from './format.js';
 
 export default function makeCalc(app) {
   const { state, api, root, ui } = app;

@@ -10,7 +10,7 @@
  */
 
 import { linksOf } from '../../lib/marketmachine/connections.js';
-import { esc, fmtDate, fmtStamp, fmtMoney, TRIP_STATUS_LABEL } from './format.js';
+import { esc, fmtDate, fmtStamp, fmtMoney, TRIP_STATUS_LABEL, msgBox } from './format.js';
 
 export default function makeConnect(app) {
   const { state, api, root, ui } = app;

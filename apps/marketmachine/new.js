@@ -12,7 +12,7 @@
 import { CAMPAIGN_TYPES, FAMILIES, typeMeta, connectableTypes, typesByUse } from '../../lib/marketmachine/catalog.js';
 import { PARTICIPATION } from '../../lib/marketmachine/campaign.js';
 import { ENDPOINTS } from '../../js/api.js';
-import { esc, PARTICIPATION_LABEL } from './format.js';
+import { esc, PARTICIPATION_LABEL, msgBox } from './format.js';
 
 export default function makeNew(app) {
   const { state, api, root, ui } = app;

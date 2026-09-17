@@ -63,3 +63,18 @@ export function parseLinks(text) {
     return { label: t.slice(0, m.index).trim(), url: m[1] };
   }).filter(Boolean);
 }
+
+/**
+ * The green or red line a screen shows after saving. Lives here, imported by
+ * every screen that shows one.
+ *
+ * It was a local in index.js until Sept 2026, when the app was split into a
+ * folder and five screens were left calling a function that was no longer in
+ * scope. Clicking a campaign type threw, and so did opening a campaign. The
+ * lesson is in the tests now: every screen is rendered for real, not just
+ * checked for the names it calls through `ui`.
+ */
+export function msgBox(m) {
+  if (!m) return '';
+  return `<div class="${m.cls === 'ok' ? 'mk-ok' : 'mk-err'}">${esc(m.text)}</div>`;
+}

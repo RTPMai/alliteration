@@ -11,7 +11,7 @@
 
 import { CAMPAIGN_TYPES, STAGES } from '../../lib/marketmachine/catalog.js';
 import { timingLabel } from '../../lib/marketmachine/dates.js';
-import { esc } from './format.js';
+import { esc, msgBox } from './format.js';
 
 export default function makeSettings(app) {
   const { state, api, root, ui } = app;

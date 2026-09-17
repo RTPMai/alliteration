@@ -12,7 +12,7 @@
 import { STAGES, typeMeta, connectableTypes } from '../../lib/marketmachine/catalog.js';
 import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION } from '../../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel } from '../../lib/marketmachine/dates.js';
-import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL } from './format.js';
+import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox } from './format.js';
 
 export default function makeDetail(app) {
   const { state, api, root, ui } = app;

@@ -59,6 +59,7 @@
 
 import { ENDPOINTS } from '../../js/api.js';
 import { todayCentral } from '../../lib/marketmachine/dates.js';
+import { esc, msgBox } from './format.js';
 import styles from './styles.js';
 import template from './template.js';
 import makeShared from './shared.js';
@@ -187,7 +188,6 @@ export default {
       }
     }
 
-    const msgBox = (m) => m ? `<div class="${m.cls === 'ok' ? 'mk-ok' : 'mk-err'}">${esc(m.text)}</div>` : '';
 
     function showPane(which) {
       state.pane = which;

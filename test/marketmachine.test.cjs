@@ -636,6 +636,96 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
       .forEach((fn) => t.assert(called.has(fn), 'nothing calls ui.' + fn + ' any more, which means a screen lost its renderer'));
   });
 
+  await t.test('every screen actually renders', async () => {
+    // The wiring test above proves the screens can FIND each other. This one
+    // proves each screen RUNS. Splitting the app into a folder left five of
+    // them calling msgBox(), which had stayed behind in index.js: clicking a
+    // campaign type and opening a campaign both threw, and every check that
+    // only read the source text passed anyway. So the screens are rendered
+    // here against a stub page, and a ReferenceError fails the build.
+    const written = {};
+    const el = (id) => ({
+      id, hidden: false,
+      set innerHTML(v) { written[id] = String(v); },
+      get innerHTML() { return written[id] || ''; },
+      querySelector: () => null, querySelectorAll: () => [],
+      scrollIntoView() {}, focus() {}, value: '',
+    });
+    const nodes = {};
+    const root = {
+      querySelector: (sel) => (nodes[sel] = nodes[sel] || el(sel)),
+      querySelectorAll: () => [],
+      contains: () => true, addEventListener() {}, removeEventListener() {},
+    };
+
+    const cat2 = await import('../lib/marketmachine/catalog.js');
+    const model = await import('../lib/marketmachine/campaign.js');
+    const campaign = { id: 'CP-00001', ...model.buildCampaign({
+      type: 'try_on_day', name: 'Ankeny Schools store', controlDate: '2027-03-04',
+      accountManagerId: 'E1', accountManagerName: 'Alexis Davis', audience: 'Staff list',
+    }, { username: 'ryan', name: 'Ryan Toney' }) };
+
+    const state = {
+      campaigns: [{ id: 'CP-00001', name: campaign.name, type: campaign.type, status: 'open',
+        accountManagerId: 'E1', accountManagerName: 'Alexis Davis', controlDate: '2027-03-04',
+        mine: true, childCount: 0, progress: { label: 'Not started', stage: 'create', next: { key: 'tod_qualify', label: 'x', owner: 'y', due: '2027-01-01', blocked: '' }, total: 19, done: 0, overdue: 1, blocked: 0 },
+        dates: { workingStart: '2027-01-07', prelaunchReview: '2027-02-25', control: '2027-03-04', postLaunchReview: '2027-03-18' } }],
+      accountManagers: [{ id: 'E1', name: 'Alexis Davis' }], me: null, legacyCount: 2,
+      limited: false, loadError: '', today: '2026-09-17',
+      filters: { show: 'open', whose: 'all', type: '', am: '' },
+      pane: 'list', openStep: 'tod_qualify', stepMsg: {}, detailMsg: { cls: 'ok', text: 'Saved.' },
+      editingHeader: false, newParentId: null, newType: 'try_on_day', newMsg: { cls: 'err', text: 'No' },
+      tl: { span: 'month', anchor: '2026-09-01', type: '', am: '' },
+      initiatives: ['Reorder nudge'], settingsMsg: { cls: 'ok', text: 'Saved.' },
+      connOptions: { trips: [], leads: [] }, connAdding: 'trips', connMsg: { cls: 'ok', text: 'Connected.' },
+      printavo: {}, printavoChecking: false,
+      calcEditing: true, scorecardEditing: true, calcMsg: { cls: 'ok', text: 'Saved.' },
+      detail: {
+        campaign,
+        parent: null,
+        children: [],
+        connections: { scope: [{ id: 'CP-00001', name: campaign.name }],
+          email: { count: 0, emails: [], delivered: 0, uniqueClicks: 0, uniqueOpens: 0, uniqueClickRate: null, rateStatus: 'No emails attached' },
+          travel: { trips: [], receipts: 0, rejected: 0, pending: 0, approved: 0, reimbursed: 0, total: 0 },
+          leads: { leads: [], count: 0, won: 0 }, invoices: { invoices: [], count: 0 } },
+        calculations: [{ key: 'tod_participation', title: 'Participation rate', formula: 'a ÷ b × 100',
+          inputs: [{ label: 'Actual participants', value: 78, source: 'Typed', basis: 'actual' }],
+          value: 65, status: null, basis: 'actual', unit: 'percent', updatedAt: '2026-09-17T12:00:00.000Z' }],
+        advisories: [{ key: 'tod_min', text: 'Under the 25-participant minimum.' }],
+        scorecard: [{ key: 'expected_actual_participants', label: 'Expected / actual participants',
+          target: '', actual: '78', range: '', source: 'Client headcount', notes: '', by: 'Ryan Toney', at: '2026-09-17T12:00:00.000Z', filled: true }],
+      },
+    };
+
+    const app = { state, api: {}, root, ui: {} };
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings']) {
+      Object.assign(app.ui, (await import(`../apps/marketmachine/${name}.js`)).default(app));
+    }
+
+    const renders = [
+      ['the campaigns list', () => app.ui.renderList(), '#mkListPane'],
+      ['the new campaign form', () => app.ui.renderNew(), '#mkNewPane'],
+      ['the type picker', () => { state.newType = null; app.ui.renderNew(); state.newType = 'try_on_day'; }, '#mkNewPane'],
+      ['one campaign', () => app.ui.renderDetail(), '#mkDetailPane'],
+      ['the timeline', () => app.ui.renderTimeline(), '#mkTimelineBody'],
+      ['settings', () => app.ui.renderSettings(), '#mkSettingsBody'],
+    ];
+    renders.forEach(([what, run, target]) => {
+      let error = null;
+      try { run(); } catch (e) { error = e; }
+      t.assert(!error, `${what} threw: ${error && error.message}`);
+      t.assert((written[target] || '').length > 200, `${what} rendered nothing into ${target}`);
+    });
+
+    // The campaign page is the one that carries everything: prove the parts
+    // are really in it, not just that it did not throw.
+    const page = written['#mkDetailPane'];
+    ['Ankeny Schools store', 'Prelaunch review', 'connections.', 'calculations.',
+     'Results scorecard', '25-participant minimum'].forEach((bit) =>
+      t.assert(page.includes(bit), 'the campaign page is missing: ' + bit));
+    t.assert(written['#mkNewPane'].includes('Try On Day'), 'the type picker offers Try On Day');
+  });
+
   t.test('no screen file is near the 100 KB upload limit', () => {
     MODULE_FILES.forEach((f) => {
       const kb = read(f).length / 1024;
