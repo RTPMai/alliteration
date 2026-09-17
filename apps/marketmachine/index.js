@@ -90,6 +90,7 @@ export default {
       amUnavailable: false,
       me: null,
       legacyCount: 0,
+      demoCount: 0,
       limited: false,
       limitedMessage: '',
       loadError: '',
@@ -178,6 +179,7 @@ export default {
         state.amUnavailable = !!(d && d.accountManagersUnavailable);
         state.me = (d && d.me) || null;
         state.legacyCount = Number((d && d.legacyCount) || 0);
+        state.demoCount = Number((d && d.demoCount) || 0);
         if (d && d.today) state.today = d.today;
       } catch (e) {
         state.loadError = e.message || 'Campaigns did not load.';
@@ -535,6 +537,27 @@ export default {
             state.settingsMsg = { cls: 'err', text: e.message || 'The list was not saved.' };
           }
           ui.renderSettings();
+          break;
+        }
+        case 'load-demo': {
+          try {
+            const r = await api.post(ENDPOINTS.mkCampaigns, {}, { query: { demo: 'load' } });
+            state.settingsMsg = { cls: 'ok', text: `Loaded ${r.created || 0} example campaigns. They are named EXAMPLE and can be removed here.` };
+          } catch (e) {
+            state.settingsMsg = { cls: 'err', text: e.message || 'The examples were not loaded.' };
+          }
+          await loadList(); ui.renderSettings();
+          break;
+        }
+        case 'remove-demo': {
+          if (!window.confirm('Remove every example campaign? Real campaigns are not touched.')) return;
+          try {
+            const r = await api.del(ENDPOINTS.mkCampaigns, { query: { demo: 'all' } });
+            state.settingsMsg = { cls: 'ok', text: `Removed ${r.removed || 0} example campaigns.` };
+          } catch (e) {
+            state.settingsMsg = { cls: 'err', text: e.message || 'The examples were not removed.' };
+          }
+          await loadList(); ui.renderSettings();
           break;
         }
         case 'clear-legacy': {

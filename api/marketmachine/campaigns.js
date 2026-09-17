@@ -23,6 +23,8 @@
 //                        invoices (on demand; Printavo is slow)
 // DELETE ?id=         -> delete a campaign
 // DELETE ?legacy=all  -> delete the old pre-rebuild sample campaigns
+// POST   ?demo=load   -> load the example campaigns, for showing the app
+// DELETE ?demo=all    -> remove them again, and only them
 //
 // ADMIN ONLY FOR NOW (Ryan, Sept 2026). Checked here on every request, not
 // just hidden in the rail, and checked as `superuser === true` on the account
@@ -45,6 +47,7 @@ import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
   childrenOf, legacyCount, clearLegacy, accountManagers,
   linkConnection, connectionOptions, connectionDetail, invoiceStatuses, setCalcInput, setScorecardRow,
+  loadDemo, removeDemo, demoCount,
 } from "../../lib/marketmachine/store.js";
 import { computeCalculations, advisories, scorecardRows } from "../../lib/marketmachine/calculations.js";
 import { isParentType } from "../../lib/marketmachine/catalog.js";
@@ -189,6 +192,7 @@ export default async function handler(req, res) {
         accountManagersUnavailable: people.unavailable,
         me: people.me,
         legacyCount: await legacyCount(),
+        demoCount: await demoCount(),
         canEdit: true,
         canDelete: true,
         today,
@@ -196,6 +200,10 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "POST") {
+      if (q.demo === "load") {
+        const out = await loadDemo(session, today);
+        return res.status(201).json({ ok: true, ...out });
+      }
       const out = await createCampaign(parseBody(req), session);
       if (!out.ok) return refuse(res, out);
       return res.status(201).json({ ok: true, campaign: out.campaign });
@@ -218,6 +226,9 @@ export default async function handler(req, res) {
     }
 
     if (req.method === "DELETE") {
+      if (q.demo === "all") {
+        return res.status(200).json({ ok: true, ...(await removeDemo()) });
+      }
       if (q.legacy === "all") {
         const removed = await clearLegacy();
         return res.status(200).json({ ok: true, removed });

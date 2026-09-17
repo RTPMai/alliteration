@@ -36,6 +36,20 @@ export default function makeSettings(app) {
       body.innerHTML = `
         ${msgBox(state.settingsMsg)}
         <div class="mk-card">
+          <div class="mk-card-hd"><h3>Example campaigns</h3>
+            <span class="meta">${state.demoCount ? state.demoCount + ' loaded' : 'None loaded'}</span></div>
+          <div class="mk-card-bd">
+            <div class="who" style="margin-bottom:12px;max-width:78ch">Five made-up campaigns for showing the app
+              to somebody: a trade show with two campaigns connected underneath it, one with a blocker, one carrying
+              the Try On Day warning, and a finished one with its numbers and scorecard filled in. Every one is named
+              EXAMPLE, and removing them deletes only the examples.</div>
+            <div class="mk-actions">
+              <button class="mk-btn" data-act="load-demo">Load example campaigns</button>
+              ${state.demoCount ? '<button class="mk-btn danger" data-act="remove-demo">Remove them</button>' : ''}
+            </div>
+          </div>
+        </div>
+        <div class="mk-card">
           <div class="mk-card-hd"><h3>Campaign types and their steps</h3>
             <span class="meta">From Jacob's handoff. Read only.</span></div>
           <div class="mk-card-bd">
