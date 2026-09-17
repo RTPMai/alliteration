@@ -312,6 +312,10 @@ export const APPS = [
     // are baked into stored layouts and deep links. `calendar` is labelled
     // Timeline now. Data Entry and Definitions were retired with the old
     // hand-typed channel numbers.
+    // A FOLDER since Sept 2026: one file had reached 94 KB, close to the
+    // 100 KB line above which the web uploader is off limits. Same shape
+    // BackBone uses; the app contract is unchanged.
+    entry: 'marketmachine/index.js',
     views: [
       ['campaigns', 'Campaigns'],
       ['calendar', 'Timeline'],

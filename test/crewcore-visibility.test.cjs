@@ -253,7 +253,7 @@ async function check(name, fn) {
     // Comments and code keys are exempt: they are the reason this rename was
     // cheap. This looks only at quoted text that reaches a screen.
     const files = ['apps/settings.js', 'apps/promopro.js', 'api/sitework.js', 'api/help.js',
-                   'api/marketmachine/campaigns.js', 'apps/marketmachine.js'];
+                   'api/marketmachine/campaigns.js', 'apps/marketmachine/index.js', 'apps/marketmachine/detail.js'];
     files.forEach((f) => {
       read(f).split('\n').forEach((line, i) => {
         const code = line.replace(/^\s*\/\/.*$/, '');

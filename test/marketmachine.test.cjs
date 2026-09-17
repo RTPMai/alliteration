@@ -22,6 +22,12 @@ const path = require('path');
 const t = require('./harness.cjs');
 
 const ROOT = path.join(__dirname, '..');
+
+// The app is a FOLDER since Sept 2026: index.js plus one file per screen.
+// Listed here so a new screen that forgets the seam or hardcodes a color
+// cannot hide in it.
+const MODULE_FILES = ['index', 'styles', 'template', 'format', 'shared', 'list', 'new',
+  'detail', 'connect', 'calc', 'timeline', 'settings'].map((n) => `apps/marketmachine/${n}.js`);
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
@@ -551,6 +557,8 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     ["['campaigns', 'Campaigns']", "['calendar', 'Timeline']", "['settings', 'Settings']"].forEach((v) =>
       t.assert(block.includes(v), 'the registry is missing ' + v));
     t.assert(!/'entry'|'definitions'/.test(block), 'the retired screens are gone from the rail');
+    t.assert(/entry: 'marketmachine\/index\.js'/.test(block), 'the registry points at the folder, not a file');
+    t.assert(!exists('apps/marketmachine.js'), 'the old single file is gone, so it cannot go stale beside the folder');
     const api = read('js/api.js');
     t.assert(/mkCampaigns:\s*'\/api\/marketmachine\/campaigns'/.test(api), 'ENDPOINTS.mkCampaigns');
     t.assert(!/mkEntries/.test(api), 'no endpoint points at the deleted rows route');
@@ -562,7 +570,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
   });
 
   t.test('the screen goes through the seam and owns no colors', () => {
-    const app = read('apps/marketmachine.js');
+    const app = MODULE_FILES.map(read).join('\n');
     const code = app.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
     t.assert(!/\bfetch\(/.test(code), 'no fetch in the app');
     t.assert(!/#[0-9a-fA-F]{3,8}\b(?![^\n]*TOKEN-EXEMPT)/.test(app.replace(/^\s*\/\/.*$/gm, '').replace(/\/\*[\s\S]*?\*\//g, '')
@@ -586,6 +594,50 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     const fn = app.slice(app.indexOf('async function loadMarketingCampaigns'));
     t.assert(/catch/.test(fn.slice(0, 600)), 'MailMe loads the campaign list softly');
     t.assert(/Not part of a campaign/.test(app), 'and a standalone email is still a real choice');
+  });
+
+  await t.test('every screen is wired to the others it calls', async () => {
+    // Splitting one 94 KB file into a folder moved functions between modules.
+    // A renderer calling ui.somethingGone() passes a syntax check and breaks
+    // the moment somebody opens a campaign, so the factories are really built
+    // here and the names really compared.
+    const app = { state: {}, api: {}, root: { querySelector: () => null }, ui: {} };
+    const made = {};
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings']) {
+      const mod = await import(`../apps/marketmachine/${name}.js`);
+      const fns = mod.default(app);
+      Object.entries(fns).forEach(([fn, impl]) => {
+        t.equal(typeof impl, 'function', `${name}.js: ${fn} is not a function`);
+        t.assert(!made[fn], `${fn} is defined in two screens (${made[fn]} and ${name}.js)`);
+        made[fn] = name + '.js';
+      });
+      Object.assign(app.ui, fns);
+    }
+    // index.js hangs its own loading and saving functions on ui as well.
+    const index = read('apps/marketmachine/index.js');
+    const assigned = index.slice(index.indexOf('Object.assign(ui, {'));
+    assigned.slice(0, assigned.indexOf('});')).replace('Object.assign(ui, {', '')
+      .split(',').map((x) => x.trim()).filter(Boolean)
+      .forEach((fn) => { made[fn] = 'index.js'; });
+    t.assert(made.loadList && made.openCampaign, 'index.js shares its loaders with the screens');
+
+    const called = new Set();
+    MODULE_FILES.map(read).forEach((src) => {
+      (src.match(/\bui\.(\w+)\(/g) || []).forEach((m) => called.add(m.slice(3, -1)));
+    });
+    called.forEach((fn) => t.assert(made[fn], `something calls ui.${fn}(), which no screen defines`));
+    ['renderList', 'renderDetail', 'renderTimeline', 'renderSettings', 'renderNew'].forEach((fn) =>
+      t.assert(made[fn], fn + ' went missing in the split'));
+    t.assert(called.size >= 12, 'the screens really do call each other through ui (' + called.size + ')');
+    ['renderDetail', 'renderList', 'amOptions', 'connectionsSection', 'calculationsSection']
+      .forEach((fn) => t.assert(called.has(fn), 'nothing calls ui.' + fn + ' any more, which means a screen lost its renderer'));
+  });
+
+  t.test('no screen file is near the 100 KB upload limit', () => {
+    MODULE_FILES.forEach((f) => {
+      const kb = read(f).length / 1024;
+      t.assert(kb < 90, `${f} is ${Math.round(kb)} KB, close to the limit that forces clone-and-push`);
+    });
   });
 
   process.exit(t.report());

@@ -1,12 +1,13 @@
 # alliteration.
 
-One shell, one login, five internal apps. Replaces five separate deployments.
+One shell, one login, and every internal app P&M Apparel runs. Replaces what
+used to be a separate deployment per tool.
 
 Static files, native ES modules, no build step. Deploys to Vercel from the
 folder root.
 
 ```
-bash test/run.sh     # 129 tests. Never let it go red.
+bash test/run.sh     # run it; it prints the count. Never let it go red.
 ```
 
 Open `index.html` through a local server (ES modules need http, not `file://`):
@@ -15,8 +16,9 @@ Open `index.html` through a local server (ES modules need http, not `file://`):
 python3 -m http.server 8000
 ```
 
-Runs in mock mode by default, so it works with no backend. `?mock=0` hits real
-endpoints.
+Mock mode is the default locally, so the shell runs with no backend. `?mock=0`
+hits the real endpoints. Anything listed in `LIVE_PREFIXES` in `js/api.js` is
+always live, mock or not, which by now is most of the platform.
 
 ---
 
@@ -35,10 +37,11 @@ js/giving-engine.js   ES adapter over the verbatim scoring engine
 vendor/               verbatim algorithm ports. DO NOT EDIT
 apps/hub.js           the "All apps" landing view
 apps/<id>.js          one file per app
-lib/                  backend: storage, sessions, accounts
-api/                  backend routes: auth, users
-login.html            sign-in / first-run setup
-test/                 zero-dependency suite
+apps/<id>/            a folder when one file got too big (backbone, marketmachine)
+lib/                  backend: storage, sessions, accounts, and one folder per
+                      app for its rules. Tests call these directly
+api/                  backend routes, one folder per app
+test/                 zero-dependency suite. Every *.test.cjs here runs
 ```
 
 ## Setup
@@ -62,11 +65,11 @@ Locally, `?mock=1` skips auth and storage entirely.
 
 ## Sign-in
 
-ONE cookie (`alliteration_session`) and ONE account list for all five apps.
+ONE cookie (`alliteration_session`) and ONE account list for every app.
 
 Before the shell, BackBone and ErrorEngine each had their own `session.js`
 (byte-identical apart from comments) and their own user store. The stores hashed
-passwords in incompatible formats — BackBone `salt:hash` hex via `scryptSync`,
+passwords in incompatible formats. BackBone `salt:hash` hex via `scryptSync`,
 ErrorEngine `scrypt$N$salt$hash` base64 via async `scrypt`. Same algorithm,
 mutually unreadable output.
 
@@ -84,30 +87,41 @@ BackBone's richer permissions (per-app access, not just a role label).
   api/users.js      admin-only account management
   login.html        sign-in, doubles as first-run setup
 
-Roles grant apps by registry id, which is what `perms.tabs` carries to the front
-end. Permissions are looked up fresh on every session check rather than trusted
-from the cookie, so a role change takes effect on the next request instead of
-waiting 12 hours for the cookie to expire.
+Access is granted per account by registry id, which is what `perms.tabs` carries
+to the front end. ROLES WERE REMOVED in Sept 2026: access lives on the account
+record (`lib/user-grants.js`), and Admin is the per-account `superuser` flag and
+nothing else. A route asks `getAccess(username)`, never a role name, and an
+admin gate tests `superuser === true` strictly. Permissions are looked up fresh
+on every session check rather than trusted from the cookie, so a change takes
+effect on the next request instead of waiting for the cookie to expire.
 
-## Ports
+## The apps
 
-- **GivingGauge** — DONE. First real port. Single view (the request queue). Its
-  score comes entirely from the two verbatim files in vendor/ (scoring-engine.cjs
-  and gauge.cjs), reached through js/giving-engine.js and js/giving-dial.js. The
-  six sample requests moved into api.js as mock data, so MOCK=false hits the real
-  endpoint with no change to the app. What the port touched: removed the app's own
-  header and :root, scoped every getElementById to the app root, moved the click
-  listener off document, and routed data through ctx.api.
-- **ShopStock** — DONE. Dashboard, Full Inventory, Admin. All 10 fetch calls go
-  through the seam; all 70 DOM lookups are scoped to the app root. Its 46 inline
-  `onclick` handlers are namespaced to ONE global, `window.ShopStock` (see the
-  note at the top of apps/shopstock.js). The QR library loads on demand rather
-  than on every page view, and printed labels now point at the shell route
-  instead of the old standalone `/item/:id`, which matters because labels are
-  permanent.
-- **BackBone** — DONE. Six views, 8,795 lines of application code, and all 12
-  API endpoints. See "What the BackBone port fixed" below.
-- **ErrorEngine** — not yet ported. The last one.
+Every app in the rail, and what it does. `js/registry.js` is the list the shell
+reads; this table is for people.
+
+| App | What it is |
+|---|---|
+| BackBone | CRM: clients, leads, the sales dashboard, Printavo sync |
+| ShopStock | Supply inventory, QR labels on the bins |
+| ErrorEngine | Misprints and production errors |
+| GivingGauge | Donation requests, scored |
+| TravelTrack | Trips, expenses, reimbursements |
+| PromoPro | Purchase orders and vendor tracking |
+| CrewCore | Employees: roster, stipend, reviews, handbook, time clock |
+| MailMe | Email: audience, sends, suppression, deliverability |
+| MarketMachine | Campaigns as ordered checklists, across every channel |
+| WebsiteWidget | GA4 traffic for the three sites |
+| StitchSense | Embroidery stitch estimates from artwork |
+| RaveReviews | The Google review request after pickup or shipping |
+| TeleTally | Stub. Phone call volume, not built |
+
+Plus two shell screens (Settings, Notifications) and a Site Work section for
+building the platform itself.
+
+The original port of the first five apps is described below, because the
+reasons still bind: the seam, the token rule, scoped DOM lookups, and the
+permanence of printed QR labels.
 
 ### What the BackBone port fixed
 
@@ -121,7 +135,7 @@ Three security problems that were live in the standalone app:
 - **api/printavo-schema.js** was also unauthenticated with wildcard CORS, and it
   introspects Printavo using the shop's credentials.
 - **The public intake form was broken.** api/intake.js and intake.html are
-  byte-identical in the source repo — the API file contains the HTML page — so
+  byte-identical in the source repo (the API file contains the HTML page), so
   every submission from the "Start a Project" form posted to something that
   returned a web page. api/intake.js here is the handler that file was supposed
   to contain.
@@ -139,7 +153,7 @@ Two data-loss guards carried across deliberately:
 GivingGauge scores a request out of 100, and 46 of those points come from the
 requesting organisation's relationship and spend. Until a request is matched to
 a real account those 46 score zero, so a real customer's request was
-indistinguishable from a stranger's — the same submission scores F (32) unmatched
+indistinguishable from a stranger's: the same submission scores F (32) unmatched
 and C (56) matched.
 
 api/customer-match.js bridges the two: given a name it searches BackBone's
@@ -164,7 +178,7 @@ recalled, so both formats must work forever:
 
 The router carries a third path segment as `param`, and "item" is listed in
 ShopStock's `hiddenViews`: routable by URL, but not shown in the rail. Both
-halves are needed — without routable the shell rejects a scan and bounces to the
+halves are needed. Without routable the shell rejects a scan and bounces to the
 dashboard, without hidden the rail grows a dead link.
 
 ### Vendor files exist twice, on purpose
@@ -200,7 +214,7 @@ real rule. A stray hex anywhere else still fails the build.
 
 Donation requests come from the Jotform at form.jotform.com/231636854478064.
 
-  api/giving-intake.js     the webhook. PUBLIC — Jotform is never signed in.
+  api/giving-intake.js     the webhook. PUBLIC, because Jotform is never signed in.
                            Can only CREATE a pending request; it cannot read,
                            edit or delete. Optional shared secret via
                            JOTFORM_WEBHOOK_TOKEN and ?token=.
@@ -263,8 +277,8 @@ The one exemption is the brand SVG artwork in the header: the P&M mark must not
 recolor when the accent changes, so its fills are baked in deliberately.
 
 **2. api.js is the seam.** No app file calls `fetch()` directly, ever. A test
-enforces this. `MOCK = true` returns fake data; flipping to false hits the real
-endpoints, already written in.
+enforces this. `MOCK = true` returns fake data; anything in `LIVE_PREFIXES` is
+live regardless, which is most routes now.
 
 **3. Verbatim ports stay verbatim.** `vendor/scoring-engine.cjs` is a
 byte-for-byte copy of Ryan's real algorithm. Do not improve it. If a rule
@@ -275,15 +289,29 @@ hashes the file and fails if it drifts.
 
 ### An app can be a folder
 
-Most apps are one file. BackBone is ~10,000 lines, where "go to the leads code"
-becomes a scroll rather than a jump, so it splits:
+Most apps are one file. Two are not, for the same two reasons: a file that long
+stops being navigable ("go to the leads code" becomes a scroll rather than a
+jump), and past 100 KB the GitHub web uploader is off limits, so every change
+needs a terminal.
 
-  apps/backbone/index.js      the app contract, mount, routing
-  apps/backbone/styles.js     575 lines of CSS, tokenised
-  apps/backbone/template.js   the six pages and five modals
-  apps/backbone/main.js       the application code (8,795 lines)
+  apps/backbone/index.js         the app contract, mount, routing
+  apps/backbone/styles.js        the CSS, tokenised
+  apps/backbone/template.js      the six pages and five modals
+  apps/backbone/main.js          the application code
 
-Selected by `entry: 'backbone/index.js'` in the registry. The contract does not
+  apps/marketmachine/index.js    the contract, state, loading, saving, events
+  apps/marketmachine/styles.js   the CSS
+  apps/marketmachine/format.js   escaping, dates, money, status words
+  apps/marketmachine/*.js        one file per screen: list, new, detail,
+                                 connect, calc, timeline, settings
+
+MarketMachine's screens are factories: each is handed the same `app` object and
+hangs its render functions on `app.ui`, so one screen can call another's
+renderer without importing it and creating a loop. A test builds every factory
+and checks that everything called through `ui` actually exists, because a
+missing one passes a syntax check and breaks when somebody opens a campaign.
+
+Selected by `entry: '<app>/index.js'` in the registry. The contract does not
 change: the entry module still default-exports one app object with the same
 members. Single-file remains the default and the right choice for most apps.
 
@@ -364,6 +392,10 @@ Recipe:
 
 ## Notes from the migration
 
+These are the original four-app migration notes, kept because the reasoning
+still explains why things are shaped the way they are. Where one has since been
+overtaken, it says so.
+
 **Endpoint collisions.** Four were listed; two are real file collisions
 (`api/auth.js`, `api/intake.js`, both shipped by BackBone and ErrorEngine).
 `users` and `customers` exist only in ErrorEngine, so nothing of BackBone's
@@ -377,12 +409,11 @@ missed: the two apps also had separate user stores with incompatible password
 hashes, so a shared cookie alone would have produced a valid key for a building
 you were not on the guest list for. Both are merged now. See Sign-in above.
 
-**perms.tabs.** Currently holds BackBone's internal tab names
-(`dashboard`, `roster`, ...). Under one login it must also carry app IDs.
-`canAccess()` treats a list containing no app IDs as legacy and grants BackBone
-only, so stored roles keep working until they are re-saved. Per-view grants use
-`<appId>:<view>` so BackBone's "settings" and ErrorEngine's "settings" stay
-distinct.
+**perms.tabs.** Carries app IDs and, for per-view grants, `<appId>:<view>`, so
+BackBone's "settings" and CrewCore's "settings" stay distinct. OVERTAKEN in
+Sept 2026: roles were removed entirely. Access is granted per account, Admin is
+the `superuser` flag, and `lib/user-grants.js` is where that lives. The legacy
+allowance described here is gone with the roles it protected.
 
 **GivingGauge is gold, not green.** The brief listed `#3D9A5C`, but that value
 is `--success` in all four apps, and GivingGauge's gauge renders green/gold/red
