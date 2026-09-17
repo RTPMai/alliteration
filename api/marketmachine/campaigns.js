@@ -14,6 +14,7 @@
 //                        due date, blocker, notes, links
 // PATCH  ?id=&connect=1 -> connect or disconnect a TravelTrack trip, a
 //                        BackBone lead, or a Printavo invoice number
+// PATCH  ?id=&calc=1  -> set or clear one typed calculation input
 // GET    ?options=connections -> the trips and leads to pick from
 // GET    ?id=&printavo=1      -> current Printavo status of this campaign's
 //                        invoices (on demand; Printavo is slow)
@@ -40,8 +41,10 @@ import { progress, headerDates, childSummary, isMine, pickerShape } from "../../
 import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
   childrenOf, legacyCount, clearLegacy, accountManagers,
-  linkConnection, connectionOptions, connectionDetail, invoiceStatuses,
+  linkConnection, connectionOptions, connectionDetail, invoiceStatuses, setCalcInput,
 } from "../../lib/marketmachine/store.js";
+import { computeCalculations } from "../../lib/marketmachine/calculations.js";
+import { isParentType } from "../../lib/marketmachine/catalog.js";
 import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
 import { todayCentral } from "../../lib/marketmachine/dates.js";
 
@@ -105,13 +108,15 @@ export default async function handler(req, res) {
           return res.status(200).json({ statuses: await invoiceStatuses(numbers) });
         }
         const parent = campaign.parentId ? all.find((c) => c.id === campaign.parentId) || null : null;
+        const connections = await connectionDetail(campaign, all);
         return res.status(200).json({
           campaign,
           progress: progress(campaign, today),
           dates: headerDates(campaign),
           parent: parent ? childSummary(parent, today) : null,
           children: childrenOf(id, all).map((c) => childSummary(c, today)),
-          connections: await connectionDetail(campaign, all),
+          connections,
+          calculations: computeCalculations(campaign, connections, { strategic: isParentType(campaign.type) }),
           accountManagers: people.options,
           today,
         });
@@ -156,7 +161,9 @@ export default async function handler(req, res) {
     if (req.method === "PATCH") {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
       const body = parseBody(req);
-      const out = q.connect
+      const out = q.calc
+        ? await setCalcInput(id, body, session)
+        : q.connect
         ? await linkConnection(id, body, session)
         : q.step
           ? await updateStep(id, String(q.step), body, session, today)

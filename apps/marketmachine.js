@@ -17,6 +17,10 @@
  * campaign. Everything is read live from its own app and counted once, so an
  * event's totals never add the same invoice or lead twice.
  *
+ * CALCULATIONS (phase 3): the handoff's five formulas, each shown with its
+ * equation, the numbers going in, where each came from, estimate or actual,
+ * and when it last changed. Missing data reads as words, never as 0.
+ *
  * WHAT LIVES ELSEWHERE, deliberately:
  *   - the rules (what can be marked done, when a campaign can close, what a
  *     connected campaign inherits) are in lib/marketmachine/campaign.js, and
@@ -40,6 +44,7 @@ import {
 } from '../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel, todayCentral } from '../lib/marketmachine/dates.js';
 import { linksOf } from '../lib/marketmachine/connections.js';
+import { CALC_INPUTS } from '../lib/marketmachine/calculations.js';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -280,6 +285,21 @@ export default {
   .mk-conn-stats .mk-stat-row{margin-bottom:12px}
   .mk-scope{font-size:13px;color:var(--muted);margin:-6px 0 14px}
 
+  .mk-calcs{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px;margin-bottom:14px}
+  .mk-calc{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);padding:14px 16px}
+  .mk-calc .t{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .mk-calc .t h4{font-size:13.5px;font-weight:700}
+  .mk-calc .r{font-size:26px;font-weight:800;letter-spacing:-.02em;margin:6px 0 2px;font-variant-numeric:tabular-nums}
+  .mk-calc .r.neg{color:var(--danger-dk)}
+  .mk-calc .st{font-size:13.5px;font-weight:600;color:var(--warn-dk);margin:10px 0 6px;line-height:1.45}
+  .mk-calc .f{font-size:12.5px;color:var(--muted);font-family:var(--mono, ui-monospace, monospace);margin-bottom:8px;line-height:1.5}
+  .mk-calc table{width:100%;border-collapse:collapse;font-size:12.5px}
+  .mk-calc td{padding:4px 0;border-top:1px solid var(--line-soft);vertical-align:top}
+  .mk-calc td.v{text-align:right;font-weight:600;white-space:nowrap;padding-left:10px;font-variant-numeric:tabular-nums}
+  .mk-calc .src{color:var(--faint);font-size:11.5px}
+  .mk-calc .up{font-size:11.5px;color:var(--faint);margin-top:8px}
+  .mk-inputs{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 16px}
+
   .mk-tl-month{margin-bottom:18px}
   .mk-tl-month h3{font-size:14px;font-weight:800;margin-bottom:8px}
   .mk-tl-row{display:grid;grid-template-columns:110px 170px 1fr auto;gap:10px;align-items:baseline;
@@ -344,6 +364,9 @@ export default {
       connMsg: null,
       printavo: {},          // invoice number -> status from the last on-demand check
       printavoChecking: false,
+      calculations: [],
+      calcEditing: false,
+      calcMsg: null,
       openStep: null,        // step key whose details are expanded
       stepMsg: {},           // step key -> { cls, text }
       detailMsg: null,
@@ -391,6 +414,7 @@ export default {
         parent: d.parent || null,
         children: Array.isArray(d.children) ? d.children : [],
         connections: d.connections || null,
+        calculations: Array.isArray(d.calculations) ? d.calculations : [],
       };
       if (Array.isArray(d.accountManagers)) state.accountManagers = d.accountManagers;
       if (d.today) state.today = d.today;
@@ -697,6 +721,8 @@ export default {
       state.connAdding = null;
       state.connMsg = null;
       state.printavo = {};
+      state.calcEditing = false;
+      state.calcMsg = null;
       showPane('detail');
       const det = $('#mkDetailPane');
       if (det) det.innerHTML = '<div class="mk-empty">Loading the campaign.</div>';
@@ -1032,6 +1058,70 @@ export default {
         </div>`;
     }
 
+    /* ---------------- calculations ---------------- */
+
+    function fmtCalcValue(v, unit, input) {
+      if (v === null || v === undefined) return '';
+      if (input && input.display) return esc(input.display);
+      if (unit === 'money') return fmtMoney(v);
+      if (unit === 'percent') return esc(v) + '%';
+      return esc(Number(v).toLocaleString());
+    }
+
+    function inputUnit(label) {
+      if (/rate/i.test(label)) return 'percent';
+      if (/value|profit|expense/i.test(label)) return 'money';
+      return 'count';
+    }
+
+    function calculationsSection(c, meta) {
+      const calcs = (state.detail && state.detail.calculations) || [];
+      if (!calcs.length) return '';
+      const cards = calcs.map((k) => `
+        <div class="mk-calc">
+          <div class="t"><h4>${esc(k.title)}</h4>
+            <span class="pill ${k.basis === 'actual' ? 'ok' : 'src'}">${k.basis === 'actual' ? 'Actual' : 'Estimate'}</span></div>
+          ${k.value === null
+            ? `<div class="st">${esc(k.status || 'Not enough to calculate yet')}</div>`
+            : `<div class="r${k.unit === 'percent' && k.value < 0 ? ' neg' : ''}">${fmtCalcValue(k.value, k.unit)}${k.unit === 'orders' ? ' <span style="font-size:14px;font-weight:600;color:var(--muted)">orders</span>' : ''}</div>`}
+          <div class="f">${esc(k.formula)}</div>
+          <table><tbody>${k.inputs.map((i) => `<tr>
+            <td>${esc(i.label)}<div class="src">${esc(i.source)}${i.by ? ', ' + esc(i.by) : ''}</div></td>
+            <td class="v">${i.value === null ? '<span class="src">Missing</span>' : fmtCalcValue(i.value, inputUnit(i.label), i)}</td>
+          </tr>`).join('')}</tbody></table>
+          <div class="up">${k.updatedAt ? 'Last updated ' + esc(fmtStamp(k.updatedAt)) : 'Nothing entered yet'}</div>
+        </div>`).join('');
+
+      const inputs = (state.detail.campaign.calc && state.detail.campaign.calc.inputs) || {};
+      const editor = state.calcEditing ? `
+        <div class="mk-card"><div class="mk-card-hd"><h3>Numbers that are typed in</h3>
+          <span class="meta">Leave a number blank when it is not known. Blank is not zero.</span></div>
+          <div class="mk-card-bd">
+            <div class="mk-inputs">${Object.entries(CALC_INPUTS).filter(([, spec]) => !spec.strategic || meta.parent).map(([key, spec]) => {
+              const cur = inputs[key] || {};
+              return `<div class="mk-field">
+                <label for="mkCalc-${key}">${esc(spec.label)}${spec.kind === 'percent' ? ' (%)' : spec.kind === 'money' ? ' ($)' : ''}</label>
+                ${spec.hint ? `<div class="hint">${esc(spec.hint)}</div>` : ''}
+                <input type="text" id="mkCalc-${key}" inputmode="decimal" value="${cur.value != null ? esc(cur.value) : ''}">
+                ${spec.kind !== 'count' ? `<input type="text" id="mkCalcSrc-${key}" maxlength="200" style="margin-top:6px"
+                  placeholder="Where it came from, e.g. Apparelytics 2025 average" value="${esc(cur.source || '')}">` : ''}
+                ${cur.at ? `<div class="hint" style="margin-top:4px">Set by ${esc(cur.by || 'someone')}, ${esc(fmtStamp(cur.at))}</div>` : ''}
+              </div>`;
+            }).join('')}</div>
+            <button class="mk-btn" data-act="calc-save-all">Save numbers</button>
+          </div></div>` : '';
+
+      return `
+        <h2 style="font-size:17px;font-weight:800;margin:26px 0 6px">calculations.</h2>
+        <div class="mk-scope" style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;align-items:center">
+          <span>Every number shows where it came from. Connected leads and TravelTrack receipts are read live; everything else is typed.</span>
+          <button class="mk-btn ghost sm" data-act="calc-edit">${state.calcEditing ? 'Done entering numbers' : 'Enter numbers'}</button>
+        </div>
+        ${msgBox(state.calcMsg)}
+        ${editor}
+        <div class="mk-calcs">${cards}</div>`;
+    }
+
     async function refreshDetailKeepingPlace() {
       const y = window.scrollY;
       await loadDetail(state.detail.campaign.id);
@@ -1141,7 +1231,7 @@ export default {
           </div>
         </div>` : '';
 
-      const emailCard = connectionsSection(c, meta, connections);
+      const emailCard = calculationsSection(c, meta) + connectionsSection(c, meta, connections);
 
       const history = (c.history || []).slice().reverse().slice(0, 40);
 
@@ -1460,6 +1550,49 @@ export default {
         case 'create': t.disabled = true; await createFromForm(); break;
         case 'to-list': showPane('list'); await loadList(); renderList(); break;
         case 'reload': await openCampaign(state.detail.campaign.id); break;
+        case 'calc-save-all': {
+          // Only what changed is sent, one input at a time, so one bad number
+          // is reported by name and every good one next to it still saves.
+          const c = state.detail.campaign;
+          const inputs = (c.calc && c.calc.inputs) || {};
+          const changed = Object.keys(CALC_INPUTS).filter((key) => {
+            const v = root.querySelector('#mkCalc-' + key);
+            if (!v) return false;
+            const src = root.querySelector('#mkCalcSrc-' + key);
+            const cur = inputs[key] || {};
+            const curVal = cur.value != null ? String(cur.value) : '';
+            return v.value.trim() !== curVal || (src && src.value.trim() !== (cur.source || ''));
+          });
+          if (!changed.length) { state.calcMsg = { cls: 'ok', text: 'Nothing changed.' }; renderDetail(); break; }
+          const values = Object.fromEntries(changed.map((key) => {
+            const src = root.querySelector('#mkCalcSrc-' + key);
+            return [key, { value: root.querySelector('#mkCalc-' + key).value, source: src ? src.value : '' }];
+          }));
+          const errors = [];
+          const failed = [];
+          for (const key of changed) {
+            try {
+              await api.patch(ENDPOINTS.mkCampaigns, { key, ...values[key] }, { query: { id: c.id, calc: 1 } });
+            } catch (e) {
+              errors.push(e.message || CALC_INPUTS[key].label + ' was not saved');
+              failed.push(key);
+            }
+          }
+          state.calcMsg = errors.length
+            ? { cls: 'err', text: errors.join(' ') + (errors.length < changed.length ? ' The other numbers saved.' : '') }
+            : { cls: 'ok', text: `Saved ${changed.length} number${changed.length === 1 ? '' : 's'}.` };
+          if (!errors.length) state.calcEditing = false;
+          await refreshDetailKeepingPlace();
+          // Put back what did not save, so a typo costs one retype, not all of them.
+          failed.forEach((key) => {
+            const v = root.querySelector('#mkCalc-' + key);
+            const src = root.querySelector('#mkCalcSrc-' + key);
+            if (v) v.value = values[key].value;
+            if (src) src.value = values[key].source;
+          });
+          break;
+        }
+        case 'calc-edit': state.calcEditing = !state.calcEditing; state.calcMsg = null; renderDetail(); break;
         case 'start-email': {
           const c = state.detail.campaign;
           try {
