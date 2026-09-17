@@ -57,8 +57,9 @@ Promise.all([
 
   /* ---- type tags ------------------------------------------------------- */
 
-  t.test('exactly three type tags: Task, Need, Hand Off', () => {
-    t.equal(TYPES.length, 3, 'expected exactly three type tags');
+  t.test('exactly four type tags: Task, Need, Hand Off, Reminder', () => {
+    t.equal(TYPES.length, 4, 'expected exactly four type tags');
+    t.equal(TYPE_VALUES.includes('reminder'), true, 'missing reminder');
     t.equal(TYPE_VALUES.includes('task'), true, 'missing task');
     t.equal(TYPE_VALUES.includes('need'), true, 'missing need');
     t.equal(TYPE_VALUES.includes('handoff'), true, 'missing handoff');

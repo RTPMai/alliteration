@@ -51,6 +51,14 @@
  * overwrite. The assignee and admins can edit too, same "isParty" rule the
  * server already used for reassigning and marking done.
  *
+ * Reminders (Ryan's ask, Sep 16 2026): a fourth type, Reminder, carries a
+ * "Remind on" date as well as the usual due date. Until that day it is
+ * scheduled: left out of the Open list, the tab counts and the rail badge,
+ * and reachable under the "Scheduled reminders" status filter. On the day
+ * it turns up like any other open item. The rules live in
+ * lib/notifications/schema.js (isWaiting, settleReminder) so the screen, the
+ * rail count and the server all agree on what "not yet" means.
+ *
  * The Delete button only shows if the signed-in user's role allows it
  * (ctx.perms.can_delete_notifications, set in Settings > Roles) or they are
  * an admin/superuser — api/notifications.js enforces this server-side
@@ -62,10 +70,11 @@ import { ENDPOINTS } from '../js/api.js';
 import { APPS, SITE_APPS, canAccess } from '../js/registry.js';
 import {
   TYPES, GENERAL_APP, LINK_TYPE_LABELS, linkTypesForApps, appForLinkType,
+  REMINDER_TYPE, isWaiting,
 } from '../lib/notifications/schema.js';
 import {
   DUE_FILTERS, STATUS_FILTERS, EMPTY_FILTERS,
-  applyFilters, activeFilterCount, teamPool, todayLocalISO,
+  applyFilters, activeFilterCount, teamPool, todayLocalISO, countWaiting,
 } from '../lib/notifications/filters.js';
 
 // Where a link opens, per type: { app, view }. "client" has no top-level
@@ -129,6 +138,22 @@ function fmtDue(iso) {
   return 'Due ' + d.toLocaleDateString();
 }
 
+// "Shows up Oct 3". Only drawn while a reminder is still waiting; once the
+// day arrives it is an ordinary open item and the due date says the rest.
+function fmtTrigger(iso) {
+  if (!iso) return '';
+  const d = new Date(iso + 'T00:00:00');
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const days = Math.round((d - today) / 86400000);
+  if (days === 1) return 'Shows up tomorrow';
+  return 'Shows up ' + d.toLocaleDateString();
+}
+
+function fmtDay(iso) {
+  return iso ? new Date(iso + 'T00:00:00').toLocaleDateString() : '';
+}
+
 function relTime(iso) {
   if (!iso) return '';
   const ms = Date.now() - new Date(iso).getTime();
@@ -145,10 +170,11 @@ function fmtChangeValue(field, v) {
   if (field === 'appIds') return (Array.isArray(v) ? v : [v]).map((id) => appMeta(id).name).join(', ');
   if (field === 'types') return (Array.isArray(v) ? v : [v]).map(typeLabel).join(', ');
   if (field === 'dueDate') return fmtDue(v) || v;
+  if (field === 'triggerDate') return fmtDay(v) || v;
   return String(v);
 }
 
-const FIELD_LABEL = { title: 'title', types: 'type', appIds: 'app', dueDate: 'due date', link: 'linked record' };
+const FIELD_LABEL = { title: 'title', types: 'type', appIds: 'app', dueDate: 'due date', triggerDate: 'remind-on date', link: 'linked record' };
 
 function fmtLinkValue(v) {
   if (!v || !v.id) return '(none)';
@@ -257,6 +283,7 @@ export default {
     padding:14px 16px;margin-bottom:10px;
   }
   .nt-card.done{opacity:.6}
+  .nt-card.waiting{border-style:dashed}
   .nt-card-top{display:flex;gap:12px;align-items:flex-start}
   .nt-check{margin-top:2px;width:17px;height:17px;cursor:pointer;flex:none}
   .nt-body{flex:1;min-width:0}
@@ -276,6 +303,7 @@ export default {
   .nt-pill.type-task{background:var(--bg);color:var(--muted);border:1px solid var(--line)}
   .nt-pill.type-need{background:var(--warn-tint);color:var(--warn-dk);border:1px solid var(--warn-tint)}
   .nt-pill.type-handoff{background:var(--accent-tint);color:var(--accent-deep);border:1px solid transparent}
+  .nt-pill.type-reminder{background:var(--hue-sky-tint);color:var(--hue-sky);border:1px solid transparent}
   .nt-pill.link{
     background:none;border:1px solid var(--line);color:var(--accent-deep);
     cursor:pointer;font-family:inherit;padding:2px 9px 2px 7px;
@@ -288,6 +316,7 @@ export default {
   .nt-private input{width:auto;margin:0}
   .nt-hint{display:block;font-size:11.5px;color:var(--faint);margin-top:3px}
   .nt-meta{font-size:11.5px;color:var(--faint);margin-top:6px}
+  .nt-meta .nt-when{color:var(--hue-sky);font-weight:600}
 
   /* Link-to-record picker — a type select plus a live search-as-you-type
      result list, same idea as the assignee dropdown but needs its own
@@ -477,7 +506,8 @@ export default {
     }
 
     function renderTabs() {
-      const openIn = (list) => list.filter((n) => n.status === 'open').length;
+      // Scheduled reminders are not counted until their day, same as the rail.
+      const openIn = (list) => list.filter((n) => n.status === 'open' && !isWaiting(n, today)).length;
       const inboxOpen = openIn(poolFor('inbox'));
       const sentOpen = openIn(poolFor('sent'));
       $('#ntInboxCt').textContent = inboxOpen ? ' (' + inboxOpen + ')' : '';
@@ -558,7 +588,7 @@ export default {
     }
 
     function typePillClass(t) {
-      return 'nt-pill type-' + (t === 'handoff' ? 'handoff' : t === 'need' ? 'need' : 'task');
+      return 'nt-pill type-' + (t === 'handoff' ? 'handoff' : t === 'need' ? 'need' : t === REMINDER_TYPE ? 'reminder' : 'task');
     }
 
     function toggleHtml(items, selectedSet, dataAttr) {
@@ -610,6 +640,10 @@ export default {
         '<div class="nt-field"><label>App (select one or more)</label><div class="nt-toggles" data-edit-app-toggles="' + esc(n.id) + '">' +
           toggleHtml(APP_OPTIONS, editApps, 'edit-app') +
         '</div></div>' +
+        '<div class="nt-field" data-edit-trigger-field="' + esc(n.id) + '"' +
+          (editTypes.has(REMINDER_TYPE) ? '' : ' style="display:none"') + '><label>Remind on</label>' +
+          '<input type="date" data-edit-trigger="' + esc(n.id) + '" value="' + esc(n.triggerDate || '') + '">' +
+          '<span class="nt-hint">Stays out of the list until this day, then shows up for whoever it is assigned to.</span></div>' +
         '<div class="nt-field"><label>Due date (optional)</label>' +
           '<input type="date" data-edit-due="' + esc(n.id) + '" value="' + esc(n.dueDate || '') + '"></div>' +
         '<div class="nt-field"><label>Link to a record (optional)</label>' +
@@ -770,6 +804,7 @@ export default {
     function cardHtml(n) {
       const app0 = appMeta((n.appIds || [])[0]);
       const done = n.status === 'done';
+      const waiting = isWaiting(n, today);
       // The team tab is the one place both halves matter: a manager needs to
       // know whose plate it is on AND who put it there, since the answer to
       // "why is this stuck" is often the second name.
@@ -780,6 +815,7 @@ export default {
           ? 'From ' + esc(n.createdByName || n.createdBy)
           : 'To ' + esc(n.assignedToName || n.assignedTo);
       const due = n.dueDate ? ' \u00b7 ' + esc(fmtDue(n.dueDate)) : '';
+      const when = waiting ? ' \u00b7 <span class="nt-when">' + esc(fmtTrigger(n.triggerDate)) + '</span>' : '';
       const completed = done && n.doneByName ? ' \u00b7 Completed by ' + esc(n.doneByName) : '';
       const appPills = (n.appIds || []).map((id) => {
         const a = appMeta(id);
@@ -819,14 +855,14 @@ export default {
       const showEdit = openEdit.has(n.id);
 
       return '' +
-        '<div class="nt-card' + (done ? ' done' : '') + '" data-id="' + esc(n.id) + '">' +
+        '<div class="nt-card' + (done ? ' done' : '') + (waiting ? ' waiting' : '') + '" data-id="' + esc(n.id) + '">' +
           '<div class="nt-card-top">' +
             '<input type="checkbox" class="nt-check" data-toggle="' + esc(n.id) + '"' +
               (done ? ' checked' : '') + ' title="' + (done ? 'Reopen' : 'Mark done') + '">' +
             '<div class="nt-body">' +
               '<div class="nt-title' + (done ? ' done' : '') + '">' + esc(n.title) + '</div>' +
               '<div class="nt-tags">' + appPills + typePills + linkPill + '</div>' +
-              '<div class="nt-meta">' + who + due + completed + ' \u00b7 ' + esc(relTime(n.createdAt)) + '</div>' +
+              '<div class="nt-meta">' + who + when + due + completed + ' \u00b7 ' + esc(relTime(n.createdAt)) + '</div>' +
             '</div>' +
             '<div class="nt-actions">' +
               '<button class="nt-btn small" data-edit-toggle="' + esc(n.id) + '">Edit</button>' +
@@ -868,8 +904,16 @@ export default {
 
       // Says why the list is the length it is, and carries the way out of a
       // filter that is hiding more than it meant to.
+      // A reminder set for next month leaves the Open list the moment it is
+      // saved. Saying how many are waiting, with a way to see them, is what
+      // stops that reading as "it did not save".
+      const waitingCt = filters.status === 'open' ? countWaiting(pool, today) : 0;
       $('#ntCount').innerHTML = pool.length
         ? esc('Showing ' + visible.length + ' of ' + pool.length) +
+          (waitingCt
+            ? ' \u00b7 <button class="nt-btn small" id="ntShowScheduled">' + waitingCt +
+                ' scheduled reminder' + (waitingCt === 1 ? '' : 's') + '</button>'
+            : '') +
           (active
             ? ' \u00b7 <button class="nt-btn small" id="ntClear">Clear filters (' + active + ')</button>'
             : '')
@@ -910,6 +954,9 @@ export default {
             '<span class="nt-hint">Nobody else can see it, not even an admin. Stays assigned to you.</span>' +
           '</div>' +
           '<div class="nt-field" id="nf-who-field"><label>Assign to</label><select id="nf-who"></select></div>' +
+          '<div class="nt-field" id="nf-trigger-field"' + (formTypes.has(REMINDER_TYPE) ? '' : ' style="display:none"') + '>' +
+            '<label>Remind on</label><input id="nf-trigger" type="date">' +
+            '<span class="nt-hint">Stays out of the list until this day, then shows up for whoever it is assigned to.</span></div>' +
           '<div class="nt-field"><label>Due date (optional)</label><input id="nf-due" type="date"></div>' +
           '<div class="nt-field"><label>Link to a record (optional)</label>' +
             linkPickerHtml('new', null, [...formApps]) +
@@ -957,6 +1004,11 @@ export default {
     root.addEventListener('click', async (e) => {
       // Both clear buttons (the one in the count line and the one inside the
       // "your filters hid everything" empty state) do the same thing.
+      if (e.target.id === 'ntShowScheduled') {
+        setFilter('status', 'scheduled');
+        return;
+      }
+
       if (e.target.id === 'ntClear' || e.target.id === 'ntClearEmpty') {
         filters = { ...EMPTY_FILTERS };
         renderFilters();
@@ -991,6 +1043,8 @@ export default {
         const v = typeToggle.dataset.type;
         if (formTypes.has(v)) formTypes.delete(v); else formTypes.add(v);
         typeToggle.setAttribute('aria-pressed', formTypes.has(v));
+        const tf = $('#nf-trigger-field');
+        if (tf) tf.style.display = formTypes.has(REMINDER_TYPE) ? '' : 'none';
         return;
       }
 
@@ -1012,6 +1066,8 @@ export default {
         const btn = e.target;
         btn.disabled = true;
         say('');
+        const isReminder = formTypes.has(REMINDER_TYPE);
+        const trigger = isReminder && $('#nf-trigger') ? ($('#nf-trigger').value || null) : null;
         try {
           await ctx.api.post(ENDPOINTS.notifications, {
             title: $('#nf-title').value.trim(),
@@ -1020,11 +1076,14 @@ export default {
             assignedTo: $('#nf-who').value,
             visibility: $('#nf-private') && $('#nf-private').checked ? 'private' : 'team',
             dueDate: $('#nf-due').value || null,
+            triggerDate: trigger,
             link: readLinkPicker('new')
           });
           $('#ntForm').style.display = 'none';
           $('#ntForm').innerHTML = '';
-          say('Notification created.', 'ok');
+          say(trigger && trigger > today
+            ? 'Reminder set. It shows up on ' + fmtDay(trigger) + '.'
+            : 'Notification created.', 'ok');
           await load();
         } catch (err) {
           say(whyFailed(err, 'Could not create that notification'), 'err');
@@ -1046,6 +1105,12 @@ export default {
       if (editTypeToggle) {
         const on = editTypeToggle.getAttribute('aria-pressed') === 'true';
         editTypeToggle.setAttribute('aria-pressed', String(!on));
+        const form = editTypeToggle.closest('[data-edit-form]');
+        if (form) {
+          const fid = form.dataset.editForm;
+          const tf = root.querySelector('[data-edit-trigger-field="' + fid + '"]');
+          if (tf) tf.style.display = editSelected(fid, 'type').includes(REMINDER_TYPE) ? '' : 'none';
+        }
         return;
       }
 
@@ -1074,6 +1139,8 @@ export default {
         const types = editSelected(id, 'type');
         const apps = editSelected(id, 'app');
         const due = root.querySelector('[data-edit-due="' + id + '"]').value || null;
+        const triggerEl = root.querySelector('[data-edit-trigger="' + id + '"]');
+        const trigger = types.includes(REMINDER_TYPE) && triggerEl ? (triggerEl.value || null) : null;
         const msg = root.querySelector('[data-edit-msg="' + id + '"]').value.trim();
         if (!title) { say('Title cannot be blank.', 'err'); return; }
         if (!types.length) { say('Select at least one type.', 'err'); return; }
@@ -1081,7 +1148,7 @@ export default {
         editSave.disabled = true;
         try {
           await ctx.api.patch(ENDPOINTS.notifications,
-            { title, types, appIds: apps, dueDate: due, link: readLinkPicker(id), message: msg || undefined },
+            { title, types, appIds: apps, dueDate: due, triggerDate: trigger, link: readLinkPicker(id), message: msg || undefined },
             { query: { id } });
           openEdit.delete(id);
           say('Notification updated.', 'ok');

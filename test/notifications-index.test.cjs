@@ -1,3 +1,4 @@
+// PUT IN: test/notifications-index.test.cjs
 /**
  * Notifications index tests (Aug 2026).
  *
@@ -105,7 +106,7 @@ async function check(name, fn) {
 
   await check('a summary carries exactly the fields the count is computed from', async () => {
     const s = store.summaryOf(note({ message: 'a long message that must not be copied' }));
-    t.equal(Object.keys(s).sort().join(','), 'assignedTo,createdBy,id,status,visibility');
+    t.equal(Object.keys(s).sort().join(','), 'assignedTo,createdBy,id,status,triggerDate,visibility');
     t.assert(!('message' in s), 'the index must not become a second copy of the record body');
   });
 

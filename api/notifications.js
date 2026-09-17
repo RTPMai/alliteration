@@ -44,6 +44,7 @@ import { requireAuth } from "../lib/session.js";
 import { getUser, getAccess, listUsers } from "../lib/users.js";
 import {
   validateNew, validatePatch, GENERAL_APP, PICKABLE_LINK_TYPES,
+  settleReminder, isWaiting, todayInZone,
 } from "../lib/notifications/schema.js";
 import {
   listNotifications, saveNotification, nextNotificationId,
@@ -391,6 +392,13 @@ export default async function handler(req, res) {
       }
 
       let list = (await listNotifications()).filter((n) => !hidden(n));
+      // Same rule as the count: a reminder waiting for its day is not open
+      // yet. Only applied when a caller asks for status=open, so the screen's
+      // own unfiltered load still receives scheduled reminders to show.
+      if (q.status === "open") {
+        const today = todayInZone();
+        list = list.filter((n) => !isWaiting(n, today));
+      }
       if (q.assignedTo) list = list.filter((n) => n.assignedTo === String(q.assignedTo).toLowerCase());
       if (q.createdBy) list = list.filter((n) => n.createdBy === String(q.createdBy).toLowerCase());
       if (q.appId) list = list.filter((n) => Array.isArray(n.appIds) && n.appIds.includes(q.appId));
@@ -410,6 +418,9 @@ export default async function handler(req, res) {
 
       const { ok, errors, record } = validateNew(body, APP_IDS, usernames);
       if (!ok) return res.status(400).json({ error: "Validation failed", details: errors });
+
+      // Reminder date rules are already applied inside validateNew(), which
+      // sees the whole new record. Edits need the merged record (see PATCH).
 
       // Enforced server-side, not just hidden in the form: a private item
       // nobody else can read must not sit in another person's inbox.
@@ -465,6 +476,21 @@ export default async function handler(req, res) {
       const willBePrivate = (patch.visibility || existing.visibility) === "private";
       if (willBePrivate) patch.assignedTo = existing.createdBy;
 
+      // Reminder rules judged on the record as it will be saved, not on this
+      // request's fields: tagging an old task Reminder without giving it a
+      // date must be refused, and taking the Reminder tag off must clear the
+      // trigger date so it stops hiding the item.
+      const touchesReminder = patch.types !== undefined || patch.triggerDate !== undefined ||
+        patch.dueDate !== undefined;
+      if (touchesReminder) {
+        const settled = settleReminder({ ...existing, ...patch });
+        if (settled.errors.length) {
+          return res.status(400).json({ error: "Validation failed", details: settled.errors });
+        }
+        if ((existing.triggerDate || null) !== settled.triggerDate) patch.triggerDate = settled.triggerDate;
+        else if (patch.triggerDate !== undefined) delete patch.triggerDate;
+      }
+
       if (!Object.keys(patch).length && !message) {
         return res.status(400).json({ error: "No editable fields in patch" });
       }
@@ -511,7 +537,7 @@ export default async function handler(req, res) {
       // that entry's own message covers the "why." Each entry keeps the
       // actual before/after values (not just field names) so the trail
       // answers "what did it used to say," not only "something changed."
-      const editedFields = ["title", "types", "appIds", "dueDate", "link"].filter((f) => patch[f] !== undefined);
+      const editedFields = ["title", "types", "appIds", "dueDate", "triggerDate", "link"].filter((f) => patch[f] !== undefined);
       if (editedFields.length && !entries.length) {
         const changes = editedFields.map((f) => ({ field: f, from: existing[f], to: patch[f] }));
         entries.push(historyEntry("edited", me, myName, { fields: editedFields, changes, message: message || undefined }));
