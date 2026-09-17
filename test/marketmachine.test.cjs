@@ -27,7 +27,7 @@ const ROOT = path.join(__dirname, '..');
 // Listed here so a new screen that forgets the seam or hardcodes a color
 // cannot hide in it.
 const MODULE_FILES = ['index', 'styles', 'template', 'format', 'shared', 'list', 'new',
-  'detail', 'connect', 'calc', 'timeline', 'settings'].map((n) => `apps/marketmachine/${n}.js`);
+  'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks'].map((n) => `apps/marketmachine/${n}.js`);
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
@@ -606,7 +606,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     // here and the names really compared.
     const app = { state: {}, api: {}, root: { querySelector: () => null }, ui: {} };
     const made = {};
-    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings']) {
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks']) {
       const mod = await import(`../apps/marketmachine/${name}.js`);
       const fns = mod.default(app);
       Object.entries(fns).forEach(([fn, impl]) => {
@@ -698,7 +698,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     };
 
     const app = { state, api: {}, root, ui: {} };
-    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings']) {
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks']) {
       Object.assign(app.ui, (await import(`../apps/marketmachine/${name}.js`)).default(app));
     }
 
@@ -709,6 +709,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
       ['one campaign', () => app.ui.renderDetail(), '#mkDetailPane'],
       ['the timeline', () => app.ui.renderTimeline(), '#mkTimelineBody'],
       ['settings', () => app.ui.renderSettings(), '#mkSettingsBody'],
+      ['my tasks', () => app.ui.renderTasks(), '#mkTasksBody'],
     ];
     renders.forEach(([what, run, target]) => {
       let error = null;

@@ -316,12 +316,18 @@ export const APPS = [
     // 100 KB line above which the web uploader is off limits. Same shape
     // BackBone uses; the app contract is unchanged.
     entry: 'marketmachine/index.js',
+    // MY TASKS IS FIRST AND IS THE DEFAULT (phase 5, Sept 2026). The campaign
+    // page is thorough because the masters are; this is the simple way in, and
+    // the only view somebody who is not an Admin can use. Everyone lands here,
+    // Admins included, because "what do I owe" is the right first question for
+    // them too. Campaigns is one click away.
     views: [
+      ['tasks', 'My tasks'],
       ['campaigns', 'Campaigns'],
       ['calendar', 'Timeline'],
       ['settings', 'Settings']
     ],
-    defaultView: 'campaigns',
+    defaultView: 'tasks',
     stub: false
   },
   {

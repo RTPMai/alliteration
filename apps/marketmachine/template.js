@@ -7,6 +7,9 @@
 
 export default `
     <div class="mk-page">
+      <section id="mkTasksView" hidden>
+        <div id="mkTasksBody"></div>
+      </section>
       <section id="mkCampaignsView" hidden>
         <div id="mkListPane"></div>
         <div id="mkNewPane" hidden></div>

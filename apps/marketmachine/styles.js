@@ -214,6 +214,22 @@ export default `
   .mk-calc .up{font-size:11.5px;color:var(--faint);margin-top:8px}
   .mk-inputs{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 16px}
 
+  /* My tasks: the simple screen. Big rows, big boxes, nothing else. */
+  .mk-task-block{margin-bottom:26px}
+  .mk-task-block h2{font-size:15px;font-weight:800;margin-bottom:8px}
+  .mk-task-block h2 span{font-weight:600;color:var(--muted);margin-left:8px;font-size:13px}
+  .mk-task-block .note{font-size:12.5px;color:var(--muted);margin:-2px 0 8px}
+  .mk-task-block ul{list-style:none;margin:0;padding:0}
+  .mk-task{display:grid;grid-template-columns:34px 1fr;gap:12px;align-items:start;
+    background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
+    padding:14px 16px;margin-bottom:8px}
+  .mk-task.late{border-color:var(--danger-line)}
+  .mk-task .mk-check{width:24px;height:24px;margin:2px 0 0}
+  .mk-task .what{font-size:15px;font-weight:700;line-height:1.35;color:var(--ink)}
+  .mk-task .why{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.5;max-width:70ch}
+  .mk-task .meta{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12.5px;color:var(--faint);margin-top:7px}
+  .mk-task .meta .late{color:var(--danger-dk);font-weight:700}
+
   .mk-tl-month{margin-bottom:18px}
   .mk-tl-month h3{font-size:14px;font-weight:800;margin-bottom:8px}
   .mk-tl-row{display:grid;grid-template-columns:110px 170px 1fr auto;gap:10px;align-items:baseline;

@@ -70,6 +70,7 @@ import makeConnect from './connect.js';
 import makeCalc from './calc.js';
 import makeTimeline from './timeline.js';
 import makeSettings from './settings.js';
+import makeTasks from './tasks.js';
 
 export default {
   id: 'marketmachine',
@@ -104,6 +105,10 @@ export default {
       printavo: {},          // invoice number -> status from the last on-demand check
       printavoChecking: false,
       calculations: [],
+      tasks: [],
+      taskMsg: null,
+      taskError: '',
+      taskSaving: null,
       calcEditing: false,
       scorecardEditing: false,
       calcMsg: null,
@@ -130,7 +135,7 @@ export default {
     const app = { state, api, root, ui: {} };
     Object.assign(app.ui,
       makeShared(app), makeList(app), makeNew(app), makeDetail(app),
-      makeConnect(app), makeCalc(app), makeTimeline(app), makeSettings(app));
+      makeConnect(app), makeCalc(app), makeTimeline(app), makeSettings(app), makeTasks(app));
     const ui = app.ui;
 
     // Loading and saving stay here, and go on `ui` too, because a screen
@@ -138,9 +143,24 @@ export default {
     // campaign it just created. Function declarations, so the order of this
     // line and their definitions below does not matter.
     Object.assign(ui, {
-      loadList, loadDetail, loadInitiatives, showPane, openCampaign,
+      loadTasks, loadList, loadDetail, loadInitiatives, showPane, openCampaign,
       refreshDetailKeepingPlace, patchConnection, patchStep, patchHeader,
     });
+
+    /**
+     * My tasks. Its own request, and the only one this screen needs, so a
+     * person who is not an Admin never waits on campaign data they cannot see.
+     */
+    async function loadTasks() {
+      try {
+        const d = await api.get(ENDPOINTS.mkCampaigns, { mine: 'tasks' });
+        state.tasks = Array.isArray(d && d.tasks) ? d.tasks : [];
+        state.taskError = '';
+        if (d && d.today) state.today = d.today;
+      } catch (e) {
+        state.taskError = e.message || 'Your tasks did not load.';
+      }
+    }
 
     async function loadList() {
       try {
@@ -278,6 +298,11 @@ export default {
       if (!t || !root.contains(t)) return;
 
       if (t.matches('input.mk-check')) {
+        const campaignId = t.getAttribute('data-task-done');
+        if (campaignId) {
+          await ui.tickTask(campaignId, t.getAttribute('data-task-step'), t.checked);
+          return;
+        }
         const key = t.getAttribute('data-done');
         await patchStep(key, { done: t.checked }, null);
         return;
@@ -377,6 +402,7 @@ export default {
 
       switch (d.act) {
         case 'refresh': await loadList(); ui.renderList(); break;
+        case 'tasks-refresh': state.taskMsg = null; await loadTasks(); ui.renderTasks(); break;
         case 'new':
           state.newParentId = null; state.newType = null; state.newMsg = null;
           showPane('new'); ui.renderNew(); break;
@@ -550,11 +576,13 @@ export default {
       root.removeEventListener('keydown', onKey);
     };
 
-    await Promise.all([loadList(), loadInitiatives()]);
+    await Promise.all([loadTasks(), loadList(), loadInitiatives()]);
     showPane('list');
+    ui.renderTasks();
     ui.renderList();
 
     this._renders = {
+      tasks: async () => { await loadTasks(); ui.renderTasks(); },
       campaigns: async () => { if (state.pane === 'list') { await loadList(); ui.renderList(); } },
       calendar: async () => { await loadList(); ui.renderTimeline(); },
       settings: async () => { await Promise.all([loadList(), loadInitiatives()]); ui.renderSettings(); },
@@ -563,7 +591,7 @@ export default {
   showView(view) {
     const root = this._root;
     if (!root) return;
-    const ids = { campaigns: 'mkCampaignsView', calendar: 'mkCalendarView', settings: 'mkSettingsView' };
+    const ids = { tasks: 'mkTasksView', campaigns: 'mkCampaignsView', calendar: 'mkCalendarView', settings: 'mkSettingsView' };
     Object.entries(ids).forEach(([v, id]) => {
       const el = root.querySelector('#' + id);
       if (el) el.hidden = v !== view;

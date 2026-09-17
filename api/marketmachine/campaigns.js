@@ -16,6 +16,8 @@
 //                        BackBone lead, or a Printavo invoice number
 // PATCH  ?id=&calc=1  -> set or clear one typed calculation input
 // PATCH  ?id=&scorecard=1 -> set or clear one results scorecard row
+// GET    ?mine=tasks  -> ANY signed-in person: the open steps that are theirs,
+//                        one line each with a short why. Nothing else.
 // GET    ?options=connections -> the trips and leads to pick from
 // GET    ?id=&printavo=1      -> current Printavo status of this campaign's
 //                        invoices (on demand; Printavo is slow)
@@ -47,6 +49,7 @@ import {
 import { computeCalculations, advisories, scorecardRows } from "../../lib/marketmachine/calculations.js";
 import { isParentType } from "../../lib/marketmachine/catalog.js";
 import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
+import { myTasks, canTickStep } from "../../lib/marketmachine/tasks.js";
 import { todayCentral } from "../../lib/marketmachine/dates.js";
 
 const ADMIN_ONLY = "MarketMachine is admin only for now.";
@@ -85,9 +88,46 @@ export default async function handler(req, res) {
     const { user, admin, session } = await accountFor(sess);
     const today = todayCentral();
 
+    // My tasks: open to anyone signed in, because the point of it is that the
+    // people doing the work never have to open the full campaign screen. It
+    // carries their own steps and nothing else: no other person's work, no
+    // budget, no connections, no history.
+    if (q.mine === "tasks") {
+      const people = await accountManagers(user ? { username: user.username, name: user.name } : null);
+      const person = {
+        username: sess.username,
+        name: (user && user.name) || sess.username,
+        employeeId: people.me ? people.me.id : null,
+        admin,
+      };
+      const open = (await listCampaigns()).filter((c) => c.status === "open");
+      return res.status(200).json({ tasks: myTasks(open, person, today), today, me: person.name });
+    }
+
     if (req.method === "GET" && !id && !admin) {
       const all = await listCampaigns();
       return res.status(200).json({ campaigns: pickerShape(all), limited: true, message: ADMIN_ONLY });
+    }
+
+    // The one write anybody may make: ticking a step that is theirs, from My
+    // tasks. Checked against the campaign record, never against what the
+    // screen claims, and only for done, the date it was done, and notes.
+    if (!admin && req.method === "PATCH" && q.step && q.mine) {
+      const campaign = id ? await getCampaign(id) : null;
+      if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+      const step = (campaign.steps || []).find((s) => s.key === String(q.step));
+      if (!step) return res.status(404).json({ error: "That step is not on this campaign" });
+      const people = await accountManagers(user ? { username: user.username, name: user.name } : null);
+      const person = { username: sess.username, name: (user && user.name) || sess.username, employeeId: people.me ? people.me.id : null, admin: false };
+      if (!canTickStep(campaign, step, person)) {
+        return res.status(403).json({ error: "That step belongs to somebody else." });
+      }
+      const body = parseBody(req);
+      const out = await updateStep(id, String(q.step), {
+        done: body.done, doneAt: body.doneAt, notes: body.notes,
+      }, session, today);
+      if (!out.ok) return refuse(res, out);
+      return res.status(200).json({ ok: true });
     }
 
     if (!admin) return res.status(403).json({ error: ADMIN_ONLY });
