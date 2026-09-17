@@ -12,6 +12,11 @@
 //                        participation, budget, notes, status
 // PATCH  ?id=&step=   -> one step: done, date completed, not applicable,
 //                        due date, blocker, notes, links
+// PATCH  ?id=&connect=1 -> connect or disconnect a TravelTrack trip, a
+//                        BackBone lead, or a Printavo invoice number
+// GET    ?options=connections -> the trips and leads to pick from
+// GET    ?id=&printavo=1      -> current Printavo status of this campaign's
+//                        invoices (on demand; Printavo is slow)
 // DELETE ?id=         -> delete a campaign
 // DELETE ?legacy=all  -> delete the old pre-rebuild sample campaigns
 //
@@ -34,8 +39,10 @@ import { getUser } from "../../lib/users.js";
 import { progress, headerDates, childSummary, isMine, pickerShape } from "../../lib/marketmachine/campaign.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
-  childrenOf, legacyCount, clearLegacy, linkedEmails, accountManagers,
+  childrenOf, legacyCount, clearLegacy, accountManagers,
+  linkConnection, connectionOptions, connectionDetail, invoiceStatuses,
 } from "../../lib/marketmachine/store.js";
+import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
 import { todayCentral } from "../../lib/marketmachine/dates.js";
 
 const ADMIN_ONLY = "MarketMachine is admin only for now.";
@@ -86,9 +93,17 @@ export default async function handler(req, res) {
       const people = await accountManagers(user ? { username: user.username, name: user.name } : null);
       const myId = people.me ? people.me.id : null;
 
+      if (q.options === "connections") {
+        return res.status(200).json(await connectionOptions());
+      }
+
       if (id) {
         const campaign = all.find((c) => c.id === id) || await getCampaign(id);
         if (!campaign) return res.status(404).json({ error: "Campaign not found" });
+        if (q.printavo) {
+          const numbers = scopeOf(campaign, all).flatMap((c) => linksOf(c).invoices.map((e) => e.ref));
+          return res.status(200).json({ statuses: await invoiceStatuses(numbers) });
+        }
         const parent = campaign.parentId ? all.find((c) => c.id === campaign.parentId) || null : null;
         return res.status(200).json({
           campaign,
@@ -96,7 +111,7 @@ export default async function handler(req, res) {
           dates: headerDates(campaign),
           parent: parent ? childSummary(parent, today) : null,
           children: childrenOf(id, all).map((c) => childSummary(c, today)),
-          emails: await linkedEmails(id),
+          connections: await connectionDetail(campaign, all),
           accountManagers: people.options,
           today,
         });
@@ -141,9 +156,11 @@ export default async function handler(req, res) {
     if (req.method === "PATCH") {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
       const body = parseBody(req);
-      const out = q.step
-        ? await updateStep(id, String(q.step), body, session, today)
-        : await updateHeader(id, body, session);
+      const out = q.connect
+        ? await linkConnection(id, body, session)
+        : q.step
+          ? await updateStep(id, String(q.step), body, session, today)
+          : await updateHeader(id, body, session);
       if (!out.ok) return refuse(res, out);
       return res.status(200).json({ ok: true, campaign: out.campaign, progress: progress(out.campaign, today) });
     }

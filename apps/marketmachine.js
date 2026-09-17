@@ -12,6 +12,11 @@
  * stands, the next step, its owner, its due date, and anything blocking it.
  * The checklist sits underneath, top to bottom, in the order the team works.
  *
+ * CONNECTIONS (phase 2): a campaign points at TravelTrack trips, BackBone
+ * leads and Printavo invoice numbers by id, and MailMe emails point at the
+ * campaign. Everything is read live from its own app and counted once, so an
+ * event's totals never add the same invoice or lead twice.
+ *
  * WHAT LIVES ELSEWHERE, deliberately:
  *   - the rules (what can be marked done, when a campaign can close, what a
  *     connected campaign inherits) are in lib/marketmachine/campaign.js, and
@@ -34,6 +39,7 @@ import {
   progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION
 } from '../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel, todayCentral } from '../lib/marketmachine/dates.js';
+import { linksOf } from '../lib/marketmachine/connections.js';
 
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({
@@ -59,6 +65,16 @@ function fmtStamp(iso) {
 
 const PARTICIPATION_LABEL = {
   exhibitor: 'Exhibitor', attendee: 'Attendee', hybrid: 'Hybrid', not_attending: 'Do not attend'
+};
+
+function fmtMoney(n) {
+  const v = Number(n) || 0;
+  return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+const TRIP_STATUS_LABEL = {
+  potential: 'Potential', confirmed: 'Confirmed', attended: 'Attended',
+  did_not_attend: 'Did not attend', cancelled: 'Cancelled'
 };
 
 function statusClass(label) {
@@ -256,6 +272,14 @@ export default {
   .mk-steps-ref .st{font-size:12px;font-weight:700;color:var(--muted);margin:10px 14px 2px}
   .mk-steps-ref .o{color:var(--muted);font-size:12px}
 
+  .mk-conn-add{display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;padding:12px 18px;
+    border-top:1px solid var(--line-soft);background:var(--head-bg)}
+  .mk-conn-add .mk-field{margin:0;min-width:240px;flex:1}
+  .mk-conn-note{font-size:12.5px;color:var(--muted);padding:10px 18px 0;line-height:1.5}
+  .mk-conn-stats{padding:14px 18px 0}
+  .mk-conn-stats .mk-stat-row{margin-bottom:12px}
+  .mk-scope{font-size:13px;color:var(--muted);margin:-6px 0 14px}
+
   .mk-tl-month{margin-bottom:18px}
   .mk-tl-month h3{font-size:14px;font-weight:800;margin-bottom:8px}
   .mk-tl-row{display:grid;grid-template-columns:110px 170px 1fr auto;gap:10px;align-items:baseline;
@@ -314,7 +338,12 @@ export default {
       filters: { show: 'open', whose: 'all', type: '', am: '' },
 
       pane: 'list',          // list | new | detail
-      detail: null,          // { campaign, parent, children, emails }
+      detail: null,          // { campaign, parent, children, connections }
+      connOptions: null,     // { trips, leads } for the connect pickers, loaded on first use
+      connAdding: null,      // trips | leads | invoices while its add form is open
+      connMsg: null,
+      printavo: {},          // invoice number -> status from the last on-demand check
+      printavoChecking: false,
       openStep: null,        // step key whose details are expanded
       stepMsg: {},           // step key -> { cls, text }
       detailMsg: null,
@@ -361,7 +390,7 @@ export default {
         campaign: d.campaign,
         parent: d.parent || null,
         children: Array.isArray(d.children) ? d.children : [],
-        emails: d.emails || { emails: [], unavailable: false },
+        connections: d.connections || null,
       };
       if (Array.isArray(d.accountManagers)) state.accountManagers = d.accountManagers;
       if (d.today) state.today = d.today;
@@ -665,6 +694,9 @@ export default {
       state.stepMsg = {};
       state.detailMsg = null;
       state.editingHeader = false;
+      state.connAdding = null;
+      state.connMsg = null;
+      state.printavo = {};
       showPane('detail');
       const det = $('#mkDetailPane');
       if (det) det.innerHTML = '<div class="mk-empty">Loading the campaign.</div>';
@@ -835,10 +867,195 @@ export default {
       }).filter(Boolean);
     }
 
+    /* ---------------- connections ---------------- */
+
+    function scopeName(id, conn) {
+      const hit = conn && Array.isArray(conn.scope) ? conn.scope.find((x) => x.id === id) : null;
+      return hit ? hit.name : id;
+    }
+
+    function creditCell(row, c, conn) {
+      if (!conn || !Array.isArray(conn.scope) || conn.scope.length < 2) return '';
+      const primary = row.primary === c.id ? 'This event' : scopeName(row.primary, conn);
+      const assisting = (row.assisting || []).map((id) => id === c.id ? 'this event' : scopeName(id, conn));
+      return `<td>${esc(primary)}${assisting.length ? `<div class="who">Assisting: ${esc(assisting.join(', '))}</div>` : ''}</td>`;
+    }
+
+    function removable(c, kind, ref) {
+      return c && linksOf(c)[kind].some((e) => e.ref === ref);
+    }
+
+    function addForm(kind) {
+      if (state.connAdding !== kind) return '';
+      const opts = state.connOptions;
+      let field;
+      if (kind === 'trips') {
+        const list = opts && Array.isArray(opts.trips) ? opts.trips : null;
+        field = list === null
+          ? '<div class="mk-notice" style="margin:0">TravelTrack did not answer, so trips cannot be listed right now.</div>'
+          : `<div class="mk-field"><label for="mkConnRef-trips">Trip</label>
+              <select id="mkConnRef-trips"><option value="">Pick a trip</option>
+                ${list.map((t) => `<option value="${esc(t.id)}">${esc(t.title || t.destination || t.id)}${t.start_date ? ', ' + esc(fmtDate(t.start_date)) : ''}</option>`).join('')}
+              </select></div>`;
+      } else if (kind === 'leads') {
+        const list = opts && Array.isArray(opts.leads) ? opts.leads : null;
+        field = list === null
+          ? '<div class="mk-notice" style="margin:0">BackBone did not answer, so leads cannot be listed right now.</div>'
+          : `<div class="mk-field"><label for="mkConnRef-leads">Lead</label>
+              <div class="hint">Start typing a company or lead number.</div>
+              <input type="text" id="mkConnRef-leads" list="mkLeadList" autocomplete="off">
+              <datalist id="mkLeadList">${list.map((l) =>
+                `<option value="${esc(l.ref)}">${esc([l.leadNo, l.company, l.status].filter(Boolean).join(', '))}</option>`).join('')}</datalist></div>`;
+      } else {
+        field = `<div class="mk-field"><label for="mkConnRef-invoices">Printavo invoice number</label>
+            <div class="hint">The number on the invoice in Printavo, digits only.</div>
+            <input type="text" id="mkConnRef-invoices" inputmode="numeric" maxlength="13"></div>`;
+      }
+      return `<div class="mk-conn-add">${field}
+        <button class="mk-btn sm" data-conn-save="${kind}">Connect</button>
+        <button class="mk-btn ghost sm" data-conn-cancel="1">Cancel</button></div>`;
+    }
+
+    function connectionsSection(c, meta, conn) {
+      if (!conn) return '';
+      const multi = Array.isArray(conn.scope) && conn.scope.length > 1;
+      const credit = multi ? '<th>Credited to</th>' : '';
+      const unavailable = (what) => `<div class="mk-card-bd"><div class="mk-notice" style="margin:0">${what} did not answer, so this cannot be shown right now. Nothing is lost.</div></div>`;
+
+      // Email
+      const em = conn.email || {};
+      const emailBody = em.unavailable ? unavailable('MailMe') : `
+        <div class="mk-conn-stats"><div class="mk-stat-row">
+          <div class="mk-stat"><div class="v">${em.count || 0}</div><div class="l">Emails attached</div></div>
+          <div class="mk-stat"><div class="v">${(em.delivered || 0).toLocaleString()}</div><div class="l">Delivered</div></div>
+          <div class="mk-stat"><div class="v">${(em.uniqueClicks || 0).toLocaleString()}</div><div class="l">Unique clicks, per email</div></div>
+          <div class="mk-stat"><div class="v">${em.uniqueClickRate == null ? '<span style="font-size:14px">' + esc(em.rateStatus || 'Nothing delivered yet') + '</span>' : esc(em.uniqueClickRate) + '%'}</div><div class="l">Unique click rate</div></div>
+          <div class="mk-stat"><div class="v">${(em.uniqueOpens || 0).toLocaleString()}</div><div class="l">Opens, directional only</div></div>
+        </div></div>
+        ${(em.emails || []).length ? `<div class="mk-wrap"><table class="mk-table"><thead><tr>
+            <th>Email</th>${multi ? '<th>Campaign</th>' : ''}<th>Status</th><th>Delivered</th><th>Unique clicks</th>
+          </tr></thead><tbody>${em.emails.map((e) => `<tr>
+            <td><div class="co">${esc(e.subject || 'No subject yet')}</div><div class="who">${esc(e.id)}${e.sentAt ? ', sent ' + esc(fmtStamp(e.sentAt)) : ''}</div></td>
+            ${multi ? `<td>${esc(scopeName(e.campaignId, conn))}</td>` : ''}
+            <td>${esc(e.status)}</td><td>${e.delivered}</td><td>${e.uniqueClicks}</td></tr>`).join('')}</tbody></table></div>`
+          : '<div class="mk-conn-note" style="padding-bottom:14px">No emails yet. Start one here, or attach an existing email from its own screen in MailMe.</div>'}`;
+
+      // Travel
+      const tr = conn.travel || {};
+      const travelBody = tr.unavailable ? unavailable('TravelTrack') : `
+        ${(tr.trips || []).length ? `
+          <div class="mk-conn-stats"><div class="mk-stat-row">
+            <div class="mk-stat"><div class="v">${tr.trips.length}</div><div class="l">Trips</div></div>
+            <div class="mk-stat"><div class="v">${fmtMoney(tr.total)}</div><div class="l">Spent, not counting rejected</div></div>
+            <div class="mk-stat"><div class="v">${fmtMoney(tr.pending)}</div><div class="l">Waiting on approval</div></div>
+            <div class="mk-stat"><div class="v">${fmtMoney(tr.reimbursed)}</div><div class="l">Reimbursed</div></div>
+          </div></div>
+          <div class="mk-wrap"><table class="mk-table"><thead><tr>
+            <th>Trip</th><th>Dates</th><th>Status</th><th>Receipts</th><th>Spent</th>${credit}<th></th>
+          </tr></thead><tbody>${tr.trips.map((t) => `<tr>
+            <td><div class="co">${t.missing ? 'Trip no longer in TravelTrack' : esc(t.title || t.destination)}</div><div class="who">${esc(t.destination || t.ref)}</div></td>
+            <td>${esc(fmtDate(t.start_date))}${t.end_date && t.end_date !== t.start_date ? ' to ' + esc(fmtDate(t.end_date)) : ''}</td>
+            <td>${esc(TRIP_STATUS_LABEL[t.status] || t.status || '')}</td>
+            <td>${t.receipts}</td><td>${fmtMoney(t.total)}</td>
+            ${creditCell(t, c, conn)}
+            <td>${removable(c, 'trips', t.ref) ? `<button class="mk-btn ghost sm" data-conn-remove="trips" data-ref="${esc(t.ref)}">Disconnect</button>` : ''}</td>
+          </tr>`).join('')}</tbody></table></div>`
+          : '<div class="mk-conn-note" style="padding-bottom:14px">No trips connected. Money stays in TravelTrack; this shows it, it does not copy it.</div>'}`;
+
+      // Leads
+      const ld = conn.leads || {};
+      const leadsBody = ld.unavailable ? unavailable('BackBone') : `
+        ${(ld.leads || []).length ? `
+          <div class="mk-conn-stats"><div class="mk-stat-row">
+            <div class="mk-stat"><div class="v">${ld.count}</div><div class="l">Leads</div></div>
+            <div class="mk-stat"><div class="v">${ld.won}</div><div class="l">Won</div></div>
+          </div></div>
+          <div class="mk-wrap"><table class="mk-table"><thead><tr>
+            <th>Lead</th><th>Status</th><th>Account Manager</th>${credit}<th></th>
+          </tr></thead><tbody>${ld.leads.map((l) => `<tr>
+            <td><div class="co">${l.missing ? 'Lead no longer in BackBone' : esc(l.company)}</div><div class="who">${esc(l.leadNo || l.ref)}${l.contact ? ', ' + esc(l.contact) : ''}</div></td>
+            <td>${esc(l.status)}</td><td>${esc(l.accountManager)}</td>
+            ${creditCell(l, c, conn)}
+            <td>${removable(c, 'leads', l.ref) ? `<button class="mk-btn ghost sm" data-conn-remove="leads" data-ref="${esc(l.ref)}">Disconnect</button>` : ''}</td>
+          </tr>`).join('')}</tbody></table></div>`
+          : '<div class="mk-conn-note" style="padding-bottom:14px">No leads connected. A lead counts once, credited to the first campaign it was connected to.</div>'}`;
+
+      // Invoices
+      const inv = conn.invoices || { invoices: [] };
+      const invoicesBody = (inv.invoices || []).length ? `
+        <div class="mk-wrap"><table class="mk-table"><thead><tr>
+          <th>Invoice</th><th>Printavo status</th><th>Customer</th><th>Total</th>${credit}<th></th>
+        </tr></thead><tbody>${inv.invoices.map((x) => {
+          const st = state.printavo[x.ref];
+          const statusCell = !st ? '<span class="who">Not checked</span>'
+            : st.unavailable ? '<span class="who">Printavo did not answer</span>'
+              : !st.found ? '<span class="late">Not found in Printavo</span>'
+                : `${esc(st.status || 'No status')}${st.kind === 'quote' ? ' <span class="pill mute">Quote</span>' : ''}`;
+          return `<tr>
+            <td class="co">#${esc(x.ref)}</td>
+            <td>${statusCell}</td>
+            <td>${st && st.found ? esc(st.customer) : ''}</td>
+            <td>${st && st.found ? fmtMoney(st.total) : ''}</td>
+            ${creditCell(x, c, conn)}
+            <td>${removable(c, 'invoices', x.ref) ? `<button class="mk-btn ghost sm" data-conn-remove="invoices" data-ref="${esc(x.ref)}">Disconnect</button>` : ''}</td>
+          </tr>`;
+        }).join('')}</tbody></table></div>`
+        : '<div class="mk-conn-note" style="padding-bottom:14px">No invoices connected. Create the invoice in Printavo, then connect its number here.</div>';
+
+      const head = (title, meta2, actions) => `<div class="mk-card-hd"><h3>${title}</h3><div class="mk-actions">${meta2 ? `<span class="meta">${meta2}</span>` : ''}${actions || ''}</div></div>`;
+      const connectBtn = (kind, label) => state.connAdding === kind ? '' : `<button class="mk-btn ghost sm" data-conn-add="${kind}">${label}</button>`;
+
+      return `
+        <h2 style="font-size:17px;font-weight:800;margin:26px 0 6px">connections.</h2>
+        <div class="mk-scope">${multi
+          ? `Counted once across this event and its ${conn.scope.length - 1} connected campaign${conn.scope.length === 2 ? '' : 's'}.`
+          : 'Read live from each app. Nothing here is a copy.'}</div>
+        ${msgBox(state.connMsg)}
+        <div class="mk-card">
+          ${head('Email, in MailMe', '', c.status === 'open' ? '<button class="mk-btn ghost sm" data-act="start-email">Start an email in MailMe</button>' : '')}
+          ${emailBody}
+        </div>
+        <div class="mk-card">
+          ${head('Travel, in TravelTrack', '', connectBtn('trips', 'Connect a trip'))}
+          ${travelBody}
+          ${addForm('trips')}
+        </div>
+        <div class="mk-card">
+          ${head('Leads, in BackBone', '', connectBtn('leads', 'Connect a lead'))}
+          ${leadsBody}
+          ${addForm('leads')}
+        </div>
+        <div class="mk-card">
+          ${head('Printavo invoices', '', ((inv.invoices || []).length ? `<button class="mk-btn ghost sm" data-act="check-printavo"${state.printavoChecking ? ' disabled' : ''}>${state.printavoChecking ? 'Checking Printavo' : 'Check status in Printavo'}</button>` : '') + connectBtn('invoices', 'Connect an invoice'))}
+          ${invoicesBody}
+          ${addForm('invoices')}
+        </div>`;
+    }
+
+    async function refreshDetailKeepingPlace() {
+      const y = window.scrollY;
+      await loadDetail(state.detail.campaign.id);
+      renderDetail();
+      window.scrollTo(0, y);
+    }
+
+    async function patchConnection(kind, ref, remove) {
+      const c = state.detail && state.detail.campaign;
+      if (!c) return;
+      try {
+        await api.patch(ENDPOINTS.mkCampaigns, { kind, ref, remove: !!remove }, { query: { id: c.id, connect: 1 } });
+        state.connAdding = null;
+        state.connMsg = { cls: 'ok', text: remove ? 'Disconnected.' : 'Connected.' };
+      } catch (e) {
+        state.connMsg = { cls: 'err', text: e.message || 'That connection was not saved.' };
+      }
+      await refreshDetailKeepingPlace();
+    }
+
     function renderDetail() {
       const det = $('#mkDetailPane');
       if (!det || !state.detail) return;
-      const { campaign: c, parent, children, emails } = state.detail;
+      const { campaign: c, parent, children, connections } = state.detail;
       const meta = typeMeta(c.type) || { label: c.type, controlLabel: 'Launch date' };
       const today = state.today;
       const p = progress(c, today);
@@ -924,17 +1141,7 @@ export default {
           </div>
         </div>` : '';
 
-      const emailList = emails && emails.emails ? emails.emails : [];
-      const emailCard = `
-        <div class="mk-card">
-          <div class="mk-card-hd"><h3>Emails attached in MailMe</h3></div>
-          <div class="mk-card-bd">
-            ${emails && emails.unavailable ? '<div class="mk-notice">MailMe did not answer, so attached emails cannot be shown right now.</div>'
-              : (emailList.length ? `<table class="mk-table"><tbody>${emailList.map((e) =>
-                  `<tr><td class="co">${esc(e.subject || 'Untitled send')}</td><td>${esc(e.status)}</td><td>${e.sentAt ? esc(fmtStamp(e.sentAt)) : ''}</td></tr>`).join('')}</tbody></table>`
-                : '<div class="who">None yet. An email is attached from its own screen in MailMe.</div>')}
-          </div>
-        </div>`;
+      const emailCard = connectionsSection(c, meta, connections);
 
       const history = (c.history || []).slice().reverse().slice(0, 40);
 
@@ -1197,6 +1404,31 @@ export default {
         await patchStep(k, body, bad.length ? 'Saved. Lines without a web address were left out.' : 'Saved.');
         return;
       }
+      if (d.connAdd) {
+        state.connAdding = d.connAdd;
+        state.connMsg = null;
+        if ((d.connAdd === 'trips' || d.connAdd === 'leads') && !state.connOptions) {
+          try { state.connOptions = await api.get(ENDPOINTS.mkCampaigns, { options: 'connections' }); }
+          catch (e) { state.connOptions = { trips: null, leads: null }; }
+        }
+        renderDetail();
+        const el = root.querySelector('#mkConnRef-' + d.connAdd);
+        if (el) el.focus();
+        return;
+      }
+      if (d.connCancel) { state.connAdding = null; renderDetail(); return; }
+      if (d.connSave) {
+        const el = root.querySelector('#mkConnRef-' + d.connSave);
+        const ref = el ? el.value.trim() : '';
+        if (!ref) { state.connMsg = { cls: 'err', text: 'Pick or type one first.' }; renderDetail(); return; }
+        await patchConnection(d.connSave, ref, false);
+        return;
+      }
+      if (d.connRemove) {
+        if (!window.confirm('Disconnect this from the campaign? Nothing is deleted in the other app.')) return;
+        await patchConnection(d.connRemove, d.ref, true);
+        return;
+      }
       if (d.status) {
         const label = d.status === 'cancelled' ? 'Cancel this campaign? It can be reopened later.' : null;
         if (label && !window.confirm(label)) return;
@@ -1228,6 +1460,35 @@ export default {
         case 'create': t.disabled = true; await createFromForm(); break;
         case 'to-list': showPane('list'); await loadList(); renderList(); break;
         case 'reload': await openCampaign(state.detail.campaign.id); break;
+        case 'start-email': {
+          const c = state.detail.campaign;
+          try {
+            // Subject and body are left out, not blanked: MailMe refuses an
+            // explicitly empty subject, and a subject written by nobody is
+            // worse than none. The Account Manager writes every email.
+            const d2 = await api.post(ENDPOINTS.mmCampaigns, { marketingCampaignId: c.id, marketingChannelId: 'email' });
+            const made = d2 && d2.campaign;
+            state.connMsg = { cls: 'ok', text: `Draft ${made && made.id ? made.id : ''} started in MailMe and attached to this campaign. Open MailMe, Sends, to write it.` };
+          } catch (e) {
+            state.connMsg = { cls: 'err', text: 'MailMe did not start the draft: ' + (e.message || 'no answer') };
+          }
+          await refreshDetailKeepingPlace();
+          break;
+        }
+        case 'check-printavo': {
+          state.printavoChecking = true;
+          renderDetail();
+          try {
+            const r = await api.get(ENDPOINTS.mkCampaigns, { id: state.detail.campaign.id, printavo: 1 });
+            state.printavo = (r && r.statuses) || {};
+            state.connMsg = null;
+          } catch (e) {
+            state.connMsg = { cls: 'err', text: 'Printavo did not answer: ' + (e.message || 'try again in a minute') };
+          }
+          state.printavoChecking = false;
+          renderDetail();
+          break;
+        }
         case 'edit-header': state.editingHeader = true; renderDetail(); break;
         case 'cancel-header': state.editingHeader = false; renderDetail(); break;
         case 'save-header': {
