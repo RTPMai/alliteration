@@ -1,3 +1,4 @@
+// PUT IN: apps/concontrol.js
 /**
  * ConControl — the event, tracked in one place.
  *
@@ -1262,18 +1263,37 @@ function renderProposals(body) {
 
 function renderSignups(body) {
   const rows = state.responses.signups || [];
-  if (!rows.length) {
-    body.innerHTML = '<div class="con-empty"><h3>Nobody on the notify list yet</h3><p>Paste the sheet tab in with Import from the sheet.</p></div>';
-    return;
-  }
-  body.innerHTML = `
+  const canEdit = !!state.responses.canEdit;
+  const canDelete = !!state.responses.canDelete;
+
+  // The add row sits above the list, empty or not. The people most worth
+  // adding by hand are the ones who never touched the form.
+  const addRow = canEdit ? `
+    <div class="con-left">
+      <h4>Add someone</h4>
+      <div class="con-note" style="margin-bottom:8px">
+        Met them at a booth, took a call, have their card. Email is the only
+        thing required. Somebody already on the list is caught, not added twice.
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="con-field" style="flex:1;min-width:140px;margin:0"><label>Name</label><input id="su_name"></div>
+        <div class="con-field" style="flex:1.4;min-width:180px;margin:0"><label>Email</label><input id="su_email" type="email"></div>
+        <div class="con-field" style="flex:1;min-width:140px;margin:0"><label>Where</label><input id="su_where" placeholder="City, ST"></div>
+        <button class="con-btn" id="suAdd">Add</button>
+      </div>
+      <div id="suMsg" style="margin-top:8px"></div>
+    </div>` : '';
+
+  const list = !rows.length
+    ? '<div class="con-empty"><h3>Nobody on the notify list yet</h3><p>Add people above, or paste the sheet tab in with Import from the sheet.</p></div>'
+    : `
     <div class="con-left">
       <div class="con-note" style="margin-bottom:8px">
-        These people asked to be told about FOC27. They belong in MailMe's Flyover
-        Con list as well; this is the record of who asked and when.
+        These people asked to be told about the next Flyover Con. They belong in
+        MailMe's Flyover Con list as well; this is the record of who asked and when.
       </div>
       <table class="con-table">
-        <thead><tr><th>Name</th><th>Email</th><th>Where</th><th>Asked</th></tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Where</th><th>Asked</th>${canDelete ? '<th></th>' : ''}</tr></thead>
         <tbody>
           ${rows.map((r) => {
             const a = r.answers || {};
@@ -1282,12 +1302,67 @@ function renderSignups(body) {
               <td>${esc(a.name) || '<span style="opacity:.5">not given</span>'}</td>
               <td>${esc(a.email)}</td>
               <td>${esc(a.city_state) || '<span style="opacity:.5">not given</span>'}</td>
-              <td class="con-note">${esc(prettyDate(r.submittedAt))}</td>
+              <td class="con-note">${esc(prettyDate(r.submittedAt))}${r.source === 'manual' ? ' · added by hand' : ''}</td>
+              ${canDelete ? `<td class="con-num"><button class="con-slot" data-drop-signup="${esc(r.id)}">Remove</button></td>` : ''}
             </tr>`;
           }).join('')}
         </tbody>
       </table>
     </div>`;
+
+  body.innerHTML = addRow + list;
+
+  const addBtn = body.querySelector('#suAdd');
+  if (addBtn) {
+    addBtn.addEventListener('click', () => addSignup(addBtn));
+    body.querySelectorAll('#su_name, #su_email, #su_where').forEach((el) => {
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter') addSignup(addBtn); });
+    });
+  }
+  body.querySelectorAll('[data-drop-signup]').forEach((el) => {
+    el.addEventListener('click', () => removeSignup(el, el.dataset.dropSignup));
+  });
+}
+
+async function addSignup(button) {
+  const val = (id) => (ctx.root.querySelector(id) || {}).value || '';
+  const msg = ctx.root.querySelector('#suMsg');
+  const email = val('#su_email').trim();
+  if (!email) { msg.innerHTML = '<div class="con-err">An email is the one thing the notify list needs.</div>'; return; }
+
+  button.disabled = true;
+  button.textContent = 'Adding…';
+  try {
+    const res = await ctx.api.post(ENDPOINTS.conResponses, {
+      what: 'add-signup', name: val('#su_name'), email, city_state: val('#su_where'),
+    });
+    state.loaded.responses = false;
+    await loadResponses();
+    const who = (res.signup && res.signup.answers) || {};
+    const after = ctx.root.querySelector('#suMsg');
+    if (after) after.innerHTML = `<div class="con-ok">${esc(who.name || who.email)} is on the list.</div>`;
+    const next = ctx.root.querySelector('#su_name');
+    if (next) next.focus();
+  } catch (e) {
+    msg.innerHTML = `<div class="con-err">${esc(e.message || 'Could not add them')}</div>`;
+    button.disabled = false;
+    button.textContent = 'Add';
+  }
+}
+
+async function removeSignup(button, id) {
+  const rec = (state.responses.signups || []).find((r) => r.id === id);
+  const a = (rec && rec.answers) || {};
+  if (!window.confirm(`Take ${a.name || a.email || 'this person'} off the notify list?`)) return;
+  button.disabled = true;
+  try {
+    await ctx.api.del(ENDPOINTS.conResponses, { query: { id, kind: 'signup' } });
+    state.loaded.responses = false;
+    await loadResponses();
+  } catch (e) {
+    showError(e.message || 'Could not remove them');
+    button.disabled = false;
+  }
 }
 
 /** One person's whole survey, every question they answered, as they wrote it. */
