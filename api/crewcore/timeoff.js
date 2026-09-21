@@ -44,6 +44,7 @@ import {
   getPolicyDoc, savePolicyDoc,
 } from "../../lib/crewcore/pto-store.js";
 import { nextNotificationId, saveNotification } from "../../lib/notifications/store.js";
+import { sendDecisionEmail, DEFAULT_TIMEOFF_FROM } from "../../lib/crewcore/pto-email.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -107,6 +108,37 @@ async function notify({ to, toName, title, detail }) {
     });
   } catch (e) {
     console.error("[crewcore/timeoff] notification failed, the request was still saved:", e.message);
+  }
+}
+
+/**
+ * Email the employee and record what happened on the request, so the screen
+ * can say "emailed" or why not. Never throws; the decision is already saved.
+ */
+async function emailEmployee({ request, event, note, doc, sess, scope }) {
+  try {
+    const emp = await getEmployee(request.employee_id);
+    if (!emp) return request;
+    const [allReq, allAdj] = await Promise.all([listRequests(), listAdjustments()]);
+    const balance = ptoBalance({
+      employee: emp,
+      requests: allReq.filter((r) => r.employee_id === emp.id),
+      adjustments: allAdj.filter((a) => a.employee_id === emp.id),
+      policyDoc: doc,
+    }, requestYear(request));
+    const byName = (scope.own && scope.own.name) || (scope.user && scope.user.name) || sess.username;
+    const out = await sendDecisionEmail({
+      employee: emp, request, event, note, balance, byName,
+      from: doc.email_from || DEFAULT_TIMEOFF_FROM,
+      replyTo: scope.own && scope.own.email,
+    });
+    return saveRequest({
+      ...request,
+      email: { event, sent: !!out.sent, to: out.to || null, why: out.why || null, at: new Date().toISOString() },
+    });
+  } catch (e) {
+    console.error("[crewcore/timeoff] email step failed, the decision was still saved:", e.message);
+    return request;
   }
 }
 
@@ -206,6 +238,7 @@ export default async function handler(req, res) {
         ? withPolicyVersion(doc, shopYear(), v.policy, sess.username)
         : { ...doc, updated_at: new Date().toISOString(), updated_by: sess.username };
       if (v.approvers) next = { ...next, approvers: v.approvers };
+      if (v.emailFrom !== undefined) next = { ...next, email_from: v.emailFrom };
       const saved = await savePolicyDoc(next);
       return res.status(200).json({ ok: true, policy_doc: saved, policy: policyForYear(saved, shopYear()) });
     }
@@ -275,7 +308,13 @@ export default async function handler(req, res) {
       }, requestYear(rec));
       const over = overBy(bal, rec.hours);
 
-      const saved = await saveRequest(rec);
+      let saved = await saveRequest(rec);
+
+      // Logged as approved for somebody else: they hear about it by email,
+      // since nobody asked them anything.
+      if (saved.status === "approved" && (!own || emp.id !== own.id)) {
+        saved = await emailEmployee({ request: saved, event: "logged", note: "", doc, sess, scope });
+      }
 
       if (saved.status === "pending") {
         const detail = `${saved.employee_name}: ${span(saved)}, ${saved.hours} hours.` +
@@ -325,10 +364,11 @@ export default async function handler(req, res) {
         decision_note: action === "decide" ? note : existing.decision_note,
         history: (existing.history || []).concat([{ at: now, by: sess.username, what, note: note || undefined }]),
       };
-      const saved = await saveRequest(updated);
+      let saved = await saveRequest(updated);
 
       // Tell the person whose time off it is, unless they did it themselves.
       if (!isOwner) {
+        saved = await emailEmployee({ request: saved, event: status, note: action === "decide" ? note : "", doc, sess, scope });
         const emp = await getEmployee(saved.employee_id);
         if (emp && emp.username) {
           await notify({

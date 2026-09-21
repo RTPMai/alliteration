@@ -3449,6 +3449,11 @@ export default {
     const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours)]);
     if (r.note) bits.push(esc(r.note));
     if (r.decision_note) bits.push('Reply: ' + esc(r.decision_note));
+    // Whether the employee was emailed, for approvers. "Not emailed" says why
+    // (usually no email on their roster record) so nobody assumes it went.
+    if (d.scope === 'team' && r.email) {
+      bits.push(r.email.sent ? 'Emailed ' + esc(r.email.to || '') : '<span style="color:var(--danger)">Not emailed: ' + esc(r.email.why || 'unknown') + '</span>');
+    }
     return `
       <div class="cc-row">
         <div style="min-width:0">
@@ -3910,6 +3915,11 @@ export default {
           <div><label>Lunch ends</label><input id="toLunchEnd" type="time" value="${esc(pol.lunch_end || '13:00')}"></div>
           <div class="full"><p class="hint" style="margin:0">Used to work out arrive late, leave early and appointments.
             Lunch isn't counted as time off: leaving at 11 on an 8 to 5 day is 5 hours.</p></div>
+          <div class="full"><label>Time off emails come from</label>
+            <input id="toFrom" type="email" value="${esc(d.policy_doc.email_from || '')}" placeholder="Ryan@pmapparel.com">
+            <div class="to-sub">Employees get an email when their time off is approved, denied, cancelled or logged for them.
+              It goes to the email on their roster record. Replies go to whoever decided.</div>
+          </div>
           <div class="full"><label>Most hours that carry into next year</label>
             <input id="toCap" type="number" step="1" min="0" value="${esc(pol.carryover_cap_hours)}">
           </div>
@@ -3954,6 +3964,7 @@ export default {
         approvers: Array.from(form.querySelectorAll('[data-approver]')).filter((c) => c.checked).map((c) => c.dataset.approver),
         tiers,
         prorate_first_year: q('#toProrate').value === 'true',
+        email_from: q('#toFrom').value,
         hours_per_day: Number(q('#toPerDay').value),
         shift_start: q('#toShiftStart').value,
         shift_end: q('#toShiftEnd').value,

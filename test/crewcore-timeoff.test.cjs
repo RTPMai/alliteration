@@ -24,8 +24,17 @@ const kv = new Map();
 const P = 'alliteration:';
 const CC = 'crewcore_data';
 
+// Fake Resend. Every email "sent" lands here; resendDown makes it fail.
+const sentMail = [];
+let resendDown = false;
+
 global.fetch = async (url, opts) => {
   const raw = String(url);
+  if (raw.startsWith('https://api.resend.com/')) {
+    if (resendDown) return { ok: false, status: 500, text: async () => JSON.stringify({ message: 'Resend is down' }) };
+    sentMail.push(JSON.parse(opts.body));
+    return { ok: true, status: 200, text: async () => JSON.stringify({ id: 'em_' + sentMail.length }) };
+  }
   // Notifications talk to Upstash through /pipeline (INCR for the id, SET
   // and GET for records and the index). Enough of it to raise one.
   if (/\/pipeline$/.test(raw)) {
@@ -50,6 +59,7 @@ global.fetch = async (url, opts) => {
 process.env.KV_REST_API_URL = 'https://fake-upstash.test';
 process.env.KV_REST_API_TOKEN = 'fake-token';
 process.env.SESSION_SECRET = 'test-secret-for-crewcore-timeoff';
+process.env.RESEND_API_KEY = 're_test_key';
 
 const THIS_YEAR = new Date().getFullYear();
 
@@ -61,6 +71,8 @@ const DAYS = (n) => ({ type: 'all_days', start_date: MON, return_date: plus(MON,
 
 function seed({ approvers = ['ryan', 'megan'] } = {}) {
   kv.clear();
+  sentMail.length = 0;
+  resendDown = false;
   kv.set(P + 'users', JSON.stringify({
     ryan:  { username: 'ryan',  name: 'Ryan',  superuser: true },
     megan: { username: 'megan', name: 'Megan' },
@@ -69,9 +81,9 @@ function seed({ approvers = ['ryan', 'megan'] } = {}) {
     dana:  { username: 'dana',  name: 'Dana' },
   }));
   kv.set(CC + ':employee_index', JSON.stringify(['EMP-1', 'EMP-2', 'EMP-3', 'EMP-4']));
-  kv.set(CC + ':employee:EMP-1', JSON.stringify({ id: 'EMP-1', name: 'Sasha', username: 'sasha', status: 'active', start_date: '2015-03-01', hourly_rate: 24, notes: 'private' }));
+  kv.set(CC + ':employee:EMP-1', JSON.stringify({ id: 'EMP-1', name: 'Sasha Smith', username: 'sasha', email: 'sasha@example.com', status: 'active', start_date: '2015-03-01', hourly_rate: 24, notes: 'private' }));
   kv.set(CC + ':employee:EMP-2', JSON.stringify({ id: 'EMP-2', name: 'Dana', username: 'dana', status: 'active', start_date: '2018-06-01' }));
-  kv.set(CC + ':employee:EMP-3', JSON.stringify({ id: 'EMP-3', name: 'Megan', username: 'megan', status: 'active', start_date: '2000-01-01' }));
+  kv.set(CC + ':employee:EMP-3', JSON.stringify({ id: 'EMP-3', name: 'Megan', username: 'megan', email: 'megan@pmapparel.com', status: 'active', start_date: '2000-01-01' }));
   kv.set(CC + ':employee:EMP-4', JSON.stringify({ id: 'EMP-4', name: 'Jacob', username: 'jacob', status: 'active', start_date: '2019-01-01' }));
   kv.set(CC + ':pto_policy', JSON.stringify({ start_year: THIS_YEAR, approvers, versions: {} }));
 }
@@ -125,6 +137,7 @@ function notesFor(user) {
 
 (async () => {
   const pto = await import(path.join(ROOT, 'lib/crewcore/pto.js'));
+  const mail = await import(path.join(ROOT, 'lib/crewcore/pto-email.js'));
   const route = (await import(path.join(ROOT, 'api/crewcore/timeoff.js'))).default;
   const users = await import(path.join(ROOT, 'lib/users.js'));
   const reg = await import(path.join(ROOT, 'js/registry.js'));
@@ -534,6 +547,97 @@ function notesFor(user) {
     const v = pto.validatePolicy({ shift_start: '07:00', shift_end: '15:30' });
     t.assert(v.ok);
     t.equal(v.policy.shift_start, '07:00');
+  });
+
+  /* ==== 4c. Emailing the employee ======================================= */
+
+  await check('approving emails the employee, from the default address, replies to the approver', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: { ...DAYS(2), note: 'dentist' } });
+    const r = await call(route, { as: MEGAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(r.statusCode, 200);
+    t.equal(sentMail.length, 1);
+    const m = sentMail[0];
+    t.equal(m.to[0], 'sasha@example.com');
+    t.equal(m.from, 'P&M Apparel <Ryan@pmapparel.com>');
+    t.equal(m.reply_to, 'megan@pmapparel.com', 'replies go to whoever decided');
+    t.assert(/approved/.test(m.subject), m.subject);
+    t.assert(/Hi Sasha,/.test(m.text), 'first name only');
+    t.assert(/You have 104 hours of PTO left/.test(m.text), m.text);
+    t.assert(!/dentist/.test(m.text + m.html), 'the reason they gave is not in the email');
+    t.equal(r.body.request.email.sent, true, 'recorded on the request so the screen can say so');
+  });
+
+  await check('a denial carries the approver\'s note', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'deny', id: made.body.request.id, note: 'Big order that week' } });
+    t.assert(/denied/.test(sentMail[0].subject));
+    t.assert(/Big order that week/.test(sentMail[0].text));
+    t.assert(!/PTO left/.test(sentMail[0].text), 'no balance line on a denial');
+  });
+
+  await check('cancelling your own request sends nothing; an approver cancelling does', async () => {
+    seed();
+    const a = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: SASHA, method: 'POST', body: { action: 'cancel', id: a.body.request.id } });
+    t.equal(sentMail.length, 0);
+    const b = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'cancel', id: b.body.request.id } });
+    t.equal(sentMail.length, 1);
+    t.assert(/cancelled/.test(sentMail[0].subject));
+  });
+
+  await check('time off an approver logs for somebody is emailed to them', async () => {
+    seed();
+    await call(route, { as: RYAN, method: 'POST', body: { employee_id: 'EMP-1', type: 'half_day', half: 'afternoon', start_date: MON, approved: true } });
+    t.equal(sentMail.length, 1);
+    t.assert(/logged for you/.test(sentMail[0].subject), sentMail[0].subject);
+    t.assert(/Half day, afternoon/.test(sentMail[0].text));
+  });
+
+  await check('no email on the roster record: the decision stands and the reason is recorded', async () => {
+    seed();
+    const made = await call(route, { as: DANA, method: 'POST', body: DAYS(1) });
+    const r = await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(r.statusCode, 200);
+    t.equal(r.body.request.status, 'approved');
+    t.equal(sentMail.length, 0);
+    t.equal(r.body.request.email.sent, false);
+    t.assert(/no email on their roster record/.test(r.body.request.email.why));
+  });
+
+  await check('Resend failing never costs the approval', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    resendDown = true;
+    const r = await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(r.statusCode, 200);
+    t.equal(r.body.request.status, 'approved');
+    t.equal(r.body.request.email.sent, false);
+    t.assert(/Resend is down/.test(r.body.request.email.why), r.body.request.email.why);
+  });
+
+  await check('the from-address is a setting, and must be an address', async () => {
+    seed();
+    const bad = await call(route, { as: RYAN, method: 'PATCH', body: { email_from: 'hr at pmapparel' } });
+    t.equal(bad.statusCode, 400);
+    await call(route, { as: RYAN, method: 'PATCH', body: { email_from: 'hr@pmapparel.com' } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(sentMail[0].from, 'P&M Apparel <hr@pmapparel.com>');
+    t.equal(sentMail[0].reply_to, 'hr@pmapparel.com', 'Ryan has no roster email here, so replies go to the from-address');
+  });
+
+  await check('the email says partial days in words', async () => {
+    const m = mail.buildDecisionEmail({
+      request: { type: 'leave_early', start_date: '2026-10-02', end_date: '2026-10-02', leave_at: '15:00', hours: 2 },
+      event: 'approved', firstName: 'Sasha', byName: 'Megan',
+    });
+    t.assert(/Friday, October 2, 2026/.test(m.text), m.text);
+    t.assert(/Leaving 3:00 PM/.test(m.text));
+    t.assert(/2 hours/.test(m.text));
+    t.assert(/Megan approved/.test(m.html));
   });
 
   /* ==== 5. Who gets the tab ============================================== */
