@@ -53,6 +53,12 @@ process.env.SESSION_SECRET = 'test-secret-for-crewcore-timeoff';
 
 const THIS_YEAR = new Date().getFullYear();
 
+// The first Monday in June this year, so a week of weekdays is the same
+// length whatever year the suite runs in.
+function plus(day, n) { return new Date(Date.parse(day + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10); }
+const MON = (() => { let d = `${THIS_YEAR}-06-01`; while (new Date(d + 'T00:00:00Z').getUTCDay() !== 1) d = plus(d, 1); return d; })();
+const DAYS = (n) => ({ type: 'all_days', start_date: MON, return_date: plus(MON, n) });
+
 function seed({ approvers = ['ryan', 'megan'] } = {}) {
   kv.clear();
   kv.set(P + 'users', JSON.stringify({
@@ -307,7 +313,7 @@ function notesFor(user) {
 
   await check('an employee requests time off, it lands pending, and both approvers hear about it', async () => {
     seed();
-    const r = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, end_date: `${THIS_YEAR}-06-02`, hours: 16, note: 'dentist' } });
+    const r = await call(route, { as: SASHA, method: 'POST', body: { ...DAYS(2), note: 'dentist' } });
     t.equal(r.statusCode, 201, JSON.stringify(r.body));
     t.equal(r.body.request.status, 'pending');
     t.equal(r.body.request.employee_id, 'EMP-1');
@@ -319,8 +325,8 @@ function notesFor(user) {
 
   await check('an employee sees only their own balance and requests, no pay or notes', async () => {
     seed();
-    await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
-    await call(route, { as: DANA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-03`, hours: 8 } });
+    await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: DANA, method: 'POST', body: DAYS(1) });
     const r = await call(route, { as: DANA });
     t.equal(r.body.scope, 'self');
     t.equal(r.body.requests.length, 1);
@@ -331,14 +337,14 @@ function notesFor(user) {
 
   await check('an employee cannot approve, even their own request', async () => {
     seed();
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
     const r = await call(route, { as: SASHA, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
     t.equal(r.statusCode, 403);
   });
 
   await check('a CrewCore admin who is not on the approver list cannot approve', async () => {
     seed();
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
     const r = await call(route, { as: JACOB, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
     t.equal(r.statusCode, 403, 'Admin flag alone is not approval rights');
     const g = await call(route, { as: JACOB });
@@ -347,7 +353,7 @@ function notesFor(user) {
 
   await check('Megan approves without the Admin flag, the hours come off, and Sasha is told', async () => {
     seed();
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, end_date: `${THIS_YEAR}-06-02`, hours: 16 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(2) });
     const r = await call(route, { as: MEGAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
     t.equal(r.statusCode, 200, JSON.stringify(r.body));
     t.equal(r.body.request.status, 'approved');
@@ -361,7 +367,7 @@ function notesFor(user) {
 
   await check('with no approvers set, nobody can approve, not even Ryan', async () => {
     seed({ approvers: [] });
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
     t.equal(made.body.approvers_set, false, 'the screen is told so it can say it');
     const r = await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
     t.equal(r.statusCode, 403);
@@ -369,7 +375,7 @@ function notesFor(user) {
 
   await check('a decided request cannot be decided again', async () => {
     seed();
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
     await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'deny', id: made.body.request.id } });
     const r = await call(route, { as: MEGAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
     t.equal(r.statusCode, 409);
@@ -377,7 +383,7 @@ function notesFor(user) {
 
   await check('an employee cannot cancel an approved request; an approver can', async () => {
     seed();
-    const made = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8 } });
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
     const id = made.body.request.id;
     await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id } });
     const no = await call(route, { as: SASHA, method: 'POST', body: { action: 'cancel', id } });
@@ -402,13 +408,13 @@ function notesFor(user) {
 
   await check('an employee asking for approved:true still lands in the queue', async () => {
     seed();
-    const r = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, hours: 8, approved: true } });
+    const r = await call(route, { as: SASHA, method: 'POST', body: { ...DAYS(1), approved: true } });
     t.equal(r.body.request.status, 'pending');
   });
 
   await check('going over the balance warns, it does not block', async () => {
     seed();
-    const r = await call(route, { as: SASHA, method: 'POST', body: { start_date: `${THIS_YEAR}-06-01`, end_date: `${THIS_YEAR}-06-30`, hours: 200 } });
+    const r = await call(route, { as: SASHA, method: 'POST', body: { type: 'all_days', start_date: MON, return_date: plus(MON, 35) } });
     t.equal(r.statusCode, 201);
     t.equal(r.body.over_by, 80, 'Sasha has 120, asked for 200');
   });
@@ -451,6 +457,83 @@ function notesFor(user) {
     await call(route, { as: SASHA });
     const stored = JSON.parse(kv.get(CC + ':pto_policy'));
     t.equal(stored.start_year, THIS_YEAR);
+  });
+
+  /* ==== 4b. Request types (the old Jotform's five) ====================== */
+
+  await check('each request type works out its own hours from an 8 to 5 day with lunch 12 to 1', async () => {
+    const p = pto.DEFAULT_POLICY;
+    t.equal(pto.hoursForRequest({ type: 'half_day', half: 'morning' }, p), 4);
+    t.equal(pto.hoursForRequest({ type: 'arrive_late', arrive_at: '10:00' }, p), 2);
+    t.equal(pto.hoursForRequest({ type: 'arrive_late', arrive_at: '13:30' }, p), 4.5, 'lunch in the gap is not time off');
+    t.equal(pto.hoursForRequest({ type: 'leave_early', leave_at: '15:00' }, p), 2);
+    t.equal(pto.hoursForRequest({ type: 'leave_early', leave_at: '11:00' }, p), 5, 'not 6: lunch is not counted');
+    t.equal(pto.hoursForRequest({ type: 'appointment', leave_at: '13:00', return_at: '15:00' }, p), 2);
+    t.equal(pto.hoursForRequest({ type: 'appointment', leave_at: '11:30', return_at: '13:30' }, p), 1, 'half hour either side of lunch');
+    t.equal(pto.hoursForRequest({ type: 'appointment', leave_at: '06:00', return_at: '09:00' }, p), 1, 'before the shift does not count');
+  });
+
+  await check('all day(s) runs from the first day off up to the day back at work', async () => {
+    // Mon to back Wed = Mon + Tue. Fri to back Mon = Fri only.
+    t.equal(pto.hoursForRequest({ type: 'all_days', start_date: '2026-06-01', return_date: '2026-06-03' }, pto.DEFAULT_POLICY), 16);
+    t.equal(pto.hoursForRequest({ type: 'all_days', start_date: '2026-06-05', return_date: '2026-06-08' }, pto.DEFAULT_POLICY), 8);
+    const v = pto.validateRequest({ type: 'all_days', start_date: '2026-06-05', return_date: '2026-06-08' }, pto.DEFAULT_POLICY);
+    t.equal(v.record.end_date, '2026-06-07', 'last day off is the day before coming back');
+    t.equal(v.record.hours, 8);
+  });
+
+  await check('a different shift in Settings changes the math', async () => {
+    const p = { ...pto.DEFAULT_POLICY, shift_start: '07:00', shift_end: '15:30', lunch_start: '11:00', lunch_end: '11:30' };
+    t.equal(pto.hoursForRequest({ type: 'leave_early', leave_at: '13:30' }, p), 2);
+    t.equal(pto.hoursForRequest({ type: 'arrive_late', arrive_at: '12:00' }, p), 4.5);
+  });
+
+  await check('each type asks for its own fields, like the Jotform did', async () => {
+    const p = pto.DEFAULT_POLICY;
+    t.equal(pto.validateRequest({ type: 'half_day', start_date: '2026-06-01' }, p).ok, false, 'morning or afternoon required');
+    t.equal(pto.validateRequest({ type: 'arrive_late', start_date: '2026-06-01' }, p).ok, false, 'arrival time required');
+    t.equal(pto.validateRequest({ type: 'appointment', start_date: '2026-06-01', leave_at: '15:00', return_at: '14:00' }, p).ok, false, 'back after leaving');
+    t.equal(pto.validateRequest({ type: 'all_days', start_date: '2026-06-03', return_date: '2026-06-03' }, p).ok, false, 'back after the first day off');
+    t.equal(pto.validateRequest({ type: 'leave_early', start_date: '2026-06-01', leave_at: '17:30' }, p).ok, false, 'leaving after the day ends is 0 hours');
+    t.equal(pto.validateRequest({ type: 'vacation', start_date: '2026-06-01' }, p).ok, false, 'unknown type');
+  });
+
+  await check('an employee cannot set their own hours; the math wins', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: { type: 'leave_early', start_date: MON, leave_at: '15:00', hours: 0.25 } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.request.hours, 2);
+  });
+
+  await check('an employee has to pick a type', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: { start_date: MON, hours: 8 } });
+    t.equal(r.statusCode, 400);
+  });
+
+  await check('an approver can override the hours, and it is marked as overridden', async () => {
+    seed();
+    const r = await call(route, { as: RYAN, method: 'POST', body: { ...DAYS(5), employee_id: 'EMP-2', hours: 32, approved: true } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.request.hours, 32, 'a holiday inside the week');
+    t.equal(r.body.request.hours_computed, 40);
+    t.equal(r.body.request.hours_overridden, true);
+  });
+
+  await check('a partial day says what kind in the notification', async () => {
+    seed();
+    await call(route, { as: SASHA, method: 'POST', body: { type: 'appointment', start_date: MON, leave_at: '13:00', return_at: '15:00', reason: 'dentist' } });
+    const n = notesFor('megan')[0];
+    t.assert(/Appointment 1:00 PM to 3:00 PM/.test(n.detail), n.detail);
+    t.assert(!/dentist/.test(n.title + n.detail), 'the reason still stays out');
+  });
+
+  await check('shift times in Settings are checked', async () => {
+    t.equal(pto.validatePolicy({ shift_start: '17:00', shift_end: '08:00' }).ok, false);
+    t.equal(pto.validatePolicy({ shift_start: '8am' }).ok, false);
+    const v = pto.validatePolicy({ shift_start: '07:00', shift_end: '15:30' });
+    t.assert(v.ok);
+    t.equal(v.policy.shift_start, '07:00');
   });
 
   /* ==== 5. Who gets the tab ============================================== */

@@ -36,7 +36,7 @@ import { listEmployees, getEmployee, getEmployeeByUsername, updateEmployee } fro
 import {
   validateRequest, validateAdjustment, validateOpening, validatePolicy,
   withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger, overBy,
-  requestActions, requestYear,
+  requestActions, requestYear, requestSummary,
 } from "../../lib/crewcore/pto.js";
 import {
   listRequests, getRequest, saveRequest,
@@ -69,7 +69,11 @@ function fmtDay(d) {
 }
 
 function span(r) {
-  return r.start_date === r.end_date ? fmtDay(r.start_date) : `${fmtDay(r.start_date)} to ${fmtDay(r.end_date)}`;
+  const days = r.start_date === r.end_date ? fmtDay(r.start_date) : `${fmtDay(r.start_date)} to ${fmtDay(r.end_date)}`;
+  // Partial days say what kind ("Leaving 3:00 PM"); a run of whole days is
+  // already said by the dates.
+  const kind = r.type && r.type !== "all_days" ? requestSummary(r) : "";
+  return kind ? `${days}, ${kind}` : days;
 }
 
 /**
@@ -237,7 +241,11 @@ export default async function handler(req, res) {
       }
       if (!emp) return refuse(res, 400, "Your login isn't linked to an employee record yet. Ask an admin to link it.");
 
-      const v = validateRequest(body);
+      // Hours are worked out from the type and times. Only an approver may
+      // override them or skip the type; everyone else gets the computed
+      // number whatever the request body says.
+      const reqYear = parseInt(String(body.start_date || "").slice(0, 4), 10) || shopYear();
+      const v = validateRequest(body, policyForYear(doc, reqYear), { allowHours: isApprover });
       if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
 
       // An approver may record it as already approved (a sick call taken

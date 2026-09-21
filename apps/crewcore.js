@@ -84,7 +84,7 @@ import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isC
 // Time off math, shared with api/crewcore/timeoff.js so the screen and the
 // server agree on estimates, warnings and which buttons a request gets. No
 // imports of its own, so safe in the browser.
-import { estimateHours, overBy, requestActions, whoIsOut, requestYear } from '../lib/crewcore/pto.js';
+import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES } from '../lib/crewcore/pto.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -539,6 +539,11 @@ export default {
   .to-num{text-align:right;font-variant-numeric:tabular-nums}
   .cc-table td.to-num.neg{color:var(--danger);font-weight:700}
   .to-tier{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px}
+  .to-types{display:flex;flex-direction:column;gap:6px;margin-top:2px}
+  .to-types label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);margin:0}
+  .cc-form-grid .to-types input{width:auto}
+  .to-sub{font-size:11.5px;color:var(--muted);margin-top:4px}
+  .to-hours{font-size:13.5px;padding:10px 12px;background:var(--line-soft);border-radius:var(--radius-sm)}
   .to-approvers{display:flex;flex-direction:column;gap:6px;margin-top:4px}
   .to-approvers label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink)}
   .to-approvers input{width:auto}
@@ -3440,7 +3445,8 @@ export default {
     const d = this._to || {};
     const me = d.me || {};
     const can = requestActions(r, { isApprover: !!me.is_approver, isOwner: !!me.employee_id && r.employee_id === me.employee_id });
-    const bits = [this._toHrs(r.hours)];
+    const kind = r.type && r.type !== 'all_days' ? requestSummary(r) : '';
+    const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours)]);
     if (r.note) bits.push(esc(r.note));
     if (r.decision_note) bits.push('Reply: ' + esc(r.decision_note));
     return `
@@ -3529,7 +3535,7 @@ export default {
         <div class="cc-list">${upcoming.length ? upcoming.map((r) => `
           <div class="cc-row">
             <div><div class="who">${esc(r.employee_name || '')}</div>
-              <div class="meta">${esc(this._toSpan(r))} \u00b7 ${this._toHrs(r.hours)}</div></div>
+              <div class="meta">${esc(this._toSpan(r))}${r.type && r.type !== 'all_days' ? ' \u00b7 ' + esc(requestSummary(r)) : ''} \u00b7 ${this._toHrs(r.hours)}</div></div>
             <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
           </div>`).join('') : `<div class="cc-empty">Nobody is out.</div>`}
         </div>
@@ -3660,66 +3666,92 @@ export default {
     return p ? p.balance : null;
   },
 
+  /**
+   * The request form, laid out like the old Jotform "Time Off Request" the
+   * shop used before QuickBooks: pick a type, and only that type's fields
+   * show. The hours are worked out from the type and times with the same
+   * function the server uses (hoursForRequest), so what the form says will
+   * come off is what comes off. An approver can override the number.
+   */
   _openTimeoffForm(presetEmployeeId, { forOthers = false } = {}) {
     const d = this._to || {};
     const me = d.me || {};
     const policy = d.policy || {};
+    const canOverride = !!me.is_approver;
     const people = forOthers ? (d.team || []).filter((p) => p.status !== 'terminated') : [];
-    const today = new Date().toISOString().slice(0, 10);
     const back = this._openModal(`
       <div class="cc-form">
-        <h3>${forOthers ? 'Log time off' : 'Request time off'}</h3>
+        <h3>${forOthers ? 'Log time off' : 'Time off request'}</h3>
+        <p class="hint">All leave is subject to availability. Leave is not guaranteed until confirmed by a supervisor.</p>
         <div class="cc-form-grid">
           ${forOthers ? `<div class="full"><label>For</label>
             <select id="toFor">${people.map((p) => `<option value="${esc(p.id)}" ${p.id === presetEmployeeId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
-          <div><label>First day off</label><input id="toStart" type="date" value="${today}"></div>
-          <div><label>Last day off</label><input id="toEnd" type="date" value="${today}"></div>
-          <div><label>Hours</label><input id="toHours" type="number" step="0.25" min="0"></div>
-          <div><label>&nbsp;</label><div class="note" id="toHint" style="font-size:12px;color:var(--muted);padding-top:8px"></div></div>
-          <div class="full"><label>Note (only approvers see this)</label><textarea id="toNote" rows="2" maxlength="500"></textarea></div>
-          ${forOthers && me.is_approver ? `<div class="full"><label style="display:flex;gap:8px;align-items:center">
+          <div class="full"><label>Type of request</label>
+            <div class="to-types">${REQUEST_TYPES.map((t, i) => `
+              <label><input type="radio" name="toType" value="${t.value}" ${i === 0 ? 'checked' : ''}> ${esc(t.label)}</label>`).join('')}
+            </div></div>
+          <div data-for="all_days"><label>Beginning date</label><input id="toStart" type="date"></div>
+          <div data-for="all_days"><label>Return to work date</label><input id="toReturn" type="date">
+            <div class="to-sub">The day you'll be BACK at work.</div></div>
+          <div data-for="half_day arrive_late leave_early appointment"><label>Date</label><input id="toDate" type="date"></div>
+          <div data-for="half_day"><label>Time off</label>
+            <div class="to-types"><label><input type="radio" name="toHalf" value="morning"> Morning</label>
+              <label><input type="radio" name="toHalf" value="afternoon"> Afternoon</label></div></div>
+          <div data-for="arrive_late"><label>Time arriving</label><input id="toArrive" type="time"></div>
+          <div data-for="leave_early appointment"><label>Time leaving</label><input id="toLeave" type="time"></div>
+          <div data-for="appointment"><label>Time returning</label><input id="toBackAt" type="time"></div>
+          <div class="full"><label>Reason (only approvers see this)</label><textarea id="toNote" rows="3" maxlength="500"></textarea></div>
+          <div class="full to-hours" id="toHoursLine"></div>
+          ${canOverride ? `<div><label>Hours (leave blank to use the math)</label><input id="toHours" type="number" step="0.25" min="0"></div>` : ''}
+          ${forOthers && canOverride ? `<div class="full"><label style="display:flex;gap:8px;align-items:center">
             <input type="checkbox" id="toPre" style="width:auto" checked> Already approved (skip the queue)</label></div>` : ''}
         </div>
         <div id="toFormWarn"></div>
         <div class="cc-err" id="toErr" hidden></div>
         <div class="cc-form-actions">
           <button class="cc-btn ghost" id="toCancelForm">Never mind</button>
-          <button class="cc-btn" id="toSave">${forOthers ? 'Save' : 'Send request'}</button>
+          <button class="cc-btn" id="toSave">${forOthers ? 'Save' : 'Submit'}</button>
         </div>
       </div>`);
     const q = (s) => back.querySelector(s);
-    let hoursTouched = false;
     const who = () => (forOthers ? q('#toFor').value : me.employee_id);
+    const type = () => (back.querySelector('input[name="toType"]:checked') || {}).value || 'all_days';
+
+    const collect = () => {
+      const t = type();
+      const r = { type: t, note: q('#toNote').value };
+      if (t === 'all_days') { r.start_date = q('#toStart').value; r.return_date = q('#toReturn').value; }
+      else r.start_date = q('#toDate').value;
+      if (t === 'half_day') r.half = (back.querySelector('input[name="toHalf"]:checked') || {}).value || '';
+      if (t === 'arrive_late') r.arrive_at = q('#toArrive').value;
+      if (t === 'leave_early' || t === 'appointment') r.leave_at = q('#toLeave').value;
+      if (t === 'appointment') r.return_at = q('#toBackAt').value;
+      return r;
+    };
 
     const refresh = () => {
-      const s = q('#toStart').value;
-      let e = q('#toEnd').value;
-      if (s && (!e || e < s)) { e = s; q('#toEnd').value = s; }
-      const est = estimateHours(s, e, policy);
-      if (!hoursTouched) q('#toHours').value = est || '';
-      q('#toHint').textContent = est ? `${est / (policy.hours_per_day || 8)} weekday${est / (policy.hours_per_day || 8) === 1 ? '' : 's'} at ${policy.hours_per_day || 8} hrs. Change it for a half day.` : 'No weekdays in that range. Enter the hours.';
+      const t = type();
+      back.querySelectorAll('[data-for]').forEach((el) => { el.hidden = !el.dataset.for.split(' ').includes(t); });
+      const r = collect();
+      const computed = hoursForRequest(r, policy);
+      const typed = canOverride && q('#toHours').value !== '' ? Number(q('#toHours').value) : null;
+      const hrs = typed != null ? typed : computed;
+      q('#toHoursLine').innerHTML = computed == null
+        ? `<span class="to-sub">Fill in the ${t === 'all_days' ? 'dates' : 'date and time'} to see how many hours this is.</span>`
+        : `<strong>${this._toHrs(computed)}</strong> of PTO${typed != null && typed !== computed ? `, overridden to <strong>${this._toHrs(typed)}</strong>` : ''}`;
       const bal = this._toBalanceFor(who());
-      const hrs = Number(q('#toHours').value) || 0;
-      const over = bal && bal.year === Number(String(s).slice(0, 4)) ? overBy(bal, hrs) : 0;
+      const over = hrs && bal && bal.year === Number(String(r.start_date || '').slice(0, 4)) ? overBy(bal, hrs) : 0;
       q('#toFormWarn').innerHTML = over
         ? `<div class="to-warn inline">That's ${this._toHrs(over)} more than ${forOthers ? 'they have' : 'you have'} left for ${bal.year}, counting anything already pending. It can still be sent; the approver decides.</div>` : '';
     };
-    q('#toStart').onchange = refresh;
-    q('#toEnd').onchange = refresh;
-    q('#toHours').oninput = () => { hoursTouched = true; refresh(); };
-    if (forOthers) q('#toFor').onchange = refresh;
+    back.querySelectorAll('input, select, textarea').forEach((el) => { el.addEventListener('input', refresh); el.addEventListener('change', refresh); });
     q('#toCancelForm').onclick = () => this._closeModal();
     refresh();
 
     q('#toSave').onclick = async () => {
       const err = q('#toErr');
-      const payload = {
-        action: 'request',
-        start_date: q('#toStart').value,
-        end_date: q('#toEnd').value,
-        hours: Number(q('#toHours').value),
-        note: q('#toNote').value,
-      };
+      const payload = { action: 'request', ...collect() };
+      if (canOverride && q('#toHours').value !== '') payload.hours = Number(q('#toHours').value);
       if (forOthers) {
         payload.employee_id = q('#toFor').value;
         payload.approved = !!(q('#toPre') && q('#toPre').checked);
@@ -3872,6 +3904,12 @@ export default {
               <option value="false" ${pol.prorate_first_year === false ? 'selected' : ''}>Full amount</option>
             </select></div>
           <div><label>Hours in a work day</label><input id="toPerDay" type="number" step="0.5" value="${esc(pol.hours_per_day)}"></div>
+          <div><label>Day starts</label><input id="toShiftStart" type="time" value="${esc(pol.shift_start || '08:00')}"></div>
+          <div><label>Day ends</label><input id="toShiftEnd" type="time" value="${esc(pol.shift_end || '17:00')}"></div>
+          <div><label>Lunch starts</label><input id="toLunchStart" type="time" value="${esc(pol.lunch_start || '12:00')}"></div>
+          <div><label>Lunch ends</label><input id="toLunchEnd" type="time" value="${esc(pol.lunch_end || '13:00')}"></div>
+          <div class="full"><p class="hint" style="margin:0">Used to work out arrive late, leave early and appointments.
+            Lunch isn't counted as time off: leaving at 11 on an 8 to 5 day is 5 hours.</p></div>
           <div class="full"><label>Most hours that carry into next year</label>
             <input id="toCap" type="number" step="1" min="0" value="${esc(pol.carryover_cap_hours)}">
           </div>
@@ -3917,6 +3955,10 @@ export default {
         tiers,
         prorate_first_year: q('#toProrate').value === 'true',
         hours_per_day: Number(q('#toPerDay').value),
+        shift_start: q('#toShiftStart').value,
+        shift_end: q('#toShiftEnd').value,
+        lunch_start: q('#toLunchStart').value,
+        lunch_end: q('#toLunchEnd').value,
         carryover_cap_hours: Number(q('#toCap').value),
       };
       try {
