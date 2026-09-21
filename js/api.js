@@ -78,9 +78,9 @@ const LIVE_PREFIXES = [
   // import step; imported prospects are MailMe's own.
   '/api/mailme/',
   // CrewCore: api/crewcore/{employees,stipend,reviews,handbook,settings}.js
-  // are deployed. PTO's api/crewcore/pto.js was removed Aug 2026 (PTO stays
-  // in QuickBooks) — the /api/crewcore/ prefix below still needs to be live
-  // for everything else, that removal isn't a route to un-list here.
+  // are deployed. Time off came back Sep 2026 as api/crewcore/timeoff.js
+  // (the Aug 2026 api/crewcore/pto.js stays deleted), all under the
+  // /api/crewcore/ prefix below.
   // The most sensitive app in the shell (pay, review notes), so every route
   // enforces scope server-side regardless of what MOCK shows on the client.
   '/api/crewcore/',
@@ -285,6 +285,9 @@ export const ENDPOINTS = {
   // calls it directly, the same way scan.html calls api/scan-status.js. The
   // seam rule covers app modules, and there is no app module in that path.
   ccTimecards:     '/api/crewcore/timecards',
+  // Time off (Sep 21 2026): requests, approvals, balances and the PTO
+  // policy. Live by the '/api/crewcore/' prefix.
+  ccTimeoff:       '/api/crewcore/timeoff',
 
   // ---- Notifications (shell-level) ----
   notifications:   '/api/notifications',

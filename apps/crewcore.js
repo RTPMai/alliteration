@@ -6,9 +6,12 @@
  * P&M internal Wix site (ryan7339.wixsite.com/pminternal), specifically
  * Company Structure (org chart) and Contact List (roster seed).
  *
- * PTO REMOVED this version — Ryan's call. Time off tracking stays in
- * QuickBooks, not duplicated here. There is no 'pto' view anymore; it isn't
- * hidden, it's gone, along with api/crewcore/pto.js.
+ * TIME OFF, Sep 21 2026 (Ryan's call, reversing Aug 2026 when PTO was
+ * pulled out and left in QuickBooks). The 'timeoff' view: an employee
+ * requests hours and sees their balance; Ryan and Megan (the approver list
+ * in Settings) approve or deny; any approver or admin sees the whole team.
+ * CrewCore is the ledger: Jan 1 grants by tenure, new hire proration,
+ * carryover up to a cap, adjustments with reasons. See lib/crewcore/pto.js.
  *
  * ADDED this version: apparel STIPEND tracking (an allotment per employee,
  * defaulted by department per the Handbook's Dress Code policy — $250
@@ -59,7 +62,7 @@
  *   themselves kudos (refused on the server), there is no edit, and only
  *   the author or an admin can remove one — never the recipient.
  *
- * Nine views: Dashboard (admin: anniversaries + headline numbers;
+ * Ten views, with Time Off (see above). The original nine: Dashboard (admin: anniversaries + headline numbers;
  * self-serve: your profile and where you stand), Roster (admin only; full
  * list + add/edit), Time Clock (admin: whole team, correctable; self-serve:
  * your own hours, read-only, and only if you punch), Stipend (both: your
@@ -78,6 +81,10 @@ import { ENDPOINTS } from '../js/api.js';
 import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin,
   DOC_CATEGORIES, DOC_LEVELS, docsFor, isFormalDoc,
   KUDOS_TAGS, KUDOS_MAX_LENGTH, kudosFor, canDeleteKudos } from '../lib/crewcore/schema.js';
+// Time off math, shared with api/crewcore/timeoff.js so the screen and the
+// server agree on estimates, warnings and which buttons a request gets. No
+// imports of its own, so safe in the browser.
+import { estimateHours, overBy, requestActions, whoIsOut, requestYear } from '../lib/crewcore/pto.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -518,6 +525,23 @@ export default {
     background:var(--accent-tint);color:var(--accent-deep);
   }
   .cc-count{font-size:12px;color:var(--muted);margin-bottom:12px}
+
+  /* Time off */
+  .chip.pending{background:var(--warn-tint);color:var(--warn-dk)}
+  .chip.approved{background:var(--success-tint);color:var(--success-dk)}
+  .chip.denied{background:var(--danger-tint);color:var(--danger)}
+  .chip.cancelled{background:var(--line-soft);color:var(--muted)}
+  .to-warn{
+    background:var(--warn-tint);border:1px solid var(--warn);border-radius:var(--radius-md);
+    padding:11px 14px;margin-bottom:16px;font-size:12.5px;line-height:1.55;color:var(--ink);
+  }
+  .to-warn.inline{margin:10px 0 0}
+  .to-num{text-align:right;font-variant-numeric:tabular-nums}
+  .cc-table td.to-num.neg{color:var(--danger);font-weight:700}
+  .to-tier{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end;margin-bottom:8px}
+  .to-approvers{display:flex;flex-direction:column;gap:6px;margin-top:4px}
+  .to-approvers label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink)}
+  .to-approvers input{width:auto}
   `,
 
   template: `
@@ -579,6 +603,11 @@ export default {
     this._kudosMe = null;        // { username, employee_id, is_admin }
     this._kudosFilter = 'all';   // all | mine | given
     this._handbook = null;
+    // Time off. One payload per load; its shape depends on who is asking
+    // (scope 'team' for approvers and admins, 'self' for everyone else).
+    this._to = null;
+    this._toYear = new Date().getFullYear();
+    this._toDetailId = null;
     // Figures for the self-serve Dashboard, each loaded independently so one
     // failing fetch costs one card rather than the whole screen.
     this._selfCards = null;
@@ -682,6 +711,8 @@ export default {
         // one endpoint having a bad day costs one number, not the screen.
         try { await this._loadKudos(); }
         catch (e) { console.error('CrewCore dashboard: kudos', e); this._kudos = []; }
+        try { this._toYear = new Date().getFullYear(); await this._loadTimeoff(); }
+        catch (e) { console.error('CrewCore dashboard: time off', e); this._to = null; }
         body.innerHTML = this._renderDashboard();
         this._wireDashboardAdmin();
         return;
@@ -742,6 +773,21 @@ export default {
         body.innerHTML = this._renderTimeclockSelf();
         this._wireTimeclockSelf();
       }
+      return;
+    }
+
+    if (view === 'timeoff') {
+      title.textContent = 'Time Off.';
+      // Entering from the rail lands on the list, never a stale detail.
+      this._toDetailId = null;
+      try {
+        await this._loadTimeoff();
+      } catch (e) {
+        sub.textContent = '';
+        body.innerHTML = `<div class="cc-locked"><h2>Time off didn't load</h2><p>${esc(e.message || 'Try again in a minute.')}</p></div>`;
+        return;
+      }
+      this._paintTimeoff();
       return;
     }
 
@@ -838,6 +884,10 @@ export default {
       title.textContent = 'Settings.';
       sub.textContent = 'Shop-wide CrewCore defaults.';
       await this._loadSettings();
+      // The time off policy rides on its own endpoint. Its own try: a
+      // failure there must not cost the stipend and clock settings.
+      try { await this._loadTimeoff(); }
+      catch (e) { console.error('CrewCore settings: time off', e); this._to = null; }
       body.innerHTML = this._renderSettings();
       this._wireSettings();
       return;
@@ -870,6 +920,14 @@ export default {
           <div class="big">${active.length}</div>
           <div class="note">active employees</div>
         </div>
+        ${this._to && this._to.scope === 'team' ? (() => {
+          const waiting = (this._to.requests || []).filter((r) => r.status === 'pending').length;
+          return `<div class="cc-card tap" data-go="timeoff">
+            <h3>Time off requests</h3>
+            <div class="big">${waiting}</div>
+            <div class="note">${waiting ? (this._to.me && this._to.me.is_approver ? 'waiting on you' : 'waiting for approval') : 'nothing waiting'}</div>
+          </div>`;
+        })() : ''}
         <div class="cc-card tap" data-go="kudos">
           <h3>Kudos this month</h3>
           <div class="big">${kudosThisMonth}</div>
@@ -928,7 +986,7 @@ export default {
    * which of four things broke. A failed card is simply not drawn.
    */
   async _loadSelfDashboard() {
-    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null, kudos: null, lastKudos: null };
+    const cards = { stipend: null, hours: null, overtime: 0, nextReview: null, lastReview: null, handbook: null, kudos: null, lastKudos: null, timeoff: null };
     this._selfCards = cards;
     if (!this._own) return;
 
@@ -964,6 +1022,12 @@ export default {
         .filter((d) => d && d >= today)
         .sort()[0] || null;
     } catch (e) { console.error('CrewCore dashboard: reviews', e); }
+
+    try {
+      this._toYear = new Date().getFullYear();
+      await this._loadTimeoff();
+      if (this._to && this._to.scope === 'self' && this._to.balance) cards.timeoff = this._to.balance;
+    } catch (e) { console.error('CrewCore dashboard: time off', e); }
 
     try {
       await this._loadHandbook();
@@ -1012,6 +1076,16 @@ export default {
           <h3>Hours this week</h3>
           <div class="big">${c.hours.toFixed(2)}</div>
           <div class="note">${c.overtime ? c.overtime.toFixed(2) + ' of it overtime' : esc(this._tcWeekLabel())}</div>
+        </div>`);
+    }
+
+    if (c.timeoff) {
+      const t = c.timeoff;
+      cards.push(`
+        <div class="cc-card tap" data-go="timeoff">
+          <h3>Time off left</h3>
+          <div class="big">${this._toHrs(t.balance)}</div>
+          <div class="note">${t.pending ? this._toHrs(t.pending) + ' waiting on approval' : 'for ' + t.year}</div>
         </div>`);
     }
 
@@ -1552,7 +1626,7 @@ export default {
     const sizes = color.sizes.map((z) => `
       <button class="cc-size" data-size="${esc(z.size)}">
         <span>${esc(z.size)}</span>
-        <span class="p">${z.price == null ? '\u2014' : fmtMoney(z.price)}</span>
+        <span class="p">${z.price == null ? '-' : fmtMoney(z.price)}</span>
       </button>`).join('');
 
     return `
@@ -3134,6 +3208,7 @@ export default {
   _renderSettings() {
     const s = this._settings || {};
     return `
+      ${this._renderTimeoffSettings()}
       <div class="cc-form" style="max-width:480px">
         <h3>Apparel stipend defaults</h3>
         <div class="cc-form-grid">
@@ -3223,6 +3298,7 @@ export default {
     const body = root.querySelector('#ccBody');
     const $ = (sel) => body.querySelector(sel);
     const err = $('#sErr');
+    this._wireTimeoffSettings();
 
     $('#sSave').onclick = async () => {
       const payload = {
@@ -3256,6 +3332,602 @@ export default {
       } catch (e) {
         err2.hidden = false;
         err2.textContent = (e.body && e.body.details && e.body.details.join(', ')) || e.message || 'Could not save.';
+      }
+    };
+  },
+
+  /* ---------------- Time Off ----------------
+   *
+   * Sep 21 2026. Two screens behind one key, like every other view here:
+   *
+   *   self   what an employee sees. Their balance for the year, a Request
+   *          button, their requests. Kept deliberately plain (Ryan's rule
+   *          for staff-facing screens): three numbers, one button, a list.
+   *   team   what an approver or admin sees. Requests waiting on a decision,
+   *          who is out in the next 60 days, and everybody's balance. A row
+   *          opens that person's year by year ledger.
+   *
+   * The server decides which one comes back; this only draws it.
+   */
+
+  async _loadTimeoff() {
+    this._to = await this._ctx.api.get(ENDPOINTS.ccTimeoff, { year: this._toYear });
+  },
+
+  async _refreshTimeoff() {
+    await this._loadTimeoff();
+    this._paintTimeoff();
+  },
+
+  _toHrs(n) {
+    const v = Math.round((Number(n) || 0) * 100) / 100;
+    return (Number.isInteger(v) ? String(v) : v.toFixed(2).replace(/0$/, '')) + ' hrs';
+  },
+
+  _toDays(n) {
+    const per = (this._to && this._to.policy && this._to.policy.hours_per_day) || 8;
+    const d = Math.round(((Number(n) || 0) / per) * 10) / 10;
+    return d + (d === 1 ? ' day' : ' days');
+  },
+
+  _toSpan(r) {
+    return r.start_date === r.end_date ? fmtDate(r.start_date) : fmtDate(r.start_date) + ' to ' + fmtDate(r.end_date);
+  },
+
+  _paintTimeoff() {
+    const root = this._root;
+    if (!root) return;
+    const sub = root.querySelector('#ccSub');
+    const actions = root.querySelector('#ccHdActions');
+    const body = root.querySelector('#ccBody');
+    const d = this._to || {};
+    const me = d.me || {};
+
+    actions.innerHTML = '';
+    if (d.scope === 'team') {
+      sub.textContent = this._toDetailId ? 'One person\u2019s time off, year by year.' : 'Requests, who\u2019s out, and everybody\u2019s balance.';
+      actions.innerHTML = `${this._toYearPicker()}
+        ${me.is_approver ? `<button class="cc-btn" id="toLogBtn">Log time off</button>` : ''}
+        ${me.employee_id ? `<button class="cc-btn ghost" id="toMineBtn">Request my own</button>` : ''}`;
+      body.innerHTML = this._toDetailId ? this._renderTimeoffDetail() : this._renderTimeoffTeam();
+    } else {
+      sub.textContent = 'Your paid time off.';
+      if (d.linked) actions.innerHTML = `${this._toYearPicker()}<button class="cc-btn" id="toReqBtn">Request time off</button>`;
+      body.innerHTML = this._renderTimeoffSelf();
+    }
+    this._wireTimeoff();
+  },
+
+  _toYearPicker() {
+    const now = new Date().getFullYear();
+    const years = [now + 1, now, now - 1, now - 2];
+    if (!years.includes(this._toYear)) years.push(this._toYear);
+    return `<select class="cc-filt" id="toYear" title="Year">
+      ${years.sort((a, b) => b - a).map((y) => `<option value="${y}" ${y === this._toYear ? 'selected' : ''}>${y}</option>`).join('')}
+    </select>`;
+  },
+
+  /** The three numbers, shared by the employee's own screen and a person's detail. */
+  _toTiles(bal) {
+    if (!bal) return '';
+    const neg = bal.balance < 0;
+    let how;
+    if (bal.source === 'opening') how = `started ${bal.year} with ${this._toHrs(bal.start)} carried over from QuickBooks`;
+    else if (bal.source === 'none') how = `nothing tracked for ${bal.year}`;
+    else how = `${this._toHrs(bal.grant)} granted${bal.carried ? ' + ' + this._toHrs(bal.carried) + ' carried over' : ''}`;
+    return `
+      <div class="cc-grid">
+        <div class="cc-card${neg ? ' over' : ''}">
+          ${neg ? `<span class="cc-flag" title="Used more than was granted">!</span>` : ''}
+          <h3>Left for ${bal.year}</h3>
+          <div class="big">${this._toHrs(bal.balance)}</div>
+          <div class="note${neg ? ' over' : ''}">${neg ? 'over by ' + this._toHrs(-bal.balance) : 'about ' + this._toDays(bal.balance)}</div>
+        </div>
+        <div class="cc-card">
+          <h3>Waiting on approval</h3>
+          <div class="big">${this._toHrs(bal.pending)}</div>
+          <div class="note">${bal.pending ? this._toHrs(bal.after_pending) + ' left if approved' : 'nothing pending'}</div>
+        </div>
+        <div class="cc-card">
+          <h3>Used in ${bal.year}</h3>
+          <div class="big">${this._toHrs(bal.used)}</div>
+          <div class="note">${esc(how)}${bal.adjusted ? ', ' + (bal.adjusted > 0 ? '+' : '') + this._toHrs(bal.adjusted) + ' adjusted' : ''}</div>
+        </div>
+      </div>`;
+  },
+
+  _toRequestRow(r, { showName = false } = {}) {
+    const d = this._to || {};
+    const me = d.me || {};
+    const can = requestActions(r, { isApprover: !!me.is_approver, isOwner: !!me.employee_id && r.employee_id === me.employee_id });
+    const bits = [this._toHrs(r.hours)];
+    if (r.note) bits.push(esc(r.note));
+    if (r.decision_note) bits.push('Reply: ' + esc(r.decision_note));
+    return `
+      <div class="cc-row">
+        <div style="min-width:0">
+          <div class="who">${showName ? esc(r.employee_name || '') + ' \u00b7 ' : ''}${esc(this._toSpan(r))}</div>
+          <div class="meta">${bits.join(' \u00b7 ')}</div>
+        </div>
+        <div class="cc-rowacts">
+          <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
+          ${can.approve ? `<button class="cc-btn sm" data-to-approve="${esc(r.id)}">Approve</button>` : ''}
+          ${can.deny ? `<button class="cc-btn sm ghost" data-to-deny="${esc(r.id)}">Deny</button>` : ''}
+          ${can.cancel ? `<button class="cc-btn sm ghost danger" data-to-cancel="${esc(r.id)}">Cancel</button>` : ''}
+        </div>
+      </div>`;
+  },
+
+  _toList(rows, empty, opts) {
+    return `<div class="cc-list">${rows.length
+      ? rows.map((r) => this._toRequestRow(r, opts)).join('')
+      : `<div class="cc-empty">${esc(empty)}</div>`}</div>`;
+  },
+
+  _toAdjustList(adjs, canRemove) {
+    if (!adjs.length) return '';
+    return `
+      <div class="cc-section">
+        <h2>Adjustments</h2>
+        <div class="cc-list">${adjs.map((a) => `
+          <div class="cc-row">
+            <div>
+              <div class="who">${a.hours > 0 ? '+' : ''}${this._toHrs(a.hours)} in ${esc(a.year)}</div>
+              <div class="meta">${esc(a.reason || '')}</div>
+            </div>
+            ${canRemove ? `<button class="cc-btn sm ghost danger" data-to-unadjust="${esc(a.id)}">Remove</button>` : ''}
+          </div>`).join('')}
+        </div>
+      </div>`;
+  },
+
+  _renderTimeoffSelf() {
+    const d = this._to || {};
+    if (!d.linked) {
+      return `<div class="cc-locked"><h2>Not linked yet</h2>
+        <p>Your login isn't connected to an employee record, so there's no balance to show. Ask an admin to link it on the Roster.</p></div>`;
+    }
+    const reqs = (d.requests || []).filter((r) => requestYear(r) === this._toYear);
+    return `
+      <div id="toMsg"></div>
+      ${d.approvers_set ? '' : `<div class="to-warn">Nobody is set up to approve time off yet, so a request will wait until that's sorted. You can still send it.</div>`}
+      ${this._toTiles(d.balance)}
+      <div class="cc-section">
+        <h2>Your requests, ${this._toYear}</h2>
+        ${this._toList(reqs, 'No time off requested for ' + this._toYear + ' yet.')}
+      </div>
+      ${this._toAdjustList((d.adjustments || []).filter((a) => Number(a.year) === this._toYear), false)}`;
+  },
+
+  _renderTimeoffTeam() {
+    const d = this._to || {};
+    const me = d.me || {};
+    const reqs = d.requests || [];
+    const pending = reqs.filter((r) => r.status === 'pending')
+      .sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)));
+    const today = new Date().toISOString().slice(0, 10);
+    const in60 = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
+    const upcoming = whoIsOut(reqs, today, in60);
+    const startYear = d.policy_doc ? d.policy_doc.start_year : null;
+    const team = (d.team || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+
+    const noStart = (p) => !p.pto_opening && p.start_date && Number(String(p.start_date).slice(0, 4)) < this._toYear
+      && (startYear == null || this._toYear === startYear);
+
+    return `
+      <div id="toMsg"></div>
+      ${d.approvers_set ? '' : `<div class="to-warn"><strong>Nobody can approve time off yet.</strong>
+        Requests can come in, but they'll sit until approvers are picked${me.is_admin ? ' in CrewCore Settings, under Time off' : ' by an admin'}.</div>`}
+
+      <div class="cc-section">
+        <h2>${me.is_approver ? 'Waiting on you' : 'Waiting for approval'}</h2>
+        ${this._toList(pending, 'Nothing waiting.', { showName: true })}
+      </div>
+
+      <div class="cc-section">
+        <h2>Out in the next 60 days</h2>
+        <div class="cc-list">${upcoming.length ? upcoming.map((r) => `
+          <div class="cc-row">
+            <div><div class="who">${esc(r.employee_name || '')}</div>
+              <div class="meta">${esc(this._toSpan(r))} \u00b7 ${this._toHrs(r.hours)}</div></div>
+            <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
+          </div>`).join('') : `<div class="cc-empty">Nobody is out.</div>`}
+        </div>
+      </div>
+
+      <div class="cc-section">
+        <h2>Balances, ${this._toYear}</h2>
+        <div class="cc-list" style="overflow-x:auto">
+          <table class="cc-table">
+            <thead><tr>
+              <th>Name</th><th class="to-num">Started with</th><th class="to-num">Adjusted</th>
+              <th class="to-num">Used</th><th class="to-num">Pending</th><th class="to-num">Left</th>
+            </tr></thead>
+            <tbody>${team.map((p) => {
+              const b = p.balance || {};
+              return `<tr class="clickable" data-to-person="${esc(p.id)}">
+                <td><strong>${esc(p.name)}</strong>
+                  ${p.status === 'terminated' ? ' <span class="chip terminated">left</span>' : ''}
+                  ${noStart(p) ? ' <span class="chip pending" title="Enter what QuickBooks shows they have left, or their grant is assumed unused">no starting balance</span>' : ''}</td>
+                <td class="to-num">${this._toHrs(b.start)}</td>
+                <td class="to-num">${b.adjusted ? (b.adjusted > 0 ? '+' : '') + this._toHrs(b.adjusted) : '-'}</td>
+                <td class="to-num">${this._toHrs(b.used)}</td>
+                <td class="to-num">${b.pending ? this._toHrs(b.pending) : '-'}</td>
+                <td class="to-num${b.balance < 0 ? ' neg' : ''}"><strong>${this._toHrs(b.balance)}</strong></td>
+              </tr>`;
+            }).join('')}</tbody>
+          </table>
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px">Pending hours aren't taken out of what's left until they're approved.</p>
+      </div>`;
+  },
+
+  _renderTimeoffDetail() {
+    const d = this._to || {};
+    const me = d.me || {};
+    const p = (d.team || []).find((x) => x.id === this._toDetailId);
+    if (!p) return `<div class="cc-empty">That person isn't on the list anymore.</div>`;
+    const reqs = (d.requests || []).filter((r) => r.employee_id === p.id);
+    const adjs = (d.adjustments || []).filter((a) => a.employee_id === p.id);
+    const yearReqs = reqs.filter((r) => requestYear(r) === this._toYear);
+    const op = p.pto_opening;
+    return `
+      <div class="cc-back">
+        <button class="cc-btn ghost sm" id="toBack">\u2190 Everybody</button>
+        <strong style="font-size:16px">${esc(p.name)}</strong>
+        <span class="meta" style="font-size:12px;color:var(--muted)">${p.start_date ? 'started ' + esc(fmtDate(p.start_date)) : 'no start date on file'}</span>
+      </div>
+      <div id="toMsg"></div>
+      ${this._toTiles(p.balance)}
+      ${me.is_approver ? `<div class="cc-toolbar">
+        <button class="cc-btn sm" id="toLogFor">Log time off</button>
+        <button class="cc-btn sm ghost" id="toAdjust">Adjust balance</button>
+        <button class="cc-btn sm ghost" id="toOpening">${op ? 'Change' : 'Set'} starting balance</button>
+        ${op ? `<span class="lbl">Starting balance: ${this._toHrs(op.hours)} for ${esc(op.year)}</span>` : ''}
+      </div>` : ''}
+      <div class="cc-section">
+        <h2>Requests, ${this._toYear}</h2>
+        ${this._toList(yearReqs, 'Nothing requested for ' + this._toYear + '.')}
+      </div>
+      ${this._toAdjustList(adjs, !!me.is_approver)}`;
+  },
+
+  _wireTimeoff() {
+    const root = this._root;
+    const $ = (sel) => root.querySelector(sel);
+
+    const yr = $('#toYear');
+    if (yr) yr.onchange = async () => { this._toYear = Number(yr.value); await this._refreshTimeoff(); };
+    const req = $('#toReqBtn');
+    if (req) req.onclick = () => this._openTimeoffForm(null);
+    const mine = $('#toMineBtn');
+    if (mine) mine.onclick = () => this._openTimeoffForm(null);
+    const log = $('#toLogBtn');
+    if (log) log.onclick = () => this._openTimeoffForm(this._toDetailId || '', { forOthers: true });
+    const logFor = $('#toLogFor');
+    if (logFor) logFor.onclick = () => this._openTimeoffForm(this._toDetailId, { forOthers: true });
+    const back = $('#toBack');
+    if (back) back.onclick = () => { this._toDetailId = null; this._paintTimeoff(); };
+    const adj = $('#toAdjust');
+    if (adj) adj.onclick = () => this._openAdjustForm(this._toDetailId);
+    const opn = $('#toOpening');
+    if (opn) opn.onclick = () => this._openOpeningForm(this._toDetailId);
+
+    root.querySelectorAll('[data-to-person]').forEach((row) => {
+      row.onclick = () => { this._toDetailId = row.dataset.toPerson; this._paintTimeoff(); };
+    });
+    root.querySelectorAll('[data-to-approve]').forEach((b) => {
+      b.onclick = () => this._toAct({ action: 'decide', decision: 'approve', id: b.dataset.toApprove });
+    });
+    root.querySelectorAll('[data-to-deny]').forEach((b) => {
+      b.onclick = () => this._openDenyForm(b.dataset.toDeny);
+    });
+    root.querySelectorAll('[data-to-cancel]').forEach((b) => {
+      b.onclick = () => {
+        if (!confirm('Cancel this time off? The hours go back on the balance.')) return;
+        this._toAct({ action: 'cancel', id: b.dataset.toCancel });
+      };
+    });
+    root.querySelectorAll('[data-to-unadjust]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('Remove this adjustment?')) return;
+        try {
+          await this._ctx.api.request(ENDPOINTS.ccTimeoff, { method: 'DELETE', query: { adjustment: b.dataset.toUnadjust } });
+          await this._refreshTimeoff();
+        } catch (e) { this._toMsg(e); }
+      };
+    });
+  },
+
+  _toMsg(e) {
+    const box = this._root && this._root.querySelector('#toMsg');
+    const text = (e && e.body && e.body.details && e.body.details.join('. ')) || (e && e.message) || String(e || '');
+    if (box) box.innerHTML = text ? `<div class="to-warn">${esc(text)}</div>` : '';
+  },
+
+  async _toAct(payload) {
+    try {
+      await this._ctx.api.post(ENDPOINTS.ccTimeoff, payload);
+      await this._refreshTimeoff();
+    } catch (e) { this._toMsg(e); }
+  },
+
+  /** Balance row the form warns against, when it is the year on screen. */
+  _toBalanceFor(employeeId) {
+    const d = this._to || {};
+    if (d.scope === 'self') return d.balance || null;
+    const p = (d.team || []).find((x) => x.id === employeeId);
+    return p ? p.balance : null;
+  },
+
+  _openTimeoffForm(presetEmployeeId, { forOthers = false } = {}) {
+    const d = this._to || {};
+    const me = d.me || {};
+    const policy = d.policy || {};
+    const people = forOthers ? (d.team || []).filter((p) => p.status !== 'terminated') : [];
+    const today = new Date().toISOString().slice(0, 10);
+    const back = this._openModal(`
+      <div class="cc-form">
+        <h3>${forOthers ? 'Log time off' : 'Request time off'}</h3>
+        <div class="cc-form-grid">
+          ${forOthers ? `<div class="full"><label>For</label>
+            <select id="toFor">${people.map((p) => `<option value="${esc(p.id)}" ${p.id === presetEmployeeId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
+          <div><label>First day off</label><input id="toStart" type="date" value="${today}"></div>
+          <div><label>Last day off</label><input id="toEnd" type="date" value="${today}"></div>
+          <div><label>Hours</label><input id="toHours" type="number" step="0.25" min="0"></div>
+          <div><label>&nbsp;</label><div class="note" id="toHint" style="font-size:12px;color:var(--muted);padding-top:8px"></div></div>
+          <div class="full"><label>Note (only approvers see this)</label><textarea id="toNote" rows="2" maxlength="500"></textarea></div>
+          ${forOthers && me.is_approver ? `<div class="full"><label style="display:flex;gap:8px;align-items:center">
+            <input type="checkbox" id="toPre" style="width:auto" checked> Already approved (skip the queue)</label></div>` : ''}
+        </div>
+        <div id="toFormWarn"></div>
+        <div class="cc-err" id="toErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="toCancelForm">Never mind</button>
+          <button class="cc-btn" id="toSave">${forOthers ? 'Save' : 'Send request'}</button>
+        </div>
+      </div>`);
+    const q = (s) => back.querySelector(s);
+    let hoursTouched = false;
+    const who = () => (forOthers ? q('#toFor').value : me.employee_id);
+
+    const refresh = () => {
+      const s = q('#toStart').value;
+      let e = q('#toEnd').value;
+      if (s && (!e || e < s)) { e = s; q('#toEnd').value = s; }
+      const est = estimateHours(s, e, policy);
+      if (!hoursTouched) q('#toHours').value = est || '';
+      q('#toHint').textContent = est ? `${est / (policy.hours_per_day || 8)} weekday${est / (policy.hours_per_day || 8) === 1 ? '' : 's'} at ${policy.hours_per_day || 8} hrs. Change it for a half day.` : 'No weekdays in that range. Enter the hours.';
+      const bal = this._toBalanceFor(who());
+      const hrs = Number(q('#toHours').value) || 0;
+      const over = bal && bal.year === Number(String(s).slice(0, 4)) ? overBy(bal, hrs) : 0;
+      q('#toFormWarn').innerHTML = over
+        ? `<div class="to-warn inline">That's ${this._toHrs(over)} more than ${forOthers ? 'they have' : 'you have'} left for ${bal.year}, counting anything already pending. It can still be sent; the approver decides.</div>` : '';
+    };
+    q('#toStart').onchange = refresh;
+    q('#toEnd').onchange = refresh;
+    q('#toHours').oninput = () => { hoursTouched = true; refresh(); };
+    if (forOthers) q('#toFor').onchange = refresh;
+    q('#toCancelForm').onclick = () => this._closeModal();
+    refresh();
+
+    q('#toSave').onclick = async () => {
+      const err = q('#toErr');
+      const payload = {
+        action: 'request',
+        start_date: q('#toStart').value,
+        end_date: q('#toEnd').value,
+        hours: Number(q('#toHours').value),
+        note: q('#toNote').value,
+      };
+      if (forOthers) {
+        payload.employee_id = q('#toFor').value;
+        payload.approved = !!(q('#toPre') && q('#toPre').checked);
+      }
+      q('#toSave').disabled = true;
+      try {
+        await this._ctx.api.post(ENDPOINTS.ccTimeoff, payload);
+        this._closeModal();
+        const y = Number(String(payload.start_date).slice(0, 4));
+        if (y && y !== this._toYear) this._toYear = y;
+        await this._refreshTimeoff();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
+        q('#toSave').disabled = false;
+      }
+    };
+  },
+
+  _openDenyForm(id) {
+    const back = this._openModal(`
+      <div class="cc-form">
+        <h3>Deny this request</h3>
+        <div class="cc-form-grid">
+          <div class="full"><label>Why (optional, they'll see it)</label><textarea id="toWhy" rows="3" maxlength="500"></textarea></div>
+        </div>
+        <div class="cc-err" id="toErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="toNo">Never mind</button>
+          <button class="cc-btn" id="toYes">Deny</button>
+        </div>
+      </div>`);
+    const q = (s) => back.querySelector(s);
+    q('#toNo').onclick = () => this._closeModal();
+    q('#toYes').onclick = async () => {
+      try {
+        await this._ctx.api.post(ENDPOINTS.ccTimeoff, { action: 'decide', decision: 'deny', id, note: q('#toWhy').value });
+        this._closeModal();
+        await this._refreshTimeoff();
+      } catch (e) {
+        q('#toErr').hidden = false;
+        q('#toErr').textContent = e.message || 'Could not save.';
+      }
+    };
+  },
+
+  _openAdjustForm(employeeId) {
+    const p = ((this._to && this._to.team) || []).find((x) => x.id === employeeId);
+    if (!p) return;
+    const back = this._openModal(`
+      <div class="cc-form">
+        <h3>Adjust ${esc(p.name)}'s balance</h3>
+        <p class="hint">Extra hours earned (event work, comp time) or a correction. Use a minus sign to take hours away.</p>
+        <div class="cc-form-grid">
+          <div><label>Hours</label><input id="toAdjH" type="number" step="0.25" placeholder="e.g. 4 or -8"></div>
+          <div><label>Year</label><input id="toAdjY" type="number" value="${this._toYear}"></div>
+          <div class="full"><label>Reason</label><input id="toAdjR" maxlength="300" placeholder="Flyover Con setup, Saturday"></div>
+        </div>
+        <div class="cc-err" id="toErr" hidden></div>
+        <div class="cc-form-actions">
+          <button class="cc-btn ghost" id="toNo">Never mind</button>
+          <button class="cc-btn" id="toYes">Save</button>
+        </div>
+      </div>`);
+    const q = (s) => back.querySelector(s);
+    q('#toNo').onclick = () => this._closeModal();
+    q('#toYes').onclick = async () => {
+      try {
+        await this._ctx.api.post(ENDPOINTS.ccTimeoff, {
+          action: 'adjust', employee_id: p.id, hours: Number(q('#toAdjH').value), year: Number(q('#toAdjY').value), reason: q('#toAdjR').value,
+        });
+        this._closeModal();
+        await this._refreshTimeoff();
+      } catch (e) {
+        q('#toErr').hidden = false;
+        q('#toErr').textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
+      }
+    };
+  },
+
+  _openOpeningForm(employeeId) {
+    const p = ((this._to && this._to.team) || []).find((x) => x.id === employeeId);
+    if (!p) return;
+    const op = p.pto_opening || {};
+    const back = this._openModal(`
+      <div class="cc-form">
+        <h3>Starting balance for ${esc(p.name)}</h3>
+        <p class="hint">What QuickBooks shows they have left right now. It replaces the Jan 1 grant for that year only.
+          From the next Jan 1 on, the normal grant and carryover rules take over. Don't also enter time off they've
+          already taken this year, or it comes out twice.</p>
+        <div class="cc-form-grid">
+          <div><label>Hours left</label><input id="toOpH" type="number" step="0.25" value="${op.hours != null ? esc(op.hours) : ''}"></div>
+          <div><label>For year</label><input id="toOpY" type="number" value="${esc(op.year || new Date().getFullYear())}"></div>
+        </div>
+        <div class="cc-err" id="toErr" hidden></div>
+        <div class="cc-form-actions">
+          ${p.pto_opening ? `<button class="cc-btn ghost danger" id="toClear">Clear it</button>` : ''}
+          <button class="cc-btn ghost" id="toNo">Never mind</button>
+          <button class="cc-btn" id="toYes">Save</button>
+        </div>
+      </div>`);
+    const q = (s) => back.querySelector(s);
+    const send = async (hours) => {
+      try {
+        await this._ctx.api.post(ENDPOINTS.ccTimeoff, { action: 'opening', employee_id: p.id, hours, year: Number(q('#toOpY').value) });
+        this._closeModal();
+        await this._refreshTimeoff();
+      } catch (e) {
+        q('#toErr').hidden = false;
+        q('#toErr').textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
+      }
+    };
+    q('#toNo').onclick = () => this._closeModal();
+    q('#toYes').onclick = () => send(q('#toOpH').value === '' ? null : Number(q('#toOpH').value));
+    const clear = q('#toClear');
+    if (clear) clear.onclick = () => send(null);
+  },
+
+  /* Settings > Time off. Admin only, drawn inside _renderSettings(). */
+  _renderTimeoffSettings() {
+    const d = this._to;
+    if (!d || !d.policy_doc) {
+      return `<div class="cc-form" style="max-width:480px"><h3>Time off</h3>
+        <p class="hint">The time off policy didn't load. Reload the page to try again.</p></div>`;
+    }
+    const pol = d.policy || {};
+    const approvers = d.approvers || [];
+    const accounts = d.accounts || [];
+    const tiers = pol.tiers || [];
+    return `
+      <div class="cc-form" style="max-width:480px" id="toPolicyForm">
+        <h3>Time off</h3>
+        <p class="hint">Hours are granted every Jan 1. Changes here apply to ${new Date().getFullYear()} and later;
+          earlier years keep the rules they had. Tracking started in ${esc(d.policy_doc.start_year)}.</p>
+        <div class="cc-form-grid">
+          <div class="full"><label>Who approves requests</label>
+            <div class="to-approvers">${accounts.length ? accounts.map((a) => `
+              <label><input type="checkbox" data-approver="${esc(a.username)}" ${approvers.includes(a.username) ? 'checked' : ''}> ${esc(a.name)}</label>`).join('')
+              : '<span class="hint">Nobody on the roster has a login linked yet.</span>'}
+            </div>
+            ${approvers.length ? '' : `<div class="to-warn inline">Nobody is ticked, so nobody can approve anything.</div>`}
+          </div>
+          <div class="full"><label>Hours granted each Jan 1, by full years worked</label>
+            <div id="toTiers">${tiers.map((t, i) => this._toTierRow(t, i)).join('')}</div>
+            <button class="cc-btn ghost sm" id="toAddTier" type="button">Add a tier</button>
+          </div>
+          <div><label>New hires</label>
+            <select id="toProrate">
+              <option value="true" ${pol.prorate_first_year !== false ? 'selected' : ''}>Prorated from start date</option>
+              <option value="false" ${pol.prorate_first_year === false ? 'selected' : ''}>Full amount</option>
+            </select></div>
+          <div><label>Hours in a work day</label><input id="toPerDay" type="number" step="0.5" value="${esc(pol.hours_per_day)}"></div>
+          <div class="full"><label>Most hours that carry into next year</label>
+            <input id="toCap" type="number" step="1" min="0" value="${esc(pol.carryover_cap_hours)}">
+          </div>
+        </div>
+        <p class="hint" style="margin-top:10px">0 means nothing carries over, which is what the Handbook says today.
+          If you set a cap, update the Handbook's Paid Time Off section to match.</p>
+        <div class="cc-err" id="toSetErr" hidden></div>
+        <div class="cc-form-actions"><button class="cc-btn" id="toSaveSet">Save</button></div>
+      </div>`;
+  },
+
+  _toTierRow(t, i) {
+    return `<div class="to-tier" data-tier="${i}">
+      <div><label>After ${i === 0 ? '(new hires)' : ''}</label>
+        <input type="number" min="0" step="1" data-tier-years value="${esc(t.min_years)}" ${i === 0 ? 'readonly' : ''}> </div>
+      <div><label>years, hours</label><input type="number" min="0" step="1" data-tier-hours value="${esc(t.hours)}"></div>
+      <div>${i === 0 ? '' : `<button class="cc-btn ghost sm danger" type="button" data-tier-remove>Remove</button>`}</div>
+    </div>`;
+  },
+
+  _wireTimeoffSettings() {
+    const form = this._root.querySelector('#toPolicyForm');
+    if (!form) return;
+    const q = (s) => form.querySelector(s);
+    const wireRemove = () => form.querySelectorAll('[data-tier-remove]').forEach((b) => {
+      b.onclick = () => b.closest('.to-tier').remove();
+    });
+    wireRemove();
+    q('#toAddTier').onclick = () => {
+      const box = q('#toTiers');
+      const n = box.querySelectorAll('.to-tier').length;
+      box.insertAdjacentHTML('beforeend', this._toTierRow({ min_years: n, hours: 0 }, n));
+      wireRemove();
+    };
+    q('#toSaveSet').onclick = async () => {
+      const err = q('#toSetErr');
+      const tiers = Array.from(form.querySelectorAll('.to-tier')).map((row) => ({
+        min_years: Number(row.querySelector('[data-tier-years]').value),
+        hours: Number(row.querySelector('[data-tier-hours]').value),
+      }));
+      const payload = {
+        approvers: Array.from(form.querySelectorAll('[data-approver]')).filter((c) => c.checked).map((c) => c.dataset.approver),
+        tiers,
+        prorate_first_year: q('#toProrate').value === 'true',
+        hours_per_day: Number(q('#toPerDay').value),
+        carryover_cap_hours: Number(q('#toCap').value),
+      };
+      try {
+        await this._ctx.api.request(ENDPOINTS.ccTimeoff, { method: 'PATCH', body: payload });
+        err.hidden = true;
+        await this._loadTimeoff();
+        form.outerHTML = this._renderTimeoffSettings();
+        this._wireTimeoffSettings();
+      } catch (e) {
+        err.hidden = false;
+        err.textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
       }
     };
   },

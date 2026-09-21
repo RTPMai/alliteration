@@ -27,8 +27,8 @@ const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const schemaReady = import(path.join(ROOT, 'lib/crewcore/schema.js')).then((schema) => {
   const {
     validateEmployee, stripAdminFields, ADMIN_ONLY_FIELDS,
-    validatePtoRequest, validatePtoStatus, validateReview, validateHandbookAck,
-    DEPARTMENTS, PTO_TYPES, PTO_STATUSES, EMPLOYMENT_STATUSES,
+    validateReview, validateHandbookAck,
+    DEPARTMENTS, EMPLOYMENT_STATUSES,
     nextId,
   } = schema;
 
@@ -142,25 +142,14 @@ const schemaReady = import(path.join(ROOT, 'lib/crewcore/schema.js')).then((sche
 
 
 
-  /* ---- PTO requests -- kept for schema compatibility -------------------
-   * PTO tracking itself moved to QuickBooks (Ryan's call, Aug 2026); the
-   * validatePtoRequest/validatePtoStatus functions and the pto_days_per_year
-   * field stayed in the schema as dead code rather than being ripped out,
-   * in case that decision is revisited. These tests intentionally stop
-   * covering PTO beyond confirming the schema still parses; see
-   * DEPLOY-NOTES.md for what was actually removed from the app surface.
+  /* ---- PTO -------------------------------------------------------------
+   * The Aug 2026 dead code is gone from schema.js. Time off came back Sep 21
+   * 2026 in lib/crewcore/pto.js and is covered by crewcore-timeoff.test.cjs.
    */
 
-  t.test('type must be one of the known PTO types', () => {
-    PTO_TYPES.forEach((type) => {
-      const { ok } = validatePtoRequest({ start_date: '2026-08-17', type, days: 1 });
-      t.assert(ok, type + ' should be a valid PTO type');
-    });
-  });
-
-  t.test('validatePtoStatus only accepts the known status set', () => {
-    PTO_STATUSES.forEach((s) => t.assert(validatePtoStatus(s), s + ' should be a valid PTO status'));
-    t.equal(validatePtoStatus('archived'), false, 'an unknown status should be rejected');
+  t.test('the old dead PTO code is not lingering in schema.js', () => {
+    t.equal(schema.validatePtoRequest, undefined, 'one definition of a time off request, in pto.js');
+    t.equal(schema.PTO_TYPES, undefined, 'PTO only, no leftover sick/unpaid buckets');
   });
 
   /* ---- reviews ----------------------------------------------------------- */
@@ -249,9 +238,10 @@ const schemaReady = import(path.join(ROOT, 'lib/crewcore/schema.js')).then((sche
  * possible, rather than relying on the front end to behave.
  */
 
-t.test('PTO route is actually gone, not just unused', () => {
+t.test('the Aug 2026 PTO route stays gone; time off lives in timeoff.js', () => {
   t.equal(fs.existsSync(path.join(ROOT, 'api/crewcore/pto.js')), false,
-    'api/crewcore/pto.js should be deleted, not left dead — PTO tracking moved to QuickBooks');
+    'api/crewcore/pto.js was the old design and should not come back beside timeoff.js');
+  t.assert(fs.existsSync(path.join(ROOT, 'api/crewcore/timeoff.js')), 'the time off route should exist');
 });
 
 t.test('employees route strips admin fields on the self-serve read path', () => {
@@ -406,8 +396,8 @@ schemaReady.then(() => Promise.all([
   t.test('if a self-serve "employee" role exists, its scoped tabs hide Settings', () => {
     const role = DEFAULT_ROLES.employee;
     if (!role) {
-      // Self-serve PTO was removed alongside the PTO feature; if the role
-      // itself was also removed, there is nothing left to check here.
+      // Roles were removed Sep 10 2026; if the role is gone there is
+      // nothing left to check here.
       return;
     }
     const perms = {

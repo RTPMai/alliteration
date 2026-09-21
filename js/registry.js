@@ -31,7 +31,7 @@ import { SELF_SERVE_VIEWS as MM_SELF_SERVE } from '../lib/marketmachine/access.j
  * "and every screen in it". See the long note in allowedViews().
  */
 const SELF_SERVE_VIEWS = {
-  crewcore: ['dashboard', 'timeclock', 'stipend', 'kudos', 'reviews', 'handbook'],
+  crewcore: ['dashboard', 'timeclock', 'timeoff', 'stipend', 'kudos', 'reviews', 'handbook'],
   // MARKETMACHINE, Sept 2026. Ticking the app on somebody's account is how
   // they get their tasks, and it must not also hand them the campaign screens.
   // Whatever IS ticked for them is honoured, so ticking Campaigns is how Jacob
@@ -193,7 +193,7 @@ export const APPS = [
     name: 'CrewCore',
     w1: 'Crew', w2: 'Core', letter: 'C',
     role: 'Who does the work',
-    blurb: 'Employees, stipends, reviews, handbook.',
+    blurb: 'Employees, time off, stipends, reviews, handbook.',
     accent: '#C83E73',           // display only (rail dot / app mark); tokens.css owns theming — raspberry, from the Aug 14 2026 logo lineup (was #E1251B red; PromoPro took the red so the two rail dots stay distinguishable)
     // Real build, Aug 2026. Reviews renders an admin view (the admin role or
     // an account with the elevated Admin flag) and a self-serve read-only
@@ -210,9 +210,12 @@ export const APPS = [
     // next review and handbook status. Dashboard is therefore two different
     // screens behind one key, the same adaptive pattern the other views use.
     //
-    // PTO REMOVED, Aug 2026 (Ryan's call): time off tracking stays in
-    // QuickBooks, not duplicated here. The old 'pto' view, and everything
-    // behind it, is gone — not hidden, gone. See DEPLOY-NOTES.md.
+    // TIME OFF, Sep 21 2026 (Ryan's call, reversing Aug 2026's "PTO stays
+    // in QuickBooks"). CrewCore is now the PTO ledger: requests, approvals,
+    // balances, Jan 1 grants and carryover. Every employee with CrewCore gets
+    // the tab (lib/users.js adds it even when their views are narrowed), an
+    // approver or admin sees the whole team. Math in lib/crewcore/pto.js,
+    // route in api/crewcore/timeoff.js.
     //
     // TIME CLOCK added Aug 2026 as a rush replacement for the shop's broken
     // clock in/out system. An admin sees the whole team's timecards and can
@@ -228,6 +231,7 @@ export const APPS = [
       ['dashboard', 'Dashboard'],
       ['roster', 'Roster'],
       ['timeclock', 'Time Clock'],
+      ['timeoff', 'Time Off'],
       ['stipend', 'Stipend'],
       // SanMar sample drops. Sits next to Stipend because a pick draws that
       // person's apparel allotment the moment it is made.

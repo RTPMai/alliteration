@@ -1,0 +1,362 @@
+// PUT IN: api/crewcore/timeoff.js
+// api/crewcore/timeoff.js: PTO requests, approvals, balances and policy.
+//
+// Sep 21 2026. PTO is back in CrewCore, this time as the ledger (Ryan's
+// call, reversing Aug 2026). The arithmetic is in lib/crewcore/pto.js and is
+// shared with the screen; this route decides who may see and do what.
+//
+// WHO SEES WHAT
+//   An employee:       their own balance, their own requests and
+//                      adjustments. Nobody else's anything.
+//   An approver or a   the whole team's balances, every request, every
+//   CrewCore admin:    adjustment. Names, start dates and hours only: no
+//                      pay rate, no notes off the employee record.
+//
+// WHO DOES WHAT
+//   Anyone linked:     request time off for themselves, cancel their own
+//                      request while it is still pending.
+//   Approvers only:    approve, deny, cancel an approved request, log time
+//                      off for someone else, adjust a balance, set a
+//                      starting balance. Approvers are a list of usernames in
+//                      the policy (Ryan and Megan). NOT "any admin": being a
+//                      CrewCore admin does not make somebody an approver, and
+//                      an empty list means nobody can approve at all.
+//   CrewCore admins:   edit the policy and the approver list (Settings).
+//
+// A request's note never goes into a notification. Notifications are visible
+// to everyone signed in, and "why I need Tuesday off" is nobody's business
+// but the approver's.
+//
+// ESM handler. Do NOT wrap the handler; call requireAuth inside it.
+
+import { requireAuth } from "../../lib/session.js";
+import { getUser } from "../../lib/users.js";
+import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
+import { listEmployees, getEmployee, getEmployeeByUsername, updateEmployee } from "../../lib/crewcore/store.js";
+import {
+  validateRequest, validateAdjustment, validateOpening, validatePolicy,
+  withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger, overBy,
+  requestActions, requestYear,
+} from "../../lib/crewcore/pto.js";
+import {
+  listRequests, getRequest, saveRequest,
+  listAdjustments, getAdjustment, saveAdjustment, deleteAdjustment,
+  getPolicyDoc, savePolicyDoc,
+} from "../../lib/crewcore/pto-store.js";
+import { nextNotificationId, saveNotification } from "../../lib/notifications/store.js";
+
+function parseBody(req) {
+  let b = req.body;
+  if (typeof b === "string") { try { b = JSON.parse(b); } catch (e) { b = {}; } }
+  return b && typeof b === "object" ? b : {};
+}
+
+/** The shop's calendar year, not the server's. The server runs on UTC. */
+function shopYear(now = new Date()) {
+  const y = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "numeric" }).format(now);
+  return parseInt(y, 10);
+}
+
+function parseYear(raw) {
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : shopYear();
+}
+
+function fmtDay(d) {
+  const [y, m, day] = String(d || "").split("-").map(Number);
+  if (!y) return String(d || "");
+  return new Date(Date.UTC(y, m - 1, day)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
+}
+
+function span(r) {
+  return r.start_date === r.end_date ? fmtDay(r.start_date) : `${fmtDay(r.start_date)} to ${fmtDay(r.end_date)}`;
+}
+
+/**
+ * Raise a notification. Fails soft, always: the request is already saved,
+ * and losing it because a nudge failed would be the wrong trade. Same shape
+ * lib/concontrol/notify.js writes.
+ */
+async function notify({ to, toName, title, detail }) {
+  const assignedTo = String(to || "").trim().toLowerCase();
+  if (!assignedTo) return;
+  try {
+    const id = await nextNotificationId();
+    const now = new Date().toISOString();
+    await saveNotification({
+      id,
+      title: String(title).slice(0, 200),
+      detail: String(detail || "").slice(0, 2000),
+      types: ["need"],
+      appIds: ["crewcore"],
+      assignedTo,
+      assignedToName: toName || assignedTo,
+      status: "open",
+      visibility: "team",
+      dueDate: null,
+      link: null,
+      createdBy: "crewcore",
+      createdByName: "CrewCore time off",
+      createdAt: now,
+      doneAt: null, doneBy: null, doneByName: null,
+      history: [{ at: now, by: "crewcore", byName: "CrewCore time off", what: "created" }],
+    });
+  } catch (e) {
+    console.error("[crewcore/timeoff] notification failed, the request was still saved:", e.message);
+  }
+}
+
+async function callerScope(sess) {
+  const user = sess.username ? await getUser(sess.username) : null;
+  const doc = await getPolicyDoc();
+  return {
+    user,
+    doc,
+    isAdmin: isCrewCoreAdmin({ superuser: user && user.superuser, roleName: user ? user.role : sess.role }),
+    isApprover: canApprove(sess.username, doc),
+    own: await getEmployeeByUsername(sess.username),
+  };
+}
+
+/** What a team row carries. Deliberately narrow: see the header. */
+function teamRow(e, balance) {
+  return {
+    id: e.id, name: e.name, department: e.department || "", status: e.status || "active",
+    start_date: e.start_date || "", username: e.username || null,
+    pto_opening: e.pto_opening || null,
+    balance,
+  };
+}
+
+function refuse(res, code, msg) {
+  return res.status(code).json({ error: msg });
+}
+
+export default async function handler(req, res) {
+  res.setHeader("Cache-Control", "no-store");
+  if (req.method === "OPTIONS") return res.status(200).end();
+
+  const sess = requireAuth(req, res);
+  if (!sess) return;
+
+  try {
+    const scope = await callerScope(sess);
+    const { doc, isAdmin, isApprover, own } = scope;
+    const teamView = isAdmin || isApprover;
+    const me = {
+      username: sess.username,
+      employee_id: own ? own.id : null,
+      is_admin: isAdmin,
+      is_approver: isApprover,
+    };
+
+    /* ---- GET ------------------------------------------------------------ */
+    if (req.method === "GET") {
+      const year = parseYear(req.query && req.query.year);
+      const policy = policyForYear(doc, year);
+      const approversSet = doc.approvers.length > 0;
+
+      if (teamView) {
+        const [employees, requests, adjustments] = await Promise.all([listEmployees(), listRequests(), listAdjustments()]);
+        const withActivity = new Set(requests.map((r) => r.employee_id));
+        const team = employees
+          .filter((e) => e.status !== "terminated" || withActivity.has(e.id))
+          .map((e) => teamRow(e, ptoBalance({
+            employee: e,
+            requests: requests.filter((r) => r.employee_id === e.id),
+            adjustments: adjustments.filter((a) => a.employee_id === e.id),
+            policyDoc: doc,
+          }, year)));
+        // Who could be picked as an approver: people with a login. Names and
+        // usernames only.
+        const accounts = employees.filter((e) => e.username && e.status !== "terminated")
+          .map((e) => ({ username: e.username, name: e.name }));
+        return res.status(200).json({
+          scope: "team", year, policy, policy_doc: isAdmin ? doc : undefined,
+          approvers: doc.approvers, approvers_set: approversSet, accounts,
+          team, requests, adjustments, me,
+        });
+      }
+
+      if (!own) return res.status(200).json({ scope: "self", linked: false, year, policy, me, approvers_set: approversSet });
+
+      const [allReq, allAdj] = await Promise.all([listRequests(), listAdjustments()]);
+      const requests = allReq.filter((r) => r.employee_id === own.id);
+      const adjustments = allAdj.filter((a) => a.employee_id === own.id);
+      const o = { employee: own, requests, adjustments, policyDoc: doc };
+      return res.status(200).json({
+        scope: "self", linked: true, year, policy, me, approvers_set: approversSet,
+        balance: ptoBalance(o, year),
+        ledger: ptoLedger({ ...o, throughYear: year }),
+        requests, adjustments,
+      });
+    }
+
+    /* ---- PATCH: the policy (Settings) ------------------------------------ */
+    if (req.method === "PATCH") {
+      if (!isAdmin) return refuse(res, 403, "Admin access required");
+      const body = parseBody(req);
+      const v = validatePolicy(body);
+      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
+      let next = Object.keys(v.policy).length
+        ? withPolicyVersion(doc, shopYear(), v.policy, sess.username)
+        : { ...doc, updated_at: new Date().toISOString(), updated_by: sess.username };
+      if (v.approvers) next = { ...next, approvers: v.approvers };
+      const saved = await savePolicyDoc(next);
+      return res.status(200).json({ ok: true, policy_doc: saved, policy: policyForYear(saved, shopYear()) });
+    }
+
+    /* ---- DELETE: an adjustment ------------------------------------------- */
+    if (req.method === "DELETE") {
+      if (!isApprover) return refuse(res, 403, "Only a time off approver can remove an adjustment");
+      const id = (req.query && req.query.adjustment) || parseBody(req).adjustment;
+      if (!id) return refuse(res, 400, "Missing adjustment id");
+      const existing = await getAdjustment(id);
+      if (!existing) return refuse(res, 404, "Adjustment not found");
+      await deleteAdjustment(id);
+      return res.status(200).json({ ok: true, deleted: id });
+    }
+
+    if (req.method !== "POST") {
+      res.setHeader("Allow", "GET, POST, PATCH, DELETE");
+      return refuse(res, 405, "Method not allowed");
+    }
+
+    /* ---- POST: everything else, by action -------------------------------- */
+    const body = parseBody(req);
+    const action = String(body.action || "request");
+    const now = new Date().toISOString();
+
+    if (action === "request") {
+      // For yourself, unless you are an approver logging it for somebody.
+      let emp = own;
+      if (body.employee_id && (!own || body.employee_id !== own.id)) {
+        if (!isApprover) return refuse(res, 403, "Only a time off approver can log time off for someone else");
+        emp = await getEmployee(body.employee_id);
+        if (!emp) return refuse(res, 404, "Employee not found");
+      }
+      if (!emp) return refuse(res, 400, "Your login isn't linked to an employee record yet. Ask an admin to link it.");
+
+      const v = validateRequest(body);
+      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
+
+      // An approver may record it as already approved (a sick call taken
+      // over the phone). Nobody else can skip the queue.
+      const preApproved = isApprover && body.approved === true;
+      const rec = {
+        ...v.record,
+        employee_id: emp.id,
+        employee_name: emp.name,
+        status: preApproved ? "approved" : "pending",
+        requested_by: sess.username,
+        created_at: now,
+        updated_at: now,
+        decided_by: preApproved ? sess.username : null,
+        decided_at: preApproved ? now : null,
+        decision_note: "",
+        history: [{ at: now, by: sess.username, what: preApproved ? "logged as approved" : "requested" }],
+      };
+
+      // Warn, never block: an approver decides whether going over is fine.
+      const [allReq, allAdj] = await Promise.all([listRequests(), listAdjustments()]);
+      const bal = ptoBalance({
+        employee: emp,
+        requests: allReq.filter((r) => r.employee_id === emp.id),
+        adjustments: allAdj.filter((a) => a.employee_id === emp.id),
+        policyDoc: doc,
+      }, requestYear(rec));
+      const over = overBy(bal, rec.hours);
+
+      const saved = await saveRequest(rec);
+
+      if (saved.status === "pending") {
+        const detail = `${saved.employee_name}: ${span(saved)}, ${saved.hours} hours.` +
+          (over ? ` That is ${over} hours more than they have left.` : "");
+        for (const a of doc.approvers) {
+          if (a === String(sess.username || "").toLowerCase()) continue;
+          const acct = await getEmployeeByUsername(a);
+          await notify({ to: a, toName: acct ? acct.name : a, title: `Time off request from ${saved.employee_name}`, detail });
+        }
+      }
+      return res.status(201).json({ ok: true, request: saved, over_by: over, approvers_set: doc.approvers.length > 0 });
+    }
+
+    if (action === "decide" || action === "cancel") {
+      const existing = await getRequest(body.id);
+      if (!existing) return refuse(res, 404, "Request not found");
+      const isOwner = !!own && existing.employee_id === own.id;
+      const can = requestActions(existing, { isApprover, isOwner });
+
+      let status;
+      let what;
+      if (action === "decide") {
+        const d = String(body.decision || "");
+        if (d !== "approve" && d !== "deny") return refuse(res, 400, "Decision must be approve or deny");
+        if (!(d === "approve" ? can.approve : can.deny)) {
+          return refuse(res, isApprover ? 409 : 403, isApprover ? `This request is already ${existing.status}` : "Only a time off approver can do that");
+        }
+        status = d === "approve" ? "approved" : "denied";
+        what = status;
+      } else {
+        if (!can.cancel) {
+          return refuse(res, 403, existing.status === "approved"
+            ? "This request is already approved. Ask an approver to cancel it."
+            : `This request is already ${existing.status}`);
+        }
+        status = "cancelled";
+        what = "cancelled";
+      }
+
+      const note = String(body.note || "").trim().slice(0, 500);
+      const updated = {
+        ...existing,
+        status,
+        updated_at: now,
+        decided_by: action === "decide" ? sess.username : existing.decided_by,
+        decided_at: action === "decide" ? now : existing.decided_at,
+        decision_note: action === "decide" ? note : existing.decision_note,
+        history: (existing.history || []).concat([{ at: now, by: sess.username, what, note: note || undefined }]),
+      };
+      const saved = await saveRequest(updated);
+
+      // Tell the person whose time off it is, unless they did it themselves.
+      if (!isOwner) {
+        const emp = await getEmployee(saved.employee_id);
+        if (emp && emp.username) {
+          await notify({
+            to: emp.username, toName: emp.name,
+            title: `Your time off for ${span(saved)} was ${status}`,
+            detail: `${saved.hours} hours.` + (action === "decide" && note ? ` Note: ${note}` : ""),
+          });
+        }
+      }
+      return res.status(200).json({ ok: true, request: saved });
+    }
+
+    if (action === "adjust") {
+      if (!isApprover) return refuse(res, 403, "Only a time off approver can adjust a balance");
+      const emp = await getEmployee(body.employee_id);
+      if (!emp) return refuse(res, 404, "Employee not found");
+      const v = validateAdjustment(body);
+      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
+      const saved = await saveAdjustment({ ...v.record, employee_id: emp.id, created_by: sess.username, created_at: now });
+      return res.status(201).json({ ok: true, adjustment: saved });
+    }
+
+    if (action === "opening") {
+      if (!isApprover) return refuse(res, 403, "Only a time off approver can set a starting balance");
+      const emp = await getEmployee(body.employee_id);
+      if (!emp) return refuse(res, 404, "Employee not found");
+      const v = validateOpening(body);
+      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
+      const patch = { pto_opening: v.record ? { ...v.record, set_by: sess.username, set_at: now } : null };
+      const saved = await updateEmployee(emp.id, patch);
+      return res.status(200).json({ ok: true, pto_opening: saved.pto_opening });
+    }
+
+    return refuse(res, 400, "Unknown action");
+  } catch (e) {
+    console.error("crewcore/timeoff route error:", e);
+    return res.status(500).json({ error: e.message });
+  }
+}
