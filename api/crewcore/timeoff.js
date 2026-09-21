@@ -41,17 +41,17 @@ import { getUser } from "../../lib/users.js";
 import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { listEmployees, getEmployee, getEmployeeByUsername } from "../../lib/crewcore/store.js";
 import {
-  validateRequest, validateAdjustment, validatePolicy,
-  withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger, overBy,
-  requestActions, requestYear, requestSummary,
+  validateAdjustment, validatePolicy,
+  withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger,
+  requestActions, requestYear,
 } from "../../lib/crewcore/pto.js";
 import {
   listRequests, getRequest, saveRequest,
   listAdjustments, getAdjustment, saveAdjustment, deleteAdjustment,
   getPolicyDoc, savePolicyDoc,
 } from "../../lib/crewcore/pto-store.js";
-import { nextNotificationId, saveNotification } from "../../lib/notifications/store.js";
 import { sendDecisionEmail, DEFAULT_TIMEOFF_FROM } from "../../lib/crewcore/pto-email.js";
+import { createTimeoffRequest, notifyTimeoff, shopYear, span } from "../../lib/crewcore/pto-request.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -59,63 +59,9 @@ function parseBody(req) {
   return b && typeof b === "object" ? b : {};
 }
 
-/** The shop's calendar year, not the server's. The server runs on UTC. */
-function shopYear(now = new Date()) {
-  const y = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "numeric" }).format(now);
-  return parseInt(y, 10);
-}
-
 function parseYear(raw) {
   const n = parseInt(raw, 10);
   return Number.isFinite(n) && n >= 2000 && n <= 2100 ? n : shopYear();
-}
-
-function fmtDay(d) {
-  const [y, m, day] = String(d || "").split("-").map(Number);
-  if (!y) return String(d || "");
-  return new Date(Date.UTC(y, m - 1, day)).toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
-}
-
-function span(r) {
-  const days = r.start_date === r.end_date ? fmtDay(r.start_date) : `${fmtDay(r.start_date)} to ${fmtDay(r.end_date)}`;
-  // Partial days say what kind ("Leaving 3:00 PM"); a run of whole days is
-  // already said by the dates.
-  const kind = r.type && r.type !== "all_days" ? requestSummary(r) : "";
-  return kind ? `${days}, ${kind}` : days;
-}
-
-/**
- * Raise a notification. Fails soft, always: the request is already saved,
- * and losing it because a nudge failed would be the wrong trade. Same shape
- * lib/concontrol/notify.js writes.
- */
-async function notify({ to, toName, title, detail }) {
-  const assignedTo = String(to || "").trim().toLowerCase();
-  if (!assignedTo) return;
-  try {
-    const id = await nextNotificationId();
-    const now = new Date().toISOString();
-    await saveNotification({
-      id,
-      title: String(title).slice(0, 200),
-      detail: String(detail || "").slice(0, 2000),
-      types: ["need"],
-      appIds: ["crewcore"],
-      assignedTo,
-      assignedToName: toName || assignedTo,
-      status: "open",
-      visibility: "team",
-      dueDate: null,
-      link: null,
-      createdBy: "crewcore",
-      createdByName: "CrewCore time off",
-      createdAt: now,
-      doneAt: null, doneBy: null, doneByName: null,
-      history: [{ at: now, by: "crewcore", byName: "CrewCore time off", what: "created" }],
-    });
-  } catch (e) {
-    console.error("[crewcore/timeoff] notification failed, the request was still saved:", e.message);
-  }
 }
 
 /**
@@ -283,61 +229,20 @@ export default async function handler(req, res) {
       }
       if (!emp) return refuse(res, 400, "Your login isn't linked to an employee record yet. Ask an admin to link it.");
 
-      // Hours are worked out from the type and times. Only an approver may
-      // override them or skip the type; everyone else gets the computed
-      // number whatever the request body says.
-      const reqYear = parseInt(String(body.start_date || "").slice(0, 4), 10) || shopYear();
-      const v = validateRequest(body, policyForYear(doc, reqYear), { allowHours: isApprover });
-      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
-
-      // An approver may record it as already approved (a sick call taken
-      // over the phone). Nobody else can skip the queue.
-      // Exempt people are not asked: their time off is recorded, approved,
-      // and shown on "who's out", with no balance behind it.
-      const exempt = emp.pto_exempt === true;
-      const preApproved = exempt || (isApprover && body.approved === true);
-      const rec = {
-        ...v.record,
-        employee_id: emp.id,
-        employee_name: emp.name,
-        status: preApproved ? "approved" : "pending",
-        requested_by: sess.username,
-        created_at: now,
-        updated_at: now,
-        decided_by: preApproved ? (exempt && !isApprover ? "exempt" : sess.username) : null,
-        decided_at: preApproved ? now : null,
-        decision_note: "",
-        history: [{ at: now, by: sess.username, what: exempt ? "logged (PTO exempt)" : preApproved ? "logged as approved" : "requested" }],
-      };
-
-      // Warn, never block: an approver decides whether going over is fine.
-      const [allReq, allAdj] = await Promise.all([listRequests(), listAdjustments()]);
-      const bal = ptoBalance({
-        employee: emp,
-        requests: allReq.filter((r) => r.employee_id === emp.id),
-        adjustments: allAdj.filter((a) => a.employee_id === emp.id),
-        policyDoc: doc,
-      }, requestYear(rec));
-      const over = exempt ? 0 : overBy(bal, rec.hours);
-
-      let saved = await saveRequest(rec);
+      // The rules for a new request live in lib/crewcore/pto-request.js,
+      // shared with the kiosk at /clock so the two doors cannot drift apart.
+      const made = await createTimeoffRequest({
+        emp, body, doc, by: sess.username, isApprover, source: "app",
+      });
+      if (!made.ok) return res.status(400).json({ error: "Validation failed", details: made.errors });
+      let saved = made.request;
 
       // Logged as approved for somebody else: they hear about it by email,
       // since nobody asked them anything.
       if (saved.status === "approved" && (!own || emp.id !== own.id)) {
         saved = await emailEmployee({ request: saved, event: "logged", note: "", doc, sess, scope });
       }
-
-      if (saved.status === "pending") {
-        const detail = `${saved.employee_name}: ${span(saved)}, ${saved.hours} hours.` +
-          (over ? ` That is ${over} hours more than they have left.` : "");
-        for (const a of doc.approvers) {
-          if (a === String(sess.username || "").toLowerCase()) continue;
-          const acct = await getEmployeeByUsername(a);
-          await notify({ to: a, toName: acct ? acct.name : a, title: `Time off request from ${saved.employee_name}`, detail });
-        }
-      }
-      return res.status(201).json({ ok: true, request: saved, over_by: over, approvers_set: doc.approvers.length > 0 });
+      return res.status(201).json({ ok: true, request: saved, over_by: made.over_by, approvers_set: doc.approvers.length > 0 });
     }
 
     if (action === "decide" || action === "cancel") {
@@ -383,7 +288,7 @@ export default async function handler(req, res) {
         saved = await emailEmployee({ request: saved, event: status, note: action === "decide" ? note : "", doc, sess, scope });
         const emp = await getEmployee(saved.employee_id);
         if (emp && emp.username) {
-          await notify({
+          await notifyTimeoff({
             to: emp.username, toName: emp.name,
             title: `Your time off for ${span(saved)} was ${status}`,
             detail: `${saved.hours} hours.` + (action === "decide" && note ? ` Note: ${note}` : ""),

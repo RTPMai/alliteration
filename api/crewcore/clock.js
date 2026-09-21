@@ -15,6 +15,21 @@
 //                       is on the clock and since when.
 //   POST action=in|out -> requires the passcode. Opens or closes a shift.
 //
+//   POST action=timeoff_info    -> requires the passcode. That ONE person's
+//                       PTO hours left (or that they are exempt) and what the
+//                       request form needs to work out hours.
+//   POST action=timeoff_request -> requires the passcode. Sends a time off
+//                       request into the same queue as the Time Off tab,
+//                       through the same code (lib/crewcore/pto-request.js).
+//
+// TIME OFF AT THE KIOSK, Sep 21 2026 (Ryan). Request only: no history, no
+// cancelling, no seeing anyone else; that stays behind the login. Because
+// salaried staff can request time off too, the name list now includes anyone
+// with a passcode, with `clock: false` for people who do not punch. The
+// screen hides Clock In and Out for them, and the server still refuses a
+// punch from them either way. Hours are always worked out from the type and
+// times here; nobody at the kiosk can type their own number.
+//
 // There is no read of anyone else's hours, no write to any other field, and
 // no way to reach the rest of CrewCore from here. Everything on the back
 // side goes through api/crewcore/timecards.js, which requires a session.
@@ -38,6 +53,9 @@ import { verifyPassword } from "../../lib/users.js";
 import { listEmployees, getEmployee, getSettings } from "../../lib/crewcore/store.js";
 import { localParts, SHOP_TIMEZONE } from "../../lib/crewcore/timeclock.js";
 import { clockIn, clockOut, getOpenShift } from "../../lib/crewcore/timeclock-store.js";
+import { policyForYear, REQUEST_TYPES } from "../../lib/crewcore/pto.js";
+import { getPolicyDoc } from "../../lib/crewcore/pto-store.js";
+import { createTimeoffRequest, balanceFor, shopYear } from "../../lib/crewcore/pto-request.js";
 
 // Generous on purpose. A shift change puts a dozen people through this in
 // two minutes, and a whole shop punching out at once should never trip it.
@@ -109,8 +127,8 @@ export default async function handler(req, res) {
       }
       const all = await listEmployees();
       const roster = all
-        .filter((e) => e.status === "active" && e.clock_enabled !== false && e.clock_pin_hash)
-        .map((e) => ({ id: e.id, name: e.name, department: e.department || "" }));
+        .filter((e) => e.status === "active" && e.clock_pin_hash)
+        .map((e) => ({ id: e.id, name: e.name, department: e.department || "", clock: e.clock_enabled !== false }));
       return res.status(200).json({ roster, count: roster.length });
     }
 
@@ -132,7 +150,7 @@ export default async function handler(req, res) {
     if (!employeeId || !pin) {
       return res.status(400).json({ error: "Pick your name and enter your passcode." });
     }
-    if (!["in", "out", "status"].includes(action)) {
+    if (!["in", "out", "status", "timeoff_info", "timeoff_request"].includes(action)) {
       return res.status(400).json({ error: "Unknown action" });
     }
 
@@ -150,7 +168,9 @@ export default async function handler(req, res) {
     // confirm which codes are close.
     const deny = () => res.status(401).json({ error: "That passcode doesn't match. Try again." });
 
-    if (!emp || emp.status !== "active" || emp.clock_enabled === false || !emp.clock_pin_hash) {
+    const isTimeoff = action === "timeoff_info" || action === "timeoff_request";
+    // Time off does not need the person to punch; clocking does.
+    if (!emp || emp.status !== "active" || !emp.clock_pin_hash || (!isTimeoff && emp.clock_enabled === false)) {
       return deny();
     }
     const good = await verifyPassword(pin, emp.clock_pin_hash);
@@ -159,6 +179,55 @@ export default async function handler(req, res) {
     // Right code. Clear the counter so a couple of fat-fingered tries before
     // the correct one do not count against them later in the window.
     await resetKey(attemptKey);
+
+    /* ---- time off ------------------------------------------------------ */
+
+    if (isTimeoff) {
+      const doc = await getPolicyDoc();
+      const year = shopYear();
+      const exempt = emp.pto_exempt === true;
+
+      if (action === "timeoff_info") {
+        const bal = exempt ? null : await balanceFor(emp, doc, year);
+        const policy = policyForYear(doc, year);
+        return res.status(200).json({
+          ok: true,
+          name: emp.name,
+          exempt,
+          // Hours only. Nothing else off the record, and no request history.
+          left: bal ? bal.balance : null,
+          pending: bal ? bal.pending : null,
+          year,
+          policy: {
+            hours_per_day: policy.hours_per_day,
+            shift_start: policy.shift_start, shift_end: policy.shift_end,
+            lunch_start: policy.lunch_start, lunch_end: policy.lunch_end,
+          },
+          types: REQUEST_TYPES,
+          approvers_set: doc.approvers.length > 0,
+        });
+      }
+
+      // A passcode is not an approver, and never overrides hours.
+      const made = await createTimeoffRequest({
+        emp, body: { ...(body.request || {}), hours: undefined, approved: undefined }, doc,
+        by: emp.username || ("kiosk:" + emp.id), isApprover: false, source: "kiosk",
+      });
+      if (!made.ok) return res.status(400).json({ error: made.errors.join(". ") });
+      const r = made.request;
+      return res.status(201).json({
+        ok: true,
+        action: "timeoff",
+        name: emp.name,
+        status: r.status,
+        hours: r.hours,
+        start_date: r.start_date,
+        end_date: r.end_date,
+        type: r.type,
+        over_by: made.over_by,
+        approvers_set: doc.approvers.length > 0,
+      });
+    }
 
     const openBefore = await getOpenShift(employeeId);
 

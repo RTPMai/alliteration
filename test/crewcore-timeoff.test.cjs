@@ -43,6 +43,7 @@ global.fetch = async (url, opts) => {
       if (op === 'INCR') { const n = Number(kv.get(key) || 0) + 1; kv.set(key, String(n)); return { result: n }; }
       if (op === 'SET') { kv.set(key, val); return { result: 'OK' }; }
       if (op === 'GET') return { result: kv.has(key) ? kv.get(key) : null };
+      if (op === 'DEL') { kv.delete(key); return { result: 1 }; }
       return { result: null };
     });
     return { ok: true, status: 200, json: async () => out };
@@ -139,6 +140,7 @@ function notesFor(user) {
   const pto = await import(path.join(ROOT, 'lib/crewcore/pto.js'));
   const mail = await import(path.join(ROOT, 'lib/crewcore/pto-email.js'));
   const route = (await import(path.join(ROOT, 'api/crewcore/timeoff.js'))).default;
+  const kiosk = (await import(path.join(ROOT, 'api/crewcore/clock.js'))).default;
   const users = await import(path.join(ROOT, 'lib/users.js'));
   const reg = await import(path.join(ROOT, 'js/registry.js'));
 
@@ -690,6 +692,93 @@ function notesFor(user) {
     t.assert(/Leaving 3:00 PM/.test(m.text));
     t.assert(/2 hours/.test(m.text));
     t.assert(/Megan approved/.test(m.html));
+  });
+
+  /* ==== 4d. The kiosk at /clock (no login) ============================== */
+
+  async function kioskSeed() {
+    seed();
+    const h = await users.hashPassword('4821');
+    const salaried = await users.hashPassword('7355');
+    const s1 = JSON.parse(kv.get(CC + ':employee:EMP-1'));
+    kv.set(CC + ':employee:EMP-1', JSON.stringify({ ...s1, clock_pin_hash: h }));
+    const s2 = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    kv.set(CC + ':employee:EMP-2', JSON.stringify({ ...s2, clock_enabled: false, clock_pin_hash: salaried }));
+  }
+  async function kcall(body, method = 'POST') {
+    const res = fakeRes();
+    await kiosk({ method, query: {}, body, headers: { 'x-forwarded-for': '10.0.0.' + Math.floor(Math.random() * 200) } }, res);
+    return res;
+  }
+
+  await check('the kiosk name list includes salaried people with a passcode, marked as not punching', async () => {
+    await kioskSeed();
+    const r = await kcall(null, 'GET');
+    const by = Object.fromEntries(r.body.roster.map((e) => [e.id, e]));
+    t.equal(by['EMP-1'].clock, true);
+    t.equal(by['EMP-2'].clock, false, 'salaried: time off only');
+    t.equal(by['EMP-3'], undefined, 'no passcode, not listed');
+    t.equal(Object.keys(by['EMP-1']).sort().join(), 'clock,department,id,name', 'nothing else off the record');
+  });
+
+  await check('time off info needs the right passcode and shows only hours', async () => {
+    await kioskSeed();
+    const bad = await kcall({ employee_id: 'EMP-1', pin: '1111', action: 'timeoff_info' });
+    t.equal(bad.statusCode, 401);
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_info' });
+    t.equal(r.statusCode, 200, JSON.stringify(r.body));
+    t.equal(r.body.left, 120);
+    t.equal(r.body.types.length, 5);
+    t.equal(r.body.hourly_rate, undefined);
+    t.equal(r.body.requests, undefined, 'no history at the kiosk');
+  });
+
+  await check('a kiosk request lands pending, hours worked out, and the approvers hear about it', async () => {
+    await kioskSeed();
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_request',
+      request: { type: 'leave_early', start_date: MON, leave_at: '15:00', hours: 0.25, approved: true, note: 'kid thing' } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.status, 'pending', 'a passcode cannot pre-approve');
+    t.equal(r.body.hours, 2, 'a passcode cannot set its own hours');
+    const stored = JSON.parse(kv.get(CC + ':pto_request:' + 'PTO-00001'));
+    t.equal(stored.source, 'kiosk');
+    t.equal(stored.requested_by, 'sasha');
+    const n = notesFor('ryan')[0];
+    t.assert(/kiosk/.test(n.detail), n.detail);
+    t.assert(!/kid thing/.test(n.title + n.detail), 'the reason stays out');
+  });
+
+  await check('a salaried person can request time off at the kiosk but still cannot punch', async () => {
+    await kioskSeed();
+    const to = await kcall({ employee_id: 'EMP-2', pin: '7355', action: 'timeoff_request', request: DAYS(1) });
+    t.equal(to.statusCode, 201, JSON.stringify(to.body));
+    const punch = await kcall({ employee_id: 'EMP-2', pin: '7355', action: 'in' });
+    t.equal(punch.statusCode, 401);
+  });
+
+  await check('an exempt person logging at the kiosk is approved on the spot', async () => {
+    await kioskSeed();
+    const s1 = JSON.parse(kv.get(CC + ':employee:EMP-1'));
+    kv.set(CC + ':employee:EMP-1', JSON.stringify({ ...s1, pto_exempt: true }));
+    const info = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_info' });
+    t.equal(info.body.exempt, true);
+    t.equal(info.body.left, null);
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_request', request: DAYS(1) });
+    t.equal(r.body.status, 'approved');
+  });
+
+  await check('a bad kiosk request says what is wrong in plain words', async () => {
+    await kioskSeed();
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_request', request: { type: 'half_day', start_date: MON } });
+    t.equal(r.statusCode, 400);
+    t.assert(/morning or afternoon/.test(r.body.error), r.body.error);
+  });
+
+  await check('five wrong passcodes lock that name out of time off too', async () => {
+    await kioskSeed();
+    for (let i = 0; i < 5; i++) await kcall({ employee_id: 'EMP-1', pin: '0000', action: 'timeoff_info' });
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_info' });
+    t.equal(r.statusCode, 429);
   });
 
   /* ==== 5. Who gets the tab ============================================== */

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0,maximum-scale=1.0,user-scalable=no">
-<title>Time Clock — P&amp;M Apparel</title>
+<title>Time Clock: P&amp;M Apparel</title>
 <link rel="icon" href="/favicon.ico" sizes="any">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -28,6 +28,12 @@
 
   Optional kiosk token: if one is set in CrewCore Settings, this page needs
   ?k=<token> on the URL. Bookmark the full link on the tablet.
+
+  TIME OFF, Sep 21 2026 (Ryan): after the passcode, a Time off button shows
+  hours left and the same request form as CrewCore's Time Off tab, with the
+  hours worked out by the same code (lib/crewcore/pto.js, loaded below).
+  Request only; history and cancelling stay behind the login. People who
+  don't punch (salaried) only get the Time off button.
 -->
 <style>
   :root {
@@ -125,6 +131,31 @@
   }
   .done .countdown { margin-top: 24px; font-size: 12.5px; color: var(--muted); }
 
+  .act.to { background: var(--ink); grid-column: 1 / -1; }
+  .actions.only-to .act.to { padding: 24px 10px; }
+  .to-wrap { max-width: 560px; margin: 0 auto; }
+  .to-left { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 16px; }
+  .to-left .n { font-size: 30px; font-weight: 800; letter-spacing: -.02em; }
+  .to-left .l { font-size: 13px; color: var(--muted); font-weight: 600; }
+  .to-note { font-size: 12.5px; color: var(--muted); margin: 0 0 14px; line-height: 1.5; }
+  .field { margin-bottom: 14px; }
+  .field > label { display: block; font-size: 13px; font-weight: 700; margin-bottom: 6px; }
+  .field .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .choices { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .choice {
+    background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px 12px;
+    font-size: 15px; font-weight: 700; font-family: inherit; color: var(--ink); cursor: pointer; text-align: left;
+  }
+  .choice.on { border-color: var(--ink); background: var(--line-soft); box-shadow: inset 0 0 0 1px var(--ink); }
+  .to-input {
+    width: 100%; border: 1px solid var(--line); border-radius: 10px; padding: 13px 14px;
+    font-size: 16px; font-family: inherit; background: var(--card); color: var(--ink);
+    -webkit-user-select: text; user-select: text;
+  }
+  textarea.to-input { min-height: 70px; resize: vertical; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .to-hours { background: var(--line-soft); border-radius: 10px; padding: 12px 14px; font-size: 15px; margin-bottom: 14px; }
+  .done.to .ring { background: var(--ink); }
   .center-note { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 14.5px; line-height: 1.6; }
   .spin { text-align: center; padding: 60px 20px; color: var(--muted); font-size: 14px; }
   .search {
@@ -288,10 +319,13 @@
           '<button class="key" data-k="0">0</button>' +
           '<button class="key util" data-k="back">Delete</button>' +
         '</div>' +
-        '<div class="actions">' +
-          '<button class="act in" id="btnIn">Clock In</button>' +
-          '<button class="act out" id="btnOut">Clock Out</button>' +
-        '</div>' +
+        (picked.clock === false
+          ? '<div class="actions only-to"><button class="act to" id="btnTo">Time off</button></div>'
+          : '<div class="actions">' +
+              '<button class="act in" id="btnIn">Clock In</button>' +
+              '<button class="act out" id="btnOut">Clock Out</button>' +
+              '<button class="act to" id="btnTo">Time off</button>' +
+            '</div>') +
         '<button class="back" id="btnBack">Not you? Go back</button>' +
       '</div>';
 
@@ -305,8 +339,10 @@
       };
     });
 
-    document.getElementById('btnIn').onclick = function () { punch('in'); };
-    document.getElementById('btnOut').onclick = function () { punch('out'); };
+    var bIn = document.getElementById('btnIn'), bOut = document.getElementById('btnOut');
+    if (bIn) bIn.onclick = function () { punch('in'); };
+    if (bOut) bOut.onclick = function () { punch('out'); };
+    document.getElementById('btnTo').onclick = function () { openTimeoff(); };
     document.getElementById('btnBack').onclick = function () { showNames(); };
 
     drawDots();
@@ -326,8 +362,10 @@
     }
     el.innerHTML = html;
     var ok = pin.length >= 4 && !busy;
-    document.getElementById('btnIn').disabled = !ok;
-    document.getElementById('btnOut').disabled = !ok;
+    ['btnIn', 'btnOut', 'btnTo'].forEach(function (id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = !ok;
+    });
   }
 
   /* ---- the punch ---- */
@@ -359,6 +397,187 @@
       pin = '';
       showPad('Can\'t reach the time clock. Check wifi and try again.', 'err');
     });
+  }
+
+  /* ---- time off ----
+   *
+   * The passcode is checked again on every call; nothing here is trusted
+   * from the last screen. The hours come from the same function CrewCore's
+   * Time Off tab and the server use. If that file can't load, the form still
+   * works and the server works the hours out on its own.
+   */
+
+  var pto = null;
+  import('/lib/crewcore/pto.js').then(function (m) { pto = m; }).catch(function () { pto = null; });
+
+  var TO_IDLE_MS = 180000;
+
+  function toIdle() {
+    if (resetTimer) clearTimeout(resetTimer);
+    resetTimer = setTimeout(function () { showNames(); }, TO_IDLE_MS);
+  }
+
+  function hrsText(n) {
+    var v = Math.round((Number(n) || 0) * 100) / 100;
+    return v + (v === 1 ? ' hr' : ' hrs');
+  }
+
+  function openTimeoff() {
+    if (busy || pin.length < 4) return;
+    busy = true;
+    clearTimers();
+    var btn = document.getElementById('btnTo');
+    if (btn) btn.textContent = 'Checking...';
+    post({ employee_id: picked.id, pin: pin, action: 'timeoff_info' }).then(function (res) {
+      busy = false;
+      if (res.status === 200 && res.body.ok) { showTimeoff(res.body); return; }
+      pin = '';
+      showPad(res.body.error || 'That did not work. Try again.', 'err');
+    }).catch(function () {
+      busy = false; pin = '';
+      showPad('Can\'t reach the time clock. Check wifi and try again.', 'err');
+    });
+  }
+
+  function showTimeoff(info, message) {
+    var state = { type: 'all_days', half: '' };
+    var types = info.types || [];
+    screen.innerHTML =
+      '<div class="to-wrap">' +
+        '<div class="who">' + esc(info.name) + '</div>' +
+        '<div class="who-sub">Time off request</div>' +
+        (message ? '<div class="msg err">' + esc(message) + '</div>' : '') +
+        (info.exempt
+          ? '<div class="to-left"><div class="l">You\'re PTO exempt. This is logged and approved right away.</div></div>'
+          : '<div class="to-left"><div class="n">' + hrsText(info.left) + '</div>' +
+              '<div class="l">of PTO left for ' + esc(info.year) + (info.pending ? ', ' + hrsText(info.pending) + ' waiting on approval' : '') + '</div></div>') +
+        '<p class="to-note">All leave is subject to availability. Leave is not guaranteed until confirmed by a supervisor.</p>' +
+        '<div class="field"><label>Type of request</label><div class="choices" id="toTypes">' +
+          types.map(function (t) {
+            return '<button type="button" class="choice' + (t.value === 'all_days' ? ' on' : '') + '" data-type="' + esc(t.value) + '">' + esc(t.label) + '</button>';
+          }).join('') +
+        '</div></div>' +
+        '<div class="two" data-for="all_days">' +
+          '<div class="field"><label>Beginning date</label><input class="to-input" type="date" id="tStart"></div>' +
+          '<div class="field"><label>Return to work date</label><input class="to-input" type="date" id="tReturn">' +
+            '<div class="hint">The day you\'ll be BACK at work.</div></div>' +
+        '</div>' +
+        '<div class="field" data-for="half_day arrive_late leave_early appointment"><label>Date</label><input class="to-input" type="date" id="tDate"></div>' +
+        '<div class="field" data-for="half_day"><label>Time off</label><div class="choices" id="toHalf">' +
+          '<button type="button" class="choice" data-half="morning">Morning</button>' +
+          '<button type="button" class="choice" data-half="afternoon">Afternoon</button>' +
+        '</div></div>' +
+        '<div class="field" data-for="arrive_late"><label>Time arriving</label><input class="to-input" type="time" id="tArrive"></div>' +
+        '<div class="two" data-for="leave_early appointment">' +
+          '<div class="field"><label>Time leaving</label><input class="to-input" type="time" id="tLeave"></div>' +
+          '<div class="field" data-for="appointment"><label>Time returning</label><input class="to-input" type="time" id="tBack"></div>' +
+        '</div>' +
+        '<div class="field"><label>Reason (only Ryan and Megan see this)</label><textarea class="to-input" id="tNote" maxlength="500"></textarea></div>' +
+        '<div class="to-hours" id="tHours"></div>' +
+        '<div class="actions"><button class="act to" id="tSend">' + (info.exempt ? 'Log it' : 'Send request') + '</button></div>' +
+        '<button class="back" id="tBackBtn">Never mind</button>' +
+      '</div>';
+
+    function $(id) { return document.getElementById(id); }
+
+    function collect() {
+      var r = { type: state.type, note: $('tNote').value };
+      if (state.type === 'all_days') { r.start_date = $('tStart').value; r.return_date = $('tReturn').value; }
+      else r.start_date = $('tDate').value;
+      if (state.type === 'half_day') r.half = state.half;
+      if (state.type === 'arrive_late') r.arrive_at = $('tArrive').value;
+      if (state.type === 'leave_early' || state.type === 'appointment') r.leave_at = $('tLeave').value;
+      if (state.type === 'appointment') r.return_at = $('tBack').value;
+      return r;
+    }
+
+    function refresh() {
+      toIdle();
+      Array.prototype.forEach.call(screen.querySelectorAll('[data-for]'), function (el) {
+        el.hidden = el.getAttribute('data-for').split(' ').indexOf(state.type) === -1;
+      });
+      var h = pto ? pto.hoursForRequest(collect(), info.policy) : null;
+      var box = $('tHours');
+      if (h == null) {
+        box.textContent = pto ? 'Fill in the ' + (state.type === 'all_days' ? 'dates' : 'date and time') + ' to see the hours.' : 'Hours are worked out when you send it.';
+      } else {
+        var over = !info.exempt && info.left != null ? Math.max(0, h - (info.left - (info.pending || 0))) : 0;
+        box.innerHTML = '<strong>' + hrsText(h) + '</strong> of PTO' +
+          (over ? '<div class="hint" style="color:var(--amber);font-weight:700;margin-top:4px">That\'s ' + hrsText(over) + ' more than you have left. You can still send it.</div>' : '');
+      }
+    }
+
+    Array.prototype.forEach.call(screen.querySelectorAll('[data-type]'), function (b) {
+      b.onclick = function () {
+        state.type = b.getAttribute('data-type');
+        Array.prototype.forEach.call(screen.querySelectorAll('[data-type]'), function (x) { x.classList.toggle('on', x === b); });
+        refresh();
+      };
+    });
+    Array.prototype.forEach.call(screen.querySelectorAll('[data-half]'), function (b) {
+      b.onclick = function () {
+        state.half = b.getAttribute('data-half');
+        Array.prototype.forEach.call(screen.querySelectorAll('[data-half]'), function (x) { x.classList.toggle('on', x === b); });
+        refresh();
+      };
+    });
+    Array.prototype.forEach.call(screen.querySelectorAll('input, textarea'), function (el) {
+      el.addEventListener('input', refresh);
+      el.addEventListener('change', refresh);
+    });
+    $('tBackBtn').onclick = function () { showNames(); };
+    $('tSend').onclick = function () {
+      if (busy) return;
+      busy = true;
+      var btn = $('tSend');
+      btn.textContent = 'Sending...';
+      btn.disabled = true;
+      post({ employee_id: picked.id, pin: pin, action: 'timeoff_request', request: collect() }).then(function (res) {
+        busy = false;
+        if (res.status === 201 && res.body.ok) { showTimeoffDone(res.body); return; }
+        btn.textContent = info.exempt ? 'Log it' : 'Send request';
+        btn.disabled = false;
+        var m = res.body.error || 'That did not work. Try again.';
+        var top = screen.querySelector('.who-sub');
+        var old = screen.querySelector('.msg.err');
+        if (old) old.remove();
+        top.insertAdjacentHTML('afterend', '<div class="msg err">' + esc(m) + '</div>');
+        window.scrollTo(0, 0);
+      }).catch(function () {
+        busy = false;
+        btn.textContent = info.exempt ? 'Log it' : 'Send request';
+        btn.disabled = false;
+      });
+    };
+    refresh();
+  }
+
+  function showTimeoffDone(data) {
+    var pending = data.status === 'pending';
+    var days = data.start_date === data.end_date ? data.start_date : data.start_date + ' to ' + data.end_date;
+    screen.innerHTML =
+      '<div class="done to">' +
+        '<div class="ring">&#10003;</div>' +
+        '<h2>' + esc(data.name) + '</h2>' +
+        '<div class="detail">' + (pending ? 'Time off requested' : 'Time off logged') + '</div>' +
+        '<div class="big-time">' + esc(hrsText(data.hours)) + '</div>' +
+        '<div class="detail">' + esc(days) + '</div>' +
+        (pending
+          ? '<div class="heads-up">' + (data.approvers_set
+              ? 'Ryan or Megan will approve or deny it. You\'ll get an email either way.'
+              : 'Nobody is set up to approve requests yet, so this will wait. Let a manager know.') + '</div>'
+          : '') +
+        '<div class="countdown" id="cd"></div>' +
+      '</div>';
+    var left = RESET_SECONDS;
+    var cd = document.getElementById('cd');
+    cd.textContent = 'Back to the crew list in ' + left + '...';
+    countdownTimer = setInterval(function () {
+      left -= 1;
+      if (cd) cd.textContent = 'Back to the crew list in ' + left + '...';
+      if (left <= 0) { clearTimers(); loadRoster(); }
+    }, 1000);
+    screen.onclick = function () { screen.onclick = null; clearTimers(); loadRoster(); };
   }
 
   /* ---- screen 3: confirmation ---- */
