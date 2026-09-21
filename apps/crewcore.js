@@ -580,6 +580,9 @@ export default {
     // server decides the shape.
     const empPayload = await ctx.api.get(ENDPOINTS.ccEmployees);
     this._employees = isAdmin ? (empPayload.employees || []) : [];
+    // Whether this caller may make logins (the Admin flag itself). Drives
+    // the "Create a login" option and the Make login button on the roster.
+    this._canMakeLogins = !!(isAdmin && empPayload.can_make_logins);
     this._own = isAdmin ? null : (empPayload.employee || null);
 
     this._stipendSpends = [];
@@ -1181,8 +1184,29 @@ export default {
           ${DEPARTMENTS.map((d) => `<option value="${esc(d)}">${esc(d)}</option>`).join('')}
         </select>
       </div>
+      <div id="ccRosterGaps"></div>
       <div class="cc-list" id="ccRosterList"></div>
     `;
+  },
+
+  /**
+   * The flags Ryan asked for: anyone on the roster with no email (time off
+   * emails cannot reach them) or no login (they cannot sign in to request
+   * time off or see anything). Terminated people are left out; nobody needs
+   * to chase a login for somebody who left.
+   */
+  _rosterGapBanner() {
+    const live = (this._employees || []).filter((e) => e.status !== 'terminated' && e.gaps);
+    const noEmail = live.filter((e) => e.gaps.no_email);
+    const noLogin = live.filter((e) => e.gaps.no_login);
+    if (!noEmail.length && !noLogin.length) return '';
+    const names = (list) => list.map((e) => esc(e.name)).join(', ');
+    return `<div class="to-warn">
+      ${noLogin.length ? `<div><strong>${noLogin.length} ${noLogin.length === 1 ? 'person has' : 'people have'} no login:</strong> ${names(noLogin)}.
+        They can't sign in to request time off.${this._canMakeLogins ? ' Open one to make a login.' : ''}</div>` : ''}
+      ${noEmail.length ? `<div style="margin-top:${noLogin.length ? '6px' : '0'}"><strong>${noEmail.length} ${noEmail.length === 1 ? 'person has' : 'people have'} no email:</strong> ${names(noEmail)}.
+        They won't get time off emails.</div>` : ''}
+    </div>`;
   },
 
   _wireRosterAdmin() {
@@ -1199,6 +1223,8 @@ export default {
         if (q && !String(e.name || '').toLowerCase().includes(q)) return false;
         return true;
       });
+      const gapBox = $('#ccRosterGaps');
+      if (gapBox) gapBox.innerHTML = this._rosterGapBanner();
       const list = $('#ccRosterList');
       if (!rows.length) {
         list.innerHTML = `<div class="cc-empty">No employees match.</div>`;
@@ -1206,7 +1232,7 @@ export default {
       }
       list.innerHTML = `
         <table class="cc-table">
-          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th><th>Stipend</th><th>Kiosk</th></tr></thead>
+          <thead><tr><th>Name</th><th>Department</th><th>Title</th><th>Start</th><th>Status</th><th>Rate</th><th>Stipend</th><th>Kiosk</th><th>Login / email</th></tr></thead>
           <tbody>
             ${rows.map((e) => `
               <tr class="clickable" data-id="${esc(e.id)}">
@@ -1219,6 +1245,7 @@ export default {
                 <td>${fmtMoney(e.apparel_stipend)}/yr</td>
                 <td>${e.clock_enabled === false ? '<span class="chip on_leave">salary</span>'
                   : (e.has_clock_pin ? '<span class="chip">set</span>' : '<span class="chip terminated">no code</span>')}</td>
+                <td>${this._gapChips(e)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -1235,6 +1262,38 @@ export default {
     search.oninput = render;
     deptFilter.onchange = render;
     render();
+  },
+
+  _gapChips(e) {
+    const g = e.gaps || {};
+    if (e.status === 'terminated') return '';
+    const chips = [];
+    if (g.no_login) chips.push('<span class="chip terminated" title="Can\'t sign in">no login</span>');
+    if (g.no_email) chips.push('<span class="chip pending" title="Won\'t get time off emails">no email</span>');
+    if (e.pto_exempt) chips.push('<span class="chip">PTO exempt</span>');
+    return chips.length ? chips.join(' ') : '<span class="chip approved">' + esc(e.username || '') + '</span>';
+  },
+
+  /**
+   * The temporary password is shown ONCE, here. It is not stored anywhere
+   * readable, so if this is closed without writing it down the fix is a
+   * reset in Settings > Accounts.
+   */
+  _showNewLogin(name, login) {
+    const back = this._openModal(`
+      <div class="cc-form">
+        <h3>Login made for ${esc(name)}</h3>
+        <p class="hint">Give them these. The password is only shown this once. If it gets lost, reset it in
+          Settings under Accounts.</p>
+        <div class="cc-field-grid">
+          <div class="cc-field"><label>Username</label><div class="v">${esc(login.username)}</div></div>
+          <div class="cc-field"><label>Temporary password</label><div class="v">${esc(login.temp_password)}</div></div>
+        </div>
+        <p class="hint" style="margin-top:12px">They sign in at ${esc(location.origin)} and land on CrewCore:
+          their dashboard, time off, stipend, reviews and the handbook. Nothing else until you give them more in Settings.</p>
+        <div class="cc-form-actions"><button class="cc-btn" id="nlDone">Got it</button></div>
+      </div>`);
+    back.querySelector('#nlDone').onclick = () => this._closeModal();
   },
 
   _openEmployeeForm(emp) {
@@ -1270,7 +1329,18 @@ export default {
           </div>
           <div><label>Phone</label><input id="fPhone" value="${esc(emp ? emp.phone : '')}"></div>
           <div><label>Email</label><input id="fEmail" value="${esc(emp ? emp.email : '')}"></div>
-          <div><label>Shell username (optional)</label><input id="fUsername" value="${esc(emp && emp.username ? emp.username : '')}" placeholder="links self-serve login"></div>
+          <div><label>Login username</label><input id="fUsername" value="${esc(emp && emp.username ? emp.username : '')}" placeholder="${isEdit ? 'not linked' : 'blank = make one'}">
+            ${isEdit && emp.gaps && emp.gaps.no_login && this._canMakeLogins
+              ? `<button class="cc-btn ghost sm" type="button" id="fMakeLogin" style="margin-top:6px">Make a login for ${esc(emp.name.split(' ')[0])}</button>` : ''}
+            ${!isEdit && this._canMakeLogins ? `<label style="display:flex;gap:6px;align-items:center;margin-top:6px;font-weight:500">
+              <input type="checkbox" id="fCreateLogin" checked style="width:auto"> Make a login if blank</label>` : ''}
+          </div>
+          <div><label>PTO</label>
+            <select id="fExempt">
+              <option value="false" ${!emp || !emp.pto_exempt ? 'selected' : ''}>Tracked (gets a balance)</option>
+              <option value="true" ${emp && emp.pto_exempt ? 'selected' : ''}>Exempt (no balance, logs are auto-approved)</option>
+            </select>
+          </div>
           <div><label>Hourly rate</label><input id="fRate" type="number" step="0.01" value="${emp && emp.hourly_rate != null ? emp.hourly_rate : ''}"></div>
           <div>
             <label>Apparel stipend / year</label>
@@ -1309,6 +1379,22 @@ export default {
 
     $('#fCancel').onclick = () => wrap.remove();
 
+    const mk = $('#fMakeLogin');
+    if (mk) mk.onclick = async () => {
+      mk.disabled = true;
+      try {
+        const out = await this._ctx.api.post(ENDPOINTS.ccEmployees, { action: 'create_login', id: emp.id });
+        const idx = this._employees.findIndex((e) => e.id === emp.id);
+        if (idx >= 0) this._employees[idx] = out.employee;
+        wrap.remove();
+        await this.showView('roster');
+        this._showNewLogin(emp.name, out.login);
+      } catch (e) {
+        mk.disabled = false;
+        err.hidden = false; err.textContent = e.message || 'Could not make a login.';
+      }
+    };
+
     if (isEdit) {
       $('#fDelete').onclick = async () => {
         if (!confirm('Delete ' + emp.name + '? This cannot be undone.')) return;
@@ -1341,6 +1427,8 @@ export default {
         notes: $('#fNotes').value
       };
       payload.clock_enabled = $('#fClockOn').value === 'true';
+      payload.pto_exempt = $('#fExempt').value === 'true';
+      if (!isEdit && $('#fCreateLogin')) payload.create_login = $('#fCreateLogin').checked;
 
       // The passcode field is write-only and blank by default. Blank means
       // "leave whatever is stored alone", which is why it is only added to
@@ -1364,6 +1452,11 @@ export default {
         } else {
           const out = await this._ctx.api.request(ENDPOINTS.ccEmployees, { method: 'POST', body: payload });
           this._employees.push(out.employee);
+          wrap.remove();
+          await this.showView('roster');
+          if (out.login && out.login.username) this._showNewLogin(out.employee.name, out.login);
+          else if (out.login && out.login.error) alert('Saved ' + out.employee.name + ', but no login was made: ' + out.login.error);
+          return;
         }
         wrap.remove();
         this.showView('roster');
@@ -2287,6 +2380,22 @@ export default {
     const err = $('#fErr');
 
     $('#fCancel').onclick = () => wrap.remove();
+
+    const mk = $('#fMakeLogin');
+    if (mk) mk.onclick = async () => {
+      mk.disabled = true;
+      try {
+        const out = await this._ctx.api.post(ENDPOINTS.ccEmployees, { action: 'create_login', id: emp.id });
+        const idx = this._employees.findIndex((e) => e.id === emp.id);
+        if (idx >= 0) this._employees[idx] = out.employee;
+        wrap.remove();
+        await this.showView('roster');
+        this._showNewLogin(emp.name, out.login);
+      } catch (e) {
+        mk.disabled = false;
+        err.hidden = false; err.textContent = e.message || 'Could not make a login.';
+      }
+    };
     $('#fSubmit').onclick = async () => {
       const payload = {
         employee_id: $('#fEmp').value,
@@ -2844,6 +2953,22 @@ export default {
     const err = $('#fErr');
 
     $('#fCancel').onclick = () => wrap.remove();
+
+    const mk = $('#fMakeLogin');
+    if (mk) mk.onclick = async () => {
+      mk.disabled = true;
+      try {
+        const out = await this._ctx.api.post(ENDPOINTS.ccEmployees, { action: 'create_login', id: emp.id });
+        const idx = this._employees.findIndex((e) => e.id === emp.id);
+        if (idx >= 0) this._employees[idx] = out.employee;
+        wrap.remove();
+        await this.showView('roster');
+        this._showNewLogin(emp.name, out.login);
+      } catch (e) {
+        mk.disabled = false;
+        err.hidden = false; err.textContent = e.message || 'Could not make a login.';
+      }
+    };
     $('#fSubmit').onclick = async () => {
       const payload = {
         employee_id: editing ? review.employee_id : $('#fEmp').value,
@@ -3397,7 +3522,7 @@ export default {
       body.innerHTML = this._toDetailId ? this._renderTimeoffDetail() : this._renderTimeoffTeam();
     } else {
       sub.textContent = 'Your paid time off.';
-      if (d.linked) actions.innerHTML = `${this._toYearPicker()}<button class="cc-btn" id="toReqBtn">Request time off</button>`;
+      if (d.linked) actions.innerHTML = `${this._toYearPicker()}<button class="cc-btn" id="toReqBtn">${d.exempt ? 'Log time off' : 'Request time off'}</button>`;
       body.innerHTML = this._renderTimeoffSelf();
     }
     this._wireTimeoff();
@@ -3499,6 +3624,16 @@ export default {
         <p>Your login isn't connected to an employee record, so there's no balance to show. Ask an admin to link it on the Roster.</p></div>`;
     }
     const reqs = (d.requests || []).filter((r) => requestYear(r) === this._toYear);
+    if (d.exempt) {
+      return `
+        <div id="toMsg"></div>
+        <div class="cc-note">You're PTO exempt, so there's no balance to track. Time off you log is approved
+          right away and shows the team you're out.</div>
+        <div class="cc-section">
+          <h2>Your time off, ${this._toYear}</h2>
+          ${this._toList(reqs, 'Nothing logged for ' + this._toYear + '.')}
+        </div>`;
+    }
     return `
       <div id="toMsg"></div>
       ${d.approvers_set ? '' : `<div class="to-warn">Nobody is set up to approve time off yet, so a request will wait until that's sorted. You can still send it.</div>`}
@@ -3519,11 +3654,11 @@ export default {
     const today = new Date().toISOString().slice(0, 10);
     const in60 = new Date(Date.now() + 60 * 86400000).toISOString().slice(0, 10);
     const upcoming = whoIsOut(reqs, today, in60);
-    const startYear = d.policy_doc ? d.policy_doc.start_year : null;
-    const team = (d.team || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
-
-    const noStart = (p) => !p.pto_opening && p.start_date && Number(String(p.start_date).slice(0, 4)) < this._toYear
-      && (startYear == null || this._toYear === startYear);
+    const everyone = (d.team || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+    // Exempt people (Ryan, Megan) have no balance to show. They are named
+    // under the table so it is clear they were left out on purpose.
+    const team = everyone.filter((p) => !p.pto_exempt);
+    const exempt = everyone.filter((p) => p.pto_exempt);
 
     return `
       <div id="toMsg"></div>
@@ -3558,8 +3693,7 @@ export default {
               const b = p.balance || {};
               return `<tr class="clickable" data-to-person="${esc(p.id)}">
                 <td><strong>${esc(p.name)}</strong>
-                  ${p.status === 'terminated' ? ' <span class="chip terminated">left</span>' : ''}
-                  ${noStart(p) ? ' <span class="chip pending" title="Enter what QuickBooks shows they have left, or their grant is assumed unused">no starting balance</span>' : ''}</td>
+                  ${p.status === 'terminated' ? ' <span class="chip terminated">left</span>' : ''}</td>
                 <td class="to-num">${this._toHrs(b.start)}</td>
                 <td class="to-num">${b.adjusted ? (b.adjusted > 0 ? '+' : '') + this._toHrs(b.adjusted) : '-'}</td>
                 <td class="to-num">${this._toHrs(b.used)}</td>
@@ -3569,7 +3703,8 @@ export default {
             }).join('')}</tbody>
           </table>
         </div>
-        <p style="font-size:12px;color:var(--muted);margin-top:8px">Pending hours aren't taken out of what's left until they're approved.</p>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px">Pending hours aren't taken out of what's left until they're approved.
+          ${exempt.length ? `PTO exempt, no balance kept: ${exempt.map((p) => `<a href="#" data-to-person="${esc(p.id)}">${esc(p.name)}</a>`).join(', ')}.` : ''}</p>
       </div>`;
   },
 
@@ -3581,7 +3716,6 @@ export default {
     const reqs = (d.requests || []).filter((r) => r.employee_id === p.id);
     const adjs = (d.adjustments || []).filter((a) => a.employee_id === p.id);
     const yearReqs = reqs.filter((r) => requestYear(r) === this._toYear);
-    const op = p.pto_opening;
     return `
       <div class="cc-back">
         <button class="cc-btn ghost sm" id="toBack">\u2190 Everybody</button>
@@ -3589,12 +3723,12 @@ export default {
         <span class="meta" style="font-size:12px;color:var(--muted)">${p.start_date ? 'started ' + esc(fmtDate(p.start_date)) : 'no start date on file'}</span>
       </div>
       <div id="toMsg"></div>
-      ${this._toTiles(p.balance)}
+      ${p.pto_exempt
+        ? `<div class="cc-note">PTO exempt. No balance is kept; time off logged here is approved on the spot and shows on who's out. Change it on the Roster.</div>`
+        : this._toTiles(p.balance)}
       ${me.is_approver ? `<div class="cc-toolbar">
         <button class="cc-btn sm" id="toLogFor">Log time off</button>
-        <button class="cc-btn sm ghost" id="toAdjust">Adjust balance</button>
-        <button class="cc-btn sm ghost" id="toOpening">${op ? 'Change' : 'Set'} starting balance</button>
-        ${op ? `<span class="lbl">Starting balance: ${this._toHrs(op.hours)} for ${esc(op.year)}</span>` : ''}
+        ${p.pto_exempt ? '' : `<button class="cc-btn sm ghost" id="toAdjust">Adjust balance</button>`}
       </div>` : ''}
       <div class="cc-section">
         <h2>Requests, ${this._toYear}</h2>
@@ -3621,11 +3755,9 @@ export default {
     if (back) back.onclick = () => { this._toDetailId = null; this._paintTimeoff(); };
     const adj = $('#toAdjust');
     if (adj) adj.onclick = () => this._openAdjustForm(this._toDetailId);
-    const opn = $('#toOpening');
-    if (opn) opn.onclick = () => this._openOpeningForm(this._toDetailId);
 
     root.querySelectorAll('[data-to-person]').forEach((row) => {
-      row.onclick = () => { this._toDetailId = row.dataset.toPerson; this._paintTimeoff(); };
+      row.onclick = (ev) => { ev.preventDefault(); this._toDetailId = row.dataset.toPerson; this._paintTimeoff(); };
     });
     root.querySelectorAll('[data-to-approve]').forEach((b) => {
       b.onclick = () => this._toAct({ action: 'decide', decision: 'approve', id: b.dataset.toApprove });
@@ -3835,44 +3967,6 @@ export default {
         q('#toErr').textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
       }
     };
-  },
-
-  _openOpeningForm(employeeId) {
-    const p = ((this._to && this._to.team) || []).find((x) => x.id === employeeId);
-    if (!p) return;
-    const op = p.pto_opening || {};
-    const back = this._openModal(`
-      <div class="cc-form">
-        <h3>Starting balance for ${esc(p.name)}</h3>
-        <p class="hint">What QuickBooks shows they have left right now. It replaces the Jan 1 grant for that year only.
-          From the next Jan 1 on, the normal grant and carryover rules take over. Don't also enter time off they've
-          already taken this year, or it comes out twice.</p>
-        <div class="cc-form-grid">
-          <div><label>Hours left</label><input id="toOpH" type="number" step="0.25" value="${op.hours != null ? esc(op.hours) : ''}"></div>
-          <div><label>For year</label><input id="toOpY" type="number" value="${esc(op.year || new Date().getFullYear())}"></div>
-        </div>
-        <div class="cc-err" id="toErr" hidden></div>
-        <div class="cc-form-actions">
-          ${p.pto_opening ? `<button class="cc-btn ghost danger" id="toClear">Clear it</button>` : ''}
-          <button class="cc-btn ghost" id="toNo">Never mind</button>
-          <button class="cc-btn" id="toYes">Save</button>
-        </div>
-      </div>`);
-    const q = (s) => back.querySelector(s);
-    const send = async (hours) => {
-      try {
-        await this._ctx.api.post(ENDPOINTS.ccTimeoff, { action: 'opening', employee_id: p.id, hours, year: Number(q('#toOpY').value) });
-        this._closeModal();
-        await this._refreshTimeoff();
-      } catch (e) {
-        q('#toErr').hidden = false;
-        q('#toErr').textContent = (e.body && e.body.details && e.body.details.join('. ')) || e.message || 'Could not save.';
-      }
-    };
-    q('#toNo').onclick = () => this._closeModal();
-    q('#toYes').onclick = () => send(q('#toOpH').value === '' ? null : Number(q('#toOpH').value));
-    const clear = q('#toClear');
-    if (clear) clear.onclick = () => send(null);
   },
 
   /* Settings > Time off. Admin only, drawn inside _renderSettings(). */

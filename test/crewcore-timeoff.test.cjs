@@ -432,16 +432,68 @@ function notesFor(user) {
     t.equal(r.body.over_by, 80, 'Sasha has 120, asked for 200');
   });
 
-  await check('only approvers adjust or set a starting balance', async () => {
+  await check('only approvers adjust a balance', async () => {
     seed();
     const no = await call(route, { as: JACOB, method: 'POST', body: { action: 'adjust', employee_id: 'EMP-1', year: THIS_YEAR, hours: 4, reason: 'event' } });
     t.equal(no.statusCode, 403);
     const yes = await call(route, { as: MEGAN, method: 'POST', body: { action: 'adjust', employee_id: 'EMP-1', year: THIS_YEAR, hours: 4, reason: 'event' } });
     t.equal(yes.statusCode, 201);
-    const op = await call(route, { as: RYAN, method: 'POST', body: { action: 'opening', employee_id: 'EMP-1', year: THIS_YEAR, hours: 30 } });
-    t.equal(op.statusCode, 200);
     const mine = await call(route, { as: SASHA });
-    t.equal(mine.body.balance.balance, 34, '30 starting + 4 adjusted');
+    t.equal(mine.body.balance.balance, 124, '120 granted + 4 adjusted');
+  });
+
+  await check('the starting balance action is gone, but ones already entered still count', async () => {
+    seed();
+    const op = await call(route, { as: RYAN, method: 'POST', body: { action: 'opening', employee_id: 'EMP-1', year: THIS_YEAR, hours: 30 } });
+    t.equal(op.statusCode, 400, 'no longer an action');
+    const e = JSON.parse(kv.get(CC + ':employee:EMP-1'));
+    e.pto_opening = { year: THIS_YEAR, hours: 30 };
+    kv.set(CC + ':employee:EMP-1', JSON.stringify(e));
+    const mine = await call(route, { as: SASHA });
+    t.equal(mine.body.balance.balance, 30);
+  });
+
+  /* ---- PTO exempt ------------------------------------------------------- */
+
+  await check('an exempt person has no balance and their time off is approved on the spot', async () => {
+    seed();
+    const e = JSON.parse(kv.get(CC + ':employee:EMP-3'));
+    e.pto_exempt = true;
+    kv.set(CC + ':employee:EMP-3', JSON.stringify(e));
+    const r = await call(route, { as: MEGAN, method: 'POST', body: DAYS(5) });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.request.status, 'approved');
+    t.equal(r.body.over_by, 0, 'no balance to go over');
+    t.equal(notesFor('ryan').length, 0, 'nobody is asked');
+    const team = await call(route, { as: RYAN });
+    const m = team.body.team.find((p) => p.id === 'EMP-3');
+    t.equal(m.pto_exempt, true);
+    t.equal(m.balance, null);
+    const out = team.body.requests.filter((q) => q.employee_id === 'EMP-3' && q.status === 'approved');
+    t.equal(out.length, 1, 'still on who is out');
+  });
+
+  await check('an exempt employee who is not an approver sees the exempt screen, no balance', async () => {
+    seed();
+    const e = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    e.pto_exempt = true;
+    kv.set(CC + ':employee:EMP-2', JSON.stringify(e));
+    const mine = await call(route, { as: DANA });
+    t.equal(mine.body.scope, 'self');
+    t.equal(mine.body.exempt, true);
+    t.equal(mine.body.balance, null);
+    const r = await call(route, { as: DANA, method: 'POST', body: DAYS(1) });
+    t.equal(r.body.request.status, 'approved');
+    t.equal(r.body.request.decided_by, 'exempt');
+  });
+
+  await check('exempt only skips the queue for the exempt person, nobody else', async () => {
+    seed();
+    const e = JSON.parse(kv.get(CC + ':employee:EMP-3'));
+    e.pto_exempt = true;
+    kv.set(CC + ':employee:EMP-3', JSON.stringify(e));
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    t.equal(r.body.request.status, 'pending');
   });
 
   await check('the team view carries names and hours, never pay or notes', async () => {

@@ -11,10 +11,21 @@
 // PATCH  -> edit. Admin-scope only.
 // DELETE -> admin-scope only.
 //
+// LOGINS, Sep 21 2026 (Ryan): every roster row carries `gaps` (no_email,
+// no_login) so the Roster can flag them. Adding somebody with no login makes
+// one (create_login, on by default in the form), and POST action=create_login
+// makes one for somebody already on the roster. Making an account needs the
+// per-account Admin flag itself, not just CrewCore admin, because it is the
+// same power as Settings > Accounts. The temporary password comes back ONCE
+// in the response and is never stored in plain text. See
+// lib/crewcore/accounts.js.
+//
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser } from "../../lib/users.js";
+import { getUser, listUsers, createUser } from "../../lib/users.js";
+import { randomInt } from "node:crypto";
+import { suggestUsername, tempPassword, rosterGaps } from "../../lib/crewcore/accounts.js";
 import { validateEmployee, stripAdminFields, stripSecrets, isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { validatePin } from "../../lib/crewcore/timeclock.js";
 import { hashPassword } from "../../lib/users.js";
@@ -82,9 +93,36 @@ function parseBody(req) {
   return b && typeof b === "object" ? b : {};
 }
 
+/**
+ * Make a login for a roster person and link it. Returns { username,
+ * temp_password } or { error }. Never throws: the roster record is already
+ * saved, and failing to make a login must not lose it.
+ */
+async function createLoginFor(emp) {
+  try {
+    const [users, roster] = await Promise.all([listUsers(), listEmployees()]);
+    const accounts = new Set(users.map((u) => u.username));
+    // A roster username with no account behind it is reused if it is free:
+    // somebody typed it on purpose.
+    const typed = String(emp.username || "").trim().toLowerCase();
+    const claimed = new Set(roster.filter((e) => e.id !== emp.id).map((e) => String(e.username || "").toLowerCase()).filter(Boolean));
+    let username = typed && !accounts.has(typed) && !claimed.has(typed) && /^[a-z0-9._-]{3,32}$/.test(typed) ? typed : null;
+    if (!username) username = suggestUsername(emp.name, new Set([...accounts, ...claimed]));
+    if (!username) return { error: "Couldn't work out a free username for " + emp.name };
+    const temp_password = tempPassword((n) => randomInt(n));
+    await createUser({ username, password: temp_password, name: emp.name, access: { apps: ["crewcore"] } });
+    await updateEmployee(emp.id, { username });
+    return { username, temp_password };
+  } catch (e) {
+    console.error("crewcore/employees: login creation failed, the employee was still saved:", e.message);
+    return { error: e.message || "The login could not be made" };
+  }
+}
+
 async function callerScope(sess) {
   const user = sess.username ? await getUser(sess.username) : null;
   return {
+    canMakeLogins: !!(user && user.superuser === true),
     // Superuser flag or the protected admin role. Deliberately NOT data_scope:
     // see isCrewCoreAdmin() in lib/crewcore/schema.js for why.
     isAdmin: isCrewCoreAdmin({
@@ -102,7 +140,7 @@ export default async function handler(req, res) {
   if (!sess) return;
 
   try {
-    const { isAdmin } = await callerScope(sess);
+    const { isAdmin, canMakeLogins } = await callerScope(sess);
 
     if (req.method === "GET") {
       const id = req.query && req.query.id;
@@ -125,8 +163,10 @@ export default async function handler(req, res) {
         // credential, and an admin has no use for reading one. They set a
         // new code instead. has_clock_pin comes back so the Roster can show
         // who is still not set up on the kiosk.
-        const employees = (await listEmployees()).map(stripSecrets);
-        return res.status(200).json({ employees });
+        const [rows, users] = await Promise.all([listEmployees(), listUsers()]);
+        const logins = new Set(users.map((u) => u.username));
+        const employees = rows.map((e) => ({ ...stripSecrets(e), gaps: rosterGaps(e, logins) }));
+        return res.status(200).json({ employees, can_make_logins: canMakeLogins });
       }
 
       // Self-serve: only the caller's own record, and only the non-sensitive
@@ -140,6 +180,21 @@ export default async function handler(req, res) {
 
     if (!isAdmin) {
       return res.status(403).json({ error: "Admin access required" });
+    }
+
+    if (req.method === "POST" && parseBody(req).action === "create_login") {
+      if (!canMakeLogins) return res.status(403).json({ error: "Making logins needs the Admin flag" });
+      const body = parseBody(req);
+      const emp = await getEmployee(body.id || (req.query && req.query.id));
+      if (!emp) return res.status(404).json({ error: "Employee not found" });
+      const users = await listUsers();
+      if (!rosterGaps(emp, new Set(users.map((u) => u.username))).no_login) {
+        return res.status(409).json({ error: emp.name + " already has a login: " + emp.username });
+      }
+      const login = await createLoginFor(emp);
+      if (login.error) return res.status(400).json({ error: login.error });
+      const fresh = await getEmployee(emp.id);
+      return res.status(201).json({ ok: true, login, employee: { ...stripSecrets(fresh), gaps: { ...rosterGaps(fresh, new Set([login.username])) } } });
     }
 
     if (req.method === "POST") {
@@ -157,8 +212,20 @@ export default async function handler(req, res) {
       record.created_at = new Date().toISOString();
       record.updated_at = record.created_at;
 
-      const employee = await saveEmployee(record);
-      return res.status(201).json({ ok: true, employee: stripSecrets(employee) });
+      let employee = await saveEmployee(record);
+
+      // A new roster person with no login gets one, unless the form said not
+      // to (somebody who will never sign in, like a seasonal helper).
+      let login = null;
+      if (!record.username && body.create_login !== false) {
+        login = canMakeLogins ? await createLoginFor(employee) : { error: "Only an account with the Admin flag can make logins" };
+        if (login.username) employee = await getEmployee(employee.id);
+      }
+      const users = await listUsers();
+      return res.status(201).json({
+        ok: true, login,
+        employee: { ...stripSecrets(employee), gaps: rosterGaps(employee, new Set(users.map((u) => u.username))) },
+      });
     }
 
     if (req.method === "PATCH") {
@@ -181,7 +248,8 @@ export default async function handler(req, res) {
       if (pinError) return res.status(400).json({ error: pinError });
 
       const employee = await updateEmployee(id, record);
-      return res.status(200).json({ ok: true, employee: stripSecrets(employee) });
+      const users = await listUsers();
+      return res.status(200).json({ ok: true, employee: { ...stripSecrets(employee), gaps: rosterGaps(employee, new Set(users.map((u) => u.username))) } });
     }
 
     if (req.method === "DELETE") {

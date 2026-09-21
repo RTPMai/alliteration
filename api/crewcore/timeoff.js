@@ -16,12 +16,19 @@
 //   Anyone linked:     request time off for themselves, cancel their own
 //                      request while it is still pending.
 //   Approvers only:    approve, deny, cancel an approved request, log time
-//                      off for someone else, adjust a balance, set a
-//                      starting balance. Approvers are a list of usernames in
+//                      off for someone else, adjust a balance. Approvers are a list of usernames in
 //                      the policy (Ryan and Megan). NOT "any admin": being a
 //                      CrewCore admin does not make somebody an approver, and
 //                      an empty list means nobody can approve at all.
 //   CrewCore admins:   edit the policy and the approver list (Settings).
+//
+// PTO EXEMPT (Sep 21 2026): Ryan and Megan. No balance is kept for an exempt
+// person. Time off they log is approved on the spot, nobody is asked, and it
+// still shows on "who's out" so the shop knows they are gone.
+//
+// STARTING BALANCES were removed from the screen and this route the same
+// day (Ryan entered them by hand). Any already on a roster record still
+// count; see ptoLedger() in lib/crewcore/pto.js.
 //
 // A request's note never goes into a notification. Notifications are visible
 // to everyone signed in, and "why I need Tuesday off" is nobody's business
@@ -32,9 +39,9 @@
 import { requireAuth } from "../../lib/session.js";
 import { getUser } from "../../lib/users.js";
 import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
-import { listEmployees, getEmployee, getEmployeeByUsername, updateEmployee } from "../../lib/crewcore/store.js";
+import { listEmployees, getEmployee, getEmployeeByUsername } from "../../lib/crewcore/store.js";
 import {
-  validateRequest, validateAdjustment, validateOpening, validatePolicy,
+  validateRequest, validateAdjustment, validatePolicy,
   withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger, overBy,
   requestActions, requestYear, requestSummary,
 } from "../../lib/crewcore/pto.js";
@@ -159,8 +166,8 @@ function teamRow(e, balance) {
   return {
     id: e.id, name: e.name, department: e.department || "", status: e.status || "active",
     start_date: e.start_date || "", username: e.username || null,
-    pto_opening: e.pto_opening || null,
-    balance,
+    pto_exempt: e.pto_exempt === true,
+    balance: e.pto_exempt === true ? null : balance,
   };
 }
 
@@ -220,10 +227,12 @@ export default async function handler(req, res) {
       const requests = allReq.filter((r) => r.employee_id === own.id);
       const adjustments = allAdj.filter((a) => a.employee_id === own.id);
       const o = { employee: own, requests, adjustments, policyDoc: doc };
+      const exempt = own.pto_exempt === true;
       return res.status(200).json({
         scope: "self", linked: true, year, policy, me, approvers_set: approversSet,
-        balance: ptoBalance(o, year),
-        ledger: ptoLedger({ ...o, throughYear: year }),
+        exempt,
+        balance: exempt ? null : ptoBalance(o, year),
+        ledger: exempt ? [] : ptoLedger({ ...o, throughYear: year }),
         requests, adjustments,
       });
     }
@@ -283,7 +292,10 @@ export default async function handler(req, res) {
 
       // An approver may record it as already approved (a sick call taken
       // over the phone). Nobody else can skip the queue.
-      const preApproved = isApprover && body.approved === true;
+      // Exempt people are not asked: their time off is recorded, approved,
+      // and shown on "who's out", with no balance behind it.
+      const exempt = emp.pto_exempt === true;
+      const preApproved = exempt || (isApprover && body.approved === true);
       const rec = {
         ...v.record,
         employee_id: emp.id,
@@ -292,10 +304,10 @@ export default async function handler(req, res) {
         requested_by: sess.username,
         created_at: now,
         updated_at: now,
-        decided_by: preApproved ? sess.username : null,
+        decided_by: preApproved ? (exempt && !isApprover ? "exempt" : sess.username) : null,
         decided_at: preApproved ? now : null,
         decision_note: "",
-        history: [{ at: now, by: sess.username, what: preApproved ? "logged as approved" : "requested" }],
+        history: [{ at: now, by: sess.username, what: exempt ? "logged (PTO exempt)" : preApproved ? "logged as approved" : "requested" }],
       };
 
       // Warn, never block: an approver decides whether going over is fine.
@@ -306,7 +318,7 @@ export default async function handler(req, res) {
         adjustments: allAdj.filter((a) => a.employee_id === emp.id),
         policyDoc: doc,
       }, requestYear(rec));
-      const over = overBy(bal, rec.hours);
+      const over = exempt ? 0 : overBy(bal, rec.hours);
 
       let saved = await saveRequest(rec);
 
@@ -389,17 +401,6 @@ export default async function handler(req, res) {
       if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
       const saved = await saveAdjustment({ ...v.record, employee_id: emp.id, created_by: sess.username, created_at: now });
       return res.status(201).json({ ok: true, adjustment: saved });
-    }
-
-    if (action === "opening") {
-      if (!isApprover) return refuse(res, 403, "Only a time off approver can set a starting balance");
-      const emp = await getEmployee(body.employee_id);
-      if (!emp) return refuse(res, 404, "Employee not found");
-      const v = validateOpening(body);
-      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
-      const patch = { pto_opening: v.record ? { ...v.record, set_by: sess.username, set_at: now } : null };
-      const saved = await updateEmployee(emp.id, patch);
-      return res.status(200).json({ ok: true, pto_opening: saved.pto_opening });
     }
 
     return refuse(res, 400, "Unknown action");
