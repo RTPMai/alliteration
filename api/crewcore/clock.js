@@ -224,6 +224,7 @@ export default async function handler(req, res) {
         start_date: r.start_date,
         end_date: r.end_date,
         type: r.type,
+        use_pto: r.use_pto !== false,
         over_by: made.over_by,
         approvers_set: doc.approvers.length > 0,
       });

@@ -440,7 +440,7 @@
   }
 
   function showTimeoff(info, message) {
-    var state = { type: 'all_days', half: '' };
+    var state = { type: 'all_days', half: '', usePto: true };
     var types = info.types || [];
     screen.innerHTML =
       '<div class="to-wrap">' +
@@ -472,6 +472,10 @@
           '<div class="field"><label>Time leaving</label><input class="to-input" type="time" id="tLeave"></div>' +
           '<div class="field" data-for="appointment"><label>Time returning</label><input class="to-input" type="time" id="tBack"></div>' +
         '</div>' +
+        '<div class="field"><label>Use PTO?</label><div class="choices" id="toPto">' +
+          '<button type="button" class="choice on" data-pto="yes">Yes, use my PTO</button>' +
+          '<button type="button" class="choice" data-pto="no">No, unpaid</button>' +
+        '</div></div>' +
         '<div class="field"><label>Reason (only Ryan and Megan see this)</label><textarea class="to-input" id="tNote" maxlength="500"></textarea></div>' +
         '<div class="to-hours" id="tHours"></div>' +
         '<div class="actions"><button class="act to" id="tSend">' + (info.exempt ? 'Log it' : 'Send request') + '</button></div>' +
@@ -481,7 +485,7 @@
     function $(id) { return document.getElementById(id); }
 
     function collect() {
-      var r = { type: state.type, note: $('tNote').value };
+      var r = { type: state.type, note: $('tNote').value, use_pto: state.usePto };
       if (state.type === 'all_days') { r.start_date = $('tStart').value; r.return_date = $('tReturn').value; }
       else r.start_date = $('tDate').value;
       if (state.type === 'half_day') r.half = state.half;
@@ -501,8 +505,8 @@
       if (h == null) {
         box.textContent = pto ? 'Fill in the ' + (state.type === 'all_days' ? 'dates' : 'date and time') + ' to see the hours.' : 'Hours are worked out when you send it.';
       } else {
-        var over = !info.exempt && info.left != null ? Math.max(0, h - (info.left - (info.pending || 0))) : 0;
-        box.innerHTML = '<strong>' + hrsText(h) + '</strong> of PTO' +
+        var over = state.usePto && !info.exempt && info.left != null ? Math.max(0, h - (info.left - (info.pending || 0))) : 0;
+        box.innerHTML = '<strong>' + hrsText(h) + '</strong> ' + (state.usePto ? 'of PTO' : 'unpaid, nothing comes off PTO') +
           (over ? '<div class="hint" style="color:var(--amber);font-weight:700;margin-top:4px">That\'s ' + hrsText(over) + ' more than you have left. You can still send it.</div>' : '');
       }
     }
@@ -518,6 +522,13 @@
       b.onclick = function () {
         state.half = b.getAttribute('data-half');
         Array.prototype.forEach.call(screen.querySelectorAll('[data-half]'), function (x) { x.classList.toggle('on', x === b); });
+        refresh();
+      };
+    });
+    Array.prototype.forEach.call(screen.querySelectorAll('[data-pto]'), function (b) {
+      b.onclick = function () {
+        state.usePto = b.getAttribute('data-pto') === 'yes';
+        Array.prototype.forEach.call(screen.querySelectorAll('[data-pto]'), function (x) { x.classList.toggle('on', x === b); });
         refresh();
       };
     });
@@ -561,6 +572,7 @@
         '<h2>' + esc(data.name) + '</h2>' +
         '<div class="detail">' + (pending ? 'Time off requested' : 'Time off logged') + '</div>' +
         '<div class="big-time">' + esc(hrsText(data.hours)) + '</div>' +
+        (data.use_pto === false ? '<div class="detail">Unpaid, not from PTO</div>' : '') +
         '<div class="detail">' + esc(days) + '</div>' +
         (pending
           ? '<div class="heads-up">' + (data.approvers_set

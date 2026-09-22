@@ -603,6 +603,51 @@ function notesFor(user) {
     t.equal(v.policy.shift_start, '07:00');
   });
 
+  /* ==== 4b2. Use PTO or not =============================================== */
+
+  await check('unpaid time off takes nothing off the balance and is counted on its own', async () => {
+    const b = pto.ptoBalance({
+      employee: { start_date: '2015-01-01' },
+      requests: [
+        { start_date: '2026-05-04', end_date: '2026-05-04', hours: 8, status: 'approved' },
+        { start_date: '2026-05-05', end_date: '2026-05-05', hours: 8, status: 'approved', use_pto: false },
+        { start_date: '2026-05-06', end_date: '2026-05-06', hours: 4, status: 'pending', use_pto: false },
+      ],
+      policyDoc: doc(),
+    }, 2026);
+    t.equal(b.used, 8, 'only the PTO day');
+    t.equal(b.unpaid, 8, 'the unpaid day is shown');
+    t.equal(b.pending, 0, 'pending unpaid is not pending PTO');
+    t.equal(b.balance, 112);
+  });
+
+  await check('a request uses PTO unless it says no; old requests with no answer were PTO', async () => {
+    t.equal(pto.validateRequest({ type: 'half_day', half: 'morning', start_date: '2026-06-01' }, pto.DEFAULT_POLICY).record.use_pto, true);
+    t.equal(pto.validateRequest({ type: 'half_day', half: 'morning', start_date: '2026-06-01', use_pto: false }, pto.DEFAULT_POLICY).record.use_pto, false);
+    t.equal(pto.usesPto({}), true);
+  });
+
+  await check('unpaid still needs approval, never warns about the balance, and says so to the approvers', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: { type: 'all_days', start_date: MON, return_date: plus(MON, 35), use_pto: false } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.request.status, 'pending');
+    t.equal(r.body.over_by, 0, '200 unpaid hours is not over a PTO balance');
+    t.assert(/NOT using PTO/.test(notesFor('ryan')[0].detail), notesFor('ryan')[0].detail);
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: r.body.request.id } });
+    const mine = await call(route, { as: SASHA });
+    t.equal(mine.body.balance.balance, 120, 'balance untouched');
+    t.equal(mine.body.balance.unpaid, 200);
+    t.assert(/Not using PTO: 200 hours unpaid/.test(sentMail[0].text), sentMail[0].text);
+  });
+
+  await check('the kiosk can send unpaid time off too', async () => {
+    await kioskSeed();
+    const r = await kcall({ employee_id: 'EMP-1', pin: '4821', action: 'timeoff_request', request: { ...DAYS(1), use_pto: false } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(r.body.use_pto, false);
+  });
+
   /* ==== 4c. Emailing the employee ======================================= */
 
   await check('approving emails the employee, from the default address, replies to the approver', async () => {

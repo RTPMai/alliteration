@@ -84,7 +84,7 @@ import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isC
 // Time off math, shared with api/crewcore/timeoff.js so the screen and the
 // server agree on estimates, warnings and which buttons a request gets. No
 // imports of its own, so safe in the browser.
-import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES } from '../lib/crewcore/pto.js';
+import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES, usesPto } from '../lib/crewcore/pto.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -542,6 +542,7 @@ export default {
   .to-types{display:flex;flex-direction:column;gap:6px;margin-top:2px}
   .to-types label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);margin:0}
   .cc-form-grid .to-types input{width:auto}
+  .to-types.to-row{flex-direction:row;gap:18px;flex-wrap:wrap}
   .to-sub{font-size:11.5px;color:var(--muted);margin-top:4px}
   .to-hours{font-size:13.5px;padding:10px 12px;background:var(--line-soft);border-radius:var(--radius-sm)}
   .to-approvers{display:flex;flex-direction:column;gap:6px;margin-top:4px}
@@ -3561,7 +3562,7 @@ export default {
         <div class="cc-card">
           <h3>Used in ${bal.year}</h3>
           <div class="big">${this._toHrs(bal.used)}</div>
-          <div class="note">${esc(how)}${bal.adjusted ? ', ' + (bal.adjusted > 0 ? '+' : '') + this._toHrs(bal.adjusted) + ' adjusted' : ''}</div>
+          <div class="note">${esc(how)}${bal.adjusted ? ', ' + (bal.adjusted > 0 ? '+' : '') + this._toHrs(bal.adjusted) + ' adjusted' : ''}${bal.unpaid ? '. Plus ' + this._toHrs(bal.unpaid) + ' unpaid, not from PTO' : ''}</div>
         </div>
       </div>`;
   },
@@ -3571,7 +3572,7 @@ export default {
     const me = d.me || {};
     const can = requestActions(r, { isApprover: !!me.is_approver, isOwner: !!me.employee_id && r.employee_id === me.employee_id });
     const kind = r.type && r.type !== 'all_days' ? requestSummary(r) : '';
-    const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours)]);
+    const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours) + (usesPto(r) ? '' : ' <strong>unpaid, not PTO</strong>')]);
     if (r.note) bits.push(esc(r.note));
     if (r.decision_note) bits.push('Reply: ' + esc(r.decision_note));
     // Whether the employee was emailed, for approvers. "Not emailed" says why
@@ -3675,7 +3676,7 @@ export default {
         <div class="cc-list">${upcoming.length ? upcoming.map((r) => `
           <div class="cc-row">
             <div><div class="who">${esc(r.employee_name || '')}</div>
-              <div class="meta">${esc(this._toSpan(r))}${r.type && r.type !== 'all_days' ? ' \u00b7 ' + esc(requestSummary(r)) : ''} \u00b7 ${this._toHrs(r.hours)}</div></div>
+              <div class="meta">${esc(this._toSpan(r))}${r.type && r.type !== 'all_days' ? ' \u00b7 ' + esc(requestSummary(r)) : ''} \u00b7 ${this._toHrs(r.hours)}${usesPto(r) ? '' : ' unpaid'}</div></div>
             <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
           </div>`).join('') : `<div class="cc-empty">Nobody is out.</div>`}
         </div>
@@ -3696,7 +3697,7 @@ export default {
                   ${p.status === 'terminated' ? ' <span class="chip terminated">left</span>' : ''}</td>
                 <td class="to-num">${this._toHrs(b.start)}</td>
                 <td class="to-num">${b.adjusted ? (b.adjusted > 0 ? '+' : '') + this._toHrs(b.adjusted) : '-'}</td>
-                <td class="to-num">${this._toHrs(b.used)}</td>
+                <td class="to-num">${this._toHrs(b.used)}${b.unpaid ? `<div style="font-size:11px;color:var(--muted)">+${this._toHrs(b.unpaid)} unpaid</div>` : ''}</td>
                 <td class="to-num">${b.pending ? this._toHrs(b.pending) : '-'}</td>
                 <td class="to-num${b.balance < 0 ? ' neg' : ''}"><strong>${this._toHrs(b.balance)}</strong></td>
               </tr>`;
@@ -3837,6 +3838,9 @@ export default {
           <div data-for="arrive_late"><label>Time arriving</label><input id="toArrive" type="time"></div>
           <div data-for="leave_early appointment"><label>Time leaving</label><input id="toLeave" type="time"></div>
           <div data-for="appointment"><label>Time returning</label><input id="toBackAt" type="time"></div>
+          <div class="full"><label>Use PTO?</label>
+            <div class="to-types to-row"><label><input type="radio" name="toPto" value="yes" checked> Yes, use my PTO</label>
+              <label><input type="radio" name="toPto" value="no"> No, unpaid</label></div></div>
           <div class="full"><label>Reason (only approvers see this)</label><textarea id="toNote" rows="3" maxlength="500"></textarea></div>
           <div class="full to-hours" id="toHoursLine"></div>
           ${canOverride ? `<div><label>Hours (leave blank to use the math)</label><input id="toHours" type="number" step="0.25" min="0"></div>` : ''}
@@ -3856,7 +3860,7 @@ export default {
 
     const collect = () => {
       const t = type();
-      const r = { type: t, note: q('#toNote').value };
+      const r = { type: t, note: q('#toNote').value, use_pto: (back.querySelector('input[name="toPto"]:checked') || {}).value !== 'no' };
       if (t === 'all_days') { r.start_date = q('#toStart').value; r.return_date = q('#toReturn').value; }
       else r.start_date = q('#toDate').value;
       if (t === 'half_day') r.half = (back.querySelector('input[name="toHalf"]:checked') || {}).value || '';
@@ -3875,9 +3879,9 @@ export default {
       const hrs = typed != null ? typed : computed;
       q('#toHoursLine').innerHTML = computed == null
         ? `<span class="to-sub">Fill in the ${t === 'all_days' ? 'dates' : 'date and time'} to see how many hours this is.</span>`
-        : `<strong>${this._toHrs(computed)}</strong> of PTO${typed != null && typed !== computed ? `, overridden to <strong>${this._toHrs(typed)}</strong>` : ''}`;
+        : `<strong>${this._toHrs(computed)}</strong> ${r.use_pto ? 'of PTO' : 'unpaid, nothing comes off PTO'}${typed != null && typed !== computed ? `, overridden to <strong>${this._toHrs(typed)}</strong>` : ''}`;
       const bal = this._toBalanceFor(who());
-      const over = hrs && bal && bal.year === Number(String(r.start_date || '').slice(0, 4)) ? overBy(bal, hrs) : 0;
+      const over = r.use_pto && hrs && bal && bal.year === Number(String(r.start_date || '').slice(0, 4)) ? overBy(bal, hrs) : 0;
       q('#toFormWarn').innerHTML = over
         ? `<div class="to-warn inline">That's ${this._toHrs(over)} more than ${forOthers ? 'they have' : 'you have'} left for ${bal.year}, counting anything already pending. It can still be sent; the approver decides.</div>` : '';
     };
