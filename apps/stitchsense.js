@@ -2,12 +2,15 @@
 /**
  * StitchSense — stitch count estimating for quoting embroidery.
  *
- * FOUR VIEWS
+ * FIVE VIEWS
  *   estimate   the AM tool. Drop artwork, enter the finished size, get a
  *              stitch range to price against.
  *   library    every design we own, with its true count. Also where a design
  *              gets requoted at a new size, and where the archive gets
  *              imported from (admin only).
+ *   colorway   try colours on a design against a garment, export a PNG. Takes
+ *              a DST (thread blocks) or flat artwork, PNG, JPG, PDF or AI
+ *              (colours found in the art, see lib/stitchsense/recolor.js).
  *   guess      Stitch Guess, the training game for the embroidery team.
  *   accuracy   how the tool is actually doing on real jobs, plus the
  *              human-versus-model board.
@@ -42,6 +45,15 @@ import {
 } from '../lib/stitchsense/model.js';
 import { CHARACTERS, characterLabel } from '../lib/stitchsense/schema.js';
 import { loadPdfJs } from '../js/pdf-loader.js';
+import {
+  analyze as analyzeArt,
+  render as renderArt,
+  rgbToHex,
+  colorsInUse,
+  MAX_COLORS,
+  DEFAULT_COLORS,
+  MAX_WORK_EDGE
+} from '../lib/stitchsense/recolor.js';
 
 /* ------------------------------------------------------------------ *
  * SMALL HELPERS
@@ -320,6 +332,47 @@ const DEFAULT_THREADS = [
   '#4B2E83', '#E36325', '#00A3AD', '#8C8279',
   '#111111', '#FFFFFF', '#7A1F3D', '#5B8F22'
 ];
+
+/**
+ * Any colour the canvas accepts (hex, rgb(), a name) as [r, g, b], read back
+ * off a one pixel canvas so there is no second colour parser to disagree with
+ * the one the browser actually paints with.
+ */
+function cssToRgb(value) {
+  const c = document.createElement('canvas');
+  c.width = c.height = 1;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.fillStyle = value;
+  g.fillRect(0, 0, 1, 1);
+  const d = g.getImageData(0, 0, 1, 1).data;
+  return [d[0], d[1], d[2]];
+}
+
+/**
+ * Put recoloured artwork on a square-ish output canvas: garment fill behind,
+ * then rotated and mirrored the same way the DST path does it, scaled so the
+ * longest edge is `size` with a small margin.
+ */
+function placeArt(src, opts) {
+  const size = opts.size || 520;
+  const turned = (opts.rotate || 0) % 180 !== 0;
+  const sw = turned ? src.height : src.width;
+  const sh = turned ? src.width : src.height;
+  const fit = (size * 0.92) / Math.max(sw, sh);
+  const outW = Math.max(1, Math.round(sw * fit / 0.92));
+  const outH = Math.max(1, Math.round(sh * fit / 0.92));
+  const c = document.createElement('canvas');
+  c.width = outW; c.height = outH;
+  const g = c.getContext('2d');
+  if (opts.garment) { g.fillStyle = opts.garment; g.fillRect(0, 0, outW, outH); }
+  g.imageSmoothingEnabled = true;
+  g.imageSmoothingQuality = 'high';
+  g.translate(outW / 2, outH / 2);
+  g.rotate(((opts.rotate || 0) * Math.PI) / 180);
+  if (opts.mirror) g.scale(-1, 1);
+  g.drawImage(src, -src.width * fit / 2, -src.height * fit / 2, src.width * fit, src.height * fit);
+  return c;
+}
 
 /** How many separate thread blocks a decoded design actually has. */
 function blockCount(design) {
@@ -1027,6 +1080,11 @@ export default {
       vectorPages: 0,
       vectorPage: 1,
       cwMirror: false,
+      cwKind: null,          // 'dst' or 'art', whichever was dropped last
+      cwArt: null,           // artwork recolor: { source, analysis }
+      cwOriginal: [],        // colours as found in the artwork, for Reset
+      cwRemoveBg: false,
+      cwFind: DEFAULT_COLORS,
             session: { rounds: 0, points: 0, beats: 0 }
     };
 
@@ -1049,7 +1107,7 @@ export default {
     if (view === 'library') this.renderLibrary();
     // Re-rendered only when there is nothing loaded, so switching tabs does not
     // throw away a colourway somebody is part way through picking.
-    if (view === 'colorway' && !this.state.cwDesign) this.renderColorway();
+    if (view === 'colorway' && !this.state.cwDesign && !this.state.cwArt) this.renderColorway();
     if (view === 'guess') this.renderGuess();
     if (view === 'accuracy') this.renderAccuracy();
   },
@@ -1848,16 +1906,16 @@ export default {
       <div class="ss-hd">
         <h1>Colorway</h1>
         <div class="sub">
-          Drop an embroidery file to see the design and try thread colours against a garment
+          Drop an embroidery file or the customer's artwork to try colours against a garment
           colour. Export a PNG when you have something to show the customer.
         </div>
       </div>
       <div class="ss-card">
         <div class="ss-drop" id="ssCwDrop">
-          <div class="big">Drop a DST here</div>
-          <div class="small">The file tells us where each thread block starts and stops.<br>It does not carry any colours, so you pick them.</div>
+          <div class="big">Drop a DST or artwork here</div>
+          <div class="small">A DST gives thread blocks to colour.<br>PNG, JPG, PDF or AI: the colours already in the art are found for you to swap.</div>
         </div>
-        <input type="file" id="ssCwFile" accept=".dst" style="display:none">
+        <input type="file" id="ssCwFile" accept=".dst,.pdf,.ai,image/*" style="display:none">
         <div class="ss-err ss-hidden" id="ssCwErr"></div>
       </div>
       <div id="ssCwEditor"></div>
@@ -1882,11 +1940,16 @@ export default {
     const err = this.root.querySelector('#ssCwErr');
     err.classList.add('ss-hidden');
     try {
-      if (!/\.dst$/i.test(f.name)) throw new Error('That is not a DST. Colorway needs the embroidery file, not the artwork.');
+      if (/\.eps$/i.test(f.name)) {
+        throw new Error('EPS cannot be read here. Open it in Illustrator and save a copy as PDF, or export a PNG.');
+      }
+      if (!/\.dst$/i.test(f.name)) { await this.loadColorwayArt(f); return; }
       const decoded = decodeDst(await f.arrayBuffer());
       if (!decoded) throw new Error('That DST could not be decoded. Check it is a Tajima DST and not a renamed file.');
 
       this.state.cwDesign = decoded;
+      this.state.cwArt = null;
+      this.state.cwKind = 'dst';
       this.state.cwName = f.name.replace(/\.dst$/i, '');
       // Seed each block from the default palette so the first render is
       // legible. Every block a different colour is not a suggestion, it is the
@@ -2019,7 +2082,7 @@ export default {
           <input type="color" data-block="${i}" value="${esc(c)}">
         </div>
         <div class="ss-field" style="margin-bottom:0">
-          <label for="ssCwHex${i}">Block ${i + 1}</label>
+          <label for="ssCwHex${i}">${this.cwLabel(i)}</label>
           <input type="text" id="ssCwHex${i}" data-blockhex="${i}" value="${esc(c)}">
         </div>
       </div>
@@ -2095,17 +2158,21 @@ export default {
       this.paintColorway();
     });
 
-    root.querySelector('#ssCwThick').addEventListener('change', () => this.paintColorway());
-    root.querySelector('#ssCwStyle').addEventListener('change', (e) => {
+    // Thread weight, render style and connectors only exist for a DST. The
+    // artwork editor shares this wiring and simply has none of the three.
+    root.querySelector('#ssCwThick')?.addEventListener('change', () => this.paintColorway());
+    root.querySelector('#ssCwStyle')?.addEventListener('change', (e) => {
       this.state.cwStyle = e.target.value;
       this.paintColorway();
     });
-    root.querySelector('#ssCwConnect').addEventListener('change', (e) => {
+    root.querySelector('#ssCwConnect')?.addEventListener('change', (e) => {
       this.state.cwHideConnectors = e.target.checked;
       this.paintColorway();
     });
     root.querySelector('#ssCwReset').addEventListener('click', () => {
-      this.state.cwColors = this.state.cwColors.map((_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
+      this.state.cwColors = this.state.cwKind === 'art'
+        ? this.state.cwOriginal.slice()
+        : this.state.cwColors.map((_, i) => DEFAULT_THREADS[i % DEFAULT_THREADS.length]);
       this.drawColorwayBlocks();
       this.paintColorway();
     });
@@ -2113,6 +2180,7 @@ export default {
   },
 
   paintColorway() {
+    if (this.state.cwKind === 'art') return this.paintColorwayArt();
     const stage = this.root.querySelector('#ssCwStage');
     if (!stage || !this.state.cwDesign) return;
     const thickness = Number((this.root.querySelector('#ssCwThick') || {}).value || 1);
@@ -2135,6 +2203,7 @@ export default {
   },
 
   exportColorway() {
+    if (this.state.cwKind === 'art') return this.exportColorwayArt();
     const size = Number((this.root.querySelector('#ssCwSize') || {}).value || 1200);
     const thickness = Number((this.root.querySelector('#ssCwThick') || {}).value || 1);
     const canvas = renderDesign(this.state.cwDesign, {
@@ -2149,6 +2218,246 @@ export default {
     });
     const a = document.createElement('a');
     a.download = (this.state.cwName || 'design') + '-colorway.png';
+    a.href = canvas.toDataURL('image/png');
+    a.click();
+  },
+
+  /* ---------------- colorway: flat artwork ---------------- *
+   * The same view, fed a PNG, JPG, PDF or AI instead of a DST. The colours are
+   * found in the art (lib/stitchsense/recolor.js), each gets a swatch, and a
+   * swap repaints the soft edges too, so there is no halo of the old colour.
+   * Good for both jobs it is used for: showing a customer their logo in
+   * thread colours, and trying screen print ink colours on a shirt.
+   */
+
+  cwLabel(i) {
+    if (this.state.cwKind !== 'art') return `Block ${i + 1}`;
+    const a = this.state.cwArt && this.state.cwArt.analysis;
+    const p = a && a.palette[i];
+    const share = p ? ` &middot; ${pct(p.share, p.share < 0.1 ? 1 : 0)} of the art` : '';
+    const bg = a && i === a.bgIndex ? ' &middot; background' : '';
+    return `Colour ${i + 1}${share}${bg}`;
+  },
+
+  async loadColorwayArt(f) {
+    let img;
+    if (VECTOR_RE.test(f.name)) {
+      ({ img } = await renderVectorPage(f, 1));
+    } else {
+      const url = URL.createObjectURL(f);
+      try {
+        img = await new Promise((resolve, reject) => {
+          const i = new Image();
+          i.onload = () => resolve(i);
+          i.onerror = () => reject(new Error('That file could not be opened as an image.'));
+          i.src = url;
+        });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
+    // Worked at a capped size. A 6000 pixel scan would take seconds per colour
+    // change and the export never needs more than the print size anyway. An
+    // SVG with no size of its own reports a tiny box, so it is drawn up.
+    const nw = img.naturalWidth || img.width, nh = img.naturalHeight || img.height;
+    if (!nw || !nh) throw new Error('That image has no size. Try exporting it again as a PNG.');
+    const longest = Math.max(nw, nh);
+    const scale = /\.svg$/i.test(f.name) && longest < 1200
+      ? 1200 / longest
+      : Math.min(1, MAX_WORK_EDGE / longest);
+    const w = Math.max(1, Math.round(nw * scale));
+    const h = Math.max(1, Math.round(nh * scale));
+
+    const source = document.createElement('canvas');
+    source.width = w; source.height = h;
+    const g = source.getContext('2d', { willReadFrequently: true });
+    g.drawImage(img, 0, 0, w, h);
+    const pixels = g.getImageData(0, 0, w, h);
+
+    this.state.cwArt = { pixels, analysis: null };
+    this.state.cwDesign = null;
+    this.state.cwKind = 'art';
+    this.state.cwName = f.name.replace(/\.[^.]+$/, '');
+    this.state.cwRotate = 0;
+    this.state.cwMirror = false;
+    this.findArtColors();
+  },
+
+  /** Run (or re-run) colour finding at the current "colours to find" setting. */
+  findArtColors() {
+    const art = this.state.cwArt;
+    const analysis = analyzeArt(art.pixels, { maxColors: this.state.cwFind });
+    if (!analysis.palette.length) {
+      throw new Error('No artwork found in that file. It may be blank or fully transparent.');
+    }
+    art.analysis = analysis;
+    this.state.cwOriginal = analysis.palette.map((p) => rgbToHex(p.rgb));
+    this.state.cwColors = this.state.cwOriginal.slice();
+    // A logo on a white box almost always wants the box gone, so it starts off.
+    // The swatch is labelled "background" and one untick brings it back.
+    this.state.cwRemoveBg = analysis.bgIndex >= 0;
+    this.drawColorwayArtEditor();
+  },
+
+  drawColorwayArtEditor() {
+    const a = this.state.cwArt.analysis;
+    const box = this.root.querySelector('#ssCwEditor');
+    const findOpts = [];
+    for (let k = 2; k <= MAX_COLORS; k++) findOpts.push(k);
+
+    box.innerHTML = `
+      <div class="ss-cols">
+        <div>
+          <div class="ss-card">
+            <h2>Preview</h2>
+            <div class="ss-preview" id="ssCwStage"></div>
+            <div class="ss-overlay-note" id="ssCwArtNote"></div>
+          </div>
+          <div class="ss-flag fair">
+            Colours are swapped as flat fills, which is right for a logo. Photos, gradients and
+            shading get flattened to the nearest colour, so check the preview before sending.
+            A mockup, not a separation or a Wilcom proof.
+          </div>
+        </div>
+
+        <div>
+          <div class="ss-card">
+            <h2>Colours</h2>
+            <div class="ss-muted" style="margin-bottom:10px">
+              Found in the artwork, biggest first. Change one and every part of the art in that
+              colour changes with it. Set two to the same colour to merge them.
+            </div>
+            <div id="ssCwBlocks"></div>
+            <div class="ss-field" style="margin-top:6px">
+              <label for="ssCwFind">Colours to find</label>
+              <select id="ssCwFind">
+                ${findOpts.map((k) => `<option value="${k}"${k === this.state.cwFind ? ' selected' : ''}>Up to ${k}</option>`).join('')}
+              </select>
+            </div>
+            <div class="ss-muted" style="margin-bottom:12px">
+              If two colours in the art came out as one swatch, raise this. If an edge shade got a
+              swatch of its own, lower it.
+            </div>
+            ${a.bgIndex >= 0 ? `
+            <label class="ss-check">
+              <input type="checkbox" id="ssCwBg"${this.state.cwRemoveBg ? ' checked' : ''}>
+              Remove the background
+            </label>
+            <div class="ss-muted" style="margin-bottom:12px">
+              Only the background touching the edge goes. The same colour inside the design,
+              like white lettering in a badge, stays.
+            </div>` : ''}
+
+            <h3>Orientation</h3>
+            <div class="ss-btnrow" style="margin-bottom:14px">
+              <button class="ss-btn ghost" id="ssCwRotL">Rotate left</button>
+              <button class="ss-btn ghost" id="ssCwRotR">Rotate right</button>
+              <button class="ss-btn ghost" id="ssCwMirror" aria-pressed="false">Mirror</button>
+            </div>
+
+            <h3>Garment</h3>
+            <div class="ss-guessrow">
+              <div class="ss-field" style="flex:0 0 70px">
+                <input type="color" id="ssCwGarment" value="${esc(this.state.cwGarment || '')}">
+              </div>
+              <div class="ss-field">
+                <label for="ssCwGarmentHex">Colour</label>
+                <input type="text" id="ssCwGarmentHex" value="${esc(this.state.cwGarment || '')}">
+              </div>
+              <button class="ss-btn ghost" id="ssCwClear">No background</button>
+            </div>
+
+            <h3>Export</h3>
+            <div class="ss-field">
+              <label for="ssCwSize">Size (pixels)</label>
+              <select id="ssCwSize">
+                <option value="600">600, on screen</option>
+                <option value="1200" selected>1200, email</option>
+                <option value="2400">2400, print</option>
+              </select>
+            </div>
+            <div class="ss-btnrow">
+              <button class="ss-btn" id="ssCwPng">Download PNG</button>
+              <button class="ss-btn ghost" id="ssCwReset">Reset colours</button>
+            </div>
+            <div class="ss-muted" style="margin-top:8px">
+              With no garment colour set the PNG exports transparent, so it drops straight onto a
+              mockup.
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.drawColorwayBlocks();
+    this.wireColorway();
+
+    const find = box.querySelector('#ssCwFind');
+    find.addEventListener('change', () => {
+      this.state.cwFind = Number(find.value) || DEFAULT_COLORS;
+      try { this.findArtColors(); } catch (e) { this.showColorwayError(e); }
+    });
+    const bg = box.querySelector('#ssCwBg');
+    if (bg) bg.addEventListener('change', () => {
+      this.state.cwRemoveBg = bg.checked;
+      this.paintColorway();
+    });
+
+    this.paintColorway();
+  },
+
+  showColorwayError(e) {
+    const err = this.root.querySelector('#ssCwErr');
+    if (!err) return;
+    err.textContent = String((e && e.message) || e);
+    err.classList.remove('ss-hidden');
+  },
+
+  /** The recoloured artwork at working size, before garment and orientation. */
+  artCanvas() {
+    const a = this.state.cwArt.analysis;
+    const targets = this.state.cwColors.map(cssToRgb);
+    const rgba = renderArt(a, targets, { removeBg: this.state.cwRemoveBg });
+    const c = document.createElement('canvas');
+    c.width = a.width; c.height = a.height;
+    c.getContext('2d').putImageData(new ImageData(rgba, a.width, a.height), 0, 0);
+    return c;
+  },
+
+  paintColorwayArt() {
+    const stage = this.root.querySelector('#ssCwStage');
+    if (!stage || !this.state.cwArt || !this.state.cwArt.analysis) return;
+    const canvas = placeArt(this.artCanvas(), {
+      size: 520,
+      garment: this.state.cwGarment,
+      rotate: this.state.cwRotate,
+      mirror: this.state.cwMirror
+    });
+    stage.style.backgroundImage = this.state.cwGarment ? 'none' : CHECKER;
+    stage.innerHTML = '';
+    stage.appendChild(canvas);
+
+    const a = this.state.cwArt.analysis;
+    const inUse = colorsInUse(a, this.state.cwColors, this.state.cwRemoveBg);
+    const note = this.root.querySelector('#ssCwArtNote');
+    if (note) {
+      note.innerHTML = `${esc(this.state.cwName)} &middot; ${a.width} by ${a.height} pixels &middot; ` +
+        `<b>${inUse} colour${inUse === 1 ? '' : 's'} in use</b>, which is the screen count for ` +
+        `print or the thread count for embroidery.`;
+    }
+  },
+
+  exportColorwayArt() {
+    const size = Number((this.root.querySelector('#ssCwSize') || {}).value || 1200);
+    const canvas = placeArt(this.artCanvas(), {
+      size,
+      garment: this.state.cwGarment,
+      rotate: this.state.cwRotate,
+      mirror: this.state.cwMirror
+    });
+    const a = document.createElement('a');
+    a.download = (this.state.cwName || 'artwork') + '-colorway.png';
     a.href = canvas.toDataURL('image/png');
     a.click();
   },
