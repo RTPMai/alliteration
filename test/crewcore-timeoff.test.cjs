@@ -701,6 +701,45 @@ function notesFor(user) {
     t.equal(d.statusCode, 200);
   });
 
+  async function orphanRequest() {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    // Make it look like it came through the old code: no link, not remembered.
+    const stored = JSON.parse(kv.get(CC + ':pto_request:' + r.body.request.id));
+    const ids = stored.notice_ids;
+    delete stored.notice_ids;
+    kv.set(CC + ':pto_request:' + stored.id, JSON.stringify(stored));
+    ids.forEach((id) => { const n = note(id); n.link = null; kv.set('notifications_data:note:' + id, JSON.stringify(n)); });
+    return { id: stored.id, ids };
+  }
+
+  await check('opening Time Off links older notifications to their request', async () => {
+    const { id, ids } = await orphanRequest();
+    await call(route, { as: RYAN });
+    ids.forEach((n) => { t.equal(note(n).link && note(n).link.id, id); });
+    t.equal(JSON.parse(kv.get(CC + ':pto_request:' + id)).notice_ids.length, 2);
+  });
+
+  await check('deciding straight from an older notification still closes both', async () => {
+    const { id, ids } = await orphanRequest();
+    await call(route, { as: MEGAN, method: 'POST', body: { action: 'decide', decision: 'approve', id } });
+    t.assert(ids.map(note).every((n) => n.status === 'done'), 'closed without opening Time Off first');
+  });
+
+  await check('an older notification for someone else, or from another time, is not touched', async () => {
+    const { id, ids } = await orphanRequest();
+    const n = note(ids[0]);
+    n.createdAt = new Date(Date.parse(n.createdAt) - 10 * 60000).toISOString();
+    kv.set('notifications_data:note:' + ids[0], JSON.stringify(n));
+    const other = note(ids[1]);
+    other.title = 'Time off request from Dana';
+    kv.set('notifications_data:note:' + ids[1], JSON.stringify(other));
+    await call(route, { as: RYAN });
+    t.equal(note(ids[0]).link, null, 'ten minutes apart: not the same request');
+    t.equal(note(ids[1]).link, null, 'different person');
+    t.equal(JSON.parse(kv.get(CC + ':pto_request:' + id)).notice_ids, undefined);
+  });
+
   await check('notifications accept a time off link and route it into CrewCore', async () => {
     const ns = await import(path.join(ROOT, 'lib/notifications/schema.js'));
     t.assert(ns.LINK_TYPES.includes('timeoff'));

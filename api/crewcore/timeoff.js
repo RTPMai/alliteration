@@ -51,7 +51,7 @@ import {
   getPolicyDoc, savePolicyDoc,
 } from "../../lib/crewcore/pto-store.js";
 import { sendDecisionEmail, DEFAULT_TIMEOFF_FROM } from "../../lib/crewcore/pto-email.js";
-import { createTimeoffRequest, notifyTimeoff, closeTimeoffNotices, shopYear, span } from "../../lib/crewcore/pto-request.js";
+import { createTimeoffRequest, notifyTimeoff, closeTimeoffNotices, adoptOrphanNotices, shopYear, span } from "../../lib/crewcore/pto-request.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -146,7 +146,10 @@ export default async function handler(req, res) {
       const approversSet = doc.approvers.length > 0;
 
       if (teamView) {
-        const [employees, requests, adjustments] = await Promise.all([listEmployees(), listRequests(), listAdjustments()]);
+        const [employees, rawRequests, adjustments] = await Promise.all([listEmployees(), listRequests(), listAdjustments()]);
+        // Pending requests whose notifications predate the link: link them
+        // now, so the notification opens the request and closes on a decision.
+        const requests = await adoptOrphanNotices(rawRequests);
         const withActivity = new Set(requests.map((r) => r.employee_id));
         const team = employees
           .filter((e) => e.status !== "terminated" || withActivity.has(e.id))
@@ -246,7 +249,10 @@ export default async function handler(req, res) {
     }
 
     if (action === "decide" || action === "cancel") {
-      const existing = await getRequest(body.id);
+      let existing = await getRequest(body.id);
+      // Deciding straight from the notification, without opening Time Off
+      // first, still finds and closes an older notification.
+      if (existing) existing = (await adoptOrphanNotices([existing]))[0];
       if (!existing) return refuse(res, 404, "Request not found");
       const isOwner = !!own && existing.employee_id === own.id;
       const can = requestActions(existing, { isApprover, isOwner });
