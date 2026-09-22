@@ -2592,6 +2592,41 @@ export default {
             'A single supplier who is reliably slower can override this on their own card.' +
           '</div>' +
 
+          '<div class="pp-sect">Automatic reminders to the vendor</div>' +
+          (isAdmin
+            ? '<div class="pp-row">' +
+                '<div class="pp-field"><label>Remind the vendor when a PO is not confirmed</label>' +
+                  '<select id="ppNudge">' +
+                    '<option value="no"' + (S.nudgeVendors ? '' : ' selected') + '>Off</option>' +
+                    '<option value="yes"' + (S.nudgeVendors ? ' selected' : '') + '>On</option>' +
+                  '</select></div>' +
+                '<div class="pp-field"><label>Working days to wait</label>' +
+                  '<input id="ppNudgeAfter" type="number" min="1" max="30" value="' + esc(S.nudgeAfterDays == null ? 2 : S.nudgeAfterDays) + '"></div>' +
+                '<div class="pp-field"><label>How many reminders</label>' +
+                  '<input id="ppNudgeRounds" type="number" min="1" max="5" value="' + esc(S.nudgeMaxRounds == null ? 2 : S.nudgeMaxRounds) + '"></div>' +
+              '</div>' +
+              '<div class="pp-row">' +
+                '<div class="pp-field"><label>Sent from</label>' +
+                  '<input id="ppNudgeFrom" value="' + esc(S.nudgeFromAddress || '') + '" placeholder="Blank uses the purchase order from-address">' +
+                  '<div class="pp-hint">Must be on a domain verified in Resend.</div></div>' +
+                '<div class="pp-field"><label>Signed</label>' +
+                  '<input id="ppNudgeName" value="' + esc(S.nudgeFromName || '') + '" placeholder="' + esc(S.brandName || 'P&M Apparel') + '"></div>' +
+                '<div class="pp-field"><label>Never remind about orders older than</label>' +
+                  '<input id="ppNudgeMaxAge" type="number" min="1" max="365" value="' + esc(S.nudgeMaxAgeDays == null ? 30 : S.nudgeMaxAgeDays) + '">' +
+                  '<div class="pp-hint">Days. Stops old orders getting chased the day this is switched on.</div></div>' +
+              '</div>'
+            : '<div style="font-size:13px">' +
+                (S.nudgeVendors
+                  ? 'On. A vendor who has not confirmed hears from us after ' + esc(S.nudgeAfterDays == null ? 2 : S.nudgeAfterDays) + ' working days.'
+                  : 'Off. Nothing is sent to a vendor automatically.') +
+              '</div>') +
+          '<div class="pp-hint">' +
+            'Weekday mornings, any order that was emailed and has not been confirmed gets one follow-up to everybody who was on the original email. ' +
+            'It stops on its own: a vendor who has replied is never chased automatically, nor is a blacklisted one, nor an order somebody has already rung about, ' +
+            'and it gives up after the number of reminders set here rather than writing every morning. ' +
+            'Replies come back to the order the same way the purchase order\\u2019s do.' +
+          '</div>' +
+
           '<div class="pp-sect">Who can raise and edit purchase orders</div>' +
           '<div class="pp-hint" style="margin-bottom:10px">' +
             'Reading stays open to everyone, so an account manager can always answer \u201cwhere is my order\u201d without asking. ' +
@@ -2729,6 +2764,14 @@ export default {
         payload.captureReplies = $('#ppCapture').value === 'yes';
         payload.captureDomain = $('#ppCaptureDomain') ? $('#ppCaptureDomain').value : '';
         payload.replyFallbackTo = $('#ppReplyFallback') ? $('#ppReplyFallback').value : '';
+      }
+      if ($('#ppNudge')) {
+        payload.nudgeVendors = $('#ppNudge').value === 'yes';
+        payload.nudgeAfterDays = Number($('#ppNudgeAfter').value) || 2;
+        payload.nudgeMaxRounds = Number($('#ppNudgeRounds').value) || 2;
+        payload.nudgeMaxAgeDays = Number($('#ppNudgeMaxAge').value) || 30;
+        payload.nudgeFromAddress = $('#ppNudgeFrom').value.trim();
+        payload.nudgeFromName = $('#ppNudgeName').value.trim();
       }
       if ($('#ppPromoCats')) {
         payload.promoCategories = String($('#ppPromoCats').value || '')

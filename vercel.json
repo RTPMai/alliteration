@@ -23,6 +23,10 @@
       "schedule": "30 13 * * 1-5"
     },
     {
+      "path": "/api/promopro/cron-nudge",
+      "schedule": "0 14 * * 1-5"
+    },
+    {
       "path": "/api/reviews/cron",
       "schedule": "15 14,17,20,23 * * *"
     }

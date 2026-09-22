@@ -432,6 +432,13 @@ export default async function handler(req, res) {
       history,
       lastSentAt: now,
       sentTo: vendor.email,
+      // WHO WAS ACTUALLY ON THE EMAIL, not who would be on it if it were
+      // built again today. The automatic reminder writes to this same list,
+      // and the always-CC list or the account manager can change between the
+      // order going out and the reminder going out. A follow-up that reaches
+      // a different set of people than the purchase order did confuses
+      // everybody copied on either one.
+      sentCc: cc,
       sendCount: (Number(po.sendCount) || 0) + 1,
       // THE HANDLE ON THIS SEND. Resend hands back an id, and until now it
       // was passed to the browser in the response and then dropped, which
