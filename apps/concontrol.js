@@ -1289,11 +1289,12 @@ function renderSignups(body) {
     : `
     <div class="con-left">
       <div class="con-note" style="margin-bottom:8px">
-        These people asked to be told about the next Flyover Con. They belong in
-        MailMe's Flyover Con list as well; this is the record of who asked and when.
+        People to tell about the next Flyover Con: ${rows.filter((r) => r.source !== 'attendee-import').length} asked,
+        ${rows.filter((r) => r.source === 'attendee-import').length} came before. They belong in MailMe's Flyover Con
+        list as well; this is the record of who they are and how they got here.
       </div>
       <table class="con-table">
-        <thead><tr><th>Name</th><th>Email</th><th>Where</th><th>Asked</th>${canDelete ? '<th></th>' : ''}</tr></thead>
+        <thead><tr><th>Name</th><th>Email</th><th>Where</th><th>When</th>${canDelete ? '<th></th>' : ''}</tr></thead>
         <tbody>
           ${rows.map((r) => {
             const a = r.answers || {};
@@ -1302,7 +1303,7 @@ function renderSignups(body) {
               <td>${esc(a.name) || '<span style="opacity:.5">not given</span>'}</td>
               <td>${esc(a.email)}</td>
               <td>${esc(a.city_state) || '<span style="opacity:.5">not given</span>'}</td>
-              <td class="con-note">${esc(prettyDate(r.submittedAt))}${r.source === 'manual' ? ' · added by hand' : ''}</td>
+              <td class="con-note">${esc(prettyDate(r.submittedAt))}${r.source === 'manual' ? ' · added by hand' : r.source === 'attendee-import' ? ' · past attendee' : ''}</td>
               ${canDelete ? `<td class="con-num"><button class="con-slot" data-drop-signup="${esc(r.id)}">Remove</button></td>` : ''}
             </tr>`;
           }).join('')}
@@ -1400,12 +1401,16 @@ function importDrawer() {
         In the Google Sheet, File, Download, Comma separated values, then open
         the file and paste the whole thing here. Safe to paste the same export
         twice: a response already here is matched on email and time and skipped.
+        A registration export can go in as it comes out of the ticketing site:
+        columns like First Name, Last Name, Email Address, City and State are
+        recognised, and anybody already on the list is left as they are.
       </div>
       <div class="con-field">
         <label>Which tab</label>
         <select id="imp_kind">
           <option value="import-survey">Responses, the survey</option>
           <option value="import-signups">Notify, the mailing list</option>
+          <option value="import-attendees">Past attendees, a registration export</option>
         </select>
       </div>
       <div class="con-field">
@@ -1433,10 +1438,16 @@ function importDrawer() {
       if (res.duplicate) bits.push(`${res.duplicate} already here`);
       if (res.empty) bits.push(`${res.empty} blank`);
       if (res.unusable) bits.push(`${res.unusable} with no usable email`);
+      const noEmail = Array.isArray(res.noEmail) ? res.noEmail : [];
       msg.innerHTML = `<div class="con-ok">${esc(bits.join(', '))}.${
         res.unknownColumns && res.unknownColumns.length
           ? ' Kept columns this app does not know about: ' + esc(res.unknownColumns.join(', ')) + '.'
-          : ''}</div>`;
+          : ''}</div>${noEmail.length ? `
+        <div class="con-note" style="margin-top:8px">
+          <strong>${noEmail.length} came on somebody else's order</strong> and have no email of their own,
+          so they are not on the list. Add any you have an address for with Add someone.
+          <div style="margin-top:6px">${noEmail.map((p) => `${esc(p.name)} <span style="opacity:.6">via ${esc(p.via)}</span>`).join('<br>')}</div>
+        </div>` : ''}`;
       state.loaded.responses = false;
       await loadResponses();
     } catch (e) {

@@ -4,6 +4,7 @@
 // GET                          the four streams, plus the survey summary
 // POST { what: "import-survey", csv }   paste the sheet export
 // POST { what: "import-signups", csv }  same, for the notify list
+// POST { what: "import-attendees", csv } a ticketing/registration export, onto the notify list as past attendees
 // POST { what: "load-foc26" }          load the FOC26 survey and notify list
 // POST { what: "promote", topic }       turn one asked-for topic into a session idea
 // POST { what: "add-signup", name, email, city_state }  one person onto the notify list by hand
@@ -24,7 +25,7 @@ import { requireAuth } from "../../lib/session.js";
 import { permsFor } from "../../lib/users.js";
 import { historyEntry, DEFAULT_EVENT } from "../../lib/concontrol/schema.js";
 import {
-  newResponse, newSignup, rowsFromCsv, responseKey, summarise, signupIsUsable, manualSignup,
+  newResponse, newSignup, rowsFromCsv, responseKey, summarise, signupIsUsable, manualSignup, signupFromRow, ticketHolder, samePerson,
 } from "../../lib/concontrol/responses.js";
 import { newSession } from "../../lib/concontrol/program.js";
 import { FOC26_SURVEY, FOC26_SIGNUPS } from "../../lib/concontrol/foc26-responses.js";
@@ -98,10 +99,49 @@ async function importSurveyRows(rows, event, who, unknown) {
  * refuses them is the shape that loses them.
  */
 async function importSignups(csv, event, who) {
-  return importSignupRows(rowsFromCsv(csv).rows, event, who);
+  return importSignupRows(rowsFromCsv(csv).rows.map(signupFromRow), event, who);
 }
 
-async function importSignupRows(rows, event, who) {
+/**
+ * Past attendees, from a ticketing or registration export.
+ *
+ * Same list, same dedupe, different label. The notify list was the record of
+ * who ASKED to hear about next year; an attendee did not ask, they came. The
+ * source keeps those apart, so the screen can say which is which and nobody
+ * mistakes one for the other later.
+ *
+ * Somebody already on the list stays as they were. If they asked, "asked" is
+ * the stronger fact and an import must not overwrite it.
+ */
+async function importAttendees(csv, event, who) {
+  const raw = rowsFromCsv(csv).rows;
+  const out = await importSignupRows(raw.map(signupFromRow), event, who, {
+    source: "attendee-import",
+    note: "imported from a registration export (past attendee)",
+  });
+
+  // WHO CAME ON SOMEBODY ELSE'S ORDER. One owner buying tickets for the crew
+  // leaves only the owner's email in the export. The owner goes on the list;
+  // the crew cannot, because there is no address for them. Rather than lose
+  // them silently, name them, so somebody who knows them can add them by hand.
+  const noEmail = [];
+  const seen = new Set();
+  for (const row of raw) {
+    const holder = ticketHolder(row);
+    if (!holder) continue;
+    const buyer = signupFromRow(row);
+    if (samePerson(holder, buyer.name)) continue;
+    const key = holder.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    noEmail.push({ name: holder, via: buyer.name || buyer.email });
+  }
+  return { ...out, noEmail };
+}
+
+async function importSignupRows(rows, event, who, how) {
+  const source = (how && how.source) || "sheet-import";
+  const note = (how && how.note) || "imported from the sheet";
   const existing = await listSignups(event);
   const seen = new Set(existing.map((r) => String((r.answers || {}).email || "").toLowerCase()));
 
@@ -115,8 +155,8 @@ async function importSignupRows(rows, event, who) {
     if (seen.has(email)) { duplicate += 1; continue; }
 
     const id = await nextSignupId();
-    const record = newSignup(id, event, answers, "sheet-import");
-    record.history = [historyEntry("imported from the sheet", who)];
+    const record = newSignup(id, event, answers, source);
+    record.history = [historyEntry(note, who)];
     await saveSignup(record);
     seen.add(email);
     created.push(id);
@@ -230,6 +270,11 @@ export default async function handler(req, res) {
       if (what === "import-signups") {
         if (!String(b.csv || "").trim()) return res.status(400).json({ error: "Paste the CSV first" });
         return res.status(200).json({ ok: true, ...(await importSignups(b.csv, event, sess.username)) });
+      }
+
+      if (what === "import-attendees") {
+        if (!String(b.csv || "").trim()) return res.status(400).json({ error: "Paste the CSV first" });
+        return res.status(200).json({ ok: true, ...(await importAttendees(b.csv, event, sess.username)) });
       }
 
       // The FOC26 data ships with the app so this is one button. Every earlier
