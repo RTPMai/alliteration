@@ -648,6 +648,66 @@ function notesFor(user) {
     t.equal(r.body.use_pto, false);
   });
 
+  /* ==== 4b3. Notification links and closing ============================== */
+
+  function note(id) { return JSON.parse(kv.get('notifications_data:note:' + id)); }
+
+  await check('the approvers\' notifications link to the request', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(2) });
+    const n = notesFor('ryan')[0];
+    t.equal(n.link.type, 'timeoff');
+    t.equal(n.link.id, r.body.request.id);
+    t.assert(/Sasha Smith/.test(n.link.label), n.link.label);
+    t.equal(r.body.request.notice_ids.length, 2, 'one each for Ryan and Megan, remembered on the request');
+  });
+
+  await check('approving closes the notification for BOTH approvers', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: MEGAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: r.body.request.id } });
+    const [a, b] = r.body.request.notice_ids.map(note);
+    t.equal(a.status, 'done'); t.equal(b.status, 'done');
+    t.equal(a.doneBy, 'megan', 'Ryan\'s shows Megan handled it');
+    t.assert(/approved/.test(a.history[a.history.length - 1].what));
+  });
+
+  await check('denying and cancelling close them too', async () => {
+    seed();
+    const r1 = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'deny', id: r1.body.request.id } });
+    t.assert(r1.body.request.notice_ids.map(note).every((n) => n.status === 'done'));
+    const r2 = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: SASHA, method: 'POST', body: { action: 'cancel', id: r2.body.request.id } });
+    t.assert(r2.body.request.notice_ids.map(note).every((n) => n.status === 'done'), 'the employee took it back, nothing left to decide');
+  });
+
+  await check('the employee\'s "approved" notification links to their request', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: r.body.request.id } });
+    const n = notesFor('sasha')[0];
+    t.equal(n.link.type, 'timeoff');
+    t.equal(n.link.id, r.body.request.id);
+  });
+
+  await check('a request from before this change (no notification ids) still decides fine', async () => {
+    seed();
+    const r = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    const stored = JSON.parse(kv.get(CC + ':pto_request:' + r.body.request.id));
+    delete stored.notice_ids;
+    kv.set(CC + ':pto_request:' + r.body.request.id, JSON.stringify(stored));
+    const d = await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: r.body.request.id } });
+    t.equal(d.statusCode, 200);
+  });
+
+  await check('notifications accept a time off link and route it into CrewCore', async () => {
+    const ns = await import(path.join(ROOT, 'lib/notifications/schema.js'));
+    t.assert(ns.LINK_TYPES.includes('timeoff'));
+    t.equal(ns.appForLinkType('timeoff'), 'crewcore');
+    t.assert(!ns.PICKABLE_LINK_TYPES.includes('timeoff'), 'attached automatically, not offered in the picker');
+  });
+
   /* ==== 4c. Emailing the employee ======================================= */
 
   await check('approving emails the employee, from the default address, replies to the approver', async () => {

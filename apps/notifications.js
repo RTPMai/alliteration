@@ -96,6 +96,9 @@ const LINK_ROUTE = {
   // to be built there, the link just had somewhere to go.
   po: { app: 'promopro', view: 'orders' },
   sticky: { app: 'stickies', view: 'board' },
+  // CrewCore opens the request itself off the route segment: an approver
+  // lands on it in "Waiting on you", the employee on their own list.
+  timeoff: { app: 'crewcore', view: 'timeoff' },
 };
 
 // What the search box says it is searching. "by company name" was true while

@@ -108,9 +108,9 @@ Promise.all([
 
   /* ---- link to a record (Ryan's ask, Aug 2026) --------------------------- */
 
-  t.test('seven link types: the five BackBone/TravelTrack/GivingGauge ones plus po and sticky', () => {
-    t.equal(LINK_TYPES.length, 7, 'expected exactly seven link types');
-    ['inquiry', 'lead', 'client', 'expense', 'donation', 'po', 'sticky'].forEach((v) =>
+  t.test('eight link types: the five BackBone/TravelTrack/GivingGauge ones plus po, sticky and timeoff', () => {
+    t.equal(LINK_TYPES.length, 8, 'expected exactly eight link types');
+    ['inquiry', 'lead', 'client', 'expense', 'donation', 'po', 'sticky', 'timeoff'].forEach((v) =>
       t.assert(LINK_TYPES.includes(v), 'missing link type ' + v));
     LINK_TYPES.forEach((v) =>
       t.assert(!!LINK_TYPE_LABELS[v], 'LINK_TYPE_LABELS is missing a label for ' + v));

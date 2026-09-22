@@ -543,6 +543,7 @@ export default {
   .to-types label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);margin:0}
   .cc-form-grid .to-types input{width:auto}
   .to-types.to-row{flex-direction:row;gap:18px;flex-wrap:wrap}
+  .cc-row.to-focus{box-shadow:inset 0 0 0 2px var(--accent);border-radius:var(--radius-sm)}
   .to-sub{font-size:11.5px;color:var(--muted);margin-top:4px}
   .to-hours{font-size:13.5px;padding:10px 12px;background:var(--line-soft);border-radius:var(--radius-sm)}
   .to-approvers{display:flex;flex-direction:column;gap:6px;margin-top:4px}
@@ -680,7 +681,7 @@ export default {
     };
   },
 
-  async showView(view) {
+  async showView(view, param) {
     const root = this._root;
     if (!root) return;
     const $ = (sel) => root.querySelector(sel);
@@ -789,6 +790,8 @@ export default {
       title.textContent = 'Time Off.';
       // Entering from the rail lands on the list, never a stale detail.
       this._toDetailId = null;
+      // A notification link carries the request id (#/crewcore/timeoff/PTO-00012).
+      this._toFocusId = param || null;
       try {
         await this._loadTimeoff();
       } catch (e) {
@@ -796,7 +799,7 @@ export default {
         body.innerHTML = `<div class="cc-locked"><h2>Time off didn't load</h2><p>${esc(e.message || 'Try again in a minute.')}</p></div>`;
         return;
       }
-      this._paintTimeoff();
+      this._focusTimeoffRequest();
       return;
     }
 
@@ -3581,7 +3584,7 @@ export default {
       bits.push(r.email.sent ? 'Emailed ' + esc(r.email.to || '') : '<span style="color:var(--danger)">Not emailed: ' + esc(r.email.why || 'unknown') + '</span>');
     }
     return `
-      <div class="cc-row">
+      <div class="cc-row" data-to-row="${esc(r.id)}">
         <div style="min-width:0">
           <div class="who">${showName ? esc(r.employee_name || '') + ' \u00b7 ' : ''}${esc(this._toSpan(r))}</div>
           <div class="meta">${bits.join(' \u00b7 ')}</div>
@@ -3781,6 +3784,36 @@ export default {
         } catch (e) { this._toMsg(e); }
       };
     });
+  },
+
+  /**
+   * Land on the request a notification pointed at. Pending: stay on the list,
+   * where "Waiting on you" has the Approve and Deny buttons. Already decided:
+   * open that person's page, in the request's year. Either way the row is
+   * scrolled to and outlined. A request that is gone just shows the list.
+   */
+  _focusTimeoffRequest() {
+    const id = this._toFocusId;
+    this._toFocusId = null;
+    const d = this._to || {};
+    const r = id ? (d.requests || []).find((x) => x.id === id) : null;
+    if (r) {
+      const y = requestYear(r);
+      if (d.scope === 'team' && r.status !== 'pending') this._toDetailId = r.employee_id;
+      if (y && y !== this._toYear) {
+        this._toYear = y;
+        this._toFocusId = id;
+        this._loadTimeoff().then(() => this._focusTimeoffRequest()).catch(() => this._paintTimeoff());
+        return;
+      }
+    }
+    this._paintTimeoff();
+    if (!r) return;
+    const row = this._root.querySelector(`[data-to-row="${CSS.escape(r.id)}"]`);
+    if (row) {
+      row.classList.add('to-focus');
+      row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
   },
 
   _toMsg(e) {

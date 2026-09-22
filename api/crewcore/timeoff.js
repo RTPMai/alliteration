@@ -51,7 +51,7 @@ import {
   getPolicyDoc, savePolicyDoc,
 } from "../../lib/crewcore/pto-store.js";
 import { sendDecisionEmail, DEFAULT_TIMEOFF_FROM } from "../../lib/crewcore/pto-email.js";
-import { createTimeoffRequest, notifyTimeoff, shopYear, span } from "../../lib/crewcore/pto-request.js";
+import { createTimeoffRequest, notifyTimeoff, closeTimeoffNotices, shopYear, span } from "../../lib/crewcore/pto-request.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -283,6 +283,11 @@ export default async function handler(req, res) {
       };
       let saved = await saveRequest(updated);
 
+      // The "please approve" notifications are answered now, for both
+      // approvers, whoever acted. Cancelling answers them too.
+      const actorName = (scope.own && scope.own.name) || (scope.user && scope.user.name) || sess.username;
+      await closeTimeoffNotices(saved, { by: sess.username, byName: actorName, what: "time off " + status });
+
       // Tell the person whose time off it is, unless they did it themselves.
       if (!isOwner) {
         saved = await emailEmployee({ request: saved, event: status, note: action === "decide" ? note : "", doc, sess, scope });
@@ -292,6 +297,7 @@ export default async function handler(req, res) {
             to: emp.username, toName: emp.name,
             title: `Your time off for ${span(saved)} was ${status}`,
             detail: `${saved.hours} hours.` + (action === "decide" && note ? ` Note: ${note}` : ""),
+            request: saved,
           });
         }
       }
