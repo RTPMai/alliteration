@@ -543,6 +543,23 @@ export default {
   .to-types label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);margin:0}
   .cc-form-grid .to-types input{width:auto}
   .to-types.to-row{flex-direction:row;gap:18px;flex-wrap:wrap}
+  .cal-head{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin:14px 0 6px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .cal-head div{text-align:center}
+  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
+  .cal-cell{min-height:86px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px}
+  .cal-cell.out{background:transparent;border:none}
+  .cal-cell.wknd{background:var(--line-soft)}
+  .cal-cell.today{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .cal-n{font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px}
+  .cal-tag{
+    font-size:11px;font-weight:700;border-radius:4px;padding:2px 5px;margin-bottom:3px;cursor:pointer;
+    background:var(--success-tint);color:var(--success-dk);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .cal-tag.pending{background:var(--warn-tint);color:var(--warn-dk)}
+  @media (max-width:720px){
+    .cal-cell{min-height:64px;padding:4px}
+    .cal-tag{font-size:10px}
+  }
   .cc-row.to-focus{box-shadow:inset 0 0 0 2px var(--accent);border-radius:var(--radius-sm)}
   .to-sub{font-size:11.5px;color:var(--muted);margin-top:4px}
   .to-hours{font-size:13.5px;padding:10px 12px;background:var(--line-soft);border-radius:var(--radius-sm)}
@@ -618,6 +635,12 @@ export default {
     this._to = null;
     this._toYear = new Date().getFullYear();
     this._toDetailId = null;
+    // Time Off has two ways of looking at the same thing: 'list' and the
+    // month 'calendar' (Ryan, Sep 22). The calendar filters are held here so
+    // switching back and forth does not lose them.
+    this._toMode = 'list';
+    this._toMonth = null;
+    this._toFilter = { dept: '', boss: '' };
     // Figures for the self-serve Dashboard, each loaded independently so one
     // failing fetch costs one card rather than the whole screen.
     this._selfCards = null;
@@ -3518,15 +3541,26 @@ export default {
     const me = d.me || {};
 
     actions.innerHTML = '';
+    const canCalendar = d.scope === 'team' || (d.reports && d.reports.length);
+    if (this._toMode === 'calendar' && canCalendar) {
+      sub.textContent = d.scope === 'team' ? 'Who is out, month by month.' : 'When your people are out.';
+      actions.innerHTML = `<button class="cc-btn ghost" id="toListBtn">List</button>`;
+      body.innerHTML = this._renderTimeoffCalendar();
+      this._wireTimeoff();
+      return;
+    }
     if (d.scope === 'team') {
       sub.textContent = this._toDetailId ? 'One person\u2019s time off, year by year.' : 'Requests, who\u2019s out, and everybody\u2019s balance.';
       actions.innerHTML = `${this._toYearPicker()}
+        <button class="cc-btn ghost" id="toCalBtn">Calendar</button>
         ${me.is_approver ? `<button class="cc-btn" id="toLogBtn">Log time off</button>` : ''}
         ${me.employee_id ? `<button class="cc-btn ghost" id="toMineBtn">Request my own</button>` : ''}`;
       body.innerHTML = this._toDetailId ? this._renderTimeoffDetail() : this._renderTimeoffTeam();
     } else {
       sub.textContent = 'Your paid time off.';
-      if (d.linked) actions.innerHTML = `${this._toYearPicker()}<button class="cc-btn" id="toReqBtn">${d.exempt ? 'Log time off' : 'Request time off'}</button>`;
+      if (d.linked) actions.innerHTML = `${this._toYearPicker()}
+        ${canCalendar ? `<button class="cc-btn ghost" id="toCalBtn">Calendar</button>` : ''}
+        <button class="cc-btn" id="toReqBtn">${d.exempt ? 'Log time off' : 'Request time off'}</button>`;
       body.innerHTML = this._renderTimeoffSelf();
     }
     this._wireTimeoff();
@@ -3646,7 +3680,101 @@ export default {
         <h2>Your requests, ${this._toYear}</h2>
         ${this._toList(reqs, 'No time off requested for ' + this._toYear + ' yet.')}
       </div>
-      ${this._toAdjustList((d.adjustments || []).filter((a) => Number(a.year) === this._toYear), false)}`;
+      ${this._toAdjustList((d.adjustments || []).filter((a) => Number(a.year) === this._toYear), false)}
+      ${this._renderMyTeamTimeoff()}`;
+  },
+
+  /**
+   * For a supervisor: when their own people are out. Dates and status only,
+   * Ryan's call, so nobody's hours or reasons travel sideways. Approvers and
+   * admins do not see this section; they have the whole team above.
+   */
+  _renderMyTeamTimeoff() {
+    const d = this._to || {};
+    if (!d.reports || !d.reports.length) return '';
+    const today = new Date().toISOString().slice(0, 10);
+    const rows = (d.report_timeoff || []).filter((r) => r.end_date >= today)
+      .sort((a, b) => String(a.start_date).localeCompare(String(b.start_date)));
+    return `
+      <div class="cc-section">
+        <h2>Your people, coming up</h2>
+        <div class="cc-list">${rows.length ? rows.map((r) => `
+          <div class="cc-row">
+            <div><div class="who">${esc(r.employee_name || '')}</div>
+              <div class="meta">${esc(this._toSpan(r))}${r.part_day ? ' \u00b7 part of the day' : ''}</div></div>
+            <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
+          </div>`).join('') : `<div class="cc-empty">Nobody on your team has time off coming up.</div>`}
+        </div>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px">${d.reports.length} ${d.reports.length === 1 ? 'person reports' : 'people report'} to you.
+          Their hours and balances stay with them${(d.me || {}).is_approver ? '' : ' and Ryan or Megan'}.</p>
+      </div>`;
+  },
+
+  /* ---- Calendar ----
+   *
+   * A month at a time, names on the days they are out. An admin or approver
+   * sees everybody and can filter by department or supervisor; a supervisor
+   * sees their own people only, which is all the server sends them.
+   */
+  _renderTimeoffCalendar() {
+    const d = this._to || {};
+    const team = d.scope === 'team';
+    const month = this._toMonth || new Date().toISOString().slice(0, 7);
+    const [y, m] = month.split('-').map(Number);
+    const first = new Date(Date.UTC(y, m - 1, 1));
+    const days = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const lead = first.getUTCDay();
+    const dept = this._toFilter.dept;
+    const boss = this._toFilter.boss;
+
+    const byId = {};
+    (d.team || []).forEach((p) => { byId[p.id] = p; });
+    let rows = team
+      ? (d.requests || []).filter((r) => r.status === 'approved' || r.status === 'pending')
+      : (d.report_timeoff || []);
+    if (team && (dept || boss)) {
+      rows = rows.filter((r) => {
+        const p = byId[r.employee_id] || {};
+        return (!dept || p.department === dept) && (!boss || p.reports_to === boss);
+      });
+    }
+
+    const cells = [];
+    for (let i = 0; i < lead; i++) cells.push('<div class="cal-cell out"></div>');
+    const todayStr = new Date().toISOString().slice(0, 10);
+    for (let day = 1; day <= days; day++) {
+      const iso = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+      const on = rows.filter((r) => r.start_date <= iso && r.end_date >= iso);
+      const dow = new Date(Date.UTC(y, m - 1, day)).getUTCDay();
+      cells.push(`<div class="cal-cell${dow === 0 || dow === 6 ? ' wknd' : ''}${iso === todayStr ? ' today' : ''}">
+        <div class="cal-n">${day}</div>
+        ${on.map((r) => `<div class="cal-tag ${esc(r.status)}"${team ? ` data-to-person="${esc(r.employee_id)}"` : ''} title="${esc((r.employee_name || '') + ' \u00b7 ' + r.status)}">${esc((r.employee_name || '').split(' ')[0])}${(r.part_day || (r.type && r.type !== 'all_days')) ? '*' : ''}</div>`).join('')}
+      </div>`);
+    }
+    const label = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
+    const depts = Array.from(new Set((d.team || []).map((p) => p.department).filter(Boolean))).sort();
+    return `
+      <div id="toMsg"></div>
+      <div class="cc-toolbar">
+        <button class="cc-btn sm ghost" id="calPrev">\u2190</button>
+        <strong style="min-width:160px;text-align:center">${esc(label)}</strong>
+        <button class="cc-btn sm ghost" id="calNext">\u2192</button>
+        <button class="cc-btn sm ghost" id="calToday">This month</button>
+        ${team ? `<select class="cc-filt" id="calDept">
+            <option value="">All departments</option>
+            ${depts.map((x) => `<option value="${esc(x)}" ${dept === x ? 'selected' : ''}>${esc(x)}</option>`).join('')}
+          </select>
+          <select class="cc-filt" id="calBoss">
+            <option value="">All supervisors</option>
+            ${(d.supervisors || []).map((x) => `<option value="${esc(x.id)}" ${boss === x.id ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}
+          </select>` : ''}
+      </div>
+      <div class="cal-head">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((x) => `<div>${x}</div>`).join('')}</div>
+      <div class="cal-grid">${cells.join('')}</div>
+      <p style="font-size:12px;color:var(--muted);margin-top:10px">
+        A star means part of the day. Paler names are still waiting on approval.
+        ${team ? 'Click a name to open that person.' : 'Your own people only.'}
+      </p>`;
   },
 
   _renderTimeoffTeam() {
@@ -3745,6 +3873,31 @@ export default {
     const root = this._root;
     const $ = (sel) => root.querySelector(sel);
 
+    const cal = $('#toCalBtn');
+    if (cal) cal.onclick = () => { this._toMode = 'calendar'; this._toDetailId = null; this._paintTimeoff(); };
+    const lst = $('#toListBtn');
+    if (lst) lst.onclick = () => { this._toMode = 'list'; this._paintTimeoff(); };
+    const shift = (n) => {
+      const [y, m] = (this._toMonth || new Date().toISOString().slice(0, 7)).split('-').map(Number);
+      const dt = new Date(Date.UTC(y, m - 1 + n, 1));
+      this._toMonth = dt.toISOString().slice(0, 7);
+      // The payload is a year at a time; stepping into another year reloads.
+      if (dt.getUTCFullYear() !== this._toYear) {
+        this._toYear = dt.getUTCFullYear();
+        this._refreshTimeoff();
+      } else this._paintTimeoff();
+    };
+    const prev = $('#calPrev');
+    if (prev) prev.onclick = () => shift(-1);
+    const next = $('#calNext');
+    if (next) next.onclick = () => shift(1);
+    const tod = $('#calToday');
+    if (tod) tod.onclick = () => { this._toMonth = new Date().toISOString().slice(0, 7); shift(0); };
+    const cd = $('#calDept');
+    if (cd) cd.onchange = () => { this._toFilter.dept = cd.value; this._paintTimeoff(); };
+    const cb = $('#calBoss');
+    if (cb) cb.onchange = () => { this._toFilter.boss = cb.value; this._paintTimeoff(); };
+
     const yr = $('#toYear');
     if (yr) yr.onchange = async () => { this._toYear = Number(yr.value); await this._refreshTimeoff(); };
     const req = $('#toReqBtn');
@@ -3761,7 +3914,12 @@ export default {
     if (adj) adj.onclick = () => this._openAdjustForm(this._toDetailId);
 
     root.querySelectorAll('[data-to-person]').forEach((row) => {
-      row.onclick = (ev) => { ev.preventDefault(); this._toDetailId = row.dataset.toPerson; this._paintTimeoff(); };
+      row.onclick = (ev) => {
+        ev.preventDefault();
+        this._toDetailId = row.dataset.toPerson;
+        this._toMode = 'list';
+        this._paintTimeoff();
+      };
     });
     root.querySelectorAll('[data-to-approve]').forEach((b) => {
       b.onclick = () => this._toAct({ action: 'decide', decision: 'approve', id: b.dataset.toApprove });

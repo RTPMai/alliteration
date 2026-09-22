@@ -925,6 +925,94 @@ function notesFor(user) {
     t.equal(r.statusCode, 429);
   });
 
+  /* ==== 4e. Supervisors ================================================== */
+
+  function makeBoss() {
+    // Dana reports to Sasha; Sasha is nobody's approver and not an admin.
+    const d = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    d.reports_to = 'EMP-1';
+    kv.set(CC + ':employee:EMP-2', JSON.stringify(d));
+  }
+
+  await check('a supervisor sees when their people are out: dates and status, nothing else', async () => {
+    seed();
+    makeBoss();
+    const made = await call(route, { as: DANA, method: 'POST', body: { ...DAYS(2), note: 'family thing' } });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    const r = await call(route, { as: SASHA });
+    t.equal(r.body.scope, 'self', 'still not an approver');
+    t.equal(r.body.reports.length, 1);
+    t.equal(r.body.report_timeoff.length, 1);
+    const row = r.body.report_timeoff[0];
+    t.equal(row.employee_name, 'Dana');
+    t.equal(row.status, 'approved');
+    t.equal(row.hours, undefined, 'no hours');
+    t.equal(row.note, undefined, 'no reason');
+    t.equal(row.use_pto, undefined);
+    t.equal(r.body.team, undefined, 'no balances for anybody');
+  });
+
+  await check('somebody with nobody reporting to them sees no team section', async () => {
+    seed();
+    makeBoss();
+    const r = await call(route, { as: DANA });
+    t.equal(r.body.reports.length, 0);
+    t.equal(r.body.report_timeoff.length, 0);
+  });
+
+  await check('a supervisor sees nothing about people who do not report to them', async () => {
+    seed();
+    makeBoss();
+    // Megan's own request: Megan does not report to Sasha.
+    const m = await call(route, { as: MEGAN, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: m.body.request.id } });
+    const r = await call(route, { as: SASHA });
+    t.equal(r.body.report_timeoff.filter((x) => x.employee_name === 'Megan').length, 0);
+  });
+
+  await check('the team payload carries who reports to whom, for the calendar filter', async () => {
+    seed();
+    makeBoss();
+    const r = await call(route, { as: RYAN });
+    t.equal(r.body.team.find((p) => p.id === 'EMP-2').reports_to, 'EMP-1');
+    t.equal(r.body.supervisors.map((x) => x.name).join(), 'Sasha Smith', 'only people who actually have reports');
+  });
+
+  /* ==== 4f. The supervisor is copied on the email ======================== */
+
+  await check('approving emails the employee and copies their supervisor', async () => {
+    seed();
+    makeBoss();
+    const s1 = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    s1.email = 'dana@example.com';
+    kv.set(CC + ':employee:EMP-2', JSON.stringify(s1));
+    const made = await call(route, { as: DANA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    const m = sentMail[0];
+    t.equal(m.to[0], 'dana@example.com');
+    t.equal(m.cc.join(), 'sasha@example.com', 'the supervisor is copied');
+    t.assert(/Sasha Smith is copied on this/.test(m.text), m.text);
+  });
+
+  await check('no supervisor, or one with no email, just means nobody is copied', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    const r = await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(sentMail[0].cc, undefined);
+    t.equal(r.body.request.email.sent, true, 'still sent to them');
+    t.assert(!/is copied on this/.test(sentMail[0].text));
+  });
+
+  await check('a supervisor is never copied on their own time off', async () => {
+    seed();
+    const s1 = JSON.parse(kv.get(CC + ':employee:EMP-1'));
+    s1.reports_to = 'EMP-1';
+    kv.set(CC + ':employee:EMP-1', JSON.stringify(s1));
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(sentMail[0].cc, undefined, 'no copy to the same address');
+  });
+
   /* ==== 5. Who gets the tab ============================================== */
 
   await check('every CrewCore account gets Time Off, even one narrowed by hand before it existed', async () => {

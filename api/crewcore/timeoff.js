@@ -8,6 +8,11 @@
 // WHO SEES WHAT
 //   An employee:       their own balance, their own requests and
 //                      adjustments. Nobody else's anything.
+//   A supervisor:      the above, plus WHEN their own people are out (Ryan,
+//                      Sep 22: "supervisors need to see when their people
+//                      have time off"). Dates and status only: no hours, no
+//                      balances, no reasons. Who reports to whom is the
+//                      roster's reports_to field, not the department.
 //   An approver or a   the whole team's balances, every request, every
 //   CrewCore admin:    adjustment. Names, start dates and hours only: no
 //                      pay rate, no notes off the employee record.
@@ -80,14 +85,19 @@ async function emailEmployee({ request, event, note, doc, sess, scope }) {
       policyDoc: doc,
     }, requestYear(request));
     const byName = (scope.own && scope.own.name) || (scope.user && scope.user.name) || sess.username;
+    // Copy their supervisor so nobody is left in the dark about who is out
+    // (Ryan, Sep 22). Nobody to copy is normal, not an error.
+    const boss = emp.reports_to ? await getEmployee(emp.reports_to) : null;
     const out = await sendDecisionEmail({
       employee: emp, request, event, note, balance, byName,
+      cc: boss && boss.email ? [boss.email] : [],
+      ccName: boss ? boss.name : "",
       from: doc.email_from || DEFAULT_TIMEOFF_FROM,
       replyTo: scope.own && scope.own.email,
     });
     return saveRequest({
       ...request,
-      email: { event, sent: !!out.sent, to: out.to || null, why: out.why || null, at: new Date().toISOString() },
+      email: { event, sent: !!out.sent, to: out.to || null, cc: out.cc || [], why: out.why || null, at: new Date().toISOString() },
     });
   } catch (e) {
     console.error("[crewcore/timeoff] email step failed, the decision was still saved:", e.message);
@@ -113,6 +123,7 @@ function teamRow(e, balance) {
     id: e.id, name: e.name, department: e.department || "", status: e.status || "active",
     start_date: e.start_date || "", username: e.username || null,
     pto_exempt: e.pto_exempt === true,
+    reports_to: e.reports_to || null,
     balance: e.pto_exempt === true ? null : balance,
   };
 }
@@ -163,23 +174,41 @@ export default async function handler(req, res) {
         // usernames only.
         const accounts = employees.filter((e) => e.username && e.status !== "terminated")
           .map((e) => ({ username: e.username, name: e.name }));
+        // Who has anybody reporting to them, for the calendar's filter.
+        const supervisorIds = new Set(employees.map((e) => e.reports_to).filter(Boolean));
+        const supervisors = employees.filter((e) => supervisorIds.has(e.id)).map((e) => ({ id: e.id, name: e.name }));
         return res.status(200).json({
           scope: "team", year, policy, policy_doc: isAdmin ? doc : undefined,
           approvers: doc.approvers, approvers_set: approversSet, accounts,
-          team, requests, adjustments, me,
+          team, requests, adjustments, supervisors, me,
         });
       }
 
       if (!own) return res.status(200).json({ scope: "self", linked: false, year, policy, me, approvers_set: approversSet });
 
-      const [allReq, allAdj] = await Promise.all([listRequests(), listAdjustments()]);
+      const [allReq, allAdj, everyone] = await Promise.all([listRequests(), listAdjustments(), listEmployees()]);
       const requests = allReq.filter((r) => r.employee_id === own.id);
+
+      // A supervisor also sees WHEN their own people are out. Dates and
+      // status only (Ryan's call): no hours, no reason, no balance, and
+      // nothing about anybody who does not report to them.
+      const reports = everyone.filter((e) => e.reports_to === own.id && e.status !== "terminated")
+        .map((e) => ({ id: e.id, name: e.name, department: e.department || "" }));
+      const reportIds = new Set(reports.map((e) => e.id));
+      const reportTimeoff = reports.length
+        ? allReq.filter((r) => reportIds.has(r.employee_id) && (r.status === "approved" || r.status === "pending"))
+          .map((r) => ({
+            id: r.id, employee_id: r.employee_id, employee_name: r.employee_name,
+            start_date: r.start_date, end_date: r.end_date, status: r.status,
+            part_day: !!(r.type && r.type !== "all_days"),
+          }))
+        : [];
       const adjustments = allAdj.filter((a) => a.employee_id === own.id);
       const o = { employee: own, requests, adjustments, policyDoc: doc };
       const exempt = own.pto_exempt === true;
       return res.status(200).json({
         scope: "self", linked: true, year, policy, me, approvers_set: approversSet,
-        exempt,
+        exempt, reports, report_timeoff: reportTimeoff,
         balance: exempt ? null : ptoBalance(o, year),
         ledger: exempt ? [] : ptoLedger({ ...o, throughYear: year }),
         requests, adjustments,
