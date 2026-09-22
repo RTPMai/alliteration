@@ -30,7 +30,7 @@ import {
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
   repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels,
   FOLLOW_UP_METHODS, followUpLabel, chaseNote, lastChasedAt, productSummary,
-  openIsTrusted, linePriced, pricingState
+  openIsTrusted, linePriced, pricingState, isFinished, isOpenPo
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 // One list of accepted file types, shared with the upload route, so the
@@ -647,10 +647,7 @@ export default {
       const filters = $('#ppPipeFilters');
       if (filters) filters.innerHTML = mineToggleHtml();
 
-      const open = rows.filter((p) => {
-        const s = currentStage(p);
-        return s !== 'closed' && s !== 'cancelled' && s !== 'received';
-      });
+      const open = rows.filter(isOpenPo);
 
       if (!rows.length) {
         body.innerHTML = loadErrorHtml() + '<div class="pp-empty">' +
@@ -671,9 +668,11 @@ export default {
         open.length + ' open, ' + late + ' late, ' + soon + ' needing attention' +
         (scoping ? ', yours only' : '');
 
-      // Draft and closed do not get lanes: draft is not in flight yet and
-      // closed is finished. Everything between them is what needs watching.
-      const lanes = STAGES.filter((s) => s.key !== 'closed');
+      // Finished orders get no lane. Received and closed are both out of the
+      // board above, so a Received lane could only ever read "None" and a
+      // permanently empty column reads as "nothing ever gets checked in".
+      // They live under Done on the Purchase Orders tab.
+      const lanes = STAGES.filter((s) => s.key !== 'closed' && s.key !== 'received');
 
       body.innerHTML = loadErrorHtml() + '<div class="pp-lanes">' + lanes.map((lane) => {
         const inLane = scored
@@ -722,8 +721,9 @@ export default {
       // pill is the number of rows pressing it produces.
       const rows = scoped();
       const counts = {
-        open: rows.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p))).length,
+        open: rows.filter(isOpenPo).length,
         late: rows.filter((p) => health(p).level === 'red').length,
+        done: rows.filter(isFinished).length,
         all: rows.length,
       };
       // Two separate questions, so two separate groups. Stage and owner stack:
@@ -733,6 +733,10 @@ export default {
       const stage = [
         ['open', 'Open', counts.open],
         ['late', 'Late', counts.late],
+        // WHERE CHECKED-IN ORDERS GO. Without this, booking in a delivery
+        // took the order out of Open and put it nowhere, and the only way
+        // back to it was All.
+        ['done', 'Done', counts.done],
         ['all', 'All', counts.all],
       ].map(([k, label, n]) =>
         '<button data-filter="' + k + '" aria-pressed="' + (st.filter === k) + '">' + label + ' ' + n + '</button>'
@@ -746,7 +750,11 @@ export default {
       const rows = scoped();
       if (st.filter === 'all') return rows;
       if (st.filter === 'late') return rows.filter((p) => health(p).level === 'red');
-      return rows.filter((p) => !['closed', 'cancelled', 'received'].includes(currentStage(p)));
+      // Cancelled is not done, it is abandoned, and it stays under All. An
+      // order somebody called off should not be sitting in a list of work
+      // that landed.
+      if (st.filter === 'done') return rows.filter(isFinished);
+      return rows.filter(isOpenPo);
     }
 
     /**
@@ -2312,7 +2320,7 @@ export default {
         '<th class="num">Lead days</th><th>Prepay</th><th>Open POs</th>' + (isAdmin ? '<th></th>' : '') +
         '</tr></thead><tbody>' +
         sorted.map((v) => {
-          const openCount = st.pos.filter((p) => p.vendorId === v.id && !['closed', 'cancelled', 'received'].includes(currentStage(p))).length;
+          const openCount = st.pos.filter((p) => p.vendorId === v.id && isOpenPo(p)).length;
           const dim = v.active === false && v.blacklisted !== true;
           return '<tr' + (dim ? ' style="opacity:.5"' : '') + '>' +
             '<td><strong>' + esc(v.name) + '</strong>' +
