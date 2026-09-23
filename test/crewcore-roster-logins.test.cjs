@@ -139,7 +139,7 @@ async function check(name, fn) {
 
   await check('adding a person makes a CrewCore-only login they can sign in with', async () => {
     seed();
-    const r = await call(route, { as: RYAN, method: 'POST', body: { name: 'Nicole Printy', start_date: '2026-09-01', email: 'nicole@example.com' } });
+    const r = await call(route, { as: RYAN, method: 'POST', body: { name: 'Nicole Printy', start_date: '2026-09-01', email: 'nicole@pmapparel.com' } });
     t.equal(r.statusCode, 201, JSON.stringify(r.body));
     t.equal(r.body.login.username, 'nicole');
     t.equal(r.body.employee.username, 'nicole', 'linked on the roster');

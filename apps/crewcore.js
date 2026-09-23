@@ -1376,7 +1376,10 @@ export default {
             </select>
           </div>
           <div><label>Phone</label><input id="fPhone" value="${esc(emp ? emp.phone : '')}"></div>
-          <div><label>Email</label><input id="fEmail" value="${esc(emp ? emp.email : '')}"></div>
+          <div><label>Work email</label><input id="fEmail" type="email" value="${esc(emp ? emp.email : '')}" placeholder="name@pmapparel.com">
+            <div style="font-size:12px;color:var(--muted);margin-top:4px">Company address only. PromoPro and other work mail use this.</div></div>
+          <div><label>Personal email</label><input id="fPersonalEmail" type="email" value="${esc(emp && emp.personal_email ? emp.personal_email : '')}">
+            <div style="font-size:12px;color:var(--muted);margin-top:4px">Time off emails go here first. Never used for work mail.</div></div>
           <div><label>Login username</label><input id="fUsername" value="${esc(emp && emp.username ? emp.username : '')}" placeholder="${isEdit ? 'not linked' : 'blank = make one'}">
             ${isEdit && emp.gaps && emp.gaps.no_login && this._canMakeLogins
               ? `<button class="cc-btn ghost sm" type="button" id="fMakeLogin" style="margin-top:6px">Make a login for ${esc(emp.name.split(' ')[0])}</button>` : ''}
@@ -1470,6 +1473,7 @@ export default {
         status: $('#fStatus').value,
         phone: $('#fPhone').value,
         email: $('#fEmail').value,
+        personal_email: $('#fPersonalEmail').value,
         username: $('#fUsername').value || null,
         hourly_rate: $('#fRate').value === '' ? null : Number($('#fRate').value),
         notes: $('#fNotes').value
@@ -1540,7 +1544,8 @@ export default {
           <div class="cc-field"><label>Start date</label><div class="v">${fmtDate(e.start_date)}</div></div>
           <div class="cc-field"><label>Status</label><div class="v"><span class="chip ${esc(e.status)}">${esc(e.status)}</span></div></div>
           <div class="cc-field"><label>Phone</label><div class="v">${esc(e.phone || '—')}</div></div>
-          <div class="cc-field"><label>Email</label><div class="v">${esc(e.email || '—')}</div></div>
+          <div class="cc-field"><label>Work email</label><div class="v">${esc(e.email || '—')}</div></div>
+          <div class="cc-field"><label>Personal email</label><div class="v">${esc(e.personal_email || '—')}</div></div>
         </div>
       </div>
     `;
@@ -4299,7 +4304,7 @@ export default {
           <div class="full"><label>Time off emails come from</label>
             <input id="toFrom" type="email" value="${esc(d.policy_doc.email_from || '')}" placeholder="Ryan@pmapparel.com">
             <div class="to-sub">Employees get an email when their time off is approved, denied, cancelled or logged for them.
-              It goes to the email on their roster record. Replies go to whoever decided.</div>
+              It goes to their personal email if the roster has one, otherwise their work email. Supervisors are copied at their work email. Replies go to whoever decided.</div>
           </div>
           <div class="full"><label>Most hours that carry into next year</label>
             <input id="toCap" type="number" step="1" min="0" value="${esc(pol.carryover_cap_hours)}">

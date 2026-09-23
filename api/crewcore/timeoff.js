@@ -45,7 +45,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { getUser } from "../../lib/users.js";
-import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
+import { isCrewCoreAdmin, workEmailOf, supervisorEmailOf } from "../../lib/crewcore/schema.js";
 import { listEmployees, getEmployee, getEmployeeByUsername } from "../../lib/crewcore/store.js";
 import {
   validateRequest, validateAdjustment, validatePolicy,
@@ -92,10 +92,10 @@ async function emailEmployee({ request, event, note, doc, sess, scope }) {
     const boss = emp.reports_to ? await getEmployee(emp.reports_to) : null;
     const out = await sendDecisionEmail({
       employee: emp, request, event, note, balance, byName,
-      cc: boss && boss.email ? [boss.email] : [],
+      cc: boss && supervisorEmailOf(boss) ? [supervisorEmailOf(boss)] : [],
       ccName: boss ? boss.name : "",
       from: doc.email_from || DEFAULT_TIMEOFF_FROM,
-      replyTo: scope.own && scope.own.email,
+      replyTo: scope.own ? workEmailOf(scope.own) : "",
     });
     return saveRequest({
       ...request,
