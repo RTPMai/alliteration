@@ -860,6 +860,95 @@ function notesFor(user) {
     t.equal(pto.weekBars([{ employee_name: 'X', start_date: '', end_date: '' }], WEEK2).length, 0);
   });
 
+  /* ==== 4b6. Editing a request =========================================== */
+
+  await check('an approver can fix the dates and hours of a request', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(2) });
+    const r = await call(route, { as: MEGAN, method: 'POST', body: {
+      action: 'edit', id: made.body.request.id, type: 'all_days', start_date: MON, return_date: plus(MON, 5),
+    } });
+    t.equal(r.statusCode, 200, JSON.stringify(r.body));
+    t.equal(r.body.request.hours, 40, 'hours worked out again from the new dates');
+    t.equal(r.body.request.status, 'pending', 'editing does not decide it');
+    t.equal(r.body.request.employee_id, 'EMP-1', 'still theirs');
+    const h = r.body.request.history[r.body.request.history.length - 1];
+    t.equal(h.what, 'edited');
+    t.assert(/was /.test(h.note), 'the old dates are kept in the trail: ' + h.note);
+  });
+
+  await check('an admin who is not an approver can edit, but still cannot approve', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    const e = await call(route, { as: JACOB, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'half_day', half: 'morning', start_date: MON } });
+    t.equal(e.statusCode, 200, JSON.stringify(e.body));
+    t.equal(e.body.request.hours, 4);
+    const a = await call(route, { as: JACOB, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    t.equal(a.statusCode, 403);
+  });
+
+  await check('an employee cannot edit anything, including their own', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    const r = await call(route, { as: SASHA, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'half_day', half: 'morning', start_date: MON } });
+    t.equal(r.statusCode, 403);
+  });
+
+  await check('editing an approved request moves the balance and emails them, copying their supervisor', async () => {
+    seed();
+    makeBoss();
+    const d2 = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    d2.email = 'dana@example.com';
+    kv.set(CC + ':employee:EMP-2', JSON.stringify(d2));
+    const made = await call(route, { as: DANA, method: 'POST', body: DAYS(5) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    const before = await call(route, { as: DANA });
+    t.equal(before.body.balance.used, 40);
+    sentMail.length = 0;
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'all_days', start_date: MON, return_date: plus(MON, 2) } });
+    const after = await call(route, { as: DANA });
+    t.equal(after.body.balance.used, 16, 'the balance follows the edit');
+    t.equal(sentMail.length, 1);
+    t.assert(/was changed/.test(sentMail[0].subject), sentMail[0].subject);
+    t.equal(sentMail[0].cc.join(), 'sasha@example.com');
+  });
+
+  await check('an edit that changes nothing sends no email', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'decide', decision: 'approve', id: made.body.request.id } });
+    sentMail.length = 0;
+    await call(route, { as: RYAN, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'all_days', start_date: MON, return_date: plus(MON, 1), note: 'tidied up' } });
+    t.equal(sentMail.length, 0, 'same dates and hours, nothing to tell them');
+  });
+
+  await check('an edit can switch it to unpaid, and can be given the hours by hand', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(5) });
+    const r = await call(route, { as: RYAN, method: 'POST', body: {
+      action: 'edit', id: made.body.request.id, type: 'all_days', start_date: MON, return_date: plus(MON, 5), hours: 32, use_pto: false,
+    } });
+    t.equal(r.body.request.hours, 32, 'a holiday in the week');
+    t.equal(r.body.request.hours_computed, 40);
+    t.equal(r.body.request.use_pto, false);
+  });
+
+  await check('a cancelled request is not edited back to life', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    await call(route, { as: SASHA, method: 'POST', body: { action: 'cancel', id: made.body.request.id } });
+    const r = await call(route, { as: RYAN, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'half_day', half: 'morning', start_date: MON } });
+    t.equal(r.statusCode, 409);
+  });
+
+  await check('an edit is still checked: no New Year crossings, no impossible times', async () => {
+    seed();
+    const made = await call(route, { as: SASHA, method: 'POST', body: DAYS(1) });
+    const bad = await call(route, { as: RYAN, method: 'POST', body: { action: 'edit', id: made.body.request.id, type: 'all_days', start_date: `${THIS_YEAR}-12-30`, return_date: `${THIS_YEAR + 1}-01-03` } });
+    t.equal(bad.statusCode, 400);
+    t.assert(/two requests/.test(bad.body.details.join()), bad.body.details.join());
+  });
+
   /* ==== 4c. Emailing the employee ======================================= */
 
   await check('approving emails the employee, from the default address, replies to the approver', async () => {

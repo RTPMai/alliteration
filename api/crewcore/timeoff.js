@@ -21,7 +21,9 @@
 //   Anyone linked:     request time off for themselves, cancel their own
 //                      request while it is still pending.
 //   Approvers only:    approve, deny, cancel an approved request, log time
-//                      off for someone else, adjust a balance. Approvers are a list of usernames in
+//                      off for someone else, adjust a balance.
+//   Approvers/admins:  edit a request that already exists (Sep 22), which
+//                      is correcting the record rather than deciding it. Approvers are a list of usernames in
 //                      the policy (Ryan and Megan). NOT "any admin": being a
 //                      CrewCore admin does not make somebody an approver, and
 //                      an empty list means nobody can approve at all.
@@ -46,7 +48,7 @@ import { getUser } from "../../lib/users.js";
 import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import { listEmployees, getEmployee, getEmployeeByUsername } from "../../lib/crewcore/store.js";
 import {
-  validateAdjustment, validatePolicy,
+  validateRequest, validateAdjustment, validatePolicy,
   withPolicyVersion, policyForYear, canApprove, ptoBalance, ptoLedger,
   requestActions, requestYear,
 } from "../../lib/crewcore/pto.js";
@@ -341,6 +343,49 @@ export default async function handler(req, res) {
             request: saved,
           });
         }
+      }
+      return res.status(200).json({ ok: true, request: saved });
+    }
+
+    if (action === "edit") {
+      const existing = await getRequest(body.id);
+      if (!existing) return refuse(res, 404, "Request not found");
+      if (!requestActions(existing, { isApprover, isAdmin }).edit) {
+        return refuse(res, existing.status === "cancelled" ? 409 : 403,
+          existing.status === "cancelled"
+            ? "That request was cancelled. Log a new one instead."
+            : "Only a time off approver or an admin can edit a request");
+      }
+      // Everything about the request can be corrected except whose it is:
+      // moving time off between people would leave two balances wrong and
+      // is two clicks anyway (cancel, log it for the right person).
+      const reqYear = parseInt(String(body.start_date || existing.start_date).slice(0, 4), 10) || shopYear();
+      // The old hours are dropped on purpose: an edit works them out again
+      // from the new dates and times unless the editor types a number. Left
+      // in the merge, a request edited from one day to five kept the one
+      // day's hours.
+      const { hours: _oldHours, hours_computed: _hc, hours_overridden: _ho, ...rest } = existing;
+      const v = validateRequest({ ...rest, ...body, id: undefined, action: undefined },
+        policyForYear(doc, reqYear), { allowHours: true });
+      if (!v.ok) return res.status(400).json({ error: "Validation failed", details: v.errors });
+
+      const was = `${span(existing)}, ${existing.hours} hours`;
+      const now2 = new Date().toISOString();
+      let saved = await saveRequest({
+        ...existing,
+        hours_overridden: false,
+        ...v.record,
+        updated_at: now2,
+        edited_by: sess.username,
+        edited_at: now2,
+        history: (existing.history || []).concat([{ at: now2, by: sess.username, what: "edited", note: `was ${was}` }]),
+      });
+
+      // If it was already decided, the person it belongs to is told what it
+      // says now, and their supervisor is copied, same as a decision.
+      const changed = span(saved) !== span(existing) || saved.hours !== existing.hours || saved.use_pto !== existing.use_pto;
+      if (saved.status !== "pending" && changed && !(own && own.id === saved.employee_id)) {
+        saved = await emailEmployee({ request: saved, event: "changed", note: "", doc, sess, scope });
       }
       return res.status(200).json({ ok: true, request: saved });
     }

@@ -3618,7 +3618,10 @@ export default {
   _toRequestRow(r, { showName = false } = {}) {
     const d = this._to || {};
     const me = d.me || {};
-    const can = requestActions(r, { isApprover: !!me.is_approver, isOwner: !!me.employee_id && r.employee_id === me.employee_id });
+    const can = requestActions(r, {
+      isApprover: !!me.is_approver, isAdmin: !!me.is_admin,
+      isOwner: !!me.employee_id && r.employee_id === me.employee_id,
+    });
     const kind = r.type && r.type !== 'all_days' ? requestSummary(r) : '';
     const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours) + (usesPto(r) ? '' : ' <strong>unpaid, not PTO</strong>')]);
     // Whether they said they had told their supervisor, for whoever decides.
@@ -3643,6 +3646,7 @@ export default {
         </div>
         <div class="cc-rowacts">
           <span class="chip ${esc(r.status)}">${esc(r.status)}</span>
+          ${can.edit ? `<button class="cc-btn sm ghost" data-to-edit="${esc(r.id)}">Edit</button>` : ''}
           ${can.approve ? `<button class="cc-btn sm" data-to-approve="${esc(r.id)}">Approve</button>` : ''}
           ${can.deny ? `<button class="cc-btn sm ghost" data-to-deny="${esc(r.id)}">Deny</button>` : ''}
           ${can.cancel ? `<button class="cc-btn sm ghost danger" data-to-cancel="${esc(r.id)}">Cancel</button>` : ''}
@@ -3979,6 +3983,12 @@ export default {
         this._paintTimeoff();
       };
     });
+    root.querySelectorAll('[data-to-edit]').forEach((b) => {
+      b.onclick = () => {
+        const r = ((this._to || {}).requests || []).find((x) => x.id === b.dataset.toEdit);
+        if (r) this._openTimeoffForm(r.employee_id, { forOthers: true, edit: r });
+      };
+    });
     root.querySelectorAll('[data-to-approve]').forEach((b) => {
       b.onclick = () => this._toAct({ action: 'decide', decision: 'approve', id: b.dataset.toApprove });
     });
@@ -4060,55 +4070,60 @@ export default {
    * function the server uses (hoursForRequest), so what the form says will
    * come off is what comes off. An approver can override the number.
    */
-  _openTimeoffForm(presetEmployeeId, { forOthers = false } = {}) {
+  _openTimeoffForm(presetEmployeeId, { forOthers = false, edit = null } = {}) {
     const d = this._to || {};
     const me = d.me || {};
     const policy = d.policy || {};
-    const canOverride = !!me.is_approver;
+    // Editing is open to admins as well as approvers, and an edit can always
+    // set the hours by hand; that is half the point of fixing one.
+    const canOverride = !!me.is_approver || !!edit;
     const people = forOthers ? (d.team || []).filter((p) => p.status !== 'terminated') : [];
     const back = this._openModal(`
       <div class="cc-form">
-        <h3>${forOthers ? 'Log time off' : 'Time off request'}</h3>
+        <h3>${edit ? 'Edit time off' : forOthers ? 'Log time off' : 'Time off request'}</h3>
+        ${edit ? `<p class="hint">${esc(edit.employee_name || '')}, ${esc(this._toSpan(edit))}, currently ${this._toHrs(edit.hours)}.
+          ${edit.status === 'pending' ? 'Still waiting on a decision.' : 'Already ' + esc(edit.status) + '; they will be emailed the new details.'}</p>` : ''}
         <p class="hint">All leave is subject to availability. Leave is not guaranteed until confirmed by a supervisor.</p>
         <div class="cc-form-grid">
-          ${forOthers ? `<div class="full"><label>For</label>
+          ${forOthers && !edit ? `<div class="full"><label>For</label>
             <select id="toFor">${people.map((p) => `<option value="${esc(p.id)}" ${p.id === presetEmployeeId ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>` : ''}
           <div class="full"><label>Type of request</label>
             <div class="to-types">${REQUEST_TYPES.map((t, i) => `
-              <label><input type="radio" name="toType" value="${t.value}" ${i === 0 ? 'checked' : ''}> ${esc(t.label)}</label>`).join('')}
+              <label><input type="radio" name="toType" value="${t.value}" ${(edit ? edit.type === t.value : i === 0) ? 'checked' : ''}> ${esc(t.label)}</label>`).join('')}
             </div></div>
-          <div data-for="all_days"><label>Beginning date</label><input id="toStart" type="date"></div>
-          <div data-for="all_days"><label>Return to work date</label><input id="toReturn" type="date">
+          <div data-for="all_days"><label>Beginning date</label><input id="toStart" type="date" value="${esc(edit && edit.type === 'all_days' ? edit.start_date : '')}"></div>
+          <div data-for="all_days"><label>Return to work date</label><input id="toReturn" type="date" value="${esc((edit && edit.return_date) || '')}">
             <div class="to-sub">The day you'll be BACK at work.</div></div>
-          <div data-for="half_day arrive_late leave_early appointment"><label>Date</label><input id="toDate" type="date"></div>
+          <div data-for="half_day arrive_late leave_early appointment"><label>Date</label><input id="toDate" type="date" value="${esc(edit && edit.type !== 'all_days' ? edit.start_date : '')}"></div>
           <div data-for="half_day"><label>Time off</label>
-            <div class="to-types"><label><input type="radio" name="toHalf" value="morning"> Morning</label>
-              <label><input type="radio" name="toHalf" value="afternoon"> Afternoon</label></div></div>
-          <div data-for="arrive_late"><label>Time arriving</label><input id="toArrive" type="time"></div>
-          <div data-for="leave_early appointment"><label>Time leaving</label><input id="toLeave" type="time"></div>
-          <div data-for="appointment"><label>Time returning</label><input id="toBackAt" type="time"></div>
+            <div class="to-types"><label><input type="radio" name="toHalf" value="morning" ${edit && edit.half === 'morning' ? 'checked' : ''}> Morning</label>
+              <label><input type="radio" name="toHalf" value="afternoon" ${edit && edit.half === 'afternoon' ? 'checked' : ''}> Afternoon</label></div></div>
+          <div data-for="arrive_late"><label>Time arriving</label><input id="toArrive" type="time" value="${esc((edit && edit.arrive_at) || '')}"></div>
+          <div data-for="leave_early appointment"><label>Time leaving</label><input id="toLeave" type="time" value="${esc((edit && edit.leave_at) || '')}"></div>
+          <div data-for="appointment"><label>Time returning</label><input id="toBackAt" type="time" value="${esc((edit && edit.return_at) || '')}"></div>
           <div class="full"><label style="display:flex;gap:8px;align-items:center;font-weight:600">
-            <input type="checkbox" id="toTold" style="width:auto"> ${forOthers ? 'They have told their supervisor' : `I've told ${esc((d.supervisor && d.supervisor.name.split(' ')[0]) || 'my supervisor')}`}</label>
+            <input type="checkbox" id="toTold" style="width:auto" ${edit && edit.told_supervisor ? 'checked' : ''}> ${forOthers ? 'They have told their supervisor' : `I've told ${esc((d.supervisor && d.supervisor.name.split(' ')[0]) || 'my supervisor')}`}</label>
             <div class="to-sub">Not required to send this. It just tells ${forOthers ? 'the approver' : 'Ryan and Megan'} whether the conversation has happened.</div>
           </div>
           <div class="full"><label>Use PTO?</label>
-            <div class="to-types to-row"><label><input type="radio" name="toPto" value="yes" checked> Yes, use my PTO</label>
-              <label><input type="radio" name="toPto" value="no"> No, unpaid</label></div></div>
-          <div class="full"><label>Reason (only approvers see this)</label><textarea id="toNote" rows="3" maxlength="500"></textarea></div>
+            <div class="to-types to-row"><label><input type="radio" name="toPto" value="yes" ${edit && edit.use_pto === false ? '' : 'checked'}> Yes, use my PTO</label>
+              <label><input type="radio" name="toPto" value="no" ${edit && edit.use_pto === false ? 'checked' : ''}> No, unpaid</label></div></div>
+          <div class="full"><label>Reason (only approvers see this)</label><textarea id="toNote" rows="3" maxlength="500">${esc((edit && edit.note) || '')}</textarea></div>
           <div class="full to-hours" id="toHoursLine"></div>
-          ${canOverride ? `<div><label>Hours (leave blank to use the math)</label><input id="toHours" type="number" step="0.25" min="0"></div>` : ''}
-          ${forOthers && canOverride ? `<div class="full"><label style="display:flex;gap:8px;align-items:center">
+          ${canOverride ? `<div><label>Hours (leave blank to use the math)</label><input id="toHours" type="number" step="0.25" min="0"
+            value="${esc(edit && edit.hours_overridden ? edit.hours : '')}"></div>` : ''}
+          ${forOthers && !edit && me.is_approver ? `<div class="full"><label style="display:flex;gap:8px;align-items:center">
             <input type="checkbox" id="toPre" style="width:auto" checked> Already approved (skip the queue)</label></div>` : ''}
         </div>
         <div id="toFormWarn"></div>
         <div class="cc-err" id="toErr" hidden></div>
         <div class="cc-form-actions">
           <button class="cc-btn ghost" id="toCancelForm">Never mind</button>
-          <button class="cc-btn" id="toSave">${forOthers ? 'Save' : 'Submit'}</button>
+          <button class="cc-btn" id="toSave">${edit ? 'Save changes' : forOthers ? 'Save' : 'Submit'}</button>
         </div>
       </div>`);
     const q = (s) => back.querySelector(s);
-    const who = () => (forOthers ? q('#toFor').value : me.employee_id);
+    const who = () => (edit ? edit.employee_id : forOthers ? q('#toFor').value : me.employee_id);
     const type = () => (back.querySelector('input[name="toType"]:checked') || {}).value || 'all_days';
 
     const collect = () => {
@@ -4148,9 +4163,10 @@ export default {
 
     q('#toSave').onclick = async () => {
       const err = q('#toErr');
-      const payload = { action: 'request', ...collect() };
-      if (canOverride && q('#toHours').value !== '') payload.hours = Number(q('#toHours').value);
-      if (forOthers) {
+      const payload = edit ? { action: 'edit', id: edit.id, ...collect() } : { action: 'request', ...collect() };
+      payload.hours = canOverride && q('#toHours').value !== '' ? Number(q('#toHours').value) : undefined;
+      if (edit && payload.hours === undefined) payload.hours = null;
+      if (forOthers && !edit) {
         payload.employee_id = q('#toFor').value;
         payload.approved = !!(q('#toPre') && q('#toPre').checked);
       }
