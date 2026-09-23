@@ -152,6 +152,11 @@
 </div>
 
 <script type="module">
+  // Where to go after signing in: the page they were sent here from (a
+  // scanned PO QR code, a bookmark), or home. Only ever a route on this site.
+  import { afterLoginUrl } from '/js/return-to.js';
+  const dest = afterLoginUrl(location.search);
+
   const form   = document.getElementById('loginForm');
   const msg    = document.getElementById('msg');
   const btn    = document.getElementById('submitBtn');
@@ -200,7 +205,7 @@
       }
 
       if (data.authenticated) {
-        location.replace('/');
+        location.replace(dest);
       } else if (data.needsSetup) {
         setSetupMode();
       }
@@ -239,7 +244,7 @@
       }
 
       show('Signed in. Loading...', 'ok');
-      location.replace('/');
+      location.replace(dest);
     } catch (err) {
       show('Network error. Try again.', 'err');
       btn.disabled = false;
