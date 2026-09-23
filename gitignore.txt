@@ -1,0 +1,25 @@
+# Delivery leftovers. Files handed over in a session arrive with their
+# destination flattened into the name (apps__foo.js) or with a browser's
+# duplicate suffix ("foo (1).js"). Neither belongs in the repo once the
+# real file is in place, and both have shipped to the live site before.
+*__*.js
+*__*.cjs
+*__*.json
+* (1)*
+* (2)*
+*.patch
+*.orig
+*.rej
+
+# Deploy notes live in the Claude project, not here.
+DEPLOY-NOTES*.md
+
+# Local noise
+node_modules/
+.vercel/
+.DS_Store
+Thumbs.db
+*.log
+.env
+.env.*
+!.env.example
