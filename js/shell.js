@@ -13,6 +13,7 @@
  *   #/<app>/<view>
  */
 
+import { loginUrlFor } from './return-to.js';
 import { APPS, SHELL_APPS, SITE_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
 import * as api from './api.js';
 import * as router from './router.js';
@@ -101,7 +102,9 @@ export async function boot() {
     // mode, back when mock mode faked the user too. It no longer does: auth is
     // ALWAYS real (see LIVE_PREFIXES in api.js), so skipping the redirect just
     // stranded signed-out visitors on a dead end that offered no way to sign in.
-    location.replace('login.html');
+    // Keep the address they came in on (a scanned PO, a bookmark) so sign-in
+    // lands them there instead of on the home screen. See js/return-to.js.
+    location.replace(loginUrlFor(location.hash));
     return;
   }
 
