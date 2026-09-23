@@ -320,43 +320,41 @@ body[data-app="stitchsense"] {
   --accent-tint: #FCEBF3;
 }
 
-/* MarketMachine. PROVISIONAL VIOLET, not off a logo file.
+/* MarketMachine. Maroon #6E1E2B, CONFIRMED (the comment below used to say
+   provisional violet and was left behind when the value changed).
    The palette is crowded by this point: blue (BackBone), orange (ShopStock),
    muted purple (ErrorEngine), gold (GivingGauge), green (TravelTrack),
    raspberry (CrewCore), red (PromoPro), slate (MailMe), navy (TeleTally),
    teal (WebsiteWidget) and magenta (StitchSense) are all taken. This violet is
    saturated enough to read as its own colour beside ErrorEngine's greyer
-   #745DA8 at rail-dot size, but it is a placeholder chosen by elimination.
-   CHECK IT AGAINST THE LOGO LINEUP SHEET and correct it here before the app
-   has been in front of the team long enough for the colour to stick. CrewCore
-   went blue -> red -> the exact logo red precisely because that check was
-   skipped the first time. */
+   #745DA8 at rail-dot size. Chosen by elimination rather than off a logo
+   file, and confirmed to stand. */
 body[data-app="marketmachine"] {
   --accent:      #6E1E2B;
   --accent-deep: #55161F;
   --accent-tint: #F6EBED;
 }
 
-/* ConControl. PROVISIONAL ESPRESSO, not off a logo file.
+/* ConControl. Espresso, CONFIRMED Sep 23 2026, not off a logo file.
    Brown is the one hue nothing else in the rail uses: blue (BackBone), orange
    (ShopStock), muted purple (ErrorEngine), gold (GivingGauge), green
    (TravelTrack), raspberry (CrewCore), red (PromoPro), slate (MailMe), navy
    (TeleTally), teal (WebsiteWidget), magenta (StitchSense) and violet
    (MarketMachine) are taken, and at rail-dot size a second orange would read
-   as ShopStock. CHECK IT AGAINST THE LOGO LINEUP SHEET and correct it here,
-   in the dark block below, and in the registry's display accent. */
+   as ShopStock. ConControl is not on the logo lineup sheet and a per-app logo
+   is no longer expected for every app, so no sheet value is coming to
+   reconcile against. This is the value. */
 body[data-app="concontrol"] {
   --accent:      #6B4423;
   --accent-deep: #4E3119;
   --accent-tint: #F3EDE7;
 }
 
-/* RaveReviews. PROVISIONAL OLIVE, not off a logo file, chosen by elimination
-   the same way ConControl's espresso was: every clear hue near the others in
-   the rail is taken, and olive sits between TravelTrack's green and the golds
-   without reading as either at rail-dot size. CHECK IT AGAINST THE LOGO LINEUP
-   SHEET and correct it here, in the dark block below, and in the registry's
-   display accent. */
+/* RaveReviews. Olive, CONFIRMED Sep 23 2026, not off a logo file, chosen by
+   elimination the same way ConControl's espresso was: every clear hue near the
+   others in the rail is taken, and olive sits between TravelTrack's green and
+   the golds without reading as either at rail-dot size. Not on the logo lineup
+   sheet and no sheet value is coming. This is the value. */
 body[data-app="reviews"] {
   --accent:      #76871C;
   --accent-deep: #5A6815;
@@ -644,9 +642,8 @@ html[data-theme="dark"] body[data-app="stitchsense"] {
 
 /* MarketMachine's #6E1E2B is a dark maroon, the second accent that disappears
    against a dark page. Lifted into a dusty rose that still reads as the same
-   colour family beside StitchSense's magenta and PromoPro's red. This accent
-   is still marked PROVISIONAL in the light block; whatever replaces it there
-   needs a matching pass here. */
+   colour family beside StitchSense's magenta and PromoPro's red. The light
+   block is confirmed; if it ever changes, this needs a matching pass. */
 html[data-theme="dark"] body[data-app="marketmachine"] {
   --accent:      #C4566A;
   --accent-deep: #D4788A;
@@ -654,15 +651,15 @@ html[data-theme="dark"] body[data-app="marketmachine"] {
 }
 
 /* ConControl's espresso is near black on a dark page, so it is lifted to a
-   tan that still reads as the same colour family. Provisional in the light
-   block; whatever replaces it there needs a matching pass here. */
+   tan that still reads as the same colour family. The light block is
+   confirmed; if it ever changes, this needs a matching pass. */
 html[data-theme="dark"] body[data-app="concontrol"] {
   --accent:      #C39A6B;
   --accent-deep: #D9B489;
   --accent-tint: #2A211A;
 }
 
-/* RaveReviews' olive is lifted for the dark page, same family. Provisional
+/* RaveReviews' olive is lifted for the dark page, same family. Confirmed
    along with the light block. */
 html[data-theme="dark"] body[data-app="reviews"] {
   --accent:      #8C9F2B;
