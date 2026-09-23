@@ -1,3 +1,4 @@
+// PUT IN: test/app-imports.test.cjs
 /**
  * An app file cannot use a constant from its own lib folder without importing
  * it.
@@ -125,6 +126,49 @@ t.test('no app imports a name its own lib does not export', () => {
   }
 
   t.equal(problems.join('; '), '', 'every imported name is really exported');
+});
+
+/**
+ * Same two checks for the files an app keeps in a folder of its own
+ * (apps/concontrol/social.js, apps/marketmachine/*.js). Those import from
+ * ../../lib/, one level further up, and the scans above only read apps/*.js,
+ * so a screen split out to stay under the 100KB upload line would otherwise
+ * be the one screen nothing checks.
+ */
+t.test('app sub-modules import what they use, and only what exists', () => {
+  const problems = [];
+  for (const dirName of fs.readdirSync('apps')) {
+    const dir = path.join('apps', dirName);
+    if (!fs.statSync(dir).isDirectory()) continue;
+    for (const file of fs.readdirSync(dir).filter((f) => f.endsWith('.js'))) {
+      const src = fs.readFileSync(path.join(dir, file), 'utf8');
+      const where = `apps/${dirName}/${file}`;
+      const imported = importedNames(src);
+      const declared = new Set();
+      for (const m of src.matchAll(/(?:const|let|var)\s+([A-Z][A-Z0-9_]{2,})/g)) declared.add(m[1]);
+      const body = codeOnly(src.replace(/import\s*\{[^}]*\}\s*from[^;]*;/g, ' ').replace(/import\s+\w+\s*,\s*\{[^}]*\}\s*from[^;]*;/g, ' '));
+
+      for (const [name, from] of exportedConstants(`lib/${dirName}`)) {
+        if (imported.has(name) || declared.has(name)) continue;
+        if (new RegExp('(?<![\\w$.])' + name + '(?![\\w$])').test(body)) {
+          problems.push(`${where} uses ${name} from ${from} without importing it`);
+        }
+      }
+
+      for (const m of src.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"]\.\.\/\.\.\/(lib\/[^'"]+)['"]/g)) {
+        const target = m[2];
+        if (!fs.existsSync(target)) { problems.push(`${where} imports from ${target}, which does not exist`); continue; }
+        const libSrc = fs.readFileSync(target, 'utf8');
+        const exported = new Set();
+        for (const e of libSrc.matchAll(/export\s+(?:async\s+)?(?:function|const|let|class)\s+([A-Za-z_$][\w$]*)/g)) exported.add(e[1]);
+        for (const part of m[1].split(',')) {
+          const name = part.trim().split(/\s+as\s+/)[0].trim();
+          if (name && !exported.has(name)) problems.push(`${where} imports ${name} from ${target}, which does not export it`);
+        }
+      }
+    }
+  }
+  t.equal(problems.join('; '), '', 'every folder module imports what it uses and nothing that is missing');
 });
 
 process.exit(t.report());

@@ -329,6 +329,8 @@ export const ENDPOINTS = {
   // What people sent us: survey answers, notify signups, and the inbound end
   // of the sponsor and speaker streams.
   conResponses:     '/api/concontrol/responses',
+  // The social plan: posts by week, open decisions, and the plan file load.
+  conSocial:        '/api/concontrol/social',
 
   // ---- RaveReviews ----
   // Admin only, checked in each route. rvCron is not called from the front

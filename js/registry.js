@@ -434,7 +434,7 @@ export const APPS = [
     // coming to reconcile against. This is the value.
     accent: '#6B4423',           // display only (rail dot / app mark); tokens.css owns theming
     //
-    // SIX VIEWS, ALL REAL. Each one was added the day it worked rather than
+    // SEVEN VIEWS, ALL REAL (Social added Sep 23 2026). Each one was added the day it worked rather than
     // as a coming-soon tab, which is the rule Capacity Manager breaks on the
     // BackBone dashboard. Settings is in-app rather than shell-level because
     // what it holds (levels, spend categories, the commitment deadline) is
@@ -446,6 +446,7 @@ export const APPS = [
       ['money', 'Money'],
       ['sessions', 'Sessions'],
       ['speakers', 'Speakers'],
+      ['social', 'Social'],
       ['settings', 'Settings']
     ],
     defaultView: 'home',

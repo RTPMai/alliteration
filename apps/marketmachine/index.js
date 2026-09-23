@@ -59,6 +59,7 @@
 
 import { ENDPOINTS } from '../../js/api.js';
 import { todayCentral } from '../../lib/marketmachine/dates.js';
+import { CALC_INPUTS } from '../../lib/marketmachine/calculations.js';
 import { esc, msgBox } from './format.js';
 import styles from './styles.js';
 import template from './template.js';

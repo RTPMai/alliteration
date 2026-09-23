@@ -9,6 +9,7 @@
  *   money     income and spend in one ledger, budget against actual
  *   sessions  the program grid, and the source the public agenda reads
  *   speakers  proposals, confirmations, and what they still have to send
+ *   social    the posting plan, week by week (apps/concontrol/social.js)
  *   settings  levels, categories, dates, and who gets told about an inquiry
  *
  * WHAT THIS REPLACES. A spreadsheet that held the money fine and could not hold
@@ -43,9 +44,11 @@ import {
   SPEAKER_STATUSES, SPEAKER_STATUS_LABELS, SPEAKER_MATERIALS,
   materialStates, materialProgress,
 } from '../lib/concontrol/program.js';
+import makeSocial, { SOCIAL_STYLES } from './concontrol/social.js';
 
 let ctx = null;
 let view = 'home';
+let social = null;
 
 const state = {
   settings: { event: 'FOC27', eventName: '', eventDate: '', commitBy: '', budget: null, tiers: [], categories: [], inquiryNotifyTo: '', speakNotifyTo: '' },
@@ -207,7 +210,7 @@ export default {
     .con-trail { font-size: 12px; color: var(--muted); line-height: 1.6; }
     .con-trail div { padding: 3px 0; border-bottom: 1px solid var(--line); }
     .con-trail div:last-child { border-bottom: 0; }
-  `,
+  ` + SOCIAL_STYLES,
 
   template: `
     <div class="con-wrap">
@@ -272,6 +275,8 @@ export default {
         <div id="conRespBody"></div>
       </section>
 
+      <section class="con-pane" data-pane="social"><div id="conSocialBody"></div></section>
+
       <section class="con-pane" data-pane="settings">
         <div id="conSettingsBody"></div>
       </section>
@@ -314,6 +319,12 @@ export default {
     wireExport('#conExportSessions', 'sessions');
     wireExport('#conExportSpeakers', 'speakers');
 
+    social = makeSocial({
+      getCtx: () => ctx, esc, prettyDate, showError, openDrawerHtml, closeDrawer,
+      formError, trailHtml, onChange: renderHome,
+    });
+    social.load();
+
     renderChips();
     await loadSponsors();
   },
@@ -329,6 +340,7 @@ export default {
     if ((view === 'sessions' || view === 'speakers') && !state.loaded.program) loadProgram();
     if (view === 'responses' && !state.loaded.responses) loadResponses();
     if (view === 'settings') loadSettings();
+    if (view === 'social' && social) social.render();
     if (view === 'home') renderHome();
   },
 };
@@ -436,6 +448,9 @@ function renderHome() {
     });
   }
 
+  const sc = social && social.homeCard();
+  if (sc) cards.push(sc);
+
   host.innerHTML = cards.map((c) => `
     <div class="con-tot${c.warn ? ' warn' : ''}">
       <div class="k">${esc(c.k)}</div>
@@ -483,6 +498,9 @@ function renderBlocked() {
       rows.push({ what: b.name || 'Speaker', why: `${b.open} thing${b.open === 1 ? '' : 's'} still to send`, go: 'speakers', id: b.ids[0] });
     }
   }
+
+  // Open decisions and posts that are late or going out unready.
+  if (social) rows.push(...social.blockerRows());
 
   if (!rows.length) {
     host.innerHTML = `<div class="con-left"><h4>Waiting on someone</h4><div class="con-note">${state.loaded.program ? 'Nothing is stuck.' : 'Nothing on the sponsor side. Open Sessions or Speakers to check the program.'}</div></div>`;
