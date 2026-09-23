@@ -3610,6 +3610,13 @@ export default {
     const can = requestActions(r, { isApprover: !!me.is_approver, isOwner: !!me.employee_id && r.employee_id === me.employee_id });
     const kind = r.type && r.type !== 'all_days' ? requestSummary(r) : '';
     const bits = (kind ? [esc(kind)] : []).concat([this._toHrs(r.hours) + (usesPto(r) ? '' : ' <strong>unpaid, not PTO</strong>')]);
+    // Whether they said they had told their supervisor, for whoever decides.
+    if (d.scope === 'team') {
+      const boss = (d.supervisor_names || {})[r.employee_id];
+      bits.push(r.told_supervisor
+        ? 'Told ' + esc(boss || 'their supervisor')
+        : `<span style="color:var(--warn-dk)">Hasn't told ${esc(boss || 'their supervisor')}</span>`);
+    }
     if (r.note) bits.push(esc(r.note));
     if (r.decision_note) bits.push('Reply: ' + esc(r.decision_note));
     // Whether the employee was emailed, for approvers. "Not emailed" says why
@@ -4029,6 +4036,10 @@ export default {
           <div data-for="arrive_late"><label>Time arriving</label><input id="toArrive" type="time"></div>
           <div data-for="leave_early appointment"><label>Time leaving</label><input id="toLeave" type="time"></div>
           <div data-for="appointment"><label>Time returning</label><input id="toBackAt" type="time"></div>
+          <div class="full"><label style="display:flex;gap:8px;align-items:center;font-weight:600">
+            <input type="checkbox" id="toTold" style="width:auto"> ${forOthers ? 'They have told their supervisor' : `I've told ${esc((d.supervisor && d.supervisor.name.split(' ')[0]) || 'my supervisor')}`}</label>
+            <div class="to-sub">Not required to send this. It just tells ${forOthers ? 'the approver' : 'Ryan and Megan'} whether the conversation has happened.</div>
+          </div>
           <div class="full"><label>Use PTO?</label>
             <div class="to-types to-row"><label><input type="radio" name="toPto" value="yes" checked> Yes, use my PTO</label>
               <label><input type="radio" name="toPto" value="no"> No, unpaid</label></div></div>
@@ -4051,7 +4062,11 @@ export default {
 
     const collect = () => {
       const t = type();
-      const r = { type: t, note: q('#toNote').value, use_pto: (back.querySelector('input[name="toPto"]:checked') || {}).value !== 'no' };
+      const r = {
+        type: t, note: q('#toNote').value,
+        use_pto: (back.querySelector('input[name="toPto"]:checked') || {}).value !== 'no',
+        told_supervisor: q('#toTold').checked,
+      };
       if (t === 'all_days') { r.start_date = q('#toStart').value; r.return_date = q('#toReturn').value; }
       else r.start_date = q('#toDate').value;
       if (t === 'half_day') r.half = (back.querySelector('input[name="toHalf"]:checked') || {}).value || '';

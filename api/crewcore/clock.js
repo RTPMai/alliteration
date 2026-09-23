@@ -194,6 +194,12 @@ export default async function handler(req, res) {
           ok: true,
           name: emp.name,
           exempt,
+          // First name of whoever they report to, for the "told" button.
+          supervisor: await (async () => {
+            if (!emp.reports_to) return "";
+            const boss = await getEmployee(emp.reports_to);
+            return boss ? String(boss.name || "").split(" ")[0] : "";
+          })(),
           // Hours only. Nothing else off the record, and no request history.
           left: bal ? bal.balance : null,
           pending: bal ? bal.pending : null,

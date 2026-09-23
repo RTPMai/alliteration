@@ -175,12 +175,15 @@ export default async function handler(req, res) {
         const accounts = employees.filter((e) => e.username && e.status !== "terminated")
           .map((e) => ({ username: e.username, name: e.name }));
         // Who has anybody reporting to them, for the calendar's filter.
+        const bossName = (id) => { const b = employees.find((e) => e.id === id); return b ? b.name : ""; };
         const supervisorIds = new Set(employees.map((e) => e.reports_to).filter(Boolean));
         const supervisors = employees.filter((e) => supervisorIds.has(e.id)).map((e) => ({ id: e.id, name: e.name }));
         return res.status(200).json({
           scope: "team", year, policy, policy_doc: isAdmin ? doc : undefined,
           approvers: doc.approvers, approvers_set: approversSet, accounts,
           team, requests, adjustments, supervisors, me,
+          // Who each person would have told, for the queue's "told" line.
+          supervisor_names: Object.fromEntries(employees.filter((e) => e.reports_to).map((e) => [e.id, bossName(e.reports_to)])),
         });
       }
 
@@ -206,9 +209,12 @@ export default async function handler(req, res) {
       const adjustments = allAdj.filter((a) => a.employee_id === own.id);
       const o = { employee: own, requests, adjustments, policyDoc: doc };
       const exempt = own.pto_exempt === true;
+      // Their supervisor's name, so the form can say "I've told Sasha".
+      const boss = own.reports_to ? everyone.find((e) => e.id === own.reports_to) : null;
       return res.status(200).json({
         scope: "self", linked: true, year, policy, me, approvers_set: approversSet,
         exempt, reports, report_timeoff: reportTimeoff,
+        supervisor: boss ? { id: boss.id, name: boss.name } : null,
         balance: exempt ? null : ptoBalance(o, year),
         ledger: exempt ? [] : ptoLedger({ ...o, throughYear: year }),
         requests, adjustments,

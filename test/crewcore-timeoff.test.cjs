@@ -747,6 +747,58 @@ function notesFor(user) {
     t.assert(!ns.PICKABLE_LINK_TYPES.includes('timeoff'), 'attached automatically, not offered in the picker');
   });
 
+  /* ==== 4b4. Told their supervisor ======================================= */
+
+  await check('the request records whether they said they told their supervisor', async () => {
+    seed();
+    makeBoss();
+    const yes = await call(route, { as: DANA, method: 'POST', body: { ...DAYS(1), told_supervisor: true } });
+    t.equal(yes.body.request.told_supervisor, true);
+    const no = await call(route, { as: DANA, method: 'POST', body: DAYS(2) });
+    t.equal(no.body.request.told_supervisor, false, 'unticked is the default, and it still sends');
+    t.equal(no.statusCode, 201, 'never blocks a request');
+  });
+
+  await check('the approvers are told either way', async () => {
+    seed();
+    makeBoss();
+    await call(route, { as: DANA, method: 'POST', body: { ...DAYS(1), told_supervisor: true } });
+    t.assert(/have told their supervisor/.test(notesFor('ryan')[0].detail), notesFor('ryan')[0].detail);
+    seed();
+    makeBoss();
+    await call(route, { as: DANA, method: 'POST', body: DAYS(1) });
+    t.assert(/has NOT said they told their supervisor/i.test(notesFor('ryan')[0].detail), notesFor('ryan')[0].detail);
+  });
+
+  await check('the team payload names who each person would have told', async () => {
+    seed();
+    makeBoss();
+    const r = await call(route, { as: RYAN });
+    t.equal(r.body.supervisor_names['EMP-2'], 'Sasha Smith');
+    t.equal(r.body.supervisor_names['EMP-1'], undefined, 'Sasha reports to nobody');
+  });
+
+  await check('an employee is told who their supervisor is, for the checkbox label', async () => {
+    seed();
+    makeBoss();
+    const r = await call(route, { as: DANA });
+    t.equal(r.body.supervisor.name, 'Sasha Smith');
+    const none = await call(route, { as: SASHA });
+    t.equal(none.body.supervisor, null);
+  });
+
+  await check('the kiosk asks the same thing and records it', async () => {
+    await kioskSeed();
+    const d2 = JSON.parse(kv.get(CC + ':employee:EMP-2'));
+    d2.reports_to = 'EMP-1';
+    kv.set(CC + ':employee:EMP-2', JSON.stringify(d2));
+    const info = await kcall({ employee_id: 'EMP-2', pin: '7355', action: 'timeoff_info' });
+    t.equal(info.body.supervisor, 'Sasha', 'first name for the button');
+    const r = await kcall({ employee_id: 'EMP-2', pin: '7355', action: 'timeoff_request', request: { ...DAYS(1), told_supervisor: true } });
+    t.equal(r.statusCode, 201, JSON.stringify(r.body));
+    t.equal(JSON.parse(kv.get(CC + ':pto_request:' + 'PTO-00001')).told_supervisor, true);
+  });
+
   /* ==== 4c. Emailing the employee ======================================= */
 
   await check('approving emails the employee, from the default address, replies to the approver', async () => {

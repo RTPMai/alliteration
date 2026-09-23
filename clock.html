@@ -440,7 +440,7 @@
   }
 
   function showTimeoff(info, message) {
-    var state = { type: 'all_days', half: '', usePto: true };
+    var state = { type: 'all_days', half: '', usePto: true, told: false };
     var types = info.types || [];
     screen.innerHTML =
       '<div class="to-wrap">' +
@@ -472,6 +472,10 @@
           '<div class="field"><label>Time leaving</label><input class="to-input" type="time" id="tLeave"></div>' +
           '<div class="field" data-for="appointment"><label>Time returning</label><input class="to-input" type="time" id="tBack"></div>' +
         '</div>' +
+        '<div class="field"><label>Have you told your supervisor?</label><div class="choices" id="toTold">' +
+          '<button type="button" class="choice" data-told="yes">Yes' + (info.supervisor ? ', told ' + esc(info.supervisor) : '') + '</button>' +
+          '<button type="button" class="choice on" data-told="no">Not yet</button>' +
+        '</div></div>' +
         '<div class="field"><label>Use PTO?</label><div class="choices" id="toPto">' +
           '<button type="button" class="choice on" data-pto="yes">Yes, use my PTO</button>' +
           '<button type="button" class="choice" data-pto="no">No, unpaid</button>' +
@@ -485,7 +489,7 @@
     function $(id) { return document.getElementById(id); }
 
     function collect() {
-      var r = { type: state.type, note: $('tNote').value, use_pto: state.usePto };
+      var r = { type: state.type, note: $('tNote').value, use_pto: state.usePto, told_supervisor: state.told };
       if (state.type === 'all_days') { r.start_date = $('tStart').value; r.return_date = $('tReturn').value; }
       else r.start_date = $('tDate').value;
       if (state.type === 'half_day') r.half = state.half;
@@ -522,6 +526,13 @@
       b.onclick = function () {
         state.half = b.getAttribute('data-half');
         Array.prototype.forEach.call(screen.querySelectorAll('[data-half]'), function (x) { x.classList.toggle('on', x === b); });
+        refresh();
+      };
+    });
+    Array.prototype.forEach.call(screen.querySelectorAll('[data-told]'), function (b) {
+      b.onclick = function () {
+        state.told = b.getAttribute('data-told') === 'yes';
+        Array.prototype.forEach.call(screen.querySelectorAll('[data-told]'), function (x) { x.classList.toggle('on', x === b); });
         refresh();
       };
     });
