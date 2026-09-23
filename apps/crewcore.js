@@ -84,7 +84,7 @@ import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isC
 // Time off math, shared with api/crewcore/timeoff.js so the screen and the
 // server agree on estimates, warnings and which buttons a request gets. No
 // imports of its own, so safe in the browser.
-import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES, usesPto } from '../lib/crewcore/pto.js';
+import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES, usesPto, weekBars } from '../lib/crewcore/pto.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -543,22 +543,33 @@ export default {
   .to-types label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500;color:var(--ink);margin:0}
   .cc-form-grid .to-types input{width:auto}
   .to-types.to-row{flex-direction:row;gap:18px;flex-wrap:wrap}
-  .cal-head{display:grid;grid-template-columns:repeat(7,1fr);gap:6px;margin:14px 0 6px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+  .cal-head{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;margin:14px 0 4px;font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
   .cal-head div{text-align:center}
-  .cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:6px}
-  .cal-cell{min-height:86px;background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:6px}
-  .cal-cell.out{background:transparent;border:none}
-  .cal-cell.wknd{background:var(--line-soft)}
-  .cal-cell.today{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
-  .cal-n{font-size:11px;font-weight:700;color:var(--muted);margin-bottom:4px}
-  .cal-tag{
-    font-size:11px;font-weight:700;border-radius:4px;padding:2px 5px;margin-bottom:3px;cursor:pointer;
-    background:var(--success-tint);color:var(--success-dk);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  .cal-month{display:flex;flex-direction:column;gap:4px}
+  /* One grid per week: the day boxes sit in column tracks spanning every
+     row, the bars sit in lane rows on top, so a bar can run across days. */
+  .cal-week{display:grid;grid-template-columns:repeat(7,1fr);gap:4px;position:relative}
+  .cal-day{
+    grid-row:1 / -1;min-height:86px;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius-sm);padding:5px;
   }
-  .cal-tag.pending{background:var(--warn-tint);color:var(--warn-dk)}
+  .cal-day.out{background:transparent;border:none}
+  .cal-day.wknd{background:var(--line-soft)}
+  .cal-day.today{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .cal-n{font-size:11px;font-weight:700;color:var(--muted)}
+  .cal-bar{
+    z-index:1;align-self:start;margin:1px 2px;padding:2px 7px;border-radius:0;
+    font-size:11.5px;font-weight:700;line-height:1.5;cursor:pointer;
+    background:var(--success-tint);color:var(--success-dk);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:center;
+  }
+  .cal-bar.opens{border-radius:4px 0 0 4px;margin-left:5px}
+  .cal-bar.closes{border-radius:0 4px 4px 0;margin-right:5px}
+  .cal-bar.opens.closes{border-radius:4px}
+  .cal-bar.pending{background:var(--warn-tint);color:var(--warn-dk)}
   @media (max-width:720px){
-    .cal-cell{min-height:64px;padding:4px}
-    .cal-tag{font-size:10px}
+    .cal-day{min-height:62px;padding:3px}
+    .cal-bar{font-size:10px;padding:1px 4px}
   }
   .cc-row.to-focus{box-shadow:inset 0 0 0 2px var(--accent);border-radius:var(--radius-sm)}
   .to-sub{font-size:11.5px;color:var(--muted);margin-top:4px}
@@ -3717,11 +3728,20 @@ export default {
       </div>`;
   },
 
-  /* ---- Calendar ----
+  /**
+   * A month at a time, one BAR per stretch of days off rather than a chip on
+   * every day (Ryan, Sep 22, pointing at how Outlook draws it). A bar that
+   * crosses a Saturday is cut at the week edge and drawn again on the next
+   * row, which is what every calendar does and what reads correctly.
    *
-   * A month at a time, names on the days they are out. An admin or approver
-   * sees everybody and can filter by department or supervisor; a supervisor
-   * sees their own people only, which is all the server sends them.
+   * Bars are stacked in lanes inside each week so two people off the same
+   * days never land on top of each other. A lane is reused as soon as the
+   * days are clear, so a week with one long absence and several short ones
+   * stays shallow instead of growing a row per person.
+   *
+   * An admin or approver sees everybody and can filter by department or
+   * supervisor; a supervisor sees their own people only, which is all the
+   * server sends them.
    */
   _renderTimeoffCalendar() {
     const d = this._to || {};
@@ -3733,6 +3753,7 @@ export default {
     const lead = first.getUTCDay();
     const dept = this._toFilter.dept;
     const boss = this._toFilter.boss;
+    const iso = (day) => `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
     const byId = {};
     (d.team || []).forEach((p) => { byId[p.id] = p; });
@@ -3746,18 +3767,48 @@ export default {
       });
     }
 
+    // Weeks as [firstDay, lastDay] of this month, day numbers, 0 for padding.
     const cells = [];
-    for (let i = 0; i < lead; i++) cells.push('<div class="cal-cell out"></div>');
+    for (let i = 0; i < lead; i++) cells.push(0);
+    for (let day = 1; day <= days; day++) cells.push(day);
+    while (cells.length % 7) cells.push(0);
+    const weeks = [];
+    for (let i = 0; i < cells.length; i += 7) weeks.push(cells.slice(i, i + 7));
+
     const todayStr = new Date().toISOString().slice(0, 10);
-    for (let day = 1; day <= days; day++) {
-      const iso = `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-      const on = rows.filter((r) => r.start_date <= iso && r.end_date >= iso);
-      const dow = new Date(Date.UTC(y, m - 1, day)).getUTCDay();
-      cells.push(`<div class="cal-cell${dow === 0 || dow === 6 ? ' wknd' : ''}${iso === todayStr ? ' today' : ''}">
-        <div class="cal-n">${day}</div>
-        ${on.map((r) => `<div class="cal-tag ${esc(r.status)}"${team ? ` data-to-person="${esc(r.employee_id)}"` : ''} title="${esc((r.employee_name || '') + ' \u00b7 ' + r.status)}">${esc((r.employee_name || '').split(' ')[0])}${(r.part_day || (r.type && r.type !== 'all_days')) ? '*' : ''}</div>`).join('')}
-      </div>`);
-    }
+    const partOfDay = (r) => !!(r.part_day || (r.type && r.type !== 'all_days'));
+
+    const html = weeks.map((week) => {
+      // One bar per stretch, clipped to this week, stacked into lanes. The
+      // arithmetic is weekBars() in lib/crewcore/pto.js so it is testable;
+      // only the true ends get a rounded cap, the rest reads as continuing.
+      const bars = weekBars(rows, week.map((day) => (day ? iso(day) : '')));
+      const laneCount = bars.reduce((n, b) => Math.max(n, b.lane + 1), 0);
+
+      const dayCells = week.map((day, col) => {
+        if (!day) return `<div class="cal-day out" style="grid-column:${col + 1}"></div>`;
+        const date = iso(day);
+        return `<div class="cal-day${col === 0 || col === 6 ? ' wknd' : ''}${date === todayStr ? ' today' : ''}" style="grid-column:${col + 1}">
+          <div class="cal-n">${day}</div>
+        </div>`;
+      }).join('');
+
+      const barEls = bars.map((b) => {
+        const r = b.request;
+        const label = team ? (r.employee_name || '') : (r.employee_name || '');
+        return `<div class="cal-bar ${esc(r.status)}${b.opens ? ' opens' : ''}${b.closes ? ' closes' : ''}"
+          style="grid-column:${b.from + 1} / span ${b.to - b.from + 1};grid-row:${b.lane + 2}"
+          ${team ? `data-to-person="${esc(r.employee_id)}"` : ''}
+          title="${esc((r.employee_name || '') + ' \u00b7 ' + this._toSpan(r) + ' \u00b7 ' + r.status)}">
+          ${b.opens ? '' : '\u2026 '}${esc(label)}${partOfDay(r) ? ' (part day)' : ''}${b.closes ? '' : ' \u2026'}
+        </div>`;
+      }).join('');
+
+      return `<div class="cal-week" style="grid-template-rows:auto repeat(${Math.max(laneCount, 1)}, auto)">
+        ${dayCells}${barEls}
+      </div>`;
+    }).join('');
+
     const label = first.toLocaleDateString('en-US', { month: 'long', year: 'numeric', timeZone: 'UTC' });
     const depts = Array.from(new Set((d.team || []).map((p) => p.department).filter(Boolean))).sort();
     return `
@@ -3777,10 +3828,10 @@ export default {
           </select>` : ''}
       </div>
       <div class="cal-head">${['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((x) => `<div>${x}</div>`).join('')}</div>
-      <div class="cal-grid">${cells.join('')}</div>
+      <div class="cal-month">${html}</div>
       <p style="font-size:12px;color:var(--muted);margin-top:10px">
-        A star means part of the day. Paler names are still waiting on approval.
-        ${team ? 'Click a name to open that person.' : 'Your own people only.'}
+        Paler bars are still waiting on approval. A \u2026 means the time off carries on into the week either side.
+        ${team ? 'Click a bar to open that person.' : 'Your own people only.'}
       </p>`;
   },
 

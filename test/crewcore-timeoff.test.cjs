@@ -799,6 +799,67 @@ function notesFor(user) {
     t.equal(JSON.parse(kv.get(CC + ':pto_request:' + 'PTO-00001')).told_supervisor, true);
   });
 
+  /* ==== 4b5. The calendar's bars ========================================= */
+
+  const WEEK1 = ['', '', '', '', '2026-10-01', '2026-10-02', '2026-10-03'];   // Sun..Sat, Oct starts Thu
+  const WEEK2 = ['2026-10-04', '2026-10-05', '2026-10-06', '2026-10-07', '2026-10-08', '2026-10-09', '2026-10-10'];
+  const off = (name, a, b) => ({ employee_name: name, start_date: a, end_date: b, status: 'approved' });
+
+  await check('a stretch of days off is ONE bar, cut at the week edge', async () => {
+    const rows = [off('Nicole', '2026-10-01', '2026-10-06')];
+    const w1 = pto.weekBars(rows, WEEK1);
+    t.equal(w1.length, 1, 'one bar, not three chips');
+    t.equal(w1[0].from, 4); t.equal(w1[0].to, 6, 'Thursday to Saturday');
+    t.equal(w1[0].opens, true); t.equal(w1[0].closes, false, 'it carries on');
+    const w2 = pto.weekBars(rows, WEEK2);
+    t.equal(w2.length, 1);
+    t.equal(w2[0].from, 0); t.equal(w2[0].to, 2);
+    t.equal(w2[0].opens, false, 'carried in from last week'); t.equal(w2[0].closes, true);
+  });
+
+  await check('one day off is one bar with both ends capped', async () => {
+    const b = pto.weekBars([off('Alexis', '2026-10-05', '2026-10-05')], WEEK2);
+    t.equal(b.length, 1);
+    t.equal(b[0].from, 1); t.equal(b[0].to, 1);
+    t.assert(b[0].opens && b[0].closes);
+  });
+
+  await check('a week nobody is off, or a request outside it, draws nothing', async () => {
+    t.equal(pto.weekBars([off('Nicole', '2026-11-02', '2026-11-04')], WEEK2).length, 0);
+    t.equal(pto.weekBars([], WEEK2).length, 0);
+  });
+
+  await check('people off at the same time get their own lanes; a clear week reuses lane 0', async () => {
+    const bars = pto.weekBars([
+      off('Megan', '2026-10-04', '2026-10-08'),
+      off('Kim', '2026-10-06', '2026-10-10'),
+      off('Quinn', '2026-10-09', '2026-10-10'),
+    ], WEEK2);
+    const lane = Object.fromEntries(bars.map((b) => [b.request.employee_name, b.lane]));
+    t.equal(lane.Megan, 0);
+    t.equal(lane.Kim, 1, 'overlaps Megan, so its own lane');
+    t.equal(lane.Quinn, 0, 'Megan is done by the 9th, so lane 0 is free again');
+  });
+
+  await check('somebody keeps the same lane from one week to the next', async () => {
+    const rows = [off('Megan', '2026-10-08', '2026-10-17'), off('Kim', '2026-10-08', '2026-10-12')];
+    const WEEK3 = ['2026-10-11', '2026-10-12', '2026-10-13', '2026-10-14', '2026-10-15', '2026-10-16', '2026-10-17'];
+    const l2 = Object.fromEntries(pto.weekBars(rows, WEEK2).map((b) => [b.request.employee_name, b.lane]));
+    const l3 = Object.fromEntries(pto.weekBars(rows, WEEK3).map((b) => [b.request.employee_name, b.lane]));
+    t.equal(l2.Megan, l3.Megan, 'no hopping up and down mid-absence');
+    t.equal(l2.Kim, l3.Kim);
+  });
+
+  await check('two people off the exact same days are laid out in name order, every time', async () => {
+    const bars = pto.weekBars([off('Zoe', '2026-10-05', '2026-10-06'), off('Amy', '2026-10-05', '2026-10-06')], WEEK2);
+    t.equal(bars.map((b) => b.request.employee_name).join(), 'Amy,Zoe', 'not whatever order they came out of storage');
+    t.equal(bars[0].lane, 0); t.equal(bars[1].lane, 1);
+  });
+
+  await check('a request with no real dates is skipped rather than drawn at column 0', async () => {
+    t.equal(pto.weekBars([{ employee_name: 'X', start_date: '', end_date: '' }], WEEK2).length, 0);
+  });
+
   /* ==== 4c. Emailing the employee ======================================= */
 
   await check('approving emails the employee, from the default address, replies to the approver', async () => {
