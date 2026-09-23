@@ -84,6 +84,10 @@ import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isC
 // Time off math, shared with api/crewcore/timeoff.js so the screen and the
 // server agree on estimates, warnings and which buttons a request gets. No
 // imports of its own, so safe in the browser.
+// Pay period math (1st to 15th, 16th to month end), shared with
+// api/crewcore/timecards.js so Prev and Next land on the same periods the
+// server reports. Imports only schema.js, so safe in the browser.
+import { shiftPayPeriod } from '../lib/crewcore/timeclock.js';
 import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES, usesPto, weekBars } from '../lib/crewcore/pto.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
@@ -406,7 +410,11 @@ export default {
   .tc-day .dn{font-size:11px;color:var(--muted);margin-bottom:5px}
   .tc-day .dh{font-size:17px;font-weight:800;font-variant-numeric:tabular-nums}
   .tc-day .dh.none{color:var(--line)}
-  @media (max-width:720px){.tc-mine{grid-template-columns:repeat(4,1fr)}}
+  .tc-mine.period{grid-template-columns:repeat(8,1fr)}
+  @media (max-width:720px){.tc-mine,.tc-mine.period{grid-template-columns:repeat(4,1fr)}}
+  .tc-mode{display:flex;gap:4px;margin-right:6px}
+  .tc-scroll{overflow-x:auto}
+  .tc-otnote{font-size:12px;color:var(--muted);margin:10px 2px 0}
 
   .tc-kiosk{
     background:var(--card);border:1px solid var(--line);border-radius:var(--radius-md);
@@ -800,8 +808,10 @@ export default {
         return;
       }
       title.textContent = 'Time Clock.';
-      sub.textContent = isAdmin ? 'Hours by employee and pay week.' : 'Your hours.';
+      sub.textContent = isAdmin ? 'Hours by employee, by week or pay period.' : 'Your hours.';
       if (!this._tcWeek) this._tcWeek = '';   // '' means "whatever week today is in"
+      if (!this._tcMode) this._tcMode = 'week';   // 'week' or 'period'
+      if (!this._tcPeriod) this._tcPeriod = '';   // '' means "the period today is in"
       await this._loadTimecards();
       if (isAdmin) {
         actions.innerHTML = `
@@ -4426,7 +4436,8 @@ export default {
 
   async _loadTimecards() {
     const q = [];
-    if (this._tcWeek) q.push('week=' + encodeURIComponent(this._tcWeek));
+    if (this._tcMode === 'period') q.push('period=' + encodeURIComponent(this._tcPeriod || 'current'));
+    else if (this._tcWeek) q.push('week=' + encodeURIComponent(this._tcWeek));
     if (this._tcDept) q.push('dept=' + encodeURIComponent(this._tcDept));
     if (this._tcEmployee) q.push('employee_id=' + encodeURIComponent(this._tcEmployee));
     if (this._tcInactive) q.push('include_inactive=1');
@@ -4435,9 +4446,32 @@ export default {
     // Pin the resolved week so the Prev/Next buttons have something concrete
     // to step from, instead of re-resolving "today" on every click.
     if (this._tc && this._tc.week_key) this._tcWeek = this._tc.week_key;
+    if (this._tc && this._tc.period) this._tcPeriod = this._tc.period.start;
+  },
+
+  _tcIsPeriod() {
+    return this._tcMode === 'period';
+  },
+
+  /** Week or pay period, whichever is on screen. Used in every label. */
+  _tcSpanWord() {
+    return this._tcIsPeriod() ? 'pay period' : 'week';
+  },
+
+  _tcSetMode(mode) {
+    if (this._tcMode === mode) return;
+    this._tcMode = mode;
+    this.showView('timeclock');
   },
 
   _tcShiftWeek(n) {
+    if (this._tcIsPeriod()) {
+      const from = this._tcPeriod || (this._tc && this._tc.period && this._tc.period.start);
+      if (!from) return;
+      this._tcPeriod = shiftPayPeriod(from, n).start;
+      this.showView('timeclock');
+      return;
+    }
     const base = this._tcWeek || (this._tc && this._tc.week_key);
     if (!base) return;
     const [y, m, d] = base.split('-').map(Number);
@@ -4451,7 +4485,7 @@ export default {
   _tcWeekLabel() {
     const dates = (this._tc && this._tc.dates) || [];
     if (!dates.length) return '';
-    return fmtDate(dates[0]) + ' to ' + fmtDate(dates[6]);
+    return fmtDate(dates[0]) + ' to ' + fmtDate(dates[dates.length - 1]);
   },
 
   _tcDayHead(dateStr) {
@@ -4466,16 +4500,53 @@ export default {
     return v ? v.toFixed(2) : '';
   },
 
+  /** Week / Pay period switch plus Prev, Next and back-to-today. */
+  _renderTcNav() {
+    const p = this._tcIsPeriod();
+    return `
+        <div class="tc-weeknav">
+          <div class="tc-mode">
+            <button class="cc-btn ${p ? 'ghost ' : ''}sm" id="tcModeWeek">Week</button>
+            <button class="cc-btn ${p ? '' : 'ghost '}sm" id="tcModePeriod">Pay period</button>
+          </div>
+          <button class="cc-btn ghost sm" id="tcPrev">&lsaquo; Prev</button>
+          <span class="tc-weeklabel" id="tcLabel">${esc(this._tcWeekLabel())}</span>
+          <button class="cc-btn ghost sm" id="tcNext">Next &rsaquo;</button>
+          <button class="cc-btn ghost sm" id="tcToday">${p ? 'This period' : 'This week'}</button>
+        </div>`;
+  },
+
+  _wireTcNav(body) {
+    const $ = (sel) => body.querySelector(sel);
+    const prev = $('#tcPrev'); if (prev) prev.onclick = () => this._tcShiftWeek(-1);
+    const next = $('#tcNext'); if (next) next.onclick = () => this._tcShiftWeek(1);
+    const today = $('#tcToday');
+    if (today) today.onclick = () => { this._tcWeek = ''; this._tcPeriod = ''; this.showView('timeclock'); };
+    const mw = $('#tcModeWeek'); if (mw) mw.onclick = () => this._tcSetMode('week');
+    const mp = $('#tcModePeriod'); if (mp) mp.onclick = () => this._tcSetMode('period');
+  },
+
+  /**
+   * Overtime is weekly even in the pay period view (see summarizePeriod in
+   * lib/crewcore/timeclock.js). Says so in words, and names the week whose
+   * overtime lands next period, so a low OT number is never a mystery.
+   */
+  _tcOtNote() {
+    if (!this._tcIsPeriod()) return '';
+    const rows = (this._tc && this._tc.rows) || [];
+    const first = rows[0] && rows[0].summary && rows[0].summary.weeks;
+    const trailing = (first || []).find((w) => !w.counted);
+    return `<p class="tc-otnote">Overtime is figured by work week, past ${esc(String((this._tc && this._tc.overtime_after) || 40))}
+      hours, and counted in the pay period the week ends in.${trailing
+        ? ` The week of ${fmtDate(trailing.start)} to ${fmtDate(trailing.end)} ends next period, so its overtime shows there.`
+        : ''}</p>`;
+  },
+
   _renderTcToolbar() {
     const emps = this._employees || [];
     return `
       <div class="cc-toolbar">
-        <div class="tc-weeknav">
-          <button class="cc-btn ghost sm" id="tcPrev">&lsaquo; Prev</button>
-          <span class="tc-weeklabel" id="tcLabel">${esc(this._tcWeekLabel())}</span>
-          <button class="cc-btn ghost sm" id="tcNext">Next &rsaquo;</button>
-          <button class="cc-btn ghost sm" id="tcToday">This week</button>
-        </div>
+        ${this._renderTcNav()}
         <span class="tc-spacer"></span>
         <select class="cc-filt" id="tcDept">
           <option value="">All departments</option>
@@ -4530,10 +4601,10 @@ export default {
 
     const cards = `
       <div class="cc-grid">
-        <div class="cc-card"><h3>Hours this week</h3><div class="big">${(totals.hours || 0).toFixed(2)}</div>
+        <div class="cc-card"><h3>Hours this ${this._tcSpanWord()}</h3><div class="big">${(totals.hours || 0).toFixed(2)}</div>
           <div class="note">${rows.length} ${rows.length === 1 ? 'person' : 'people'}</div></div>
         <div class="cc-card"><h3>Overtime</h3><div class="big">${(totals.overtime || 0).toFixed(2)}</div>
-          <div class="note">past ${tc.overtime_after || 40} hours</div></div>
+          <div class="note">past ${tc.overtime_after || 40} hours${this._tcIsPeriod() ? ' a week' : ''}</div></div>
         <div class="cc-card"><h3>On the clock</h3><div class="big">${(tc.now_in || []).length}</div>
           <div class="note">right now</div></div>
         ${totals.cost != null ? `<div class="cc-card"><h3>Estimated labor</h3><div class="big">${fmtMoney(totals.cost)}</div>
@@ -4541,7 +4612,7 @@ export default {
       </div>`;
 
     return this._renderTcToolbar() + nowIn + flagBanner + cards + kiosk + `
-      <div class="cc-list">
+      <div class="cc-list"><div class="tc-scroll">
         <table class="tc-grid">
           <thead>
             <tr>
@@ -4583,14 +4654,15 @@ export default {
             </tr>
           </tfoot>
         </table>
-      </div>
+      </div></div>
+      ${this._tcOtNote()}
     `;
   },
 
   _renderShiftList(row) {
     const shifts = row.shifts || [];
     if (!shifts.length) {
-      return `<div class="tc-shifts"><div class="tc-shift"><span class="note">No shifts recorded this week.</span>
+      return `<div class="tc-shifts"><div class="tc-shift"><span class="note">No shifts recorded this ${this._tcSpanWord()}.</span>
         <span class="grow"></span>
         <button class="cc-btn ghost sm" data-addfor="${esc(row.employee.id)}">Add a shift</button></div></div>`;
     }
@@ -4617,9 +4689,7 @@ export default {
     const body = this._root.querySelector('#ccBody');
     const $ = (sel) => body.querySelector(sel);
 
-    const prev = $('#tcPrev'); if (prev) prev.onclick = () => this._tcShiftWeek(-1);
-    const next = $('#tcNext'); if (next) next.onclick = () => this._tcShiftWeek(1);
-    const today = $('#tcToday'); if (today) today.onclick = () => { this._tcWeek = ''; this.showView('timeclock'); };
+    this._wireTcNav(body);
 
     const dept = $('#tcDept');
     if (dept) dept.onchange = () => { this._tcDept = dept.value; this.showView('timeclock'); };
@@ -4765,12 +4835,19 @@ export default {
           sh.hours == null ? '' : sh.hours, sh.source, sh.note
         ].map(cell).join(','));
       });
-      lines.push([r.employee.name, '', '', '', 'WEEK TOTAL', r.summary.total_hours, '', ''].map(cell).join(','));
+      if (this._tcIsPeriod()) {
+        lines.push([r.employee.name, '', '', '', 'PAY PERIOD TOTAL', r.summary.total_hours, '', ''].map(cell).join(','));
+        lines.push([r.employee.name, '', '', '', 'OVERTIME (BY WORK WEEK)', r.summary.overtime_hours, '', ''].map(cell).join(','));
+      } else {
+        lines.push([r.employee.name, '', '', '', 'WEEK TOTAL', r.summary.total_hours, '', ''].map(cell).join(','));
+      }
     });
 
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' }));
-    a.download = 'timecards-' + (tc.week_key || 'week') + '.csv';
+    a.download = tc.period
+      ? 'timecards-period-' + tc.period.start + '-to-' + tc.period.end + '.csv'
+      : 'timecards-' + (tc.week_key || 'week') + '.csv';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -4787,7 +4864,7 @@ export default {
       return `
         <div class="cc-locked">
           <h2>No timecard yet</h2>
-          <p>${esc(tc.error_hint || "Nothing recorded for you this week.")}</p>
+          <p>${esc(tc.error_hint || ('Nothing recorded for you this ' + this._tcSpanWord() + '.'))}</p>
         </div>
       `;
     }
@@ -4798,12 +4875,12 @@ export default {
     return `
       ${this._renderTcSelfNav()}
       <div class="cc-grid">
-        <div class="cc-card"><h3>Hours this week</h3><div class="big">${(row.summary.total_hours || 0).toFixed(2)}</div>
+        <div class="cc-card"><h3>Hours this ${this._tcSpanWord()}</h3><div class="big">${(row.summary.total_hours || 0).toFixed(2)}</div>
           <div class="note">${esc(this._tcWeekLabel())}</div></div>
         ${row.summary.overtime_hours ? `<div class="cc-card"><h3>Overtime</h3><div class="big">${row.summary.overtime_hours.toFixed(2)}</div>
-          <div class="note">past ${tc.overtime_after || 40} hours</div></div>` : ''}
+          <div class="note">past ${tc.overtime_after || 40} hours${this._tcIsPeriod() ? ' a week' : ''}</div></div>` : ''}
       </div>
-      <div class="tc-mine">
+      <div class="tc-mine${this._tcIsPeriod() ? ' period' : ''}">
         ${dates.map((d) => {
           const h = this._tcDayHead(d);
           const v = row.summary.days[d] || 0;
@@ -4816,6 +4893,7 @@ export default {
       <div class="cc-section">
         <h2>Your shifts</h2>
         <div class="cc-list">${this._renderShiftList(row)}</div>
+        ${this._tcOtNote()}
       </div>
       <p style="font-size:12.5px;color:var(--muted)">
         Something wrong here? Tell a manager. Timecards can only be corrected
@@ -4827,22 +4905,14 @@ export default {
   _renderTcSelfNav() {
     return `
       <div class="cc-toolbar">
-        <div class="tc-weeknav">
-          <button class="cc-btn ghost sm" id="tcPrev">&lsaquo; Prev</button>
-          <span class="tc-weeklabel">${esc(this._tcWeekLabel())}</span>
-          <button class="cc-btn ghost sm" id="tcNext">Next &rsaquo;</button>
-          <button class="cc-btn ghost sm" id="tcToday">This week</button>
-        </div>
+        ${this._renderTcNav()}
       </div>
     `;
   },
 
   _wireTimeclockSelf() {
     const body = this._root.querySelector('#ccBody');
-    const prev = body.querySelector('#tcPrev'); if (prev) prev.onclick = () => this._tcShiftWeek(-1);
-    const next = body.querySelector('#tcNext'); if (next) next.onclick = () => this._tcShiftWeek(1);
-    const today = body.querySelector('#tcToday');
-    if (today) today.onclick = () => { this._tcWeek = ''; this.showView('timeclock'); };
+    this._wireTcNav(body);
   },
 
   unmount() {

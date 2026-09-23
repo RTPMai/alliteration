@@ -1,7 +1,7 @@
 // api/crewcore/timecards.js — the back side of the time clock. Session required.
 //
 // Everything the kiosk cannot do lives here: reading hours across the team,
-// filtering by pay week and department, correcting a missed punch, and
+// filtering by pay week or pay period and department, correcting a missed punch, and
 // exporting for payroll.
 //
 // SCOPE, same split as the rest of CrewCore:
@@ -24,6 +24,7 @@ import { isCrewCoreAdmin } from "../../lib/crewcore/schema.js";
 import {
   validateShiftEdit, weekKeyFor, weekDates, localParts, localToday,
   summarizeWeek, shiftHours, SHOP_TIMEZONE,
+  isDateString, payPeriodFor, payPeriodReadStart, summarizePeriod, datesInWindow,
 } from "../../lib/crewcore/timeclock.js";
 import {
   listWeek, listRange, addShift, updateShift, deleteShift, whoIsIn,
@@ -63,8 +64,8 @@ function round2(n) {
  * estimated labor cost. The cost is an ESTIMATE and labelled as one — it
  * ignores overtime multipliers, which live in payroll, not here.
  */
-function buildRow(emp, shifts, opts, isAdmin) {
-  const summary = summarizeWeek(shifts, opts);
+function buildRow(emp, shifts, opts, isAdmin, periodSummary = null) {
+  const summary = periodSummary || summarizeWeek(shifts, opts);
   const row = {
     employee: {
       id: emp.id,
@@ -129,6 +130,19 @@ export default async function handler(req, res) {
       const rangeEnd = String(q.end || "").trim();
       const useRange = !!(rangeStart && rangeEnd);
 
+      // Pay period view (1st to 15th, 16th to month end). "current" or any
+      // date inside the period. See summarizePeriod() for how overtime is
+      // kept weekly inside a period that is not a week.
+      const periodParam = String(q.period || "").trim();
+      let period = null;
+      if (periodParam && !useRange) {
+        const pAnchor = periodParam === "current" ? localToday(timezone) : periodParam;
+        if (!isDateString(pAnchor)) {
+          return res.status(400).json({ error: "period must be a date (YYYY-MM-DD) or current" });
+        }
+        period = payPeriodFor(pAnchor);
+      }
+
       let employees;
       if (isAdmin) {
         employees = await listEmployees();
@@ -164,6 +178,18 @@ export default async function handler(req, res) {
 
       const rows = await Promise.all(
         employees.map(async (emp) => {
+          if (period) {
+            // Reads back to the start of the first work week so that week's
+            // overtime is judged on the whole week. Only shifts inside the
+            // period are listed and added into the period's hours.
+            const all = await listRange(emp.id, payPeriodReadStart(period, weekStartDay), period.end, timezone);
+            const summary = summarizePeriod(all, { ...opts, start: period.start, end: period.end });
+            const shown = all.filter((s) => {
+              const lp = localParts(s.in_at, timezone);
+              return lp && lp.date >= period.start && lp.date <= period.end;
+            });
+            return buildRow(emp, shown, opts, isAdmin, summary);
+          }
           const shifts = useRange
             // weekKey is the PAY week start. Storage is anchored to Sunday
             // whatever the setting says, so these read the buckets that
@@ -189,9 +215,11 @@ export default async function handler(req, res) {
         scope: isAdmin ? "all" : "own",
         timezone,
         week_start_day: weekStartDay,
-        week_key: useRange ? null : weekKey,
-        dates: useRange ? null : weekDates(weekKey),
+        mode: period ? "period" : (useRange ? "range" : "week"),
+        week_key: (useRange || period) ? null : weekKey,
+        dates: period ? datesInWindow(period.start, period.end) : (useRange ? null : weekDates(weekKey)),
         range: useRange ? { start: rangeStart, end: rangeEnd } : null,
+        period,
         round_minutes: opts.roundMinutes,
         overtime_after: opts.overtimeAfter,
         rows,
