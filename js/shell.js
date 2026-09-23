@@ -14,6 +14,7 @@
  */
 
 import { loginUrlFor } from './return-to.js';
+import { noAccessMessage } from './route-access.js';
 import { APPS, SHELL_APPS, SITE_APPS, getApp, canAccess, allowedViews, firstAllowed, viewLabel } from './registry.js';
 import * as api from './api.js';
 import * as router from './router.js';
@@ -149,8 +150,18 @@ async function handleRoute(route) {
     return activateHub();
   }
 
-  // Unknown app, or one this user cannot open: fall back to the first they can.
-  if (!getApp(appId) || !canAccess(state.perms, appId)) {
+  // A real app this account cannot open: say so. Quietly landing somewhere
+  // else made a scanned PO look like a broken QR code. See js/route-access.js.
+  if (getApp(appId) && !canAccess(state.perms, appId)) {
+    state.app = null;
+    state.view = null;
+    renderRail();
+    const msg = noAccessMessage(getApp(appId).name, firstAllowed(state.perms));
+    return renderMessage(msg.title, msg.body);
+  }
+
+  // Unknown app (a typo, a retired app): fall back to the first they can open.
+  if (!getApp(appId)) {
     const fallback = firstAllowed(state.perms);
     if (!fallback) {
       renderRail();
