@@ -425,13 +425,13 @@ export const APPS = [
     // StitchSense), so the mark has never been the thing people navigate by.
     // The accent colour is what has to stay distinct, and this one is nowhere
     // near CrewCore's raspberry.
-    // PROVISIONAL ACCENT. Espresso, chosen by elimination rather than off a
-    // logo file: blue, orange, muted purple, gold, green, red, raspberry,
-    // slate, navy, teal, magenta and violet are all taken, and brown is the
-    // one hue nothing else in the rail uses. CHECK IT AGAINST THE LOGO LINEUP
-    // SHEET and correct it here and in tokens.css before the team has seen it
-    // long enough for the colour to stick. CrewCore went blue -> red -> the
-    // exact logo red precisely because that check was skipped the first time.
+    // ACCENT CONFIRMED (Sep 23 2026). Espresso was chosen by elimination
+    // rather than off a logo file: blue, orange, muted purple, gold, green,
+    // red, raspberry, slate, navy, teal, magenta and violet are all taken,
+    // and brown is the one hue nothing else in the rail uses. Ryan confirmed
+    // it stands. ConControl is not on the logo lineup sheet and a per-app
+    // logo is no longer expected for every app, so there is no sheet value
+    // coming to reconcile against. This is the value.
     accent: '#6B4423',           // display only (rail dot / app mark); tokens.css owns theming
     //
     // SIX VIEWS, ALL REAL. Each one was added the day it worked rather than
@@ -453,15 +453,17 @@ export const APPS = [
   },
   {
     id: 'reviews',
-    // PROVISIONAL NAME AND ACCENT (Sep 17 2026). Neither is off the logo
-    // lineup sheet yet. The id is `reviews` precisely so the name can change
-    // without moving storage keys, routes or saved links: change `name`, `w1`,
-    // `w2`, `letter` here and the accent in tokens.css, nothing else.
+    // NAME AND ACCENT CONFIRMED (Sep 23 2026). Neither came off the logo
+    // lineup sheet, and neither is going to: RaveReviews was never on it, and
+    // a per-app logo is no longer expected for every app. Ryan confirmed both
+    // stand. The id stays `reviews` regardless, so a later rename would still
+    // cost nothing: change `name`, `w1`, `w2`, `letter` here and the accent in
+    // tokens.css, and no storage key, route or saved link moves.
     name: 'RaveReviews',
     w1: 'Rave', w2: 'Reviews', letter: 'R',
     role: 'Who we ask for a review',
     blurb: 'The Google review request after pickup or shipping.',
-    accent: '#76871C',           // display only (rail dot / app mark); tokens.css owns theming. PROVISIONAL, see tokens.css
+    accent: '#76871C',           // display only (rail dot / app mark); tokens.css owns theming
     // Replaces two Printavo automations ("ZAP> Order Shipped", "ZAP> Order
     // Ready for Pick Up") feeding a Zapier zap. A scheduled check finds
     // orders newly at ORDER SHIPPED or PICKED-UP, queues a request, and sends
