@@ -1,3 +1,4 @@
+// PUT IN: api/promopro/settings.js
 // api/promopro/settings.js — shop-wide PromoPro settings.
 //
 // Holds three things:
@@ -62,6 +63,18 @@ export default async function handler(req, res) {
       }
     }
 
+    // MOVING YOUR OWN ORDERS ALONG. Whether this account could tick progress
+    // on an order it is the account manager for, and its own username so the
+    // screen can recognise orders it owns. Which orders are "yours" is then
+    // answered per order by ownsPo() in lib/promopro/move-own.js, the same
+    // function the purchase-order route gates on.
+    function moveOwnFlags() {
+      return {
+        youCanMoveOwn: !!callerRole && callerRole.can_edit !== false,
+        meUsername: String(sess.username || "").trim().toLowerCase(),
+      };
+    }
+
     async function shape(stored) {
       const settings = withSettingDefaults(stored);
       const employees = await roster();
@@ -78,6 +91,7 @@ export default async function handler(req, res) {
         // failure.
         settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
         settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
+        Object.assign(settings, moveOwnFlags());
         if (isAdmin) settings.candidates = [];
         return settings;
       }
@@ -118,6 +132,7 @@ export default async function handler(req, res) {
       // people who cannot use it and fail at the last step.
       settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
       settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
+      Object.assign(settings, moveOwnFlags());
 
       // WHO CAN BUY, ONE ROW PER ACCOUNT. Admins only.
       //

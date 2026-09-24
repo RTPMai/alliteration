@@ -33,6 +33,9 @@ import {
   openIsTrusted, linePriced, pricingState, isFinished, isOpenPo
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
+// Who may move an order along without being able to edit it. Same function
+// the purchase-order route gates on, so a tick shown is a tick that saves.
+import { ownsPo } from '../lib/promopro/move-own.js';
 // One list of accepted file types, shared with the upload route, so the
 // dialog cannot offer something the server then refuses.
 import { ART_ACCEPT, artAcceptSummary } from '../lib/promopro/art-types.js';
@@ -590,6 +593,13 @@ export default {
     }
 
     const isMine = (p) => !!meId() && p.accountManager === meId();
+
+    // MOVE ALONG. A buyer can do everything. Anybody else can tick progress,
+    // set carrier and tracking and log a follow-up on orders where they are
+    // the account manager, because they are the one copied on the vendor's
+    // emails. The server makes the same call with the same ownsPo().
+    const canMove = (p) => canEdit ||
+      (st.settings.youCanMoveOwn === true && ownsPo(p, meId(), st.settings.meUsername));
 
     // EVERY count and list on the two list screens starts here. Scoping the
     // rows but not the pill counts would put "Open 12" above four rows, and
@@ -1729,10 +1739,10 @@ export default {
       const ticks = '<div class="pp-trail">' + MANUAL_STAGES.map((s) => {
         const val = po[s.dateField] || '';
         return '<button class="pp-step-btn' + (val ? ' done' : '') + '" ' +
-          'data-stagetick="' + esc(s.dateField) + '"' + (canEdit ? '' : ' disabled') +
+          'data-stagetick="' + esc(s.dateField) + '"' + (canMove(po) ? '' : ' disabled') +
           ' title="' + (val ? 'Press to clear' : 'Press to mark it done today') + '">' +
           '<span class="k">' + esc(stageLabel(s.key, po)) + '</span>' +
-          '<span class="v">' + (val ? esc(val) : (canEdit ? 'Mark done' : '&mdash;')) + '</span>' +
+          '<span class="v">' + (val ? esc(val) : (canMove(po) ? 'Mark done' : '&mdash;')) + '</span>' +
         '</button>';
       }).join('') + '</div>';
 
@@ -1746,18 +1756,18 @@ export default {
             '<div class="pp-step' + (po[s.dateField] ? ' done' : '') + '">' +
               '<div class="k">' + esc(stageLabel(s.key, po)) + '</div>' +
               '<input type="date" data-datefield="' + esc(s.dateField) + '" value="' + esc(po[s.dateField] || '') + '"' +
-                (canEdit ? '' : ' disabled') + '>' +
+                (canMove(po) ? '' : ' disabled') + '>' +
             '</div>').join('') +
             '<div class="pp-step"><div class="k">Art sent</div>' +
               '<input type="date" data-datefield="artSentAt" value="' + esc(po.artSentAt || '') + '"' +
-              (canEdit ? '' : ' disabled') + '></div>' +
+              (canMove(po) ? '' : ' disabled') + '></div>' +
           '</div>' +
           '<div class="pp-hint">Changed dates need Save changes at the bottom. Ticks save on their own.</div>'
         : '';
 
       return ticks +
         (facts.length ? '<div class="pp-hint">' + esc(facts.join('. ')) + '.</div>' : '') +
-        (canEdit
+        (canMove(po)
           ? '<div class="pp-hint"><button class="pp-linkish" id="ppToggleDates">' +
             (st.showDates ? 'Hide the dates' : 'Adjust dates') + '</button></div>'
           : '') +
@@ -1830,7 +1840,7 @@ export default {
       const list = Array.isArray(po.history) ? po.history.slice().reverse() : [];
       const chased = chaseNote(po, today());
 
-      const box = canEdit
+      const box = canMove(po)
         ? '<div class="pp-followup">' +
             '<select id="ppFuMethod">' +
               FOLLOW_UP_METHODS.map((m) => '<option value="' + esc(m.key) + '">' + esc(m.label) + '</option>').join('') +
@@ -1942,8 +1952,8 @@ export default {
               (po.shippingInstructions ? '<div class="pp-hint">' + esc(po.shippingInstructions) + '</div>' : '') +
             '</div>' +
             '<div class="pp-row" style="margin-top:10px">' +
-              '<div class="pp-field"><label>Carrier</label><input id="ppCarrier" value="' + esc(po.carrier || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
-              '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canEdit ? '' : ' disabled') + '></div>' +
+              '<div class="pp-field"><label>Carrier</label><input id="ppCarrier" value="' + esc(po.carrier || '') + '"' + (canMove(po) ? '' : ' disabled') + '></div>' +
+              '<div class="pp-field"><label>Tracking number</label><input id="ppTracking" value="' + esc(po.trackingNumber || '') + '"' + (canMove(po) ? '' : ' disabled') + '></div>' +
             '</div>' +
           '</div>' +
           '<div>' +
@@ -1992,7 +2002,13 @@ export default {
         '</div>' +
         '<div id="ppSendMsg" class="pp-hint" style="margin-top:6px"></div>' +
 
-        (canEdit ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
+        (canMove(po) ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
+        // Said once, so an account manager who can tick steps is not left
+        // wondering why the vendor and lines are locked.
+        (!canEdit && canMove(po)
+          ? '<div class="pp-hint" style="margin-top:6px">You can move your own orders along. ' +
+            'Changing what was ordered, or sending or cancelling it, is for whoever raises purchase orders.</div>'
+          : '') +
         '<div class="pp-err" id="ppDetailErr" hidden></div>' +
 
         // Two different things, kept apart on purpose.

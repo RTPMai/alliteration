@@ -18,13 +18,14 @@
 // not be a normal-day action.
 
 import { requireAuth } from "../../lib/session.js";
-import { isAdminSession, canEditSession } from "../../lib/promopro/access.js";
+import { isAdminSession, canEditSession, callerFor } from "../../lib/promopro/access.js";
+import { moveVerdict, outsideMove } from "../../lib/promopro/move-own.js";
 import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced, validateFollowUp, followUpEntry } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
 import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
-import { effectiveAccountManagerIds } from "../../lib/promopro/account-managers.js";
+import { effectiveAccountManagerIds, identifyAccountManager } from "../../lib/promopro/account-managers.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -72,7 +73,39 @@ export default async function handler(req, res) {
       return res.status(200).json({ pos });
     }
 
-    if (!canEdit) return res.status(403).json({ error: "Read-only access" });
+    // MOVING YOUR OWN ORDER ALONG. Somebody who cannot raise or edit POs may
+    // still tick progress, set carrier and tracking, and log a follow-up on
+    // an order they are the account manager for. Everything else falls
+    // through to the refusal. See lib/promopro/move-own.js.
+    if (!canEdit && req.method === "PATCH") {
+      const body = parseBody(req);
+      const id = body.id || (req.query && req.query.id);
+      const po = id ? await getPo(String(id)) : null;
+      if (!po) return res.status(403).json({ error: "Read-only access" });
+
+      const { user, role } = await callerFor(sess);
+      const employees = await roster();
+      const me = identifyAccountManager(
+        { username: sess.username, name: user && user.name },
+        employees,
+        effectiveAccountManagerIds(settingsForGate, employees),
+      );
+      const verdict = moveVerdict({ canEdit: false, role, po, meId: me && me.id, username: sess.username });
+      if (!verdict.allowed) return res.status(403).json({ error: verdict.why });
+
+      const outside = outsideMove(body);
+      if (outside.length) {
+        return res.status(403).json({
+          error: "You can move this order along, but changing " + outside.join(", ") +
+            " needs somebody who can edit purchase orders.",
+          outside,
+        });
+      }
+      // Fall through to the ordinary PATCH below, which now only ever sees
+      // stage dates, carrier, tracking or a follow-up.
+    } else if (!canEdit) {
+      return res.status(403).json({ error: "Read-only access" });
+    }
 
     if (req.method === "POST") {
       const body = parseBody(req);
