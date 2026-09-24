@@ -24,7 +24,7 @@
 // ESM handler. Do NOT wrap the handler; call requireAuth inside it.
 
 import { requireAuth } from "../../lib/session.js";
-import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
+import { requireMailMe, canEditMailMe, deleteDecision, mailMePerms } from "../../lib/mailme/access.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign,
   applyCampaignPatch, resolveContacts, getList, campaignResults, getSettings,
@@ -268,6 +268,23 @@ export default async function handler(req, res) {
       });
     }
 
+    // DELETE decides its own access: a draft needs edit access, a send that
+    // has gone out needs an Admin. Handled before the general edit gate so
+    // the rule lives in one place (deleteDecision).
+    if (req.method === "DELETE") {
+      const id = (req.query && req.query.id) || parseBody(req).id;
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+      const campaign = await getCampaign(id);
+      const decision = deleteDecision(campaign, await mailMePerms(sess), await canEditMailMe(sess));
+      if (!decision.ok) return res.status(decision.status).json({ error: decision.error });
+      const result = await deleteCampaign(id, { allowSent: campaign.status !== "draft" });
+      if (!result.ok) {
+        if (result.reason === "not_found") return res.status(404).json({ error: "Campaign not found" });
+        return res.status(409).json({ error: "This send can't be deleted right now." });
+      }
+      return res.status(200).json({ ok: true, deleted: id });
+    }
+
     if (!(await canEditMailMe(sess))) {
       return res.status(403).json({ error: "Your role is read-only in MailMe" });
     }
@@ -395,17 +412,6 @@ export default async function handler(req, res) {
         return res.status(409).json({ error: "Only drafts can be edited" });
       }
       return res.status(200).json({ ok: true, campaign: result.campaign });
-    }
-
-    if (req.method === "DELETE") {
-      const id = (req.query && req.query.id) || parseBody(req).id;
-      if (!id) return res.status(400).json({ error: "Missing campaign id" });
-      const result = await deleteCampaign(id);
-      if (!result.ok) {
-        if (result.reason === "not_found") return res.status(404).json({ error: "Campaign not found" });
-        return res.status(409).json({ error: "Sent campaigns cannot be deleted" });
-      }
-      return res.status(200).json({ ok: true, deleted: id });
     }
 
     res.setHeader("Allow", "GET, POST, PATCH, DELETE");

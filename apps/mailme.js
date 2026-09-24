@@ -441,6 +441,7 @@ export default {
   .mm-btn.ghost:hover{color:var(--ink);background:var(--row-hover)}
   .mm-btn.sm{padding:4px 10px;font-size:12px}
   .mm-btn.danger{background:var(--danger);border-color:var(--danger)}
+  .mm-btn.ghost.mm-del:hover{color:var(--danger-dk);border-color:var(--danger-line)}
   .mm-btn.danger:hover{background:var(--danger-dk);border-color:var(--danger-dk)}
 
   .mm-linklike{background:none;border:none;padding:0;margin:0;font:inherit;
@@ -801,6 +802,12 @@ export default {
 
     const canEditUI = () =>
       !!(ctx.perms && (ctx.perms.superuser === true || ctx.perms.can_edit !== false));
+    // Admin = the per-account superuser flag, strictly. Only used to SHOW the
+    // delete button on sends that went out; the server decides for itself
+    // (deleteDecision in lib/mailme/access.js).
+    const isAdminUI = () => !!(ctx.perms && ctx.perms.superuser === true);
+    const canDeleteUI = (c) => !!c && c.status !== 'sending' &&
+      (c.status === 'draft' ? canEditUI() : isAdminUI());
 
     /* ---------------- data ---------------- */
 
@@ -1004,6 +1011,7 @@ export default {
                 <td style="text-align:right;white-space:nowrap">
                   ${done ? `<button class="mm-btn ghost sm" data-report="${esc(c.id)}">Report</button>` : ''}
                   <button class="mm-btn ghost sm" data-open="${esc(c.id)}">${done ? 'View' : 'Open'}</button>
+                  ${c.status !== 'draft' && canDeleteUI(c) ? `<button class="mm-btn ghost sm mm-del" data-delete="${esc(c.id)}">Delete</button>` : ''}
                 </td>
               </tr>`;
             }).join('')}
@@ -1015,6 +1023,12 @@ export default {
           ev.stopPropagation();
           state.reportId = b.dataset.report;
           ctx.go('reports');
+        });
+      });
+      box.querySelectorAll('[data-delete]').forEach((b) => {
+        b.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          deleteCampaign(b.dataset.delete);
         });
       });
       // The whole row opens the campaign. A table of things you work on
@@ -1351,7 +1365,7 @@ export default {
         ${stepHtml('Part of a campaign', stepMark(steps.campaign.done),
           esc(steps.campaign.text), campaignBody)}
         <div id="mmReadyBlock"></div>
-        ${sent || readOnly ? '' : `<div class="mm-actions" style="margin-top:6px">
+        ${!canDeleteUI(d) || !d.id ? '' : `<div class="mm-actions" style="margin-top:6px">
           <button class="mm-btn ghost" id="mmDeleteCampaign">Delete this send</button>
         </div>`}`;
 
@@ -1592,7 +1606,7 @@ export default {
       wire('#mmSendTest', sendTest);
       wire('#mmScheduleCampaign', scheduleCampaign);
       wire('#mmSendCampaign', triggerSend);
-      wire('#mmDeleteCampaign', deleteCampaign);
+      wire('#mmDeleteCampaign', () => deleteCampaign());
 
       paintAudienceHints();
     }
@@ -2522,17 +2536,26 @@ export default {
       }
     }
 
-    async function deleteCampaign() {
-      const d = state.editingCampaign;
-      if (!d || !d.id) { closeCampaign(); return; }
-      if (!window.confirm('Delete this send? This cannot be undone.')) return;
+    // From the composer (no id: the open one) or from a row on the list.
+    async function deleteCampaign(listId) {
+      const open = state.editingCampaign;
+      const d = listId ? state.campaigns.find((c) => c.id === listId) : open;
+      if (!d || !d.id) { if (!listId) closeCampaign(); return; }
+      const sentAlready = d.status !== 'draft';
+      const question = sentAlready
+        ? `Delete "${d.subject || d.id}"? It already went out. This removes it from Sends and deletes its report. ` +
+          'Unsubscribes and bounces from it stay on record. This cannot be undone.'
+        : 'Delete this send? This cannot be undone.';
+      if (!window.confirm(question)) return;
+      const say = (html, cls) => (listId ? msg('#mmCampaignMsg', html, cls) : composerMsg(html, cls));
       try {
         await api.del(ENDPOINTS.mmCampaigns, { query: { id: d.id } });
         await loadCampaigns();
-        closeCampaign();
+        if (!listId || (open && open.id === d.id)) closeCampaign();
+        else renderCampaignList();
         msg('#mmCampaignMsg', 'Send deleted.', 'mm-ok');
       } catch (e) {
-        composerMsg('Could not delete: ' + esc(e.message), 'mm-err');
+        say('Could not delete: ' + esc(e.message), 'mm-err');
       }
     }
 
