@@ -171,4 +171,10 @@ async function check(name, fn) {
     t.equal(res.statusCode, 200, JSON.stringify(res.body));
     t.equal(stored().notes, 'buyer edit');
   });
-})();
+
+  const code = t.report();
+  process.exit(code !== 0 ? code : (process.exitCode || 0));
+})().catch((e) => {
+  console.log('  FAIL promopro-move-own-route could not run: ' + (e && e.stack || e));
+  process.exit(1);
+});

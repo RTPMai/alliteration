@@ -138,12 +138,19 @@ const PO = { id: 'po_1', accountManager: 'EMP-1', owner: 'jacob' };
     t.assert(/id="ppCarrier"[^\n]*canMove\(po\)/.test(app), 'carrier not on canMove');
     t.assert(/id="ppTracking"[^\n]*canMove\(po\)/.test(app), 'tracking not on canMove');
     t.assert(/const box = canMove\(po\)/.test(app), 'follow-up not on canMove');
-    t.assert(/canMove\(po\) \? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail"/.test(app), 'save not on canMove');
+    t.assert(/canMove\(po\) \? '<button class="pp-btn" id="ppSaveDetail"/.test(app), 'save not on canMove');
   });
 
   t.test('send, cancel and artwork stay with buyers', () => {
-    t.assert(/canEdit && !isOutsourced\(po\) \? '<button class="pp-btn" id="ppSend"/.test(app), 'send widened');
-    t.assert(/\(canEdit\s*\n\s*\? '<div class="pp-sect">This order<\/div>'/.test(app), 'cancel widened');
+    t.assert(/canEdit && !isOutsourced\(po\) \? '<button class="pp-btn' \+ \(po\.lastSentAt \? ' ghost' : ''\) \+ '" id="ppSend"/.test(app), 'send widened');
+    const more = app.slice(app.indexOf('function moreHtml'), app.indexOf('function activityPaneHtml'));
+    t.assert(/\(canEdit\s*\n\s*\? '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' \+\s*\n\s*\(po\.cancelledAt/.test(more), 'cancel widened');
     t.assert(/\(canEdit\s*\n\s*\? '<div style="margin-top:8px">'\s*\+\s*\n\s*'<input type="file" id="ppArtFile"/.test(app), 'artwork widened');
   });
-})();
+
+  const code = t.report();
+  process.exit(code !== 0 ? code : (process.exitCode || 0));
+})().catch((e) => {
+  console.log('  FAIL promopro-move-own could not run: ' + (e && e.stack || e));
+  process.exit(1);
+});

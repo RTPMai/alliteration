@@ -20,7 +20,7 @@
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, canEditSession, callerFor } from "../../lib/promopro/access.js";
 import { moveVerdict, outsideMove } from "../../lib/promopro/move-own.js";
-import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced, validateFollowUp, followUpEntry } from "../../lib/promopro/schema.js";
+import { validateNew, validatePatch, yearPrefix, poTotal, currentStage, withSettingDefaults, closedPatch, isOutsourced, validateFollowUp, followUpEntry, stageMoveText } from "../../lib/promopro/schema.js";
 import { blacklistWarning } from "../../lib/promopro/vendor-stats.js";
 import { listPos, getPo, savePo, updatePo, deletePo, getVendors, nextManualSeq, getSettings, numberFor } from "../../lib/promopro/store.js";
 import { copyArt, copyProblem, baseName } from "../../lib/promopro/art-copy.js";
@@ -385,7 +385,7 @@ export default async function handler(req, res) {
         history.push({
           at: new Date().toISOString(),
           by: String(sess.username || "").toLowerCase(),
-          what: `${before} to ${after}`,
+          what: stageMoveText(before, after, existing),
         });
       }
 

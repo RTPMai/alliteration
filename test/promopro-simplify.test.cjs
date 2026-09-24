@@ -1,4 +1,4 @@
-// test/promopro-simplify.test.cjs
+// PUT IN: test/promopro-simplify.test.cjs
 /**
  * PromoPro, simplified (Aug 28 2026).
  *
@@ -170,11 +170,14 @@ const doc = read('lib/promopro/document.js');
     t.assert(/ppReceive\b/.test(body) && /ppRecvDate/.test(body), 'and the booking controls under it');
   });
 
-  t.test('the receipt log folds away', () => {
+  t.test('the receipt log is kept off the order tab', () => {
     // It matters the day somebody asks when the short 24 turned up, and never
-    // otherwise.
+    // otherwise. Sep 24 2026: it moved from a fold under the lines to the
+    // Emails & history tab, with the rest of the record.
     const fn = app.slice(app.indexOf('function linesHtml'));
-    t.assert(/pp-fold/.test(fn.slice(0, fn.indexOf('\n    }'))), 'history should collapse');
+    t.assert(!/receipts\.map/.test(fn.slice(0, fn.indexOf('\n    }'))), 'the log should not be on the order tab');
+    const pane = app.slice(app.indexOf('function activityPaneHtml'), app.indexOf('function renderDetail'));
+    t.assert(/receipts\.map/.test(pane), 'it should be on the history tab');
   });
 
   /* ---- the rest of the screen ------------------------------------------ */

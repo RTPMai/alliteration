@@ -1,4 +1,4 @@
-// test/promopro-buyers.test.cjs
+// PUT IN: test/promopro-buyers.test.cjs
 /**
  * PromoPro: who can raise a purchase order, and being able to see it.
  *
@@ -204,7 +204,9 @@ const VIEWER = { name: 'viewer', label: 'Viewer (read-only)', can_edit: false };
   });
 
   t.test('receiving on screen is gated on its own flag', () => {
-    t.assert(/const booking = canReceive &&/.test(app),
+    // Sep 24 2026: the per-line boxes now open on "Only some arrived", so the
+    // gate sits on canBook and booking builds on it. Still canReceive first.
+    t.assert(/const canBook = canReceive &&/.test(app) && /const booking = canBook &&/.test(app),
       'the delivery column must not disappear when somebody loses the ability to buy');
   });
 

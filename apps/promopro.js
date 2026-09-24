@@ -30,7 +30,7 @@ import {
   withSettingDefaults, ccListFor, parseEmailList, receiptSummary, captureState,
   repliedSinceSend, replyCount, isOutsourced, stageLabel, docLabels,
   FOLLOW_UP_METHODS, followUpLabel, chaseNote, lastChasedAt, productSummary,
-  openIsTrusted, linePriced, pricingState, isFinished, isOpenPo
+  openIsTrusted, linePriced, pricingState, isFinished, isOpenPo, nextStep, readableHistory
 } from '../lib/promopro/schema.js';
 import { promoGroups } from '../lib/promopro/printavo-lookup.js';
 // Who may move an order along without being able to edit it. Same function
@@ -117,7 +117,10 @@ export default {
       border: 1px solid transparent; border-radius: var(--radius-sm); color: var(--muted);
     }
     .pp-step-btn:hover:not(:disabled) { border-color: var(--accent); }
-    .pp-step-btn.done { background: var(--accent-tint); border-color: var(--accent); }
+    /* Done reads as done. PromoPro's accent is red, and a row of red boxes
+       for finished steps looked like a row of problems. */
+    .pp-step-btn.done { background: var(--success-tint); border-color: var(--success); }
+    .pp-step-btn.done .v::before { content: '✓ '; color: var(--success-dk); }
     .pp-step-btn.done .v { color: var(--ink); font-weight: 700; }
     .pp-step-btn:disabled { cursor: default; }
 
@@ -347,6 +350,24 @@ export default {
     .pp-notice { background: var(--accent-tint); border: 1px solid var(--accent); border-radius: var(--radius-sm); padding: 12px 14px; font-size: 13px; margin-bottom: 16px; }
     .pp-err { color: var(--danger); font-size: 13px; font-weight: 600; margin-top: 8px; }
 
+    /* PO detail: two tabs, one next step, one-line alerts. */
+    .pp-po-num { font-size: 12px; font-weight: 700; color: var(--muted); letter-spacing: .03em; }
+    .pp-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 4px 0 16px; }
+    .pp-tab { background: none; border: 0; border-bottom: 3px solid transparent; padding: 10px 14px; font: inherit; font-size: 14px; font-weight: 600; color: var(--muted); cursor: pointer; margin-bottom: -1px; }
+    .pp-tab.on { color: var(--ink); border-bottom-color: var(--accent); }
+    .pp-tab-n { display: inline-block; min-width: 18px; padding: 0 6px; border-radius: var(--radius-pill); background: var(--line-soft); color: var(--muted); font-size: 11px; line-height: 18px; text-align: center; margin-left: 4px; }
+    .pp-tab-n.new { background: var(--accent); color: var(--on-accent); }
+    .pp-alert { border-left: 4px solid var(--warn); background: var(--warn-tint); padding: 10px 14px; border-radius: var(--radius-sm); font-size: 13px; margin-bottom: 10px; }
+    .pp-alert.pp-bad { border-left-color: var(--danger); background: var(--danger-tint); }
+    .pp-next { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; border: 1px solid var(--line); border-left: 6px solid var(--muted); border-radius: var(--radius-sm); padding: 14px 16px; margin: 6px 0 14px; background: var(--card); }
+    .pp-next.us { border-left-color: var(--accent); }
+    .pp-next.done { border-left-color: var(--success); }
+    .pp-next .k { font-size: 18px; font-weight: 800; }
+    .pp-next .v { font-size: 13px; color: var(--muted); margin-top: 2px; }
+    .pp-note { font-size: 13px; background: var(--row-hover); border-radius: var(--radius-sm); padding: 10px 12px; }
+    .pp-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+    .pp-more { margin-top: 18px; font-size: 13px; }
+    .pp-more > summary { cursor: pointer; color: var(--muted); font-weight: 600; margin-bottom: 10px; }
     .pp-sect { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 18px 0 8px; }
     .pp-sect:first-child { margin-top: 0; }
     .pp-hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
@@ -1609,26 +1630,34 @@ export default {
     function linesHtml(po) {
       const sum = receiptSummary(po);
       const receipts = Array.isArray(po.receipts) ? po.receipts : [];
-      const booking = canReceive && !sum.complete && (po.lines || []).length > 0;
+      // Receiving is offered once there is something to receive. The
+      // per-line boxes only appear when somebody says part of it came in;
+      // before that they are six empty inputs asking a question nobody has.
+      const canBook = canReceive && !sum.complete && (po.lines || []).length > 0;
+      const booking = canBook && st.showReceive === true;
+      // In and Short only earn their columns once something has arrived.
+      const counting = booking || sum.partial || sum.complete;
 
       const head = '<table class="pp-table"><thead><tr>' +
-        '<th>Item #</th><th>Description</th><th class="num">Qty</th>' +
-        '<th class="num">In</th><th class="num">Short</th>' +
-        '<th class="num">Cost</th><th class="num">Total</th>' +
+        '<th>Item</th><th class="num">Qty</th>' +
+        (counting ? '<th class="num">In</th><th class="num">Short</th>' : '') +
+        '<th class="num">Each</th><th class="num">Total</th>' +
         (booking ? '<th class="num">Arrived now</th>' : '') +
         '</tr></thead><tbody>';
 
       const rows = (po.lines || []).map((l, i) => {
         const got = Number(l.receivedQty) || 0;
         const short = Math.max(0, (Number(l.qty) || 0) - got);
-        return '<tr><td>' + esc(l.itemNumber || '') + '</td>' +
+        const sub = [l.itemNumber, l.imprint, l.detail].filter(Boolean).join(' · ');
+        return '<tr>' +
           '<td>' + esc(l.description) +
-            (l.imprint ? '<div class="pp-hint">' + esc(l.imprint) + '</div>' : '') +
-            (l.detail ? '<div class="pp-hint">' + esc(l.detail) + '</div>' : '') +
+            (sub ? '<div class="pp-hint">' + esc(sub) + '</div>' : '') +
           '</td>' +
-          '<td class="num">' + esc(l.qty) + '</td>' +
-          '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
-          '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '–') + '</td>' +
+          '<td class="num"><strong>' + esc(l.qty) + '</strong></td>' +
+          (counting
+            ? '<td class="num">' + (got ? esc(got) : '<span class="pp-hint">0</span>') + '</td>' +
+              '<td class="num">' + (short ? '<strong>' + esc(short) + '</strong>' : '–') + '</td>'
+            : '') +
           // Matches the vendor's copy word for word. A screen that says $0.00
           // where the emailed PO says "to be confirmed" is two answers to one
           // question, and the person reading the screen is the one who has to
@@ -1648,7 +1677,7 @@ export default {
         : priceState === 'none'
           ? '<span class="pp-hint">to be confirmed</span>'
           : '<strong>' + money(poTotal(po)) + '</strong><div class="pp-hint">so far, some lines unpriced</div>';
-      const totalRow = '<tr><td colspan="6" class="num"><strong>Total</strong></td>' +
+      const totalRow = '<tr><td colspan="' + (counting ? 5 : 3) + '" class="num"><strong>Total</strong></td>' +
         '<td class="num">' + totalCell + '</td>' +
         (booking ? '<td></td>' : '') + '</tr>';
 
@@ -1660,22 +1689,21 @@ export default {
             (sum.short.length === 1 ? ' line' : ' lines') + '.</div>'
           : '';
 
-      // The receipt log is history, so it collapses. It matters the day
-      // somebody asks when the short 24 turned up, and never otherwise.
-      const log = receipts.length
-        ? '<details class="pp-fold"><summary>' + receipts.length +
-          (receipts.length === 1 ? ' booking' : ' bookings') + '</summary>' +
-          '<div class="pp-hint">' + receipts.map((r) =>
-            esc(r.date) + ': ' + r.lines.map((l) => (l.qty > 0 ? '+' : '') + l.qty).join(', ') +
-            (r.by ? ' by ' + esc(r.by) : '') +
-            (r.note ? ' (' + esc(r.note) + ')' : '')
-          ).join('<br>') + '</div></details>'
-        : '';
-
-      const controls = booking
+      const expecting = !!po.shippedAt || sum.partial;
+      const controls = canBook && !booking && !expecting
+        ? '<div class="pp-hint" style="margin-top:8px"><button class="pp-linkish" id="ppReceiveSome">Stock already here? Book it in</button></div>' +
+          '<div class="pp-err" id="ppRecvErr" hidden></div>'
+        : canBook && !booking
+        ? '<div class="pp-recv">' +
+            '<button class="pp-btn ghost" id="ppReceiveAll">Everything arrived</button>' +
+            '<button class="pp-btn ghost" id="ppReceiveSome">Only some arrived</button>' +
+            '<input type="date" id="ppRecvDate" value="' + esc(today()) + '" title="Date received">' +
+          '</div>' +
+          '<div class="pp-err" id="ppRecvErr" hidden></div>'
+        : booking
         ? '<div class="pp-recv">' +
             '<button class="pp-btn" id="ppReceive">Book in what arrived</button>' +
-            '<button class="pp-btn ghost" id="ppReceiveAll">Everything arrived</button>' +
+            '<button class="pp-btn ghost" id="ppReceiveSome">Never mind</button>' +
             '<input type="date" id="ppRecvDate" value="' + esc(today()) + '" title="Date received">' +
             '<input id="ppRecvNote" placeholder="Note, e.g. short 24, vendor says Friday">' +
           '</div>' +
@@ -1683,7 +1711,8 @@ export default {
           '<div class="pp-err" id="ppRecvErr" hidden></div>'
         : '';
 
-      return head + rows + totalRow + '</tbody></table>' + status + controls + log;
+      // The booking log is history, so it lives on the Emails & history tab.
+      return head + rows + totalRow + '</tbody></table>' + status + controls;
     }
 
     async function postReceipt(entries) {
@@ -1747,7 +1776,6 @@ export default {
       }).join('') + '</div>';
 
       const facts = [];
-      if (po.artSentAt) facts.push('Art went with the order on ' + po.artSentAt);
       if (po.closedAt) facts.push('Closed ' + po.closedAt + ', on its own, because every step is done');
       if (po.cancelledAt) facts.push('Cancelled ' + po.cancelledAt);
 
@@ -1824,7 +1852,7 @@ export default {
           '</details>';
         }).join('') +
         '<div class="pp-hint">A reply never moves the order along on its own. If this one means it is ' +
-        'confirmed or shipped, tick the step above.</div>';
+        'confirmed or shipped, tick it on the Order tab.</div>';
     }
 
     /**
@@ -1866,85 +1894,35 @@ export default {
             const who = String(h.by || '').trim();
             return '<li' + (h.kind === 'followup' ? ' class="me"' : '') + '>' +
               '<span class="when">' + esc(when) + '</span>' +
-              '<span class="what">' + esc(h.what || '') + '</span>' +
+              '<span class="what">' + esc(readableHistory(h.what, po)) + '</span>' +
               (who ? '<span class="who">' + esc(who) + '</span>' : '') +
             '</li>';
           }).join('') +
         '</ul>' + box;
     }
 
-    function renderDetail(po) {
-      const wrap = $('#ppDetailWrap');
-      const v = vendorById(po.vendorId);
-      const h = health(po);
-      const orderBy = orderByDate(po, v);
-
-      wrap.innerHTML = '<div class="pp-detail">' +
-        '<div class="pp-hd"><div>' +
-          '<h1 style="font-size:22px">' + esc(po.poNumber || 'Draft') + outsourcedTag(po) + '</h1>' +
-          '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; ' +
-            esc(custName(po)) + (custContact(po) ? ' (' + esc(custContact(po)) + ')' : '') +
-            (po.printavo ? ' &middot; Printavo ' +
-              (po.printavo.kind === 'quote' ? 'quote ' : '') + esc(po.printavo.invoiceNumber) : '') +
-          '</div>' +
-          '<div class="sub" style="font-size:12px">AM ' + esc(amName(po.accountManager)) +
-            (ccListFor(po, v, st.settings).length
-              ? ' &middot; CC ' + esc(ccListFor(po, v, st.settings).join(', '))
-              : '') +
-          '</div>' +
-          (po.reorderOf
-            ? '<div class="sub" style="font-size:12px">Reorder of ' +
-                '<button class="pp-linkish" data-po="' + esc(po.reorderOf) + '">' +
-                esc(po.reorderOfNumber || 'an earlier order') + '</button></div>'
-            : '') +
-        '</div>' +
-        '<div style="display:flex;gap:8px">' +
-          // Reorder sits here rather than down with cancel and delete: it is
-          // the ordinary thing somebody does with a finished order, not part
-          // of taking one apart.
-          (canEdit ? '<button class="pp-btn ghost" id="ppReorder">Reorder</button>' : '') +
-          // Only on orders that have a Printavo job to re-read. Offering it on
-          // a manual order would be a button whose only possible outcome is an
-          // error message.
-          (canEdit && po.printavo && po.printavo.id
-            ? '<button class="pp-btn ghost" id="ppRefreshCust" title="Re-read the customer name from Printavo">Refresh customer</button>'
-            : '') +
-          '<button class="pp-btn ghost" id="ppCloseDetail">Close</button>' +
-        '</div></div>' +
-
-        // The chase note rides WITH the warning rather than replacing it.
-        // "No word for 9 days" and "no word for 9 days, and Abby rang them
-        // yesterday" are two different situations and the second one still
-        // needs the 9 days in it.
-        (h.reasons.length
-          ? '<div class="pp-notice"><strong>Attention.</strong> ' + esc(h.reasons.join('. ')) +
-            (chaseNote(po, today()) ? ' <span class="pp-chased">' + esc(chaseNote(po, today())) + '</span>' : '') +
-            '</div>'
-          : '') +
-        // A bounce belongs at the TOP with the other things that change what
-        // you do next, not buried down by the send button. Hidden until the
-        // lookup comes back bad, which is the overwhelmingly common case.
-        '<div class="pp-notice pp-bad" id="ppDeliveryBad" hidden></div>' +
-
-        (repliedSinceSend(po)
-          ? '<div class="pp-notice"><strong>The vendor has replied</strong> since this was last emailed, ' +
-            esc(String(po.lastVendorReplyAt || '').slice(0, 16).replace('T', ' ')) + '. ' +
-            (replyCount(po) > 1 ? esc(replyCount(po)) + ' messages are on this order. ' : '') +
-            'It is below, and chasing has stopped.</div>'
-          : '') +
-        (orderBy ? '<div class="sub" style="font-size:12px;color:var(--muted)">To hit the due date this needed ordering by ' + esc(orderBy) + '</div>' : '') +
-
+    /**
+     * THE ORDER TAB. Kept to what somebody needs to answer "where is this
+     * and what do I do next", top to bottom, in that order:
+     *
+     *   1. anything wrong, one line each
+     *   2. the next step, with its button
+     *   3. the steps as ticks
+     *   4. what was ordered
+     *   5. where it ships, and the art
+     *   6. print / send / save
+     *
+     * Rare things (cancel, delete, refresh customer, back-dating) live in
+     * one fold at the bottom. Emails, replies and history are on the other
+     * tab. Most of the team reads this in a hurry between other jobs, so the
+     * page has one thing to look at first and nothing competing with it.
+     */
+    function orderPaneHtml(po, v, h) {
+      return alertsHtml(po, h) +
+        nextStepHtml(po) +
         progressHtml(po) +
-
+        '<div class="pp-sect">What we ordered</div>' +
         linesHtml(po) +
-
-        repliesHtml(po) +
-
-        activityHtml(po) +
-
-        // Shipping and artwork side by side. They are the two things somebody
-        // checks before pressing send, and stacked they pushed the send
-        // button off the bottom of the screen.
         '<div class="pp-cols">' +
           '<div>' +
             '<div class="pp-sect">Shipping</div>' +
@@ -1977,55 +1955,92 @@ export default {
               : '') +
           '</div>' +
         '</div>' +
+        (po.notes
+          ? '<div class="pp-sect">Notes</div><div class="pp-note">' + esc(po.notes) + '</div>'
+          : '') +
 
-        // AN OUTSOURCED JOB HAS NOTHING TO SEND, so this whole section stops
-        // being about sending. The print button stays: a sheet to travel with
-        // the work is the one piece of paper this kind of job does want, and
-        // it prints headed OUTSOURCED JOB rather than PURCHASE ORDER.
-        '<div class="pp-sect">' + (isOutsourced(po) ? 'Paperwork' : 'Send this order') + '</div>' +
-        (isOutsourced(po)
-          ? '<div class="pp-hint" style="margin-bottom:8px">No purchase order was raised for this one, so nothing is emailed to the vendor.</div>'
-          : po.lastSentAt
-            ? '<div class="pp-hint" style="margin-bottom:8px">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
-              ' to ' + esc(po.sentTo || '') +
-              (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') +
-              // Filled in after render by loadDelivery(). Left empty rather
-              // than saying "checking" on first paint: a line that flashes a
-              // word and replaces it reads as a fault when the answer lands
-              // in under a second, which it usually does.
-              '<span id="ppDeliveryLine"></span></div>'
-            : '<div class="pp-hint" style="margin-bottom:8px">Not sent yet.</div>') +
-        '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+        '<div class="pp-actions">' +
           '<button class="pp-btn ghost" id="ppPrint">Print or save as PDF</button>' +
           (canEdit && !isOutsourced(po) ? '<button class="pp-btn ghost" id="ppSendTest">Send a test to me</button>' : '') +
-          (canEdit && !isOutsourced(po) ? '<button class="pp-btn" id="ppSend">' + (po.lastSentAt ? 'Send again' : 'Send to vendor') + '</button>' : '') +
+          // Once sent, sending again is the exception, so it stops being the
+          // loud button and Save changes is the only red one on the row.
+          (canEdit && !isOutsourced(po) ? '<button class="pp-btn' + (po.lastSentAt ? ' ghost' : '') + '" id="ppSend">' + (po.lastSentAt ? 'Send again' : 'Send to vendor') + '</button>' : '') +
+          (canMove(po) ? '<button class="pp-btn" id="ppSaveDetail">Save changes</button>' : '') +
         '</div>' +
         '<div id="ppSendMsg" class="pp-hint" style="margin-top:6px"></div>' +
-
-        (canMove(po) ? '<div style="margin-top:14px"><button class="pp-btn" id="ppSaveDetail">Save changes</button></div>' : '') +
-        // Said once, so an account manager who can tick steps is not left
-        // wondering why the vendor and lines are locked.
+        (isOutsourced(po)
+          ? '<div class="pp-hint">No purchase order was raised for this one, so nothing is emailed to the vendor.</div>'
+          : (po.lastSentAt ? '' : '<div class="pp-hint">Not sent to the vendor yet.</div>')) +
         (!canEdit && canMove(po)
           ? '<div class="pp-hint" style="margin-top:6px">You can move your own orders along. ' +
             'Changing what was ordered, or sending or cancelling it, is for whoever raises purchase orders.</div>'
           : '') +
-        '<div class="pp-err" id="ppDetailErr" hidden></div>' +
 
-        // Two different things, kept apart on purpose.
-        //
-        // CANCEL is for an order that was real and stopped being real. The
-        // vendor may already have it. The record survives, drops out of the
-        // pipeline and stops being chased, and the vendor scorecard counts it
-        // as cancelled rather than as a completed order, so calling one off
-        // does not drag their numbers down.
-        //
-        // DELETE is for a mistake: typed wrong, never sent. Admin only, and
-        // hidden entirely once the order has been emailed, because deleting
-        // the only record of a document a vendor is working from is the one
-        // thing here that cannot be walked back.
+        moreHtml(po) ;
+    }
+
+    /**
+     * Anything wrong, one line each. Three kinds, and only these three,
+     * because a page with five coloured boxes has no coloured boxes.
+     */
+    function alertsHtml(po, h) {
+      const chased = chaseNote(po, today());
+      return (h.reasons.length
+          ? '<div class="pp-alert"><strong>Heads up:</strong> ' + esc(h.reasons.join('. ')) +
+            (chased ? ' <span class="pp-chased">' + esc(chased) + '</span>' : '') + '</div>'
+          : '') +
+        // Filled in by loadDelivery() when the last email bounced.
+        '<div class="pp-alert pp-bad" id="ppDeliveryBad" hidden></div>' +
+        (repliedSinceSend(po)
+          ? '<div class="pp-alert"><strong>The vendor replied</strong> ' +
+            esc(String(po.lastVendorReplyAt || '').slice(0, 10)) + ', so chasing has stopped. ' +
+            '<button class="pp-linkish" data-potab="activity">Read it</button></div>'
+          : '');
+    }
+
+    /**
+     * THE ONE THING TO DO NEXT. The first unticked step, who it is waiting
+     * on, and its button. Everything else on the page is detail; this is the
+     * line somebody glances at and knows whether it is theirs.
+     */
+    function nextStepHtml(po) {
+      if (po.cancelledAt) {
+        return '<div class="pp-next done"><div><div class="k">Cancelled</div>' +
+          '<div class="v">' + esc(String(po.cancelledAt).slice(0, 10)) + '</div></div></div>';
+      }
+      const step = nextStep(po);
+      if (!step) {
+        return '<div class="pp-next done"><div><div class="k">All done</div>' +
+          '<div class="v">Every step is ticked' + (po.closedAt ? ', closed ' + esc(po.closedAt) : '') + '.</div></div></div>';
+      }
+      const next = step.stage;
+      const onUs = step.onUs;
+      const due = po.neededBy ? 'Needed by ' + po.neededBy : '';
+      return '<div class="pp-next' + (onUs ? ' us' : '') + '">' +
+        '<div>' +
+          '<div class="k">Next: ' + esc(stageLabel(next.key, po)) + '</div>' +
+          '<div class="v">' + (onUs ? 'Waiting on us' : 'Waiting on the vendor') +
+            (due ? ' &middot; ' + esc(due) : '') + '</div>' +
+        '</div>' +
+        (canMove(po)
+          ? '<button class="pp-btn" data-stagetick="' + esc(next.dateField) + '">Mark ' +
+            esc(stageLabel(next.key, po).toLowerCase()) + ' today</button>'
+          : '') +
+      '</div>';
+    }
+
+    /**
+     * The fold at the bottom. Things somebody does a few times a year sit
+     * here so they are findable without being in the way the rest of the time.
+     */
+    function moreHtml(po) {
+      const bits = [];
+      if (canEdit && po.printavo && po.printavo.id) {
+        bits.push('<button class="pp-btn ghost" id="ppRefreshCust" title="Re-read the customer name from Printavo">Refresh customer from Printavo</button>');
+      }
+      const inner = (bits.length ? '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">' + bits.join('') + '</div>' : '') +
         (canEdit
-          ? '<div class="pp-sect">This order</div>' +
-            '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+          ? '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
               (po.cancelledAt
                 ? '<button class="pp-btn ghost" id="ppUncancel">Reinstate this order</button>' +
                   '<span class="pp-hint">Cancelled ' + esc(String(po.cancelledAt).slice(0, 10)) + '.</span>'
@@ -2043,7 +2058,104 @@ export default {
                     : 'Deleting removes the record completely. This one has never been sent, so nothing is owed to anybody.')
                 : '') +
             '</div>'
+          : '');
+      if (!inner) return '';
+      return '<details class="pp-more"><summary>More options</summary>' + inner + '</details>';
+    }
+
+    /**
+     * THE EMAILS & HISTORY TAB. Everything that is a record: what was sent
+     * and to whom, what the vendor said, who chased, who ticked what, and
+     * when stock was booked in.
+     */
+    function activityPaneHtml(po, v, orderBy) {
+      const cc = ccListFor(po, v, st.settings);
+      const receipts = Array.isArray(po.receipts) ? po.receipts : [];
+      return '<div class="pp-sect">Emails</div>' +
+        (isOutsourced(po)
+          ? '<div class="pp-hint">Outsourced work, so nothing is emailed to the vendor.</div>'
+          : po.lastSentAt
+            ? '<div class="pp-hint">Last emailed ' + esc(String(po.lastSentAt).slice(0, 16).replace('T', ' ')) +
+              ' to ' + esc(po.sentTo || '') +
+              (Number(po.sendCount) > 1 ? ' (' + esc(po.sendCount) + ' times)' : '') +
+              // Filled in after render by loadDelivery().
+              '<span id="ppDeliveryLine"></span></div>'
+            : '<div class="pp-hint">Not sent yet.</div>') +
+        (cc.length ? '<div class="pp-hint">Copied: ' + esc(cc.join(', ')) + '</div>' : '') +
+        (po.artSentAt ? '<div class="pp-hint">Art went with the order on ' + esc(po.artSentAt) + '</div>' : '') +
+        (po.printavo
+          ? '<div class="pp-hint">Printavo ' + (po.printavo.kind === 'quote' ? 'quote ' : '') + esc(po.printavo.invoiceNumber) +
+            (custContact(po) ? ', contact ' + esc(custContact(po)) : '') + '</div>'
           : '') +
+        (orderBy ? '<div class="pp-hint">To hit the due date this needed ordering by ' + esc(orderBy) + '</div>' : '') +
+        repliesHtml(po) +
+        activityHtml(po) +
+        (receipts.length
+          ? '<div class="pp-sect">Stock booked in</div>' +
+            '<div class="pp-hint">' + receipts.map((r) =>
+              esc(r.date) + ': ' + r.lines.map((l) => (l.qty > 0 ? '+' : '') + l.qty).join(', ') +
+              (r.by ? ' by ' + esc(r.by) : '') +
+              (r.note ? ' (' + esc(r.note) + ')' : '')
+            ).join('<br>') + '</div>'
+          : '');
+    }
+
+    function renderDetail(po) {
+      const wrap = $('#ppDetailWrap');
+      const v = vendorById(po.vendorId);
+      const h = health(po);
+      const orderBy = orderByDate(po, v);
+
+      // A DIFFERENT ORDER STARTS ON THE ORDER TAB. Coming back to the same
+      // one after a tick keeps whichever tab you were on, because a redraw
+      // that bounces you off the Activity tab mid-read is the kind of thing
+      // that makes people stop using the screen.
+      if (st.tabPoId !== po.id) {
+        st.tabPoId = po.id;
+        st.poTab = 'order';
+        st.showReceive = false;
+      }
+      const onOrder = st.poTab !== 'activity';
+      const replies = Array.isArray(po.replies) ? po.replies.length : 0;
+      const fresh = repliedSinceSend(po);
+
+      wrap.innerHTML = '<div class="pp-detail">' +
+        // WHO AND WHAT, in two lines. The customer is the name people say out
+        // loud about an order, so it is the big line; the PO number is how
+        // the vendor knows it.
+        '<div class="pp-hd"><div>' +
+          '<div class="pp-po-num">' + esc(po.poNumber || 'Draft') + outsourcedTag(po) + '</div>' +
+          '<h1 style="font-size:22px">' + esc(custName(po)) + '</h1>' +
+          '<div class="sub">' + esc(vendorName(po.vendorId)) + ' &middot; AM ' + esc(amName(po.accountManager)) +
+            (po.reorderOf
+              ? ' &middot; Reorder of <button class="pp-linkish" data-po="' + esc(po.reorderOf) + '">' +
+                esc(po.reorderOfNumber || 'an earlier order') + '</button>'
+              : '') +
+          '</div>' +
+        '</div>' +
+        '<div style="display:flex;gap:8px">' +
+          (canEdit ? '<button class="pp-btn ghost" id="ppReorder">Reorder</button>' : '') +
+          '<button class="pp-btn ghost" id="ppCloseDetail">Close</button>' +
+        '</div></div>' +
+
+        // TWO TABS. Everything anybody needs to act on is on the first one.
+        // Everything that is a record of what already happened (emails,
+        // replies, calls, who ticked what) is on the second, where it can be
+        // as long as it likes without pushing the order off the screen.
+        '<div class="pp-tabs" role="tablist">' +
+          '<button class="pp-tab' + (onOrder ? ' on' : '') + '" data-potab="order" role="tab">Order</button>' +
+          '<button class="pp-tab' + (onOrder ? '' : ' on') + '" data-potab="activity" role="tab">Emails &amp; history' +
+            (replies ? ' <span class="pp-tab-n' + (fresh ? ' new' : '') + '">' + esc(replies) + '</span>' : '') +
+          '</button>' +
+        '</div>' +
+        '<div class="pp-err" id="ppDetailErr" hidden></div>' +
+
+        '<div data-popane="order"' + (onOrder ? '' : ' hidden') + '>' +
+          orderPaneHtml(po, v, h) +
+        '</div>' +
+        '<div data-popane="activity"' + (onOrder ? ' hidden' : '') + '>' +
+          activityPaneHtml(po, v, orderBy) +
+        '</div>' +
       '</div>';
 
       wrap.hidden = false;
@@ -2853,6 +2965,26 @@ export default {
     root.addEventListener('click', async (e) => {
       const t = e.target.closest('button, tr[data-po]');
       if (!t || !root.contains(t)) return;
+
+      // Order / Emails & history. Switched in place rather than redrawn, so
+      // anything half-typed on the other tab (a tracking number, a note on a
+      // call) is still there when you come back to it.
+      const tabKey = t.dataset ? t.dataset.potab : '';
+      if (tabKey) {
+        st.poTab = tabKey === 'activity' ? 'activity' : 'order';
+        root.querySelectorAll('[data-popane]').forEach((el) => { el.hidden = el.dataset.popane !== st.poTab; });
+        root.querySelectorAll('.pp-tab[data-potab]').forEach((el) => { el.classList.toggle('on', el.dataset.potab === st.poTab); });
+        return;
+      }
+
+      // "Some arrived" opens the per-line boxes. "Everything arrived" is the
+      // common case and stays one press.
+      if (t.id === 'ppReceiveSome') {
+        st.showReceive = !st.showReceive;
+        const po = st.pos.find((p) => p.id === st.openPoId);
+        if (po) renderDetail(po);
+        return;
+      }
 
       if (t.id === 'ppNewFromPipe' || t.id === 'ppNewToggle') {
         st.picked = null;

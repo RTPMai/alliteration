@@ -262,8 +262,11 @@ const settingsRoute = read('api/promopro/settings.js');
     t.assert(/r\.text/.test(body), 'and show the message itself, not just that one exists');
     t.assert(/reverse\(\)/.test(body), 'newest first: the last thing said is what is being asked about');
     t.assert(/Nothing captured yet/.test(body), 'and say so plainly when there are none');
-    t.assert(/repliesHtml\(po\)/.test(app.slice(app.indexOf('function renderDetail'))),
-      'and the detail screen has to actually call it');
+    // Sep 24 2026: replies live on the Emails & history tab of the order.
+    const pane = app.slice(app.indexOf('function activityPaneHtml'), app.indexOf('function renderDetail'));
+    t.assert(/repliesHtml\(po\)/.test(pane), 'and the history tab has to actually call it');
+    t.assert(/activityPaneHtml\(po/.test(app.slice(app.indexOf('function renderDetail'))),
+      'and the detail screen has to render that tab');
   });
 
   t.test('the list and the pipeline say a vendor has come back', () => {
