@@ -233,9 +233,49 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
   await t.test('the simple list carries nothing but the task', async () => {
     const hers = await call({ as: HANNAH_U, query: { mine: 'tasks' } });
     const fields = Object.keys(hers.body.tasks[0]).sort().join(',');
-    t.equal(fields, 'approval,blocked,campaignId,campaignName,due,key,label,next,overdue,typeLabel,waitingOn,why',
+    t.equal(fields, 'approval,blocked,campaignId,campaignName,details,due,key,label,next,overdue,typeLabel,waitingOn,why',
       'no budget, no history, no connections, no other steps');
     t.assert(!JSON.stringify(hers.body).includes('"steps"'), 'and no checklist comes along for the ride');
+    // Sept 24 2026: the Details panel. Locked to exactly these, so a later
+    // change cannot quietly hand staff the budget or the history.
+    t.equal(Object.keys(hers.body.tasks[0].details).sort().join(','),
+      'accountManager,audience,date,dateLabel,help,links,notes',
+      'details are the step and the campaign basics, nothing more');
+  });
+
+  await t.test('Details shows the step\'s own notes and files, never the campaign\'s private parts', async () => {
+    const cur = await store.getCampaign(ID);
+    await store.updateHeader(ID, { notes: 'SECRET-CAMPAIGN-NOTE', budget: '4321', audience: 'Ankeny parents' }, S, '2026-09-24');
+    await store.updateStep(ID, 'tod_qualify', { notes: 'Call the principal first',
+      links: [{ label: 'Store sheet', url: 'https://example.com/sheet' }, { label: 'bad', url: 'javascript:alert(1)' }] }, S, '2026-09-24');
+    await store.updateStep(ID, 'prelaunch_review', { notes: 'RYANS-OWN-NOTE' }, S, '2026-09-24');
+    t.assert(cur, 'the campaign exists');
+
+    const hers = await call({ as: HANNAH_U, query: { mine: 'tasks' } });
+    const q = hers.body.tasks.find((x) => x.key === 'tod_qualify');
+    t.equal(q.details.notes, 'Call the principal first', 'her step\'s notes come through');
+    t.equal(q.details.links.length, 1, 'with its web links, and a non-web link is dropped');
+    t.equal(q.details.links[0].url, 'https://example.com/sheet', 'the real one');
+    t.equal(q.details.accountManager, 'Hannah Posey', 'the Account Manager');
+    t.equal(q.details.date, '2027-03-04', 'the campaign date');
+    t.assert(q.details.dateLabel && q.details.dateLabel !== 'Campaign date', 'under the type\'s own name: ' + q.details.dateLabel);
+    t.equal(q.details.audience, 'Ankeny parents', 'who it is for');
+    t.assert(q.details.help.length >= q.why.length, 'the full help, not just the first sentence');
+
+    const body = JSON.stringify(hers.body);
+    t.assert(!body.includes('SECRET-CAMPAIGN-NOTE'), 'campaign notes stay on the campaign page');
+    t.assert(!body.includes('4321'), 'so does the budget');
+    t.assert(!body.includes('RYANS-OWN-NOTE'), 'and nobody else\'s step notes come along');
+    t.assert(!body.includes('"history"'), 'nor the history');
+  });
+
+  await t.test('only a person who can open the campaign is offered the link', async () => {
+    const hers = await call({ as: HANNAH_U, query: { mine: 'tasks' } });
+    t.equal(hers.body.full, false, 'staff are not offered a button the campaign page would refuse');
+    const refused = await call({ as: HANNAH_U, query: { id: ID } });
+    t.equal(refused.statusCode, 403, 'and the campaign page does refuse them');
+    const ryans = await call({ as: RYAN, query: { mine: 'tasks' } });
+    t.equal(ryans.body.full, true, 'an Admin is');
   });
 
   await t.test('a person can tick their own step and nobody else\'s', async () => {

@@ -108,7 +108,10 @@ export default async function handler(req, res) {
         admin,
       };
       const open = (await listCampaigns()).filter((c) => c.status === "open");
-      return res.status(200).json({ tasks: myTasks(open, person, today), today, me: person.name });
+      // `full` tells the screen whether to offer "Open the campaign". The
+      // campaign read below still checks for itself; this only saves a
+      // person a button that would answer "admin only".
+      return res.status(200).json({ tasks: myTasks(open, person, today), today, me: person.name, full: admin });
     }
 
     if (req.method === "GET" && !id && !admin) {

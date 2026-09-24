@@ -111,6 +111,8 @@ export default {
       taskMsg: null,
       taskError: '',
       taskSaving: null,
+      taskOpen: null,        // campaignId:stepKey whose details are showing
+      taskFull: false,       // may this person open the campaign page
       calcEditing: false,
       scorecardEditing: false,
       calcMsg: null,
@@ -157,6 +159,7 @@ export default {
       try {
         const d = await api.get(ENDPOINTS.mkCampaigns, { mine: 'tasks' });
         state.tasks = Array.isArray(d && d.tasks) ? d.tasks : [];
+        state.taskFull = !!(d && d.full === true);
         state.taskError = '';
         if (d && d.today) state.today = d.today;
       } catch (e) {
@@ -244,6 +247,21 @@ export default {
       }
     }
 
+    /**
+     * From My tasks to the campaign page (Admins only; the button is not drawn
+     * for anyone else and the server refuses them anyway). Goes through the
+     * shell so the address becomes #/marketmachine/campaigns/<id> and the
+     * browser's Back button returns to the tasks. When the address is already
+     * that one, the shell sees no change, so the view is switched here.
+     */
+    const self = this;
+    function openFromTask(id) {
+      const before = location.hash;
+      if (typeof ctx.goApp === 'function') ctx.goApp('marketmachine', 'campaigns', id);
+      if (location.hash === before) self.showView('campaigns', id);
+    }
+    this._openCampaign = openCampaign;
+
     async function refreshDetailKeepingPlace() {
       const y = window.scrollY;
       await loadDetail(state.detail.campaign.id);
@@ -312,6 +330,8 @@ export default {
       }
 
       const d = t.dataset;
+      if (d.taskMore) { ui.toggleTask(d.taskMore); return; }
+      if (d.taskCampaign) { openFromTask(d.taskCampaign); return; }
       if (d.open) { ev.preventDefault(); await openCampaign(d.open); return; }
       if (d.show) { state.filters.show = d.show; ui.renderList(); return; }
       if (d.whose) { state.filters.whose = d.whose; ui.renderList(); return; }
@@ -612,7 +632,7 @@ export default {
       settings: async () => { await Promise.all([loadList(), loadInitiatives()]); ui.renderSettings(); },
     };
   },
-  showView(view) {
+  showView(view, param) {
     const root = this._root;
     if (!root) return;
     const ids = { tasks: 'mkTasksView', campaigns: 'mkCampaignsView', calendar: 'mkCalendarView', settings: 'mkSettingsView' };
@@ -620,6 +640,9 @@ export default {
       const el = root.querySelector('#' + id);
       if (el) el.hidden = v !== view;
     });
+    // #/marketmachine/campaigns/<id> opens that campaign (Sept 24 2026), which
+    // is how My tasks links to one and how a campaign address can be shared.
+    if (view === 'campaigns' && param && this._openCampaign) { this._openCampaign(String(param)); return; }
     if (this._renders && this._renders[view]) this._renders[view]();
   },
 

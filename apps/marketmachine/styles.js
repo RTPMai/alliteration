@@ -229,6 +229,20 @@ export default `
   .mk-task .why{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.5;max-width:70ch}
   .mk-task .meta{display:flex;gap:6px 16px;flex-wrap:wrap;font-size:12.5px;color:var(--faint);margin-top:7px}
   .mk-task .meta .late{color:var(--danger-dk);font-weight:700}
+  .mk-task-toggle{background:none;border:0;padding:0;font:inherit;font-size:12.5px;font-weight:700;
+    color:var(--accent-deep);cursor:pointer;text-decoration:underline;text-underline-offset:2px}
+  .mk-task-toggle:focus-visible{outline:2px solid var(--accent-deep);outline-offset:2px;border-radius:2px}
+  .mk-task-more{margin-top:12px;padding-top:12px;border-top:1px solid var(--line-soft);font-size:13px;line-height:1.5}
+  .mk-task-more .help{margin:0 0 10px;max-width:70ch;color:var(--ink)}
+  .mk-task-more dl{display:grid;grid-template-columns:max-content 1fr;gap:4px 14px;margin:0 0 10px}
+  .mk-task-more dt{color:var(--muted)}
+  .mk-task-more dd{margin:0;color:var(--ink);font-weight:600}
+  .mk-task-more .sec{font-size:11.5px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--faint);margin:10px 0 4px}
+  .mk-task-more .notes{white-space:pre-wrap;max-width:70ch}
+  .mk-task-more .links{display:flex;flex-direction:column;gap:3px;margin-bottom:4px}
+  .mk-task-more .links a{color:var(--accent-deep);word-break:break-all}
+  .mk-task-more .mk-btn{margin-top:10px}
+  @media (max-width:640px){.mk-task-more dl{grid-template-columns:1fr}.mk-task-more dd{margin-bottom:6px}}
 
   .mk-tl-month{margin-bottom:18px}
   .mk-tl-month h3{font-size:14px;font-weight:800;margin-bottom:8px}

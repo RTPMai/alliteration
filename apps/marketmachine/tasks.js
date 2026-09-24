@@ -11,7 +11,15 @@
  * person opens this, reads a few lines, ticks what they did, and leaves.
  *
  * WHAT IS HERE, because Ryan asked for task plus a short why: the step, one
- * line saying why it exists, when it is due, and a box. Anything waiting on
+ * line saying why it exists, when it is due, and a box.
+ *
+ * DETAILS (Sept 24 2026). Ryan: the list did not link to the campaign or show
+ * anything to see details. Each row now has a Details button that opens, in
+ * place, the step's full help, its notes and files, and the campaign's date,
+ * Account Manager and audience (see taskDetails in lib/marketmachine/tasks.js
+ * for exactly what, and what is kept out). Admins also get "Open the
+ * campaign", which goes to the full campaign page at its own address. Staff
+ * do not, because that page is admin only and the button would only refuse. Anything waiting on
  * somebody else is set aside under its own heading rather than listed as due,
  * because a list that tells you to do things you cannot start is a list people
  * stop opening.
@@ -21,12 +29,35 @@ import { ENDPOINTS } from '../../js/api.js';
 import { groupTasks } from '../../lib/marketmachine/tasks.js';
 import { esc, fmtDate, msgBox } from './format.js';
 
+/** Which task's details are open, as one string, so only one opens at a time. */
+export const taskId = (t) => t.campaignId + ':' + t.key;
+
 export default function makeTasks(app) {
   const { state, api, root, ui } = app;
   const $ = (sel) => root.querySelector(sel);
 
+  function details(t) {
+    const d = t.details || {};
+    const facts = [
+      [d.dateLabel || 'Campaign date', d.date ? fmtDate(d.date) : 'Not set yet'],
+      ['Account Manager', d.accountManager || 'Not assigned'],
+      d.audience ? ['Who it is for', d.audience] : null,
+      t.waitingOn ? ['Waiting on', t.waitingOn] : null,
+    ].filter(Boolean);
+    return `
+      <div class="mk-task-more" id="mkTaskMore-${esc(taskId(t))}">
+        ${d.help ? `<p class="help">${esc(d.help)}</p>` : ''}
+        <dl>${facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+        ${d.notes ? `<div class="sec">Notes</div><div class="notes">${esc(d.notes)}</div>` : ''}
+        ${(d.links || []).length ? `<div class="sec">Files and links</div><div class="links">${d.links.map((l) =>
+          `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.url)}</a>`).join('')}</div>` : ''}
+        ${state.taskFull ? `<button class="mk-btn sm" data-task-campaign="${esc(t.campaignId)}">Open the campaign</button>` : ''}
+      </div>`;
+  }
+
   function taskRow(t) {
-    const saving = state.taskSaving === t.campaignId + ':' + t.key;
+    const saving = state.taskSaving === taskId(t);
+    const open = state.taskOpen === taskId(t);
     return `
       <li class="mk-task${t.overdue ? ' late' : ''}">
         <input type="checkbox" class="mk-check" data-task-done="${esc(t.campaignId)}" data-task-step="${esc(t.key)}"
@@ -39,7 +70,10 @@ export default function makeTasks(app) {
             ${t.due ? `<span class="${t.overdue ? 'late' : ''}">${t.overdue ? 'Was due ' : 'Due '}${esc(fmtDate(t.due))}</span>` : '<span>No date</span>'}
             ${t.approval ? '<span>Your approval</span>' : ''}
             ${t.blocked ? `<span class="late">Blocked: ${esc(t.blocked)}</span>` : ''}
+            <button class="mk-task-toggle" data-task-more="${esc(taskId(t))}" aria-expanded="${open ? 'true' : 'false'}"
+              aria-controls="mkTaskMore-${esc(taskId(t))}">${open ? 'Hide details' : 'Details'}</button>
           </div>
+          ${open ? details(t) : ''}
         </div>
       </li>`;
   }
@@ -95,5 +129,10 @@ export default function makeTasks(app) {
     renderTasks();
   }
 
-  return { renderTasks, tickTask };
+  function toggleTask(id) {
+    state.taskOpen = state.taskOpen === id ? null : id;
+    renderTasks();
+  }
+
+  return { renderTasks, tickTask, toggleTask };
 }
