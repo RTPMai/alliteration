@@ -471,8 +471,13 @@ t.test('apps/notifications.js shows a clickable link pill that opens the record 
   t.assert(src.includes('LINK_ROUTE'), 'clicking the link pill should route via a per-type {app, view} table');
   t.assert(src.includes('ctx.goApp(route.app, route.view'),
     'the pill should call ctx.goApp with the app/view looked up for that link\'s type, not a hardcoded app');
+  // The per-type table lives in lib/notifications/schema.js since Sep 24
+  // 2026 (Today opens the same links); what matters here is that the three
+  // apps are still destinations in it.
+  const schemaSrc = read('lib/notifications/schema.js');
+  const table = schemaSrc.slice(schemaSrc.indexOf('export const LINK_TYPE_APP'), schemaSrc.indexOf('export const PICKABLE_LINK_TYPES'));
   ['backbone', 'traveltrack', 'givinggauge'].forEach((app) =>
-    t.assert(src.includes("app: '" + app + "'"), 'LINK_ROUTE is missing an entry that opens into ' + app));
+    t.assert(table.includes('"' + app + '"'), 'the link table is missing an entry that opens into ' + app));
 });
 
 // ---- Private notifications (Aug 18 2026) --------------------------------

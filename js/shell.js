@@ -1,3 +1,4 @@
+// PUT IN: js/shell.js
 /**
  * alliteration. — shell
  *
@@ -9,7 +10,8 @@
  * sub-nav and the crumb; the header and the mounted app hosts stay put.
  *
  * Routes:
- *   #/            -> hub ("All apps")
+ *   #/            -> Today (what needs you, from every app). Sep 24 2026.
+ *   #/hub         -> All apps grid (was the landing screen until Sep 24 2026)
  *   #/<app>/<view>
  */
 
@@ -22,13 +24,17 @@ import { mountApp, showView, isMounted } from './app-host.js';
 import { initHelp } from './help.js';
 import * as theme from './theme.js';
 
+// Two shell pages that are not apps. HOME is the landing screen; HUB is the
+// All apps grid it replaced, still one click away in the rail.
+const HOME = 'today';
 const HUB = 'hub';
+const SHELL_PAGES = [HOME, HUB];
 
 const el = {};
 const state = {
   user: null,
   perms: null,
-  app: HUB,
+  app: HOME,
   view: null,
   hosts: new Map(),
   // Counts an app wants shown in the rail (e.g. ShopStock's "needs ordering").
@@ -78,7 +84,7 @@ export async function boot() {
 
   initTheme();
 
-  el.brandBtn.addEventListener('click', () => router.go(HUB, null));
+  el.brandBtn.addEventListener('click', () => router.go(HOME, null));
   el.railToggle.addEventListener('click', () => document.body.classList.toggle('rail-open'));
 
   api.onAuthFailure(() => renderMessage(
@@ -140,14 +146,16 @@ export async function boot() {
 async function handleRoute(route) {
   const { app: appId, view, param } = route;
 
-  // No route at all, or an explicit hub route.
-  if (!appId || appId === HUB) {
-    state.app = HUB;
+  // No route at all is Today. Today and All apps are shell pages, not apps.
+  if (!appId || SHELL_PAGES.includes(appId)) {
+    const page = appId || HOME;
+    state.app = page;
     state.view = null;
+    // Both pages wear the shell's own theme (tokens.css body[data-app="hub"]).
     document.body.dataset.app = HUB;
     renderRail();
     renderCrumb();
-    return activateHub();
+    return activateShellPage(page);
   }
 
   // A real app this account cannot open: say so. Quietly landing somewhere
@@ -244,23 +252,36 @@ function hideAllHosts() {
   state.hosts.forEach((h) => h.classList.remove('active'));
 }
 
-async function activateHub() {
+async function activateShellPage(id) {
   clearShellMessage();
   hideAllHosts();
 
-  const host = hostFor(HUB);
+  const host = hostFor(id);
   host.classList.add('active');
 
-  if (!isMounted(HUB)) {
+  if (!isMounted(id)) {
     host.innerHTML = '<div class="shell-spinner"></div>';
-    await mountApp({ id: HUB, views: [], defaultView: null }, host, {
-      user: state.user,
-      perms: state.perms,
-      go: () => {},
-      goApp: (a, v) => router.go(a, v)
-    });
+    try {
+      await mountApp({ id, views: [], defaultView: null }, host, {
+        user: state.user,
+        perms: state.perms,
+        go: () => {},
+        // The param is how Today opens one record (a PO, a time off request).
+        goApp: (a, v, p) => router.go(a, v, { param: p == null ? null : p })
+      });
+    } catch (e) {
+      console.error('[shell] failed to mount ' + id, e);
+      const spinner = host.querySelector(':scope > .shell-spinner');
+      if (spinner) spinner.remove();
+      return renderMessage('Could not load ' + (id === HOME ? 'Today' : 'All apps'),
+        'Check that <code>apps/' + id + '.js</code> deployed. The menu on the left still works.');
+    }
     const spinner = host.querySelector(':scope > .shell-spinner');
     if (spinner) spinner.remove();
+  } else {
+    // Coming back: Today reloads (throttled inside the page) so something
+    // finished in another app is gone when you return.
+    showView(id, null, null);
   }
 
   window.scrollTo({ top: 0 });
@@ -343,8 +364,11 @@ function renderRail() {
 
   html += '<div class="rail-hr"></div><div class="rail-label">Shared</div>';
   html += `
+    <button class="rail-item${state.app === HOME ? ' active' : ''}" data-app="${HOME}">
+      <span class="sq" style="--dot:var(--hub)"></span>Today
+    </button>
     <button class="rail-item${state.app === HUB ? ' active' : ''}" data-app="${HUB}">
-      <span class="sq" style="--dot:var(--hub)"></span>All apps
+      <span class="sq" style="--dot:var(--dot-idle)"></span>All apps
     </button>`;
 
   // Shell-level screens (Settings, Notifications). Not apps, so they sit
@@ -382,7 +406,7 @@ function renderRail() {
     btn.addEventListener('click', () => {
       document.body.classList.remove('rail-open');
       const id = btn.dataset.app;
-      if (id === HUB) return router.go(HUB, null);
+      if (SHELL_PAGES.includes(id)) return router.go(id, null);
       const target = getApp(id);
       router.go(id, btn.dataset.view || (target ? target.defaultView : null));
     });
@@ -396,6 +420,10 @@ function renderRail() {
 function renderCrumb() {
   if (!el.crumb) return;
 
+  if (state.app === HOME) {
+    el.crumb.innerHTML = '<span>Today</span>';
+    return;
+  }
   if (state.app === HUB) {
     el.crumb.innerHTML = '<span>All apps</span>';
     return;

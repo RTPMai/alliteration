@@ -70,36 +70,20 @@ import { ENDPOINTS } from '../js/api.js';
 import { APPS, SITE_APPS, canAccess } from '../js/registry.js';
 import {
   TYPES, GENERAL_APP, LINK_TYPE_LABELS, linkTypesForApps, appForLinkType,
-  REMINDER_TYPE, isWaiting,
+  REMINDER_TYPE, isWaiting, LINK_TYPES, linkRoute,
 } from '../lib/notifications/schema.js';
 import {
   DUE_FILTERS, STATUS_FILTERS, EMPTY_FILTERS,
   applyFilters, activeFilterCount, teamPool, todayLocalISO, countWaiting,
 } from '../lib/notifications/filters.js';
 
-// Where a link opens, per type: { app, view }. "client" has no top-level
-// BackBone view of its own — the roster lives inside the dashboard page as
-// a sub-tab — so it routes to dashboard and BackBone's showView() switches
-// to that sub-tab itself. See openDeepLink() in apps/backbone/main.js (and
-// the TravelTrack/GivingGauge equivalents for expense/donation).
-const LINK_ROUTE = {
-  // Both types point at the one merged screen. The TYPES stay separate because
-  // notifications already on file carry one or the other and are never
-  // rewritten; only where they land changed.
-  inquiry: { app: 'backbone', view: 'inquiries' },
-  lead: { app: 'backbone', view: 'inquiries' },
-  client: { app: 'backbone', view: 'dashboard' },
-  expense: { app: 'traveltrack', view: 'expenses' },
-  donation: { app: 'givinggauge', view: 'requests' },
-  // PromoPro already opened one order off a route segment before this existed:
-  // it is what the QR code on a printed purchase order points at. Nothing had
-  // to be built there, the link just had somewhere to go.
-  po: { app: 'promopro', view: 'orders' },
-  sticky: { app: 'stickies', view: 'board' },
-  // CrewCore opens the request itself off the route segment: an approver
-  // lands on it in "Waiting on you", the employee on their own list.
-  timeoff: { app: 'crewcore', view: 'timeoff' },
-};
+// Where a link opens, per type: { app, view }. The table itself moved to
+// lib/notifications/schema.js (LINK_TYPE_VIEW, Sep 24 2026) because the Today
+// screen opens the same links, and two copies would drift. Built once here
+// so the lookups below stay LINK_ROUTE[type].
+const LINK_ROUTE = Object.fromEntries(
+  LINK_TYPES.map((type) => [type, linkRoute(type)]).filter(([, r]) => r)
+);
 
 // What the search box says it is searching. "by company name" was true while
 // every linkable record was a company; a purchase order is looked up by its

@@ -1,3 +1,4 @@
+// PUT IN: js/router.js
 /**
  * alliteration. — router
  *
@@ -62,9 +63,11 @@ export function currentRoute() {
  */
 export function go(app, view, opts = {}) {
   const { replace = false, param = null } = opts;
-  // The hub lives at bare '#/' rather than '#/hub', so the landing URL stays
-  // clean and a shared link to the front page looks like the site root.
-  const hash = (app === 'hub' || !app)
+  // The landing screen lives at bare '#/' rather than '#/today', so the
+  // landing URL stays clean and a shared link to the front page looks like
+  // the site root. Since Sep 24 2026 that is Today; the All apps grid moved
+  // to '#/hub'.
+  const hash = (app === 'today' || !app)
     ? '#/'
     : '#/' + [app, view, param == null ? null : encodeURIComponent(param)]
         .filter(Boolean).join('/');

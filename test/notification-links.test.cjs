@@ -133,7 +133,7 @@ async function check(name, fn) {
   const schema = await import(path.join(ROOT, 'lib/notifications/schema.js'));
   const {
     LINK_TYPES, LINK_TYPE_APP, PICKABLE_LINK_TYPES,
-    linkTypesForApps, appForLinkType, validateNew,
+    linkTypesForApps, appForLinkType, validateNew, linkRoute,
   } = schema;
   const registry = await import(path.join(ROOT, 'js/registry.js'));
   const route = (await import(path.join(ROOT, 'api/notifications.js'))).default;
@@ -362,12 +362,18 @@ async function check(name, fn) {
   /* ---- where a link opens ---------------------------------------------- */
 
   t.test('every link type has somewhere to open', () => {
-    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
-    const table = src.slice(src.indexOf('const LINK_ROUTE'), src.indexOf('const LINK_SEARCH_HINT'));
+    // A real call since Sep 24 2026: the table lives in lib/notifications/
+    // schema.js (Today opens the same links), and apps/notifications.js
+    // builds LINK_ROUTE from it.
     LINK_TYPES.forEach((type) => {
-      t.assert(new RegExp('\\b' + type + ':\\s*\\{').test(table),
-        'LINK_ROUTE has no destination for link type ' + type);
+      const r = linkRoute(type);
+      t.assert(r && r.app && r.view, 'no destination for link type ' + type);
+      t.equal(r.app, LINK_TYPE_APP[type], type + ' should open in the app it belongs to');
     });
+    t.equal(linkRoute('nonsense'), null, 'an unknown type opens nothing');
+    const src = require('fs').readFileSync(path.join(ROOT, 'apps/notifications.js'), 'utf8');
+    t.assert(/LINK_TYPES\.map\(\(type\) => \[type, linkRoute\(type\)\]\)/.test(src),
+      'apps/notifications.js should build LINK_ROUTE from the shared linkRoute()');
   });
 
   t.test('the pill checks access before offering to open anything', () => {

@@ -1,3 +1,4 @@
+// PUT IN: api/health.js
 // api/health.js — "why is it broken?" in plain language.
 //
 // A crashing function returns Vercel's generic 500, which tells you nothing.
@@ -23,6 +24,8 @@ const REQUIRED = [
   "css/tokens.css", "css/shell.css",
   "js/api.js", "js/app-host.js", "js/registry.js", "js/router.js", "js/shell.js",
   "js/giving-engine.js", "js/giving-dial.js", "js/qrcode-loader.js",
+  // Today is the landing screen (Sep 24 2026). Missing, nobody gets past it.
+  "apps/today.js", "lib/today/build.js",
   "apps/hub.js", "apps/traveltrack.js", "apps/givinggauge.js", "apps/shopstock.js",
   "apps/settings.js",
   // BackBone lives in a FOLDER, not one file. All three parts must be present:
