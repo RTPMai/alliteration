@@ -1,3 +1,4 @@
+// PUT IN: apps/mailme.js
 /**
  * MailMe — email marketing.
  *
@@ -153,14 +154,66 @@ const QUICK_AUDIENCES = [
 
 function escapeAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
 
-function previewInline(escapedText) {
-  let out = escapedText.replace(/\*\*([^\n*]+)\*\*/g, '<strong>$1</strong>');
+// Mirrors urlAttr() in lib/mailme/send.js. esc() here also escapes quotes and
+// apostrophes, so those are undone too before escaping once for the attribute.
+function urlAttr(escapedUrl) {
+  return escapeAttr(String(escapedUrl)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&'));
+}
 
-  // Explicit [text](url) first, so its URL is already inside an href by the
-  // time bare-URL autolinking runs and cannot be matched a second time.
+// Images. Mirrors LINKED_IMAGE_RE / IMAGE_RE / imgTag() in lib/mailme/send.js.
+const PV_MAX_DISPLAY_WIDTH = 600;
+const PV_MIN_DISPLAY_WIDTH = 16;
+const PV_LINKED_IMAGE_RE = /\[!\[([^\]\n\u0000]*)\]\((https:\/\/[^\s)\u0000]+)\)\]\((https?:\/\/[^\s)\u0000]+)\)/g;
+const PV_IMAGE_RE = /!\[([^\]\n\u0000]*)\]\((https:\/\/[^\s)\u0000]+)\)/g;
+
+function pvClampWidth(n) {
+  const v = parseInt(n, 10);
+  if (!Number.isFinite(v) || v <= 0) return null;
+  return Math.max(PV_MIN_DISPLAY_WIDTH, Math.min(PV_MAX_DISPLAY_WIDTH, v));
+}
+
+function pvSplitAlt(rawAlt) {
+  const m = /^([\s\S]*?)\s*\|\s*(\d{1,4})\s*$/.exec(rawAlt);
+  return m ? { alt: m[1].trim(), width: pvClampWidth(m[2]) } : { alt: String(rawAlt).trim(), width: null };
+}
+
+function pvImgTag(rawAlt, src) {
+  const { alt, width } = pvSplitAlt(rawAlt);
+  return `<img src="${urlAttr(src)}" alt="${alt.replace(/"/g, '&quot;').replace(/'/g, '&#39;')}"` +
+    (width ? ` width="${width}"` : '') +
+    ' style="display:block;max-width:100%;height:auto;border:0">';
+}
+
+// What the Image button writes. Mirrors imageMarkdown() in
+// lib/mailme/images.js.
+function imageMarkdown({ src, alt, width, href }) {
+  const cleanAlt = String(alt || '').replace(/[[\]|\n]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const w = pvClampWidth(width);
+  const img = `![${cleanAlt}${w ? `|${w}` : ''}](${src})`;
+  return href ? `[${img}](${href})` : img;
+}
+
+function previewInline(escapedText) {
+  // Images first, same order and reasons as the sender.
   const linked = [];
-  out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, text, url) => {
-    linked.push(`<a href="${escapeAttr(url)}">${text}</a>`);
+  let out = escapedText.replace(PV_LINKED_IMAGE_RE, (m, rawAlt, src, href) => {
+    linked.push(`<a href="${urlAttr(href)}">${pvImgTag(rawAlt, src)}</a>`);
+    return `\u0000LINK${linked.length - 1}\u0000`;
+  });
+  out = out.replace(PV_IMAGE_RE, (m, rawAlt, src) => {
+    linked.push(pvImgTag(rawAlt, src));
+    return `\u0000LINK${linked.length - 1}\u0000`;
+  });
+
+  out = out.replace(/\*\*([^\n*]+)\*\*/g, '<strong>$1</strong>');
+
+  // Explicit [text](url) next, so its URL is already inside an href by the
+  // time bare-URL autolinking runs and cannot be matched a second time.
+  out = out.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)\u0000]+)\)/g, (m, text, url) => {
+    linked.push(`<a href="${urlAttr(url)}">${text}</a>`);
     return `\u0000LINK${linked.length - 1}\u0000`;
   });
 
@@ -169,19 +222,29 @@ function previewInline(escapedText) {
   // abbreviation, and linking "etc.co" by accident is worse than asking for
   // a www. Trailing punctuation is excluded so a URL ending a sentence does
   // not swallow the full stop.
-  out = out.replace(/(^|[\s(])((?:https?:\/\/|www\.)[^\s<>"']+)/gi, (m, before, url) => {
+  out = out.replace(/(^|[\s(])((?:https?:\/\/|www\.)[^\s<>"'\u0000]+)/gi, (m, before, url) => {
     let tail = '';
     const trailing = url.match(/[.,;:!?)\]]+$/);
     if (trailing) { tail = trailing[0]; url = url.slice(0, -tail.length); }
     const href = /^https?:\/\//i.test(url) ? url : `https://${url}`;
-    return `${before}<a href="${escapeAttr(href)}">${url}</a>${tail}`;
+    return `${before}<a href="${urlAttr(href)}">${url}</a>${tail}`;
   });
 
-  return out.replace(/\u0000LINK(\d+)\u0000/g, (m, i) => linked[Number(i)]);
+  // Put the pieces back. A link's text can itself hold an image (a
+  // clickable image written the long way), so this repeats until none are
+  // left. Every URL and description pattern above refuses a placeholder
+  // character, so a piece can only ever land in text, never inside an
+  // attribute (Sep 24 2026 review: a URL typed against an image used to
+  // swallow the image's placeholder and break out of its href).
+  for (let pass = 0; pass < 4 && /\u0000LINK\d+\u0000/.test(out); pass++) {
+    out = out.replace(/\u0000LINK(\d+)\u0000/g, (m, i) => linked[Number(i)] || '');
+  }
+  return out;
 }
 
 function previewBody(text) {
-  const paragraphs = String(text || '').split(/\n{2,}/);
+  // Mirrors the sender: a typed NUL could forge a placeholder.
+  const paragraphs = String(text || '').replace(/\u0000/g, '').split(/\n{2,}/);
   return paragraphs.map((block) => {
     const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
     const isBulletBlock = lines.length > 0 && lines.every((l) => /^-\s+/.test(l));
@@ -193,6 +256,49 @@ function previewBody(text) {
     }
     return `<p>${previewInline(esc(block)).replace(/\n/g, '<br>')}</p>`;
   }).join('\n');
+}
+
+/* ---------------- designed templates ----------------
+ *
+ * The sales director's two email designs (Sep 24 2026), built in. The
+ * server renders them (lib/mailme/templates/); the browser only edits the
+ * content and shows what the server sends back, so there is no second copy
+ * of either design here. Two small things are mirrored because they update
+ * on every keystroke: the list of designs, and the promo price rule, shown
+ * as "Shows as $8.00" under the price box. test/mailme-templates.test.cjs
+ * checks both against the server's own.
+ */
+const TEMPLATE_CHOICES = [
+  { key: 'freeform', label: 'Freeform', description: 'Write it yourself. Text, links, bullets and images.' },
+  { key: 'pwp', label: 'Picks with personality', description: 'A team member\u2019s favorite styles from S&S or SanMar. Spring and fall.' },
+  { key: 'promo', label: 'Promo products', description: 'Promotional products, one per card, with minimum, price, setup and colors.' }
+];
+const PWP_MAX_PICKS = 8;
+const PWP_MAX_SWATCHES = 10;
+const PROMO_MAX_PRODUCTS = 12;
+
+// Mirrors ceilDollars() in lib/mailme/templates/shared.js.
+function pvCeilDollars(raw) {
+  const str = String(raw == null ? '' : raw).replace(/[$,\s]/g, '');
+  if (!/^\d+(\.\d+)?$/.test(str)) return null;
+  const n = Number(str);
+  const whole = Math.floor(n);
+  const up = n - whole > 1e-9 ? whole + 1 : whole;
+  return `$${up.toLocaleString('en-US')}.00`;
+}
+
+function tfGet(obj, path) {
+  return String(path).split('.').reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+
+function tfSet(obj, path, value) {
+  const ks = String(path).split('.');
+  let o = obj;
+  for (let i = 0; i < ks.length - 1; i++) {
+    if (o[ks[i]] == null) o[ks[i]] = /^\d+$/.test(ks[i + 1]) ? [] : {};
+    o = o[ks[i]];
+  }
+  o[ks[ks.length - 1]] = value;
 }
 
 // Mirrors personalize() in lib/mailme/send.js, including the "there" fallback
@@ -442,6 +548,55 @@ export default {
   .mm-preview ul{margin:0 0 11px 20px;padding:0}
   .mm-preview li{margin-bottom:4px}
   .mm-preview a{color:var(--accent-deep)}
+  .mm-preview img{max-width:100%;height:auto}
+
+  /* Designed templates: the design picker, the form, and the scaled preview. */
+  .mm-designs{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px}
+  .mm-design{text-align:left;background:var(--card);border:1px solid var(--line);
+    border-radius:var(--radius-sm);padding:10px 12px;cursor:pointer;font-family:inherit;color:var(--ink)}
+  .mm-design b{display:block;font-size:13px;margin-bottom:3px}
+  .mm-design span{display:block;font-size:11.5px;color:var(--muted);line-height:1.45}
+  .mm-design:hover{border-color:var(--line-strong)}
+  .mm-design[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+  .mm-design:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+  .mm-tf-grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+  .mm-tf-grid3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px}
+  @media (max-width:600px){.mm-tf-grid2,.mm-tf-grid3{grid-template-columns:1fr}}
+  .mm-field textarea.short{min-height:70px}
+  .mm-tf-card{border:1px solid var(--line);border-radius:var(--radius-md);padding:12px 14px 4px;
+    margin-bottom:12px;background:var(--card)}
+  .mm-tf-card-hd{display:flex;justify-content:space-between;align-items:center;gap:8px;
+    margin-bottom:10px;font-size:13px}
+  .mm-tf-card-hd b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .mm-tf-card-hd .acts{display:flex;gap:4px;flex-shrink:0}
+  .mm-tf-color{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+  .mm-tf-color input[type="color"]{width:38px;height:32px;padding:2px;border:1px solid var(--line);
+    border-radius:var(--radius-sm);background:var(--card);flex-shrink:0}
+  .mm-tf-photo{display:flex;gap:10px;align-items:flex-start}
+  .mm-tf-photo img,.mm-tf-photo .ph{width:84px;height:84px;object-fit:contain;flex-shrink:0;
+    border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--head-bg)}
+  .mm-tf-photo .ph{display:flex;align-items:center;justify-content:center;text-align:center;
+    font-size:11px;color:var(--faint)}
+  .mm-tf-photo .grow{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px;align-items:flex-start}
+  .mm-tf-bad{color:var(--danger-dk)}
+  .mm-tf-check{display:flex;gap:8px;align-items:center;font-size:12.5px;margin:-6px 0 14px}
+  .mm-tf-more{margin-bottom:14px}
+  .mm-tf-more summary{cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600;margin-bottom:10px}
+  .mm-tpl-preview{position:sticky;top:84px}
+  .mm-tpl-bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .mm-tpl-bar .phd{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);font-weight:700}
+  .mm-tpl-sizes{display:flex;gap:4px}
+  .mm-tpl-probs{margin:6px 0 0 18px;padding:0}
+  .mm-tpl-probs li{margin-bottom:2px}
+  .mm-tpl-wrap{border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--head-bg);
+    max-height:calc(100vh - 250px);overflow:auto}
+  .mm-tpl-sizer{position:relative;overflow:hidden;margin:0 auto}
+  .mm-tpl-sizer iframe{position:absolute;top:0;left:0;border:0;transform-origin:0 0;background:var(--card)}
+  .mm-img-pick{display:flex;align-items:center;gap:10px;margin-top:8px;
+    font-size:12px;color:var(--muted)}
+  .mm-img-pick img{max-width:120px;max-height:72px;border:1px solid var(--line);
+    border-radius:var(--radius-sm)}
+  .mm-img-url summary{cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600}
   .mm-preview .pfoot{margin-top:18px;padding-top:10px;
     border-top:1px solid var(--line);font-size:11px;color:var(--faint);
     white-space:pre-wrap}
@@ -960,7 +1115,7 @@ export default {
 
       const hasSubject = !!String(d.subject || '').trim();
       const hasBody = !!String(d.body || '').trim();
-      const write = {
+      const write = isTemplate(d) ? templateWriteState(d, hasSubject) : {
         done: hasSubject && hasBody,
         text: !hasSubject && !hasBody ? 'Nothing written yet'
           : !hasSubject ? 'Body written, still needs a subject'
@@ -992,9 +1147,9 @@ export default {
         : '<span class="mark todo">!</span>';
     }
 
-    function stepHtml(name, marker, summary, body) {
+    function stepHtml(name, marker, summary, body, id) {
       return `
-        <div class="mm-step">
+        <div class="mm-step"${id ? ` id="${id}"` : ''}>
           <div class="mm-step-hd">
             ${marker}
             <div class="t"><div class="n">${esc(name)}</div>
@@ -1089,8 +1244,11 @@ export default {
         : `<div class="mm-notice danger"><b>No sending brands set up.</b>
              Add one in Settings before this can go anywhere.</div>`;
 
-      /* ---- step 3: write ---- */
-      const writeBody = `
+      /* ---- step 3: write ----
+       * Freeform is the text box. A designed template is a form on the left
+       * and the real rendered email on the right. */
+      const designPicker = designPickerHtml(d, readOnly || sent);
+      const writeBody = isTemplate(d) ? templateWriteHtml(d, readOnly || sent) : `
         <div class="mm-split">
           <div>
             <div class="mm-field">
@@ -1108,6 +1266,7 @@ export default {
               <div class="mm-tools">
                 <button class="mm-tool" data-ins="bold" type="button">Bold</button>
                 <button class="mm-tool" data-ins="link" type="button">Link</button>
+                <button class="mm-tool" data-ins="image" type="button">Image</button>
                 <button class="mm-tool" data-ins="bullet" type="button">Bullets</button>
                 <button class="mm-tool" data-ins="first" type="button">First name</button>
                 <button class="mm-tool" data-ins="company" type="button">Company</button>
@@ -1188,7 +1347,7 @@ export default {
           numbers are on the Reports tab.</div>` : ''}
         ${stepHtml('Who gets it', stepMark(steps.who.done), esc(steps.who.text), whoBody)}
         ${stepHtml('Who it comes from', stepMark(steps.from.done), esc(steps.from.text), fromBody)}
-        ${stepHtml('What it says', stepMark(steps.write.done), esc(steps.write.text), writeBody)}
+        ${stepHtml('What it says', stepMark(steps.write.done), esc(steps.write.text), designPicker + writeBody, 'mmStepWrite')}
         ${stepHtml('Part of a campaign', stepMark(steps.campaign.done),
           esc(steps.campaign.text), campaignBody)}
         <div id="mmReadyBlock"></div>
@@ -1302,8 +1461,9 @@ export default {
     // available, so {{first_name}} shows an actual name rather than a
     // placeholder that reads fine and then goes out blank.
     function renderPreview() {
-      const box = $('#mmPreview');
       const d = state.editingCampaign;
+      if (d && isTemplate(d)) { scheduleTemplatePreview(); return; }
+      const box = $('#mmPreview');
       if (!box || !d) return;
 
       const sample = state.contacts.find((c) =>
@@ -1425,6 +1585,8 @@ export default {
         b.addEventListener('click', () => insertToken(b.dataset.ins));
       });
 
+      wireTemplateComposer();
+
       const wire = (sel, fn) => { const b = $(sel); if (b) b.addEventListener('click', fn); };
       wire('#mmSaveCampaign', () => saveCampaign({}));
       wire('#mmSendTest', sendTest);
@@ -1466,6 +1628,9 @@ export default {
     function insertToken(kind) {
       const ta = $('#mmBody');
       if (!ta || ta.disabled) return;
+      // Images need a file and a few answers, so they get a dialog rather
+      // than a snippet of syntax dropped at the cursor.
+      if (kind === 'image') { openImageDialog(); return; }
       const map = {
         bold: ['**', '**', 'bold text'],
         link: ['[', '](https://)', 'link text'],
@@ -1485,6 +1650,718 @@ export default {
       ta.setSelectionRange(selStart, selStart + selected.length);
       syncComposerFromDom();
       renderPreview();
+    }
+
+    /* ---------------- images in the body ----------------
+     *
+     * The Image button. Pick a file (or paste the address of one already
+     * online), optionally say where clicking it goes, and it lands in the
+     * body as a line of markdown the preview and the sender both render:
+     *
+     *   ![Fall catalog|600](https://...png)                     an image
+     *   [![Fall catalog|600](https://...png)](https://link)     click-through
+     *
+     * The line is ordinary text in the body, so moving or deleting an image
+     * is moving or deleting that line. Rules for the upload and the syntax
+     * live in lib/mailme/images.js.
+     */
+
+    // Mirrors MAX_EMAIL_IMAGE_EDGE in lib/mailme/images.js: 2x the 600px an
+    // email displays at, so it stays sharp on phones.
+    const EMAIL_IMAGE_EDGE = 1200;
+    const EMAIL_IMAGE_SIZES = [
+      { value: 600, label: 'Full width' },
+      { value: 400, label: 'Medium' },
+      { value: 200, label: 'Small' }
+    ];
+
+    function readAsDataUrl(file) {
+      return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(String(r.result || ''));
+        r.onerror = () => reject(new Error('Could not read that file.'));
+        r.readAsDataURL(file);
+      });
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const i = new Image();
+        i.onload = () => resolve(i);
+        i.onerror = () => reject(new Error('That image could not be opened.'));
+        i.src = src;
+      });
+    }
+
+    // Shrink anything wider than EMAIL_IMAGE_EDGE before it is sent. A phone
+    // photo goes from several MB to a few hundred KB, which is what every
+    // recipient downloads. The format is kept: JPEG stays JPEG (photos), PNG
+    // stays PNG (logos and text stay crisp, transparency survives). GIFs are
+    // left alone because redrawing one keeps only its first frame.
+    async function prepareEmailImage(file) {
+      const original = await readAsDataUrl(file);
+      const img = await loadImage(original);
+      const type = String(file.type || '').toLowerCase();
+      if (type === 'image/gif' || img.naturalWidth <= EMAIL_IMAGE_EDGE) {
+        return { dataUrl: original, width: img.naturalWidth };
+      }
+      const scale = EMAIL_IMAGE_EDGE / img.naturalWidth;
+      const canvas = document.createElement('canvas');
+      canvas.width = EMAIL_IMAGE_EDGE;
+      canvas.height = Math.round(img.naturalHeight * scale);
+      canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+      const outType = type === 'image/png' || type === 'image/webp' ? type : 'image/jpeg';
+      const dataUrl = outType === 'image/jpeg'
+        ? canvas.toDataURL('image/jpeg', 0.85)
+        : canvas.toDataURL(outType);
+      return { dataUrl, width: EMAIL_IMAGE_EDGE };
+    }
+
+    // "www.x.com" and "x.com/page" are how people type a link; the email
+    // needs the https:// or the click goes nowhere.
+    function normalizeLink(raw) {
+      const v = String(raw || '').trim();
+      if (!v) return '';
+      const withScheme = /^https?:\/\//i.test(v) ? v : 'https://' + v.replace(/^\/+/, '');
+      return /^https?:\/\/[^\s/]+\.[^\s]+$/i.test(withScheme) && !/[\s()]/.test(withScheme)
+        ? withScheme : null;
+    }
+
+    function openImageDialog() {
+      const ta = $('#mmBody');
+      if (!ta || ta.disabled) return;
+      // Remember where the cursor was. The dialog takes focus, and the image
+      // should land where the person was typing, not at the end.
+      const at = { start: ta.selectionStart, end: ta.selectionEnd };
+      let picked = null;   // { dataUrl, width, name } once a file is chosen
+
+      openModal(`
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Add an image</h3>
+          </div>
+          <div class="mm-card-bd">
+            <div id="mmImgMsg"></div>
+            <div class="mm-field">
+              <label for="mmImgFile">Image</label>
+              <input type="file" id="mmImgFile" accept="image/png,image/jpeg,image/gif,image/webp">
+              <div class="hint">PNG, JPG, GIF or WebP. Big photos are shrunk to email size for you.</div>
+              <div class="mm-img-pick" id="mmImgPick" hidden></div>
+            </div>
+            <details class="mm-img-url" style="margin-bottom:14px">
+              <summary>Or use an image that is already online</summary>
+              <div class="mm-field" style="margin-top:10px">
+                <input id="mmImgUrl" type="text" placeholder="https://...">
+                <div class="hint">Must start with https://. Most email apps will not show anything else.</div>
+              </div>
+            </details>
+            <div class="mm-field">
+              <label for="mmImgLink">When someone clicks it, go to</label>
+              <input id="mmImgLink" type="text" placeholder="pmapparel.com/fall (optional)">
+              <div class="hint">Leave blank for an image that is not clickable.</div>
+            </div>
+            <div class="mm-field">
+              <label for="mmImgAlt">Description</label>
+              <input id="mmImgAlt" type="text" placeholder="Fall catalog cover">
+              <div class="hint">
+                Shows in place of the image when an email app blocks images, which
+                Outlook does by default. A few words is plenty.
+              </div>
+            </div>
+            <div class="mm-field">
+              <label for="mmImgSize">Size</label>
+              <select id="mmImgSize">
+                ${EMAIL_IMAGE_SIZES.map((o) => `<option value="${o.value}">${o.label}</option>`).join('')}
+              </select>
+              <div class="hint">Never shown bigger than the picture itself, so small logos stay sharp.</div>
+            </div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmImgInsert" type="button">Add to email</button>
+              <button class="mm-btn ghost" id="mmImgCancel" type="button">Cancel</button>
+            </div>
+          </div>
+        </div>`, 'image');
+
+      $('#mmImgCancel').addEventListener('click', closeModal);
+
+      $('#mmImgFile').addEventListener('change', async (e) => {
+        const file = e.target.files && e.target.files[0];
+        const pick = $('#mmImgPick');
+        picked = null;
+        pick.hidden = true;
+        msg('#mmImgMsg', '');
+        if (!file) return;
+        try {
+          const ready = await prepareEmailImage(file);
+          picked = { ...ready, name: file.name };
+          pick.innerHTML = `<img src="${escapeAttr(ready.dataUrl)}" alt="">` +
+            `<span>${esc(file.name)} · ${Math.max(1, Math.round(ready.dataUrl.length * 0.75 / 1024))} KB</span>`;
+          pick.hidden = false;
+          const alt = $('#mmImgAlt');
+          if (alt && !alt.value) {
+            alt.value = file.name.replace(/\.[A-Za-z0-9]{1,5}$/, '').replace(/[-_]+/g, ' ').trim();
+          }
+        } catch (err) {
+          msg('#mmImgMsg', esc(err.message || 'Could not read that image.'), 'mm-err');
+        }
+      });
+
+      $('#mmImgInsert').addEventListener('click', async () => {
+        const btn = $('#mmImgInsert');
+        const typedUrl = String($('#mmImgUrl').value || '').trim();
+        const rawLink = $('#mmImgLink').value;
+        const href = normalizeLink(rawLink);
+        if (href === null) {
+          msg('#mmImgMsg', 'That click-through link does not look like a web address.', 'mm-err');
+          return;
+        }
+        if (!picked && !typedUrl) {
+          msg('#mmImgMsg', 'Choose an image first.', 'mm-err');
+          return;
+        }
+        if (!picked && !/^https:\/\/\S+$/i.test(typedUrl)) {
+          msg('#mmImgMsg', 'The image address has to start with https://.', 'mm-err');
+          return;
+        }
+
+        btn.disabled = true;
+        let src = typedUrl;
+        let natural = picked ? picked.width : 0;
+        try {
+          if (picked) {
+            btn.textContent = 'Uploading…';
+            const res = await api.post(ENDPOINTS.mmImages, { dataUrl: picked.dataUrl, name: picked.name });
+            src = res.url;
+          } else {
+            // Best effort: knowing the real width keeps a small image from
+            // being stretched. If it cannot be loaded here it may still load
+            // in email, so this never blocks.
+            try { natural = (await loadImage(src)).naturalWidth; } catch (e) { natural = 0; }
+          }
+        } catch (err) {
+          btn.disabled = false;
+          btn.textContent = 'Add to email';
+          msg('#mmImgMsg', 'Could not upload: ' + esc(err.message), 'mm-err');
+          return;
+        }
+
+        const chosen = Number($('#mmImgSize').value) || 600;
+        const width = natural ? Math.min(chosen, natural) : chosen;
+        const md = imageMarkdown({ src, alt: $('#mmImgAlt').value, width, href });
+
+        closeModal();
+        const body = $('#mmBody');
+        if (!body) return;
+        // Its own paragraph, so it never ends up glued into a sentence.
+        const before = body.value.slice(0, at.start);
+        const after = body.value.slice(at.end);
+        const lead = !before ? '' : before.endsWith('\n\n') ? '' : before.endsWith('\n') ? '\n' : '\n\n';
+        const trail = !after ? '' : after.startsWith('\n\n') ? '' : after.startsWith('\n') ? '\n' : '\n\n';
+        body.value = before + lead + md + trail + after;
+        const caret = (before + lead + md).length;
+        body.focus();
+        body.setSelectionRange(caret, caret);
+        syncComposerFromDom();
+        renderPreview();
+      });
+    }
+
+    /* ---------------- designed templates ----------------
+     *
+     * A template email is edited as a form. The content lives on
+     * state.editingCampaign.templateData, in the same shape the server
+     * stores; every input carries a data-tf path into it
+     * ("picks.2.colors.0.name"). Typing writes the value and asks the server
+     * to re-render the preview after a short pause. Adding, removing or
+     * moving a product redraws just the form.
+     */
+
+    function isTemplate(d) {
+      return !!(d && d.template && d.template !== 'freeform');
+    }
+
+    function templateLabel(key) {
+      const c = TEMPLATE_CHOICES.find((x) => x.key === key);
+      return c ? c.label : key;
+    }
+
+    function templateWriteState(d, hasSubject) {
+      const probs = state.tplProblems;
+      const label = templateLabel(d.template);
+      if (probs == null) return { done: null, text: hasSubject ? `${label} · "${String(d.subject).slice(0, 50)}"` : `${label} · needs a subject` };
+      const missing = probs.filter((p) => !/no subject line/.test(p)).length;
+      return {
+        done: hasSubject && missing === 0,
+        text: !hasSubject && missing ? `${label} · needs a subject, and ${missing} thing${missing === 1 ? '' : 's'} in the form`
+          : !hasSubject ? `${label} · needs a subject`
+          : missing ? `${label} · ${missing} thing${missing === 1 ? '' : 's'} still missing`
+          : `${label} · "${String(d.subject).slice(0, 50)}"`
+      };
+    }
+
+    function refreshWriteStep() {
+      const el = $('#mmStepWrite');
+      const d = state.editingCampaign;
+      if (!el || !d) return;
+      const w = stepState(d, state.composerDetail).write;
+      const mark = el.querySelector('.mm-step-hd .mark');
+      if (mark) mark.outerHTML = stepMark(w.done);
+      const txt = el.querySelector('.mm-step-hd .d');
+      if (txt) txt.textContent = w.text;
+    }
+
+    function designPickerHtml(d, locked) {
+      const cur = d.template || 'freeform';
+      if (locked) {
+        return `<div class="mm-field"><label>Design</label><div class="hint">${esc(templateLabel(cur))}</div></div>`;
+      }
+      return `
+        <div class="mm-field">
+          <label>Design</label>
+          <div class="mm-designs">
+            ${TEMPLATE_CHOICES.map((c) => `
+              <button type="button" class="mm-design" data-design="${esc(c.key)}"
+                      aria-pressed="${cur === c.key ? 'true' : 'false'}">
+                <b>${esc(c.label)}</b><span>${esc(c.description)}</span>
+              </button>`).join('')}
+          </div>
+        </div>`;
+    }
+
+    function templateWriteHtml(d, locked) {
+      const dis = locked ? ' disabled' : '';
+      return `
+        <div class="mm-split">
+          <div>
+            <div class="mm-field">
+              <label for="mmSubject">Subject</label>
+              <input id="mmSubject" type="text" value="${esc(d.subject || '')}"
+                     placeholder="${d.template === 'pwp' ? 'picks with personality.' : 'Something to smile about?'}"${dis}>
+            </div>
+            <div class="mm-field">
+              <label for="mmPreheader">Preheader</label>
+              <input id="mmPreheader" type="text" value="${esc(d.preheader || '')}"
+                     placeholder="Leave blank to use the design's own line"${dis}>
+            </div>
+            <div id="mmTplForm">${templateFormHtml(d, locked)}</div>
+          </div>
+          <div>
+            <div class="mm-tpl-preview">
+              <div class="mm-tpl-bar">
+                <span class="phd">Preview</span>
+                <span class="mm-tpl-sizes">
+                  <button type="button" class="mm-filt" data-tpl-size="desktop" aria-pressed="${state.tplSize === 'phone' ? 'false' : 'true'}">Desktop</button>
+                  <button type="button" class="mm-filt" data-tpl-size="phone" aria-pressed="${state.tplSize === 'phone' ? 'true' : 'false'}">Phone</button>
+                </span>
+              </div>
+              <div id="mmTplProblems"></div>
+              <div class="mm-tpl-wrap" id="mmTplWrap">
+                <div class="mm-tpl-sizer" id="mmTplSizer">
+                  <iframe id="mmTplFrame" title="Email preview"
+                          sandbox="allow-same-origin allow-popups allow-popups-to-escape-sandbox"></iframe>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    function templateFormHtml(d, locked) {
+      const td = d.templateData || {};
+      if (d.template === 'pwp') return pwpFormHtml(td, locked);
+      if (d.template === 'promo') return promoFormHtml(td, locked);
+      return '';
+    }
+
+    const tfId = (path) => 'tf-' + String(path).replace(/[^A-Za-z0-9]+/g, '-');
+
+    function tfText(path, label, value, o) {
+      const opts = o || {};
+      return `<div class="mm-field">
+          <label for="${tfId(path)}">${esc(label)}</label>
+          <input id="${tfId(path)}" type="text" data-tf="${esc(path)}" value="${esc(value == null ? '' : value)}"
+                 placeholder="${esc(opts.ph || '')}"${opts.dis || ''}>
+          ${opts.hint ? `<div class="hint"${opts.hintFor ? ` data-tf-hint="${esc(opts.hintFor)}"` : ''}>${opts.hint}</div>` : ''}
+        </div>`;
+    }
+
+    function tfArea(path, label, value, o) {
+      const opts = o || {};
+      return `<div class="mm-field">
+          <label for="${tfId(path)}">${esc(label)}</label>
+          <textarea id="${tfId(path)}" class="short" data-tf="${esc(path)}"${opts.list ? ' data-tf-lines="1"' : ''}
+                    placeholder="${esc(opts.ph || '')}"${opts.dis || ''}>${esc(Array.isArray(value) ? value.join('\n') : (value || ''))}</textarea>
+          ${opts.hint ? `<div class="hint">${opts.hint}</div>` : ''}
+        </div>`;
+    }
+
+    function tfSelect(path, label, value, options, dis) {
+      return `<div class="mm-field">
+          <label for="${tfId(path)}">${esc(label)}</label>
+          <select id="${tfId(path)}" data-tf="${esc(path)}"${dis || ''}>
+            ${options.map(([v, l]) => `<option value="${esc(v)}"${String(value) === v ? ' selected' : ''}>${esc(l)}</option>`).join('')}
+          </select>
+        </div>`;
+    }
+
+    function tfCardHead(list, i, n, title, locked) {
+      if (locked) return `<div class="mm-tf-card-hd"><b>${esc(title)}</b></div>`;
+      return `<div class="mm-tf-card-hd"><b>${esc(title)}</b>
+          <span class="acts">
+            <button type="button" class="mm-tool" data-tf-act="move" data-tf-list="${list}" data-i="${i}" data-dir="-1"${i === 0 ? ' disabled' : ''}>Up</button>
+            <button type="button" class="mm-tool" data-tf-act="move" data-tf-list="${list}" data-i="${i}" data-dir="1"${i === n - 1 ? ' disabled' : ''}>Down</button>
+            <button type="button" class="mm-tool" data-tf-act="remove" data-tf-list="${list}" data-i="${i}"${n <= 1 ? ' disabled' : ''}>Remove</button>
+          </span></div>`;
+    }
+
+    function tfPhoto(base, item, dis) {
+      const img = item.image || '';
+      return `<div class="mm-field">
+          <label for="${tfId(base + '.image')}">Photo</label>
+          <div class="mm-tf-photo">
+            ${img ? `<img src="${escapeAttr(img)}" alt="">` : '<div class="ph">No photo yet</div>'}
+            <div class="grow">
+              ${dis ? '' : `<button type="button" class="mm-btn ghost sm" data-tf-pick="${esc(base)}">Upload a photo</button>
+                <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" data-tf-upload="${esc(base)}" hidden>`}
+              <input id="${tfId(base + '.image')}" type="text" data-tf="${esc(base)}.image" value="${esc(img)}"
+                     placeholder="or paste an https:// image link"${dis}>
+              <div class="hint" data-tf-status="${esc(base)}"></div>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    /* ---- picks with personality ---- */
+
+    function pwpFormHtml(td, locked) {
+      const dis = locked ? ' disabled' : '';
+      const picks = Array.isArray(td.picks) ? td.picks : [];
+      const vendorName = td.vendor === 'sanmar' ? 'SanMar' : 'S&S';
+      return `
+        <div class="mm-tf-grid2">
+          ${tfSelect('season', 'Season', td.season, [['spring', 'Spring'], ['fall', 'Fall']], dis)}
+          ${tfText('year', 'Year', td.year, { dis })}
+        </div>
+        <div class="mm-tf-grid2">
+          ${tfSelect('vendor', 'Vendor', td.vendor, [['ss', 'S&S Activewear'], ['sanmar', 'SanMar']], dis)}
+          ${tfText('teamMember', 'Picked by', td.teamMember, { ph: 'Jacob', dis })}
+        </div>
+        ${tfArea('intro', 'Intro', td.intro, { dis })}
+        ${picks.map((p, i) => {
+          const slot = String(i + 1).padStart(2, '0');
+          const colors = Array.isArray(p.colors) ? p.colors : [];
+          return `<div class="mm-tf-card">
+            ${tfCardHead('picks', i, picks.length, `pick ${slot}.${p.name ? ' ' + p.name : ''}`, locked)}
+            <div class="mm-tf-grid2">
+              ${tfText(`picks.${i}.name`, 'Product name', p.name, { dis })}
+              ${tfText(`picks.${i}.style`, 'Style number', p.style, { dis })}
+            </div>
+            <div class="mm-tf-grid2">
+              ${tfText(`picks.${i}.msrp`, 'MSRP', p.msrp, { ph: '$14.98', dis, hint: 'Exactly as the supplier lists it.' })}
+              ${tfText(`picks.${i}.url`, `Link on ${vendorName}`, p.url, { ph: 'https://', dis })}
+            </div>
+            ${tfPhoto(`picks.${i}`, p, dis)}
+            ${tfText(`picks.${i}.alt`, 'Photo description', p.alt, { dis, hint: 'What shows when an email app blocks images.' })}
+            ${tfArea(`picks.${i}.reason`, 'Why I like it', p.reason, { dis })}
+            <div class="mm-field">
+              <label>Colors shown</label>
+              ${colors.map((c, j) => `<div class="mm-tf-color">
+                  <input type="color" data-tf="picks.${i}.colors.${j}.hex" value="${esc(c.hex || '#cccccc')}" aria-label="Swatch color"${dis}>
+                  <input type="text" data-tf="picks.${i}.colors.${j}.name" value="${esc(c.name || '')}" placeholder="Color name" aria-label="Color name"${dis}>
+                  ${locked ? '' : `<button type="button" class="mm-tool" data-tf-act="remove" data-tf-list="picks.${i}.colors" data-i="${j}">Remove</button>`}
+                </div>`).join('')}
+              ${locked || colors.length >= PWP_MAX_SWATCHES ? '' : `<button type="button" class="mm-tool" data-tf-act="add" data-tf-list="picks.${i}.colors">Add a color</button>`}
+            </div>
+            ${tfText(`picks.${i}.colorCount`, 'Total colors it comes in (optional)', p.colorCount, { dis, hint: 'Only if it comes in more than you show. The email then says "+ 12 more".' })}
+          </div>`;
+        }).join('')}
+        ${locked || picks.length >= PWP_MAX_PICKS ? '' : '<button type="button" class="mm-btn ghost sm" data-tf-act="add" data-tf-list="picks">Add a pick</button>'}`;
+    }
+
+    /* ---- promo products ---- */
+
+    function shownPrice(v) {
+      const shown = pvCeilDollars(v);
+      return shown ? `Shows as <b>${esc(shown)}</b>` : 'Rounded up to the whole dollar in the email.';
+    }
+
+    function promoFormHtml(td, locked) {
+      const dis = locked ? ' disabled' : '';
+      const products = Array.isArray(td.products) ? td.products : [];
+      return `
+        ${tfText('eyebrow', 'Small line above the headline', td.eyebrow, { dis, ph: 'dental promo picks' })}
+        ${tfText('headline', 'Headline', td.headline, { dis })}
+        ${tfArea('intro', 'Intro', td.intro, { dis })}
+        <details class="mm-tf-more">
+          <summary>Buttons and closing</summary>
+          <div class="mm-tf-grid2">
+            ${tfText('ctaLabel', 'Button label', td.ctaLabel, { dis })}
+            ${tfText('ctaUrl', 'Button link', td.ctaUrl, { dis })}
+          </div>
+          ${tfText('closingHeadline', 'Closing headline', td.closingHeadline, { dis })}
+          ${tfArea('closingText', 'Closing text', td.closingText, { dis })}
+        </details>
+        ${products.map((p, i) => {
+          const slot = String(i + 1).padStart(2, '0');
+          return `<div class="mm-tf-card">
+            ${tfCardHead('products', i, products.length, `pick ${slot}${p.name ? ' · ' + p.name : ''}`, locked)}
+            ${tfText(`products.${i}.name`, 'Product name', p.name, { dis, hint: 'No item numbers.' })}
+            <div class="mm-tf-grid3">
+              ${tfText(`products.${i}.minimum`, 'Minimum order', p.minimum, { dis, ph: '50', hint: 'The first quantity on the sheet.' })}
+              ${tfText(`products.${i}.price`, 'Price', p.price, { dis, ph: '7.01', hint: shownPrice(p.price), hintFor: `products.${i}.price` })}
+              ${tfText(`products.${i}.setup`, 'Setup charge', p.setup, { dis, ph: '60', hint: shownPrice(p.setup), hintFor: `products.${i}.setup` })}
+            </div>
+            ${tfArea(`products.${i}.colors`, 'Colors, one per line', p.colors, { dis, list: true, hint: 'The email shows the first four, then "+ add’l".' })}
+            <label class="mm-tf-check"><input type="checkbox" data-tf="products.${i}.moreColors"${p.moreColors ? ' checked' : ''}${dis}>
+              It comes in more colors than these</label>
+            ${tfPhoto(`products.${i}`, p, dis)}
+            ${tfText(`products.${i}.alt`, 'Photo description', p.alt, { dis, hint: 'What shows when an email app blocks images.' })}
+            ${tfText(`products.${i}.url`, 'Link (optional)', p.url, { dis, ph: 'Blank goes to the promo catalog' })}
+          </div>`;
+        }).join('')}
+        ${locked || products.length >= PROMO_MAX_PRODUCTS ? '' : '<button type="button" class="mm-btn ghost sm" data-tf-act="add" data-tf-list="products">Add a product</button>'}`;
+    }
+
+    function blankFor(listPath) {
+      if (listPath === 'picks') return { name: '', style: '', msrp: '', reason: '', url: '', image: '', alt: '', colors: [], colorCount: '' };
+      if (listPath === 'products') return { name: '', colors: [], moreColors: false, minimum: '', price: '', setup: '', url: '', image: '', alt: '' };
+      if (/\.colors$/.test(listPath)) return { name: '', hex: '' };
+      return {};
+    }
+
+    function redrawTemplateForm() {
+      const box = $('#mmTplForm');
+      const d = state.editingCampaign;
+      if (!box || !d) return;
+      box.innerHTML = templateFormHtml(d, !canEditUI() || d.status === 'sent');
+    }
+
+    /* ---- the preview ---- */
+
+    let tplTimer = null;
+    let tplSeq = 0;
+
+    function scheduleTemplatePreview(delay) {
+      clearTimeout(tplTimer);
+      tplTimer = setTimeout(renderTemplatePreview, delay == null ? 400 : delay);
+    }
+
+    function sampleContactFor(d) {
+      const c = state.contacts.find((x) =>
+        !SUPPRESSED.includes(x.status) && (d.source ? x.source === d.source : true)) || state.contacts[0] || null;
+      return c ? { contact_name: c.contact_name || '', company_name: c.company_name || '' } : {};
+    }
+
+    async function renderTemplatePreview() {
+      const d = state.editingCampaign;
+      if (!d || !isTemplate(d)) return;
+      const seq = ++tplSeq;
+      try {
+        const res = await api.post(ENDPOINTS.mmCampaigns, {
+          action: 'render', id: d.id || '', template: d.template,
+          templateData: d.templateData || {}, subject: d.subject || '',
+          preheader: d.preheader || '', sample: sampleContactFor(d)
+        });
+        if (seq !== tplSeq || state.editingCampaign !== d) return;
+        state.tplProblems = res.problems || [];
+        paintTemplateFrame(res.html || '');
+        paintTemplateProblems();
+        refreshWriteStep();
+      } catch (e) {
+        if (seq !== tplSeq) return;
+        const box = $('#mmTplProblems');
+        if (box) box.innerHTML = `<div class="mm-err">The preview could not load: ${esc(e.message)}</div>`;
+      }
+    }
+
+    function paintTemplateProblems() {
+      const box = $('#mmTplProblems');
+      if (!box) return;
+      const probs = state.tplProblems || [];
+      const list = `<ul class="mm-tpl-probs">${probs.map((p) => `<li>${esc(p)}</li>`).join('')}</ul>`;
+      // A fresh email is missing everything, and a list of thirty lines would
+      // push the preview off the screen. A few are listed; more fold away.
+      box.innerHTML = !probs.length
+        ? '<div class="mm-notice good"><b>Everything the design needs is filled in.</b></div>'
+        : probs.length <= 4
+          ? `<div class="mm-notice"><b>Before this can send:</b>${list}</div>`
+          : `<div class="mm-notice"><details><summary style="cursor:pointer"><b>${probs.length} things to fill in before this can send</b></summary>${list}</details></div>`;
+    }
+
+    // The email is drawn at its real width (680 for desktop, 390 for phone)
+    // and scaled down to fit the column, so it looks the way it will in an
+    // inbox rather than squeezed into the phone layout by a narrow column.
+    // allow-same-origin (with scripts still off) is only so its height can be
+    // read; an email has no scripts to run.
+    function paintTemplateFrame(html) {
+      const frame = $('#mmTplFrame');
+      if (!frame) return;
+      const fit = () => {
+        const wrap = $('#mmTplWrap');
+        const sizer = $('#mmTplSizer');
+        if (!wrap || !sizer) return;
+        const w = state.tplSize === 'phone' ? 390 : 680;
+        const scale = Math.min(1, (wrap.clientWidth - 2) / w);
+        let h = 900;
+        try { h = frame.contentDocument.documentElement.scrollHeight || h; } catch (e) { /* keep default */ }
+        frame.style.width = w + 'px';
+        frame.style.height = h + 'px';
+        frame.style.transform = `scale(${scale})`;
+        sizer.style.width = Math.round(w * scale) + 'px';
+        sizer.style.height = Math.round(h * scale) + 'px';
+      };
+      frame.onload = () => {
+        fit();
+        // Images arrive after load; measure again once they have.
+        setTimeout(fit, 400);
+      };
+      frame.srcdoc = html;
+    }
+
+    /* ---- switching design ---- */
+
+    function templateHasContent(d) {
+      const td = d.templateData || {};
+      const items = (td.picks || td.products || []);
+      return items.some((x) => x && (x.name || x.image || x.price || x.msrp));
+    }
+
+    async function switchTemplate(key) {
+      const d = state.editingCampaign;
+      if (!d) return;
+      const cur = d.template || 'freeform';
+      if (key === cur) return;
+      if (isTemplate(d) && templateHasContent(d) &&
+          !window.confirm(`Switch away from ${templateLabel(cur)}? The products you entered for it will be cleared.`)) {
+        return;
+      }
+      syncComposerFromDom();
+      d.template = key;
+      state.tplProblems = null;
+      if (key === 'freeform') {
+        d.templateData = null;
+        renderComposer();
+        return;
+      }
+      // The server fills in the design's starting content (and five empty
+      // picks), so there is one definition of it, not two.
+      try {
+        const res = await api.post(ENDPOINTS.mmCampaigns, {
+          action: 'render', template: key, templateData: {}, subject: d.subject || '', preheader: d.preheader || ''
+        });
+        d.templateData = res.templateData || {};
+      } catch (e) {
+        d.templateData = {};
+        composerMsg('Could not load that design: ' + esc(e.message), 'mm-err');
+      }
+      renderComposer();
+    }
+
+    /* ---- wiring ---- */
+
+    function wireTemplateComposer() {
+      root.querySelectorAll('[data-design]').forEach((b) => {
+        b.addEventListener('click', () => switchTemplate(b.dataset.design));
+      });
+
+      root.querySelectorAll('[data-tpl-size]').forEach((b) => {
+        b.addEventListener('click', () => {
+          state.tplSize = b.dataset.tplSize;
+          root.querySelectorAll('[data-tpl-size]').forEach((x) =>
+            x.setAttribute('aria-pressed', x.dataset.tplSize === state.tplSize ? 'true' : 'false'));
+          scheduleTemplatePreview(0);
+        });
+      });
+
+      const form = $('#mmTplForm');
+      if (!form) return;
+
+      const onEdit = (ev) => {
+        const el = ev.target;
+        const path = el && el.dataset && el.dataset.tf;
+        const d = state.editingCampaign;
+        if (!path || !d) return;
+        if (!d.templateData) d.templateData = {};
+        let value;
+        if (el.type === 'checkbox') value = el.checked;
+        else if (el.dataset.tfLines) value = el.value.split(/\n/).map((x) => x.trim()).filter(Boolean);
+        else value = el.value;
+        tfSet(d.templateData, path, value);
+        // The live "Shows as $8.00" under a price box.
+        const hint = form.querySelector(`[data-tf-hint="${path}"]`);
+        if (hint) hint.innerHTML = shownPrice(value);
+        scheduleTemplatePreview();
+      };
+      form.addEventListener('input', onEdit);
+      form.addEventListener('change', (ev) => {
+        if (ev.target && ev.target.dataset && ev.target.dataset.tfUpload) return;
+        onEdit(ev);
+        // A new photo link or vendor changes what the form itself shows.
+        const p = ev.target && ev.target.dataset && ev.target.dataset.tf;
+        if (p && (/\.image$/.test(p) || p === 'vendor')) redrawTemplateForm();
+      });
+
+      form.addEventListener('click', (ev) => {
+        const pick = ev.target.closest && ev.target.closest('[data-tf-pick]');
+        if (pick) {
+          const input = form.querySelector(`[data-tf-upload="${pick.dataset.tfPick}"]`);
+          if (input) input.click();
+          return;
+        }
+        const b = ev.target.closest && ev.target.closest('[data-tf-act]');
+        if (!b || b.disabled) return;
+        const d = state.editingCampaign;
+        if (!d) return;
+        if (!d.templateData) d.templateData = {};
+        const listPath = b.dataset.tfList;
+        let list = tfGet(d.templateData, listPath);
+        if (!Array.isArray(list)) { list = []; tfSet(d.templateData, listPath, list); }
+        const i = Number(b.dataset.i);
+        if (b.dataset.tfAct === 'add') list.push(blankFor(listPath));
+        if (b.dataset.tfAct === 'remove' && i >= 0) list.splice(i, 1);
+        if (b.dataset.tfAct === 'move') {
+          const j = i + Number(b.dataset.dir);
+          if (j >= 0 && j < list.length) { const t = list[i]; list[i] = list[j]; list[j] = t; }
+        }
+        redrawTemplateForm();
+        // A new swatch starts as whatever the color picker shows, so a grey
+        // that looks chosen IS chosen, rather than blocking the send until
+        // someone re-picks the color already on screen.
+        if (b.dataset.tfAct === 'add' && /\.colors$/.test(listPath)) {
+          const hexPath = `${listPath}.${list.length - 1}.hex`;
+          const picker = form.querySelector(`[data-tf="${hexPath}"]`);
+          if (picker && picker.value) tfSet(d.templateData, hexPath, picker.value);
+        }
+        scheduleTemplatePreview(0);
+      });
+
+      // Product photos go through the same upload as the freeform Image
+      // button: shrunk in the browser, stored publicly, never deleted.
+      form.addEventListener('change', async (ev) => {
+        const input = ev.target;
+        const base = input && input.dataset && input.dataset.tfUpload;
+        if (!base) return;
+        const file = input.files && input.files[0];
+        if (!file) return;
+        const status = form.querySelector(`[data-tf-status="${base}"]`);
+        const say = (html) => { if (status) status.innerHTML = html; };
+        say('Uploading…');
+        // Held from before the upload: if someone opens a different email
+        // while it runs, the photo must not land in that one.
+        const d = state.editingCampaign;
+        try {
+          const ready = await prepareEmailImage(file);
+          const res = await api.post(ENDPOINTS.mmImages, { dataUrl: ready.dataUrl, name: file.name });
+          if (!d || state.editingCampaign !== d || !d.templateData) return;
+          tfSet(d.templateData, base + '.image', res.url);
+          const alt = tfGet(d.templateData, base + '.alt');
+          if (!alt) tfSet(d.templateData, base + '.alt', tfGet(d.templateData, base + '.name') || '');
+          redrawTemplateForm();
+          scheduleTemplatePreview(0);
+        } catch (e) {
+          say(`<span class="mm-tf-bad">Could not upload: ${esc(e.message)}</span>`);
+        }
+      });
     }
 
     /* ---------------- campaign actions ---------------- */
@@ -1507,10 +2384,22 @@ export default {
         segmentTags: d.segmentTags || [],
         identityKey: d.identityKey || null,
         marketingCampaignId: d.marketingCampaignId || null,
-        marketingChannelId: d.marketingChannelId || null
+        marketingChannelId: d.marketingChannelId || null,
+        template: d.template || 'freeform'
       };
 
-      if (!payload.subject.trim() || !payload.body.trim()) {
+      // A template email has no body; its content is templateData, cleaned
+      // by the template on the server. Its body is left alone rather than
+      // blanked, so switching back to freeform finds what was written.
+      if (isTemplate(d)) {
+        delete payload.body;
+        payload.templateData = d.templateData || {};
+        if (!payload.subject.trim()) {
+          const error = 'A send needs a subject before it can be saved.';
+          if (!(opts && opts.silent)) composerMsg(esc(error), 'mm-err');
+          return { ok: false, error };
+        }
+      } else if (!payload.subject.trim() || !payload.body.trim()) {
         const error = 'A send needs both a subject and a body before it can be saved.';
         if (!(opts && opts.silent)) composerMsg(esc(error), 'mm-err');
         return { ok: false, error };
@@ -3143,6 +4032,34 @@ export default {
       return state.campaigns.filter((c) => c.status === 'sent' || c.status === 'sending');
     }
 
+    // Template emails only. Which pick people clicked, how many different
+    // people clicked it, and whether they went for the photo, the colors or
+    // the button. Counted from the same click events as the totals above,
+    // read from the tag every template link carries.
+    function reportPicksHtml(c, r) {
+      const rows = r.byPick || [];
+      if (!rows.length) return '';
+      const td = c.templateData || {};
+      const items = td.picks || td.products || [];
+      const hasColors = c.template === 'pwp';
+      const hasButton = c.template === 'pwp';
+      const general = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot));
+      return `
+        <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Clicks by product</h3>
+        <table class="mm-table" style="margin-bottom:14px">
+          <thead><tr><th>Pick</th><th class="num">People</th><th class="num">Clicks</th>
+            <th class="num">Photo</th>${hasColors ? '<th class="num">Colors</th>' : ''}${hasButton ? '<th class="num">Button</th>' : ''}</tr></thead>
+          <tbody>${rows.map((row) => {
+            const item = items[row.slot - 1] || {};
+            return `<tr><td>${String(row.slot).padStart(2, '0')}. ${esc(item.name || '')}</td>
+              <td class="num">${row.uniqueClicks}</td><td class="num">${row.clicks}</td>
+              <td class="num">${row.photo}</td>${hasColors ? `<td class="num">${row.colors}</td>` : ''}${hasButton ? `<td class="num">${row.button}</td>` : ''}</tr>`;
+          }).join('')}</tbody>
+        </table>
+        ${general.length ? `<div style="margin:-6px 0 14px;font-size:12px;color:var(--muted)">
+          Other buttons: ${general.map((g) => `${esc(g.label)} ${g.clicks}`).join(' \u00b7 ')}</div>` : ''}`;
+    }
+
     function renderReports() {
       const box = $('#mmReportsBody');
       if (!box) return;
@@ -3234,12 +4151,13 @@ export default {
               </summary>
               <div class="hint" style="margin-top:8px">${esc(r.openRateCaveat || '')}</div>
             </details>
+            ${reportPicksHtml(c, r)}
             ${(r.links || []).length ? `
               <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Links</h3>
               <table class="mm-table">
                 <thead><tr><th>URL</th><th class="num">Clicks</th><th class="num">Unique</th></tr></thead>
                 <tbody>${r.links.map((l) => `
-                  <tr><td class="em">${esc(l.url)}</td>
+                  <tr><td class="em">${l.spot ? `<b>${esc(l.spot)}</b><br>` : ''}${esc(l.url)}</td>
                       <td class="num">${l.clicks}</td>
                       <td class="num">${l.uniqueClicks}</td></tr>`).join('')}</tbody>
               </table>` : ''}
@@ -3786,7 +4704,7 @@ export default {
 
     $('#mmNewCampaign').addEventListener('click', () => {
       const d = {
-        subject: '', preheader: '', body: '',
+        subject: '', preheader: '', body: '', template: 'freeform', templateData: null,
         source: 'client', listId: null, segmentTags: [], status: 'draft',
         marketingCampaignId: null, marketingChannelId: null
       };

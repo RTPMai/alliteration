@@ -1,3 +1,4 @@
+// PUT IN: api/mailme/campaigns.js
 // api/mailme/campaigns.js — campaign drafts and results.
 //
 // GET    -> list campaigns, or ?id=MM-00001 for one with resolved recipients
@@ -26,7 +27,7 @@ import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateCampaign, deleteCampaign,
-  applyCampaignPatch, resolveContacts, getList, campaignResults,
+  applyCampaignPatch, resolveContacts, getList, campaignResults, getSettings,
 } from "../../lib/mailme/store.js";
 import {
   validateCampaignPatch, selectRecipients, resolveList,
@@ -37,7 +38,8 @@ import {
 import {
   applyEligibility, complianceBlockers, coldDailyCap, OPEN_RATE_CAVEAT, primaryMetric,
 } from "../../lib/mailme/audience.js";
-import { sendCampaign, sendReadiness, sendTestEmail } from "../../lib/mailme/send.js";
+import { sendCampaign, sendReadiness, sendTestEmail, contentProblems, templateSiteProblem, buildHtml } from "../../lib/mailme/send.js";
+import { TEMPLATE_KEYS, TEMPLATES } from "../../lib/mailme/templates/index.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -149,7 +151,7 @@ export default async function handler(req, res) {
         if (!campaign) return res.status(404).json({ error: "Campaign not found" });
 
         const { recipients, held, list, missingList, settings } = await recipientsFor(campaign);
-        const { stats, links } = await campaignResults(id, recipients.length);
+        const { stats, links, byPick, bySpot } = await campaignResults(id, recipients.length);
 
         // The cold ramp: a brand-new sending domain must not go from zero to
         // hundreds of cold emails in a day, which is itself a spam signal.
@@ -164,7 +166,12 @@ export default async function handler(req, res) {
           : settings.policy.clientDailyCap;
 
         const identity = identityForCampaign(campaign, settings);
-        const sendBlockers = await sendReadiness(settings, identity);
+        // What the email itself is missing comes first: "Pick 03 needs a
+        // price" is the thing the person can fix right now, on this screen.
+        const siteProblem = templateSiteProblem(campaign, settings);
+        const sendBlockers = contentProblems(campaign).map((text) => ({ field: "content", text }))
+          .concat(siteProblem ? [{ field: "unsubscribeUrl", text: siteProblem }] : [])
+          .concat(await sendReadiness(settings, identity));
         const queueRemaining = campaign.sendState ? campaign.sendState.queue.length : null;
 
         return res.status(200).json({
@@ -195,6 +202,10 @@ export default async function handler(req, res) {
           results: {
             stats,
             links,
+            // Template emails only: clicks per product and per spot on the
+            // card, read from the utm_content tag on each link.
+            byPick: byPick || [],
+            bySpot: bySpot || [],
             rates: computeRates(stats),
             warnings: deliverabilityWarnings(stats),
             primary: primaryMetric(stats),
@@ -220,6 +231,41 @@ export default async function handler(req, res) {
       }));
 
       return res.status(200).json({ campaigns: withCounts });
+    }
+
+    const renderAction = (req.query && req.query.action) || (req.method === "POST" ? parseBody(req).action : null);
+    // RENDER A DESIGNED TEMPLATE for the composer's preview, from what is on
+    // screen right now (nothing is saved). The preview used to be a copy of
+    // the renderer running in the browser; a template is too big to keep two
+    // copies of in step, so the preview asks the one real renderer instead,
+    // after a short pause in typing. Brand art is linked relative to this
+    // site, and there is no recipient, so the unsubscribe link is the bare
+    // page.
+    //
+    // Before the edit gate on purpose: it writes nothing, and someone with
+    // view-only MailMe access still needs to see what a template email says.
+    if (req.method === "POST" && renderAction === "render") {
+      const body = parseBody(req);
+      const key = String(body.template || "");
+      if (!TEMPLATES[key]) {
+        return res.status(400).json({ error: `template must be one of: ${TEMPLATE_KEYS.filter((k) => TEMPLATES[k]).join(", ")}` });
+      }
+      const settings = await getSettings();
+      const draft = {
+        id: body.id ? String(body.id) : "",
+        subject: String(body.subject || ""),
+        preheader: String(body.preheader || ""),
+        template: key,
+        templateData: TEMPLATES[key].normalize(body.templateData || {}),
+      };
+      const sample = body.sample && typeof body.sample === "object"
+        ? { contact_name: String(body.sample.contact_name || ""), company_name: String(body.sample.company_name || "") }
+        : {};
+      return res.status(200).json({
+        html: buildHtml(draft, sample, settings, "", { assetBase: "" }),
+        problems: contentProblems(draft),
+        templateData: draft.templateData,
+      });
     }
 
     if (!(await canEditMailMe(sess))) {

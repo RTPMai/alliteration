@@ -1,3 +1,4 @@
+// PUT IN: test/mailme-restructure.test.cjs
 /**
  * MailMe restructure tests (Aug 2026).
  *
@@ -507,12 +508,18 @@ t.test('a failed list creation does not hide a successful import', () => {
     t.assert(!/needs both a subject and a body/.test(post.slice(0, 900)),
       'creating a shell must be allowed');
 
+    // The words now live in contentProblems() (shared with template emails,
+    // Sep 24 2026), so it is called for real rather than grepped for.
+    const blank = send.contentProblems({ subject: '', body: '' });
+    t.assert(blank.some((p) => /no subject line/.test(p)), 'sending must refuse an empty subject');
+    t.assert(blank.some((p) => /no body/.test(p)), 'and an empty body');
+    t.equal(send.contentProblems({ subject: 'Hi', body: 'There' }).length, 0, 'a written email has no content problems');
+
     const sendSrc = read('lib/mailme/send.js');
     const fn = sendSrc.slice(sendSrc.indexOf('export async function sendCampaign'));
     const head = fn.slice(0, 2000);
-    t.assert(/no subject line/.test(head), 'sending must refuse an empty subject');
-    t.assert(/no body/.test(head), 'and an empty body');
-    t.assert(head.indexOf('no subject line') < head.indexOf('recipientsFor'),
+    t.assert(head.indexOf('contentProblems(campaign)') !== -1, 'sendCampaign must check the content');
+    t.assert(head.indexOf('contentProblems(campaign)') < head.indexOf('recipientsFor'),
       'and must refuse BEFORE building a recipient queue, not after');
   });
 

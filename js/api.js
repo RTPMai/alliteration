@@ -238,6 +238,9 @@ export const ENDPOINTS = {
   // provider dashboard from memory.
   mmWebhook:       '/api/mailme/webhook',
   mmSettings:      '/api/mailme/settings',
+  // Uploads one image for an email body; returns its public URL. The
+  // composer's Image button is the only caller.
+  mmImages:        '/api/mailme/images',
   // MarketMachine. Campaigns, their ordered checklists, and the events that
   // hold connected campaigns. Admin only for now; everyone else gets names and
   // ids for MailMe's picker. See api/marketmachine/campaigns.js.
