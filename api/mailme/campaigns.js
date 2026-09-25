@@ -259,7 +259,11 @@ export default async function handler(req, res) {
         templateData: TEMPLATES[key].normalize(body.templateData || {}),
       };
       const sample = body.sample && typeof body.sample === "object"
-        ? { contact_name: String(body.sample.contact_name || ""), company_name: String(body.sample.company_name || "") }
+        ? {
+          contact_name: String(body.sample.contact_name || ""),
+          company_name: String(body.sample.company_name || ""),
+          accountManager: String(body.sample.accountManager || "").slice(0, 60),
+        }
         : {};
       return res.status(200).json({
         html: buildHtml(draft, sample, settings, "", { assetBase: "" }),
@@ -323,7 +327,8 @@ export default async function handler(req, res) {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
       if (!to) return res.status(400).json({ error: "Missing test recipient email" });
 
-      const result = await sendTestEmail(id, to);
+      const asAm = body.accountManager || (req.query && req.query.accountManager) || "";
+      const result = await sendTestEmail(id, to, { accountManager: asAm });
       if (!result.ok) {
         const status = result.reason === "not_found" ? 404 : 400;
         return res.status(status).json({ error: testFailureMessage(result), reason: result.reason, blockers: result.blockers });

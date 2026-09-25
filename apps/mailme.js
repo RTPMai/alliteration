@@ -271,11 +271,15 @@ function previewBody(text) {
 const TEMPLATE_CHOICES = [
   { key: 'freeform', label: 'Freeform', description: 'Write it yourself. Text, links, bullets and images.' },
   { key: 'pwp', label: 'Picks with personality', description: 'A team member\u2019s favorite styles from S&S or SanMar. Spring and fall.' },
-  { key: 'promo', label: 'Promo products', description: 'Promotional products, one per card, with minimum, price, setup and colors.' }
+  { key: 'promo', label: 'Promo products', description: 'Promotional products, one per card, with minimum, price, setup and colors.' },
+  { key: 'seasonal', label: 'Seasonal announcement', description: 'A season\u2019s dates and timelines, with a button to email each reader\u2019s own account manager.' }
 ];
 const PWP_MAX_PICKS = 8;
 const PWP_MAX_SWATCHES = 10;
 const PROMO_MAX_PRODUCTS = 12;
+const SEASONAL_MAX_TIMELINES = 3;
+const SEASONAL_MAX_STEPS = 6;
+const SEASONAL_MAX_SECTIONS = 8;
 
 // Mirrors ceilDollars() in lib/mailme/templates/shared.js.
 function pvCeilDollars(raw) {
@@ -571,6 +575,7 @@ export default {
   .mm-tf-card-hd b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
   .mm-tf-card-hd .acts{display:flex;gap:4px;flex-shrink:0}
   .mm-tf-color{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+  .mm-tf-color input[type="text"]{flex:1;min-width:0}
   .mm-tf-color input[type="color"]{width:38px;height:32px;padding:2px;border:1px solid var(--line);
     border-radius:var(--radius-sm);background:var(--card);flex-shrink:0}
   .mm-tf-photo{display:flex;gap:10px;align-items:flex-start}
@@ -1950,7 +1955,7 @@ export default {
             <div class="mm-field">
               <label for="mmSubject">Subject</label>
               <input id="mmSubject" type="text" value="${esc(d.subject || '')}"
-                     placeholder="${d.template === 'pwp' ? 'picks with personality.' : 'Something to smile about?'}"${dis}>
+                     placeholder="${d.template === 'pwp' ? 'picks with personality.' : d.template === 'seasonal' ? 'Your holiday store timeline is here' : 'Something to smile about?'}"${dis}>
             </div>
             <div class="mm-field">
               <label for="mmPreheader">Preheader</label>
@@ -1984,6 +1989,7 @@ export default {
       const td = d.templateData || {};
       if (d.template === 'pwp') return pwpFormHtml(td, locked);
       if (d.template === 'promo') return promoFormHtml(td, locked);
+      if (d.template === 'seasonal') return seasonalFormHtml(td, locked);
       return '';
     }
 
@@ -2136,10 +2142,93 @@ export default {
         ${locked || products.length >= PROMO_MAX_PRODUCTS ? '' : '<button type="button" class="mm-btn ghost sm" data-tf-act="add" data-tf-list="products">Add a product</button>'}`;
     }
 
+    /* ---- seasonal announcement ---- */
+
+    // Which account manager's copy the preview (and a test send) shows.
+    // Not part of the email: each reader gets their own when it sends.
+    function seasonalPreviewAm(td) {
+      const people = Array.isArray(td.people) ? td.people : [];
+      if (state.tplPreviewAm === '' ) return '';
+      if (state.tplPreviewAm && people.includes(state.tplPreviewAm)) return state.tplPreviewAm;
+      return people[0] || '';
+    }
+
+    function seasonalFormHtml(td, locked) {
+      const dis = locked ? ' disabled' : '';
+      const timelines = Array.isArray(td.timelines) ? td.timelines : [];
+      const sections = Array.isArray(td.sections) ? td.sections : [];
+      const cal = td.calendar || {};
+      const people = Array.isArray(td.people) ? td.people : [];
+      const asAm = seasonalPreviewAm(td);
+      return `
+        ${tfText('headline', 'Headline', td.headline, { dis })}
+        ${tfText('eyebrow', 'Small line under the headline', td.eyebrow, { dis })}
+        ${tfArea('intro', 'Intro', td.intro, { dis, hint: 'A blank line starts a new paragraph. Put <b>**double stars**</b> around words to make them bold.' })}
+        <div class="mm-field"><label>Timelines</label>
+          <div class="hint" style="margin-top:-2px;margin-bottom:8px">Shown as cards near the top, so the dates are readable even when pictures are off.</div></div>
+        ${timelines.map((tl, i) => {
+          const steps = Array.isArray(tl.steps) ? tl.steps : [];
+          return `<div class="mm-tf-card">
+            ${tfCardHead('timelines', i, timelines.length, `timeline ${i + 1}${tl.title ? ' \u00b7 ' + tl.title : ''}`, locked)}
+            <div class="mm-tf-grid2">
+              ${tfText(`timelines.${i}.label`, 'Small label', tl.label, { dis, ph: 'Ideal timeline' })}
+              ${tfText(`timelines.${i}.title`, 'Title', tl.title, { dis, ph: 'Delivered by December 4' })}
+            </div>
+            <div class="mm-field"><label>Steps</label>
+              ${steps.map((st, j) => `<div class="mm-tf-color">
+                  <input type="text" data-tf="timelines.${i}.steps.${j}.name" value="${esc(st.name || '')}" placeholder="Store setup" aria-label="Step ${j + 1} name"${dis}>
+                  <input type="text" data-tf="timelines.${i}.steps.${j}.dates" value="${esc(st.dates || '')}" placeholder="Oct 8 - 21" aria-label="Step ${j + 1} dates"${dis}>
+                  ${locked ? '' : `<button type="button" class="mm-tool" data-tf-act="remove" data-tf-list="timelines.${i}.steps" data-i="${j}"${steps.length <= 1 ? ' disabled' : ''}>Remove</button>`}
+                </div>`).join('')}
+              ${locked || steps.length >= SEASONAL_MAX_STEPS ? '' : `<button type="button" class="mm-tool" data-tf-act="add" data-tf-list="timelines.${i}.steps">Add a step</button>`}
+            </div>
+          </div>`;
+        }).join('')}
+        ${locked || timelines.length >= SEASONAL_MAX_TIMELINES ? '' : '<button type="button" class="mm-btn ghost sm" data-tf-act="add" data-tf-list="timelines" style="margin-bottom:14px">Add a timeline</button>'}
+        <div class="mm-field"><label>Sections</label></div>
+        ${sections.map((sec, i) => `<div class="mm-tf-card">
+            ${tfCardHead('sections', i, sections.length, `section ${i + 1}${sec.heading ? ' \u00b7 ' + sec.heading : ''}`, locked)}
+            ${tfText(`sections.${i}.heading`, 'Heading', sec.heading, { dis })}
+            ${tfArea(`sections.${i}.text`, 'Text', sec.text, { dis, hint: '<b>**Double stars**</b> for bold. A blank line starts a new paragraph.' })}
+          </div>`).join('')}
+        ${locked || sections.length >= SEASONAL_MAX_SECTIONS ? '' : '<button type="button" class="mm-btn ghost sm" data-tf-act="add" data-tf-list="sections" style="margin-bottom:14px">Add a section</button>'}
+        <div class="mm-tf-card">
+          <div class="mm-tf-card-hd"><b>Calendar picture (optional)</b></div>
+          ${tfPhoto('calendar', cal, dis)}
+          ${tfText('calendar.alt', 'Picture description', cal.alt, { dis, hint: 'What shows when an email app blocks pictures. Say the key dates.' })}
+          ${tfText('calendar.url', 'Click-through link (optional)', cal.url, { dis, ph: 'Blank opens the picture full size' })}
+        </div>
+        <div class="mm-tf-card">
+          <div class="mm-tf-card-hd"><b>Contact buttons</b></div>
+          ${tfText('contactHeadline', 'Heading', td.contactHeadline, { dis })}
+          ${tfArea('people', 'Account managers who get their own button, first names, one per line', people, { dis, list: true,
+            hint: 'Each reader\u2019s account manager comes from BackBone. If theirs is on this list, they get an "Email Hannah" button to firstname@ the reply-to domain in Settings. Everyone else gets only the inquiry form button.' })}
+          ${tfText('amText', 'Line above that button', td.amText, { dis, hint: '{name} becomes the account manager\u2019s first name.' })}
+          ${tfText('mailSubject', 'Subject line when they click it', td.mailSubject, { dis })}
+          ${tfText('formPrompt', 'Line above the inquiry form button', td.formPrompt, { dis })}
+          <div class="mm-tf-grid2">
+            ${tfText('formLabel', 'Inquiry form button label', td.formLabel, { dis })}
+            ${tfText('formUrl', 'Inquiry form link', td.formUrl, { dis })}
+          </div>
+          <div class="mm-field">
+            <label for="mmTplAs">Preview and test as a client of</label>
+            <select id="mmTplAs">
+              ${people.map((p) => `<option value="${esc(p)}"${asAm === p ? ' selected' : ''}>${esc(p)}</option>`).join('')}
+              <option value=""${asAm === '' ? ' selected' : ''}>No account manager on the list</option>
+            </select>
+            <div class="hint">Only changes what you see here and in a test. Each reader gets their own when it sends.</div>
+          </div>
+        </div>
+        ${tfArea('signoff', 'Sign-off', td.signoff, { dis })}`;
+    }
+
     function blankFor(listPath) {
       if (listPath === 'picks') return { name: '', style: '', msrp: '', reason: '', url: '', image: '', alt: '', colors: [], colorCount: '' };
       if (listPath === 'products') return { name: '', colors: [], moreColors: false, minimum: '', price: '', setup: '', url: '', image: '', alt: '' };
       if (/\.colors$/.test(listPath)) return { name: '', hex: '' };
+      if (listPath === 'timelines') return { label: '', title: '', steps: [{ name: '', dates: '' }] };
+      if (/\.steps$/.test(listPath)) return { name: '', dates: '' };
+      if (listPath === 'sections') return { heading: '', text: '' };
       return {};
     }
 
@@ -2163,7 +2252,9 @@ export default {
     function sampleContactFor(d) {
       const c = state.contacts.find((x) =>
         !SUPPRESSED.includes(x.status) && (d.source ? x.source === d.source : true)) || state.contacts[0] || null;
-      return c ? { contact_name: c.contact_name || '', company_name: c.company_name || '' } : {};
+      const out = c ? { contact_name: c.contact_name || '', company_name: c.company_name || '' } : {};
+      if (d.template === 'seasonal') out.accountManager = seasonalPreviewAm(d.templateData || {});
+      return out;
     }
 
     async function renderTemplatePreview() {
@@ -2237,7 +2328,9 @@ export default {
     function templateHasContent(d) {
       const td = d.templateData || {};
       const items = (td.picks || td.products || []);
-      return items.some((x) => x && (x.name || x.image || x.price || x.msrp));
+      if (items.some((x) => x && (x.name || x.image || x.price || x.msrp))) return true;
+      return (td.sections || []).some((x) => x && (x.heading || x.text)) ||
+        (td.timelines || []).some((x) => x && x.title);
     }
 
     async function switchTemplate(key) {
@@ -2309,10 +2402,15 @@ export default {
       form.addEventListener('input', onEdit);
       form.addEventListener('change', (ev) => {
         if (ev.target && ev.target.dataset && ev.target.dataset.tfUpload) return;
+        if (ev.target && ev.target.id === 'mmTplAs') {
+          state.tplPreviewAm = ev.target.value;
+          scheduleTemplatePreview(0);
+          return;
+        }
         onEdit(ev);
         // A new photo link or vendor changes what the form itself shows.
         const p = ev.target && ev.target.dataset && ev.target.dataset.tf;
-        if (p && (/\.image$/.test(p) || p === 'vendor')) redrawTemplateForm();
+        if (p && (/\.image$/.test(p) || p === 'vendor' || p === 'people')) redrawTemplateForm();
       });
 
       form.addEventListener('click', (ev) => {
@@ -2450,9 +2548,11 @@ export default {
       if (!to || !to.trim()) return;
 
       try {
-        await api.post(ENDPOINTS.mmCampaigns, {},
+        const d = state.editingCampaign;
+        const asAm = d && d.template === 'seasonal' ? seasonalPreviewAm(d.templateData || {}) : '';
+        await api.post(ENDPOINTS.mmCampaigns, { accountManager: asAm },
           { query: { id: result.campaign.id, action: 'test', to: to.trim() } });
-        composerMsg(`Test sent to ${esc(to.trim())}. Check that inbox, and the spam folder, ` +
+        composerMsg(`Test sent to ${esc(to.trim())}${asAm ? ` as ${esc(asAm)}\u2019s client` : ''}. Check that inbox, and the spam folder, ` +
           'in a minute. This touched no stats and nobody else received anything.', 'mm-ok');
       } catch (e) {
         composerMsg('Could not send test: ' + esc(e.message), 'mm-err');
@@ -4061,7 +4161,13 @@ export default {
     // read from the tag every template link carries.
     function reportPicksHtml(c, r) {
       const rows = r.byPick || [];
-      if (!rows.length) return '';
+      const generalOnly = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot));
+      // A design with no products (the seasonal announcement) still has
+      // buttons worth counting: the inquiry form and the calendar.
+      if (!rows.length) {
+        return generalOnly.length ? `<div style="margin:0 0 14px;font-size:12px;color:var(--muted)">
+          Buttons: ${generalOnly.map((g) => `${esc(g.label)} ${g.clicks}`).join(' \u00b7 ')}</div>` : '';
+      }
       const td = c.templateData || {};
       const items = td.picks || td.products || [];
       const hasColors = c.template === 'pwp';
