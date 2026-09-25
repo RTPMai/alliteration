@@ -39,6 +39,7 @@ import { ownsPo } from '../lib/promopro/move-own.js';
 // One list of accepted file types, shared with the upload route, so the
 // dialog cannot offer something the server then refuses.
 import { ART_ACCEPT, artAcceptSummary } from '../lib/promopro/art-types.js';
+import { poSearchText, matchesSearch, isSearching } from '../lib/promopro/search.js';
 import {
   ORDER_COLUMNS, columnByKey, sortRows, nextDir, filterValues,
   applyColumnFilters, activeFilterList, anyFilterActive, HEALTH_LABELS
@@ -175,6 +176,12 @@ export default {
     /* Stage and owner are two independent filters. The gap says so, otherwise
        Just mine reads as a fourth stage that cancels the other three. */
     .pp-filters .pp-fsep { width: 10px; }
+    /* ---- search ---- */
+    .pp-find { position: relative; margin-bottom: 12px; max-width: 520px; }
+    .pp-find input { width: 100%; box-sizing: border-box; padding: 9px 34px 9px 12px; font-size: 14px; font-family: inherit; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--card); color: var(--ink); }
+    .pp-find input:focus { outline: none; border-color: var(--accent); }
+    .pp-find .pp-find-x { position: absolute; right: 6px; top: 50%; transform: translateY(-50%); border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; padding: 4px 6px; }
+    .pp-filters.pp-searching button[data-filter] { opacity: .45; }
     .pp-filters button.pp-mine[aria-pressed="false"] { border-style: dashed; }
 
     /* ---- pipeline ---- */
@@ -431,6 +438,9 @@ export default {
         </div>
         <button class="pp-btn" id="ppNewFromPipe">New purchase order</button>
       </div>
+      <div class="pp-find">
+        <input id="ppPipeFind" type="search" autocomplete="off" placeholder="Search all purchase orders. Press Enter.">
+      </div>
       <div class="pp-filters" id="ppPipeFilters"></div>
       <div id="ppPipeBody">Loading…</div>
     </div>
@@ -445,6 +455,10 @@ export default {
       </div>
       <div id="ppFormWrap" hidden></div>
       <div id="ppDetailWrap" hidden></div>
+      <div class="pp-find">
+        <input id="ppFind" type="search" autocomplete="off" placeholder="Search PO, invoice, customer, vendor, item, tracking, notes">
+        <button class="pp-find-x" id="ppFindClear" title="Clear search" aria-label="Clear search" hidden>×</button>
+      </div>
       <div class="pp-filters" id="ppOrdersFilters"></div>
       <div id="ppOrdersBody">Loading…</div>
     </div>
@@ -523,6 +537,10 @@ export default {
       sortKey: 'neededBy',
       sortDir: 'asc',
       colFilters: {},        // { columnKey: [values] }
+      // The search box. Not remembered between visits, for the same reason
+      // column filters are not: a forgotten search hides orders.
+      find: '',
+      findTimer: null,
       openMenu: null,        // which header menu is showing
     };
 
@@ -774,11 +792,25 @@ export default {
       ).join('');
 
       const mine = mineToggleHtml();
-      $('#ppOrdersFilters').innerHTML = stage + (mine ? '<span class="pp-fsep"></span>' + mine : '');
+      const bar = $('#ppOrdersFilters');
+      bar.innerHTML = stage + (mine ? '<span class="pp-fsep"></span>' + mine : '');
+      // A search looks through every order, open or not, so the stage pills
+      // are dimmed while one is typed rather than looking like they still
+      // apply. Just mine still applies: it is a choice about whose orders.
+      bar.classList.toggle('pp-searching', isSearching(st.find));
     }
 
     function visiblePos() {
       const rows = scoped();
+      // SEARCH IGNORES THE STAGE PILLS. Somebody searching for a number off a
+      // packing slip wants that order whether it is open, done or cancelled.
+      // Searching only Open (the default) would answer "not found" for every
+      // finished order, which reads as "we never raised one".
+      if (isSearching(st.find)) {
+        return rows.filter((p) => matchesSearch(poSearchText(p, {
+          customer: custName(p), vendor: vendorName(p.vendorId), am: amName(p.accountManager),
+        }), st.find));
+      }
       if (st.filter === 'all') return rows;
       if (st.filter === 'late') return rows.filter((p) => health(p).level === 'red');
       // Cancelled is not done, it is abandoned, and it stays under All. An
@@ -894,9 +926,14 @@ export default {
       const base = visiblePos().map(orderRow);
       const rows = orderRows();
 
-      $('#ppOrdersSub').textContent = scoping
-        ? scoped().length + ' of ' + st.pos.length + ' purchase orders are yours'
-        : st.pos.length + ' purchase orders on file';
+      const searching = isSearching(st.find);
+      $('#ppOrdersSub').textContent = searching
+        ? searchSubText(base.length, scoping)
+        : scoping
+          ? scoped().length + ' of ' + st.pos.length + ' purchase orders are yours'
+          : st.pos.length + ' purchase orders on file';
+      const clr = $('#ppFindClear');
+      if (clr) clr.hidden = !searching;
 
       const chips = filterChipsHtml();
 
@@ -908,6 +945,10 @@ export default {
         body.innerHTML = chips + '<div class="pp-empty">' +
           (anyFilterActive(st.colFilters)
             ? 'No purchase order matches the column filters above. Clear one and they come back.'
+            : searching
+              ? 'No purchase order matches "' + esc(st.find.trim()) + '"' +
+                (scoping ? ' among yours. Turn off Just mine to search everyone\'s.' : '.') +
+                ' Every word has to match, so try fewer.'
             : 'Nothing here. Try a different filter' + (scoping ? ', turn off Just mine,' : ',') +
               ' or create a purchase order.') +
         '</div>';
@@ -948,6 +989,13 @@ export default {
           ? '<div class="pp-hint" style="margin-top:8px">Showing ' + esc(rows.length) +
             ' of ' + esc(base.length) + ', filtered by column.</div>'
           : '');
+    }
+
+    /** The line under the heading while a search is typed. */
+    function searchSubText(shown, scoping) {
+      return shown + ' of ' + (scoping ? scoped().length : st.pos.length) +
+        ' purchase orders match "' + st.find.trim() + '"' +
+        (scoping ? ' (yours only)' : '') + ', open or not';
     }
 
     /* ---------------- create form ---------------- */
@@ -2966,6 +3014,8 @@ export default {
       const t = e.target.closest('button, tr[data-po]');
       if (!t || !root.contains(t)) return;
 
+      if (t.id === 'ppFindClear') { setFind(''); const f = $('#ppFind'); if (f) f.focus(); return; }
+
       // Order / Emails & history. Switched in place rather than redrawn, so
       // anything half-typed on the other tab (a tracking number, a note on a
       // call) is still there when you come back to it.
@@ -3115,7 +3165,14 @@ export default {
 
       if (t.dataset && t.dataset.vendorpick) { pickVendor(t.dataset.vendorpick); return; }
 
-      if (t.dataset && t.dataset.filter) { st.filter = t.dataset.filter; renderOrders(); return; }
+      if (t.dataset && t.dataset.filter) {
+        st.filter = t.dataset.filter;
+        // Pressing a pill is asking for that pill, so it ends a search rather
+        // than being silently overridden by it.
+        if (isSearching(st.find)) { setFind(''); return; }
+        renderOrders();
+        return;
+      }
 
       // Both screens share the preference, because "show me my orders" is one
       // question and having to answer it twice is how it gets left half on.
@@ -3562,6 +3619,34 @@ export default {
       }
     });
 
+    /** Set the search and redraw. `typed` means the box already shows it. */
+    function setFind(val, typed) {
+      clearTimeout(st.findTimer);
+      st.find = String(val || '');
+      const box = $('#ppFind');
+      if (box && !typed) box.value = st.find;
+      renderOrders();
+    }
+
+    // Enter on the pipeline's box takes the search to Purchase Orders, which
+    // is where finished and cancelled orders live too. Escape on either box
+    // clears it.
+    root.addEventListener('keydown', (e) => {
+      if (e.target.id === 'ppPipeFind' && e.key === 'Enter') {
+        e.preventDefault();
+        const val = e.target.value;
+        if (!isSearching(val)) return;
+        e.target.value = '';
+        setFind(val);
+        ctx.go('orders');
+        return;
+      }
+      if ((e.target.id === 'ppFind' || e.target.id === 'ppPipeFind') && e.key === 'Escape') {
+        e.target.value = '';
+        if (e.target.id === 'ppFind') setFind('');
+      }
+    });
+
     root.addEventListener('focusin', (e) => {
       if (e.target.id === 'ppVendorSearch') renderVendorMatches(e.target.value);
     });
@@ -3603,6 +3688,17 @@ export default {
         if (hid) hid.value = '';
         renderVendorMatches(e.target.value);
         renderCcPreview();
+        return;
+      }
+
+      // The Orders search box. Short debounce: long enough not to redraw the
+      // table on every keystroke of a PO number, short enough to feel live.
+      // The input lives in the page template, not in anything renderOrders()
+      // rewrites, so the caret is never lost mid-word.
+      if (e.target.id === 'ppFind') {
+        clearTimeout(st.findTimer);
+        const val = e.target.value;
+        st.findTimer = setTimeout(() => setFind(val, true), 150);
         return;
       }
 
