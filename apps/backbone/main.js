@@ -55,7 +55,7 @@ import {
   INQUIRY_STATUSES, FUNNEL_STAGES, STAGE_STALE_DAYS,
   normalizeInquiryStatus, setInquiryStatus, daysInStage, isStalled,
   reachBackDue, askSummary, combinedScore, inquiryPriority, isActive,
-  inquiryFromSubmission, rosterMatches, normalizeCo,
+  inquiryFromSubmission, rosterMatches, normalizeCo, needsRosterPromotion, isPendingSubmission,
 } from '../../lib/backbone/inquiries.js';
 
 export async function start(ctx) {
@@ -7240,14 +7240,17 @@ export async function start(ctx) {
    * ------------------------------------------------------------------ */
 
   // Submissions that already went somewhere are not pending: converted ones have
-  // a real record in the list, attached ones live on a client, dismissed ones
-  // were judged. Only untouched submissions are drawn as pending rows.
-  const RESOLVED_SUBMISSION_STATUSES = ["converted_lead", "attached_to_client", "dismissed"];
-
+  // a real record in the list, dismissed ones were judged. Everything else is
+  // drawn as a pending row.
+  //
+  // ATTACHED_TO_CLIENT IS NOT AN EXIT. It used to be: linking an inquiry to its
+  // Roster client took it off this list, so a repeat customer asking for new
+  // work had no stage, no AM and no follow-up, and nobody saw it again unless
+  // they went looking on the client record. Existing clients are the best
+  // inquiries there are. Linking now files the inquiry here with the client on
+  // it, and anything attached the old way reappears as a pending row.
   function pendingSubmissions() {
-    return state_intake.filter(function(sub) {
-      return RESOLVED_SUBMISSION_STATUSES.indexOf(sub.status) === -1;
-    });
+    return state_intake.filter(isPendingSubmission);
   }
 
   // A pending row is built fresh on every render and never saved. Its id is
@@ -8754,7 +8757,7 @@ export async function start(ctx) {
 
     let lead = state_leads.find(function(l) { return l.lead_id === leadId; });
 
-    if (status === "Won" && lead && !lead.promoted_customer_id) {
+    if (status === "Won" && lead && needsRosterPromotion(lead)) {
       if (!confirm('Marking "' + lead.company_name + '" Won here does NOT add it to the Roster.\n\n' +
         'To create the client record, open it and use "Promote to Roster" instead.\n\n' +
         'Set status to Won anyway?')) return revert();
@@ -8896,7 +8899,7 @@ export async function start(ctx) {
     // Won is what Promote to Roster sets — don't let a bulk edit fake a promotion.
     // A pending row has never been promoted by definition, so it counts here too.
     if (status === "Won") {
-      const unpromoted = stored.filter(function(l) { return !l.promoted_customer_id; });
+      const unpromoted = stored.filter(needsRosterPromotion);
       if (unpromoted.length + pendingCount) {
         const ok = confirm('Marking ' + (unpromoted.length + pendingCount) + ' inquiry(s) "Won" here does NOT add them to the Roster.\n\n' +
           'To create the client record, open each one and use "Promote to Roster" instead.\n\n' +
@@ -9210,6 +9213,7 @@ export async function start(ctx) {
         '<div class="wide"><label class="field-lbl">Inquiry notes</label><textarea class="field" id="editLeadInquiryNotes">' + escapeHtml(lead.inquiry_notes) + '</textarea></div>' +
         '<div class="wide"><label class="field-lbl">Existing CRM notes</label><textarea class="field" id="editLeadCrmNotes">' + escapeHtml(lead.existing_crm_notes) + '</textarea></div>' +
       '</div>' +
+      (lead.client_id ? '<div class="qual-row"><span>Existing client</span><span>' + escapeHtml(clientLabel(lead.client_id)) + '</span></div>' : '') +
       (lead.promoted_customer_id ? '<div class="qual-row"><span>Promoted to Roster as</span><span>' + lead.promoted_customer_id + '</span></div>' : '') +
       '<button class="btn btn-gray btn-sm" id="saveLeadIntakeBtn">Save changes</button>' +
       '<span id="saveLeadIntakeStatus" style="font-size:12px;color:var(--muted);margin-left:8px"></span>' +
@@ -9792,6 +9796,11 @@ export async function start(ctx) {
     if (!lead) return;
     if (lead.promoted_customer_id) {
       alert("Already promoted as " + lead.promoted_customer_id + ".");
+      return;
+    }
+    if (lead.client_id) {
+      alert("This inquiry came from an existing client (" + clientLabel(lead.client_id) + "). " +
+        "They are already on the Roster, so there is nothing to promote.");
       return;
     }
     const customerId = "LEAD-" + lead.lead_id.slice(5, 13).toUpperCase();
@@ -10520,21 +10529,26 @@ export async function start(ctx) {
       '</div>' +
       '<div id="inqActions">';
 
-    if (s.status === "attached_to_client" || s.status === "converted_lead" || s.status === "dismissed") {
+    if (s.status === "converted_lead" || s.status === "dismissed") {
       html += '<div class="help">This inquiry is <b>' + s.status.replace(/_/g, " ") + '</b>. ' +
         '<a href="#" id="inqReopen">Reopen</a> to route it again.</div>';
     } else if (isExisting) {
-      const matches = matchRoster(co.name);
-      if (matches.length) {
-        html += '<div class="help">Best Roster matches — pick one to attach this inquiry to that client:</div>';
+      const linked = s.links && s.links.customer_id;
+      const matches = linked ? [] : matchRoster(co.name);
+      if (linked) {
+        html += '<div class="help">Linked to <b>' + escapeHtml(clientLabel(linked)) + '</b>. ' +
+          'File it to put it in the pipeline with that client on it.</div>';
+      } else if (matches.length) {
+        html += '<div class="help">Best Roster matches. Pick one to link this inquiry to that client. ' +
+          'It stays in the pipeline either way.</div>';
         html += matches.map(function(m) {
           return '<button class="btn btn-gray btn-sm" style="display:block;width:100%;text-align:left;margin-bottom:6px" ' +
             'data-attach="' + m.rec.customer_id + '">' + escapeHtml(m.rec.company_name) +
             ' <span style="color:var(--faint)">(' + m.rec.customer_id + (m.rec.is_prospect ? " · prospect" : "") + ")</span></button>";
         }).join("");
-        html += '<div class="help" style="margin-top:4px">Not one of these? File it as its own inquiry:</div>';
+        html += '<div class="help" style="margin-top:4px">Not one of these? File it without a client link:</div>';
       } else {
-        html += '<div class="help">No confident Roster match for "' + escapeHtml(co.name) + '". File it as its own inquiry:</div>';
+        html += '<div class="help">No confident Roster match for "' + escapeHtml(co.name) + '". File it without a client link:</div>';
       }
       html += '<button class="btn btn-green btn-sm" id="inqConvert">File it</button> ' +
               '<button class="btn btn-gray btn-sm" id="inqDismiss">Dismiss</button>';
@@ -10572,45 +10586,56 @@ export async function start(ctx) {
     if (addressClaims.length) verifyAddressClaims(s, addressClaims);
   }
 
+  function clientLabel(customerId) {
+    const c = state.synced.find(function(x) { return x.customer_id === customerId; });
+    return c ? (c.company_name + " (" + customerId + ")") : customerId;
+  }
+
+  /**
+   * Link an existing-client inquiry to its Roster record AND file it in the
+   * pipeline. Linking used to be the end of the road: the submission was marked
+   * attached_to_client and dropped off the list. Now it gets a record, a lead
+   * number, a stage and an AM like every other inquiry, with the client on it.
+   * The client's own record still gets the inquiry in its history.
+   */
   async function attachInquiryToClient(s, customerId) {
     if (!state.enrichment[customerId]) state.enrichment[customerId] = {};
     const en = state.enrichment[customerId];
     if (!Array.isArray(en.inquiries)) en.inquiries = [];
-    en.inquiries.push({
-      inquiry_id: s.id, submitted_at: s.submitted_at,
-      summary: projectSummary(s),
-      contact: (s.contact && s.contact.name) || "",
-      in_hands_date: (s.project && s.project.in_hands_date) || null
-    });
+    if (!en.inquiries.some(function(q) { return q.inquiry_id === s.id; })) {
+      en.inquiries.push({
+        inquiry_id: s.id, submitted_at: s.submitted_at,
+        summary: projectSummary(s),
+        contact: (s.contact && s.contact.name) || "",
+        in_hands_date: (s.project && s.project.in_hands_date) || null
+      });
+    }
     // fill blank enrichment contact fields without overwriting AM judgment
     const c = s.contact || {};
     if (c.email && !en.contact_email) en.contact_email = c.email;
     if (c.phone && !en.contact_phone) en.contact_phone = c.phone;
     if (s.company && s.company.industry && !en.industry) en.industry = s.company.industry;
 
-    s.status = "attached_to_client";
+    // The link goes on the submission first so adoption carries it onto the
+    // record (inquiryFromSubmission reads links.customer_id into client_id).
     s.links = Object.assign({}, s.links, { customer_id: customerId });
-
     await saveEnrichment(state.enrichment);
-    await saveInbox();
+    const ids = await adoptIds([PENDING_PREFIX + s.id]);
+    const lead = state_leads.find(function(l) { return l.lead_id === ids[0]; });
+
     renderInquiryBody(s);
     renderInbox();
     render();
-    alert(((s.company && s.company.name) || "Inquiry") + " attached to " + customerId +
-      ". It now shows on that client's record next to the Scorecard fields.");
+    if (!lead) return;
+
+    const open = confirm(lead.company_name + " is linked to " + clientLabel(customerId) +
+      " and filed in the pipeline. Open it now to assign it?");
+    if (open) {
+      $id("inboxDetailOverlay").classList.remove("open");
+      openLeadDetail(lead.lead_id);
+    }
   }
 
-  /**
-   * Filing an inquiry. This used to be "Convert to lead" and it used to build
-   * the record right here, with its own copy of the field mapping. That copy
-   * had already drifted: it never split the contact name into first and last,
-   * which the roster stores separately, and it flattened the submission into a
-   * notes string and threw the original away, so the ask half of the score had
-   * nothing left to read.
-   *
-   * It now calls the SAME adopter the list uses, so filing from this panel and
-   * assigning straight off the list produce an identical record.
-   */
   async function convertInquiryToLead(s) {
     const ids = await adoptIds([PENDING_PREFIX + s.id]);
     const leadId = ids[0];

@@ -503,6 +503,43 @@ await t.test('Add Lead duplicate key ignores apostrophes and suffixes', async ()
   t.equal(normalizeCo(undefined), '');
 });
 
+/* ---- existing clients stay in the pipeline ------------------------------- */
+
+await t.test('linking to a client is not an exit from the pipeline', async () => {
+  const { isPendingSubmission } = await load();
+  t.assert(isPendingSubmission({ status: 'new' }), 'new is pending');
+  t.assert(isPendingSubmission({ status: 'reviewed' }), 'reviewed is pending');
+  t.assert(isPendingSubmission({ status: 'attached_to_client', links: { customer_id: 'C1' } }),
+    'an inquiry linked to an existing client must still be in the pipeline');
+  t.assert(!isPendingSubmission({ status: 'converted_lead' }), 'filed ones have a record instead');
+  t.assert(!isPendingSubmission({ status: 'dismissed' }), 'dismissed ones are done');
+  t.assert(!isPendingSubmission(null));
+});
+
+await t.test('filing a linked inquiry carries the client onto the record', async () => {
+  const { inquiryFromSubmission } = await load();
+  const rec = inquiryFromSubmission({
+    id: 'SUB-1', entry: { existing_client: 'yes' }, company: { name: 'Foth' },
+    links: { customer_id: 'C123' },
+  }, { now: NOW });
+  t.equal(rec.client_id, 'C123');
+  t.equal(rec.source_type, 'Existing account expansion');
+  t.equal(rec.promoted_customer_id, null, 'an existing client is not a win and must not look like one');
+  t.equal(rec.status, 'New');
+});
+
+await t.test('an unlinked inquiry has no client', async () => {
+  const { inquiryFromSubmission } = await load();
+  t.equal(inquiryFromSubmission({ id: 'SUB-2' }, { now: NOW }).client_id, null);
+});
+
+await t.test('an existing client never needs promoting to the Roster', async () => {
+  const { needsRosterPromotion } = await load();
+  t.assert(needsRosterPromotion({}), 'a new company does');
+  t.assert(!needsRosterPromotion({ client_id: 'C1' }), 'an existing client is already on it');
+  t.assert(!needsRosterPromotion({ promoted_customer_id: 'LEAD-X' }), 'already promoted');
+});
+
 const code = t.report();
 process.exit(code !== 0 ? code : (process.exitCode || 0));
 })().catch((e) => {
