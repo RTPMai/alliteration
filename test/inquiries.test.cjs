@@ -465,6 +465,44 @@ await t.test('an all-but-empty submission still adopts without throwing', async 
   t.assert(Array.isArray(rec.status_history), 'the trail must start empty, not undefined');
 });
 
+/* ---- existing-client inquiries: roster matches --------------------------- */
+
+await t.test('an existing-client inquiry finds its Roster record', async () => {
+  const { rosterMatches } = await load();
+  const roster = [
+    { customer_id: 'C1', company_name: 'Foth Companies' },
+    { customer_id: 'C2', company_name: 'Kitchen Bath Solutions' },
+    { customer_id: 'C3', company_name: 'Ankeny Parks' },
+  ];
+  const m = rosterMatches('Foth', roster);
+  t.equal(m.length, 1);
+  t.equal(m[0].rec.customer_id, 'C1');
+});
+
+await t.test('roster matching never throws on blanks', async () => {
+  const { rosterMatches } = await load();
+  t.equal(rosterMatches('', [{ customer_id: 'C1', company_name: 'Foth' }]).length, 0);
+  t.equal(rosterMatches('Foth', undefined).length, 0);
+  t.equal(rosterMatches(undefined, null).length, 0);
+});
+
+await t.test('the screen calls a matchRoster that actually exists', async () => {
+  const src = require('fs').readFileSync(path.join(ROOT, 'apps/backbone/main.js'), 'utf8');
+  // This one is a text check on purpose: the bug was a call with no definition,
+  // and a call with no definition only shows up when the source is read.
+  if (/matchRoster\(/.test(src)) {
+    t.assert(/function matchRoster\(/.test(src), 'matchRoster is called but never defined; existing-client inquiries will not open');
+  }
+});
+
+await t.test('Add Lead duplicate key ignores apostrophes and suffixes', async () => {
+  const { normalizeCo } = await load();
+  t.equal(normalizeCo("Gino's"), normalizeCo('Ginos'));
+  t.equal(normalizeCo('Foth, Inc.'), normalizeCo('foth'));
+  t.equal(normalizeCo('The Kitchen & Bath Co'), 'kitchen and bath');
+  t.equal(normalizeCo(undefined), '');
+});
+
 const code = t.report();
 process.exit(code !== 0 ? code : (process.exitCode || 0));
 })().catch((e) => {

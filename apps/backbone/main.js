@@ -55,7 +55,7 @@ import {
   INQUIRY_STATUSES, FUNNEL_STAGES, STAGE_STALE_DAYS,
   normalizeInquiryStatus, setInquiryStatus, daysInStage, isStalled,
   reachBackDue, askSummary, combinedScore, inquiryPriority, isActive,
-  inquiryFromSubmission,
+  inquiryFromSubmission, rosterMatches, normalizeCo,
 } from '../../lib/backbone/inquiries.js';
 
 export async function start(ctx) {
@@ -10455,6 +10455,12 @@ export async function start(ctx) {
       visionHtml;
   }
 
+
+  // Existing-client inquiries open with their likely Roster records. Archived
+  // clients are left out: attaching fresh work to an archived record hides it.
+  function matchRoster(name) {
+    return rosterMatches(name, state.synced.filter(function(c) { return !isClientArchived(c.customer_id); }));
+  }
 
   function renderInquiryBody(s) {
     const co = s.company || {};
