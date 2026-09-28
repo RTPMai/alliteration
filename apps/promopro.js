@@ -453,12 +453,12 @@ export default {
         </div>
         <button class="pp-btn" id="ppNewToggle">New purchase order</button>
       </div>
-      <div id="ppFormWrap" hidden></div>
-      <div id="ppDetailWrap" hidden></div>
       <div class="pp-find">
         <input id="ppFind" type="search" autocomplete="off" placeholder="Search PO, invoice, customer, vendor, item, tracking, notes">
         <button class="pp-find-x" id="ppFindClear" title="Clear search" aria-label="Clear search" hidden>×</button>
       </div>
+      <div id="ppFormWrap" hidden></div>
+      <div id="ppDetailWrap" hidden></div>
       <div class="pp-filters" id="ppOrdersFilters"></div>
       <div id="ppOrdersBody">Loading…</div>
     </div>
@@ -3623,6 +3623,14 @@ export default {
     function setFind(val, typed) {
       clearTimeout(st.findTimer);
       st.find = String(val || '');
+      // A search closes whatever order was open. Otherwise the order you
+      // looked at earlier sits on top of the results and reads as "the
+      // search opened the wrong PO" (Sep 28 2026, which is exactly what
+      // happened). The new-PO form is left alone: that is half-typed work.
+      if (isSearching(st.find) && st.openPoId) {
+        $('#ppDetailWrap').hidden = true;
+        st.openPoId = null;
+      }
       const box = $('#ppFind');
       if (box && !typed) box.value = st.find;
       renderOrders();
@@ -3639,6 +3647,13 @@ export default {
         e.target.value = '';
         setFind(val);
         ctx.go('orders');
+        return;
+      }
+      // Enter on the Orders box searches now instead of waiting out the
+      // typing delay. It never opens an order.
+      if (e.target.id === 'ppFind' && e.key === 'Enter') {
+        e.preventDefault();
+        setFind(e.target.value, true);
         return;
       }
       if ((e.target.id === 'ppFind' || e.target.id === 'ppPipeFind') && e.key === 'Escape') {
