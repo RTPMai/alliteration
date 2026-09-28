@@ -25,6 +25,7 @@ import { validateNew, validatePatch, canDeleteNote } from "../lib/sitework/schem
 import {
   listNotes, getNote, saveNote, updateNote, deleteNote, nextNoteId,
 } from "../lib/sitework/store.js";
+import { notifyStickyDone } from "../lib/sitework/done-notice.js";
 
 // The app-id allowlist lives server-side rather than importing js/registry.js
 // (browser code), so it is kept in sync by hand. Same list api/notifications.js
@@ -199,6 +200,9 @@ export default async function handler(req, res) {
       if (patch.status === "open") { patch.doneAt = null; patch.doneBy = null; }
 
       const merged = await updateNote(id, patch);
+      // Tell whoever made it, unless they are the one who checked it off.
+      // Fails soft inside; the note is saved either way.
+      await notifyStickyDone(existing, merged, me);
       return res.status(200).json({ ok: true, note: merged });
     }
 
