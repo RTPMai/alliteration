@@ -1,3 +1,4 @@
+// PUT IN: test/promopro.test.cjs
 // test/promopro.test.cjs
 /**
  * PromoPro tests.
@@ -1156,7 +1157,7 @@ t.test('the Printavo lookup explains why it does not reuse the sync', () => {
     // away (fixed Sep 2, 2026).
     const supported = new Set(['id', 'description', 'itemNumber', 'items']);
     fakePrintavo((q) => {
-      const leaf = (q.match(/lineItems \{ nodes \{ ([^}]*)\}/) || [])[1] || '';
+      const leaf = (q.match(/lineItems(?:\([^)]*\))? \{ (?:pageInfo \{[^}]*\} )?nodes \{ ([^}]*)\}/) || [])[1] || '';
       const asked = leaf.trim().split(/\s+/).filter((w) => /^[a-z]/i.test(w) && w !== 'name');
       const bad = asked.find((f) => !supported.has(f.replace(/[{}]/g, '')));
       if (bad) return { errors: [{ message: `Field '${bad}' doesn't exist on type 'LineItem'` }] };

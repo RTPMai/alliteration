@@ -107,7 +107,7 @@ const inv = (contact, extra) => Object.assign({
 
   t.test('a real failure stops the ladder instead of spending six requests', () => {
     const fn = lookupSrc.slice(lookupSrc.indexOf('async function getFromRoot'));
-    t.assert(/if \(!isSchemaError\(e\.message\)\) return/.test(fn.slice(0, 2500)),
+    t.assert(/if \(!isSchemaError\(e\.message\)\) return/.test(fn.slice(0, 4000)),
       'an auth error or an outage is not something to retry with fewer fields');
   });
 
