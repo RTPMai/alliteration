@@ -140,6 +140,8 @@ const STORE_KINDS = [
 ];
 
 const isInternal = new URLSearchParams(location.search).get("internal") === "1";
+const SERVICES_URL = "https://www.pmapparel.com/services/";
+const REDIRECT_SECS = 5;
 if (isInternal) document.getElementById("internalBadge").style.display = "block";
 
 // Accumulated answers — mirrors the intake_v1 schema stored in backbone_intake
@@ -459,8 +461,27 @@ const STEPS = {
       '<h2>Got it — thank you!</h2>' +
       '<p class="sub">Your inquiry is in. The right account manager will reach out shortly' +
       (form.project.in_hands_date ? ' — we\'ve noted your ' + form.project.in_hands_date + ' in-hands date.' : '.') + '</p>' +
-      '<button class="btn btn-primary" onclick="location.reload()">Start another inquiry</button></div>');
+      (isInternal
+        ? '<button class="btn btn-primary" onclick="location.reload()">Start another inquiry</button></div>'
+        : '<p class="sub" id="redirectNote">Taking you to our services page in <span id="redirectSecs">' + REDIRECT_SECS + '</span>...</p>' +
+          '<a class="btn btn-primary" href="' + SERVICES_URL + '" target="_top">See our services</a></div>'));
     bar.style.width = "100%";
+    // Public visitors land on the services page after a short pause so the
+    // confirmation is still readable. Staff (?internal=1) stay put so they
+    // can log the next call.
+    if (!isInternal) {
+      let left = REDIRECT_SECS;
+      const tick = setInterval(function() {
+        left -= 1;
+        const s = document.getElementById("redirectSecs");
+        if (s) s.textContent = left;
+        if (left <= 0) {
+          clearInterval(tick);
+          try { window.top.location.href = SERVICES_URL; }
+          catch (e) { location.href = SERVICES_URL; }
+        }
+      }, 1000);
+    }
   }
 };
 
