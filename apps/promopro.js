@@ -637,7 +637,11 @@ export default {
     // set carrier and tracking and log a follow-up on orders where they are
     // the account manager, because they are the one copied on the vendor's
     // emails. The server makes the same call with the same ownsPo().
+    // Anybody named in Settings under "can move any order along" can do the
+    // same on every order (youCanMoveAny, worked out by the server with the
+    // same namedMover() the route gates on).
     const canMove = (p) => canEdit ||
+      st.settings.youCanMoveAny === true ||
       (st.settings.youCanMoveOwn === true && ownsPo(p, meId(), st.settings.meUsername));
 
     // EVERY count and list on the two list screens starts here. Scoping the
@@ -2629,13 +2633,14 @@ export default {
         '</div>' +
         (withAccess.length
           ? '<table class="pp-table" style="margin-bottom:14px"><thead><tr>' +
-              '<th>Person</th><th>Role</th><th>Raise a PO</th><th>Book in stock</th><th>Why</th>' +
+              '<th>Person</th><th>Role</th><th>Raise a PO</th><th>Move any order</th><th>Book in stock</th><th>Why</th>' +
             '</tr></thead><tbody>' +
             withAccess.map((r) =>
               '<tr>' +
                 '<td>' + esc(r.name) + '<div style="color:var(--muted);font-size:11px">' + esc(r.username) + '</div></td>' +
                 '<td>' + esc(r.role) + (r.superuser ? ' <span style="color:var(--muted)">(Admin flag)</span>' : '') + '</td>' +
                 '<td>' + (r.canRaise ? yes : no) + '</td>' +
+                '<td>' + (r.canMoveAny ? yes : no) + '</td>' +
                 '<td>' + (r.canReceive ? yes : no) + '</td>' +
                 '<td style="color:var(--muted)">' + esc(r.why) + '</td>' +
               '</tr>'
@@ -2834,6 +2839,25 @@ export default {
                 ((S.editUsers || []).length ? esc((S.editUsers || []).join(', ')) : 'Anyone with edit access in the shell.') +
               '</div>') +
 
+          '<div class="pp-sect">Who can move any order along</div>' +
+          '<div class="pp-hint" style="margin-bottom:10px">' +
+            'For people who watch orders come through but should not be buying. They can tick progress, add carrier and tracking, and log a follow-up on every order. ' +
+            'They cannot change the vendor, lines, prices or notes, send, cancel, reorder or touch artwork. ' +
+            'Account managers can already do this on their own orders without being ticked here.' +
+          '</div>' +
+          (isAdmin
+            ? (Array.isArray(S.buyers) && S.buyers.length
+                ? '<div class="pp-amgrid">' + S.buyers.filter((b) => b.canOpen).map((b) =>
+                    '<label class="pp-amrow"><input type="checkbox" data-moveuser="' + esc(b.username) + '"' +
+                      ((S.moveUsers || []).includes(String(b.username).toLowerCase()) ? ' checked' : '') + '>' +
+                    '<span><span class="nm">' + esc(b.name || b.username) + '</span>' +
+                    '<span class="em">' + esc(b.username) + '</span></span></label>'
+                  ).join('') + '</div>'
+                : '<div class="pp-notice">The account list could not be read, so this cannot be changed right now.</div>')
+            : '<div style="font-size:13px">' +
+                ((S.moveUsers || []).length ? esc((S.moveUsers || []).join(', ')) : 'Nobody beyond account managers on their own orders.') +
+              '</div>') +
+
           buyersHtml(S) +
 
           '<div class="pp-sect">Promo categories</div>' +
@@ -2967,6 +2991,13 @@ export default {
           if (el.checked) editUsers.push(String(el.dataset.edituser).toLowerCase());
         });
         payload.editUsers = editUsers;
+      }
+      if (root.querySelector('[data-moveuser]')) {
+        const moveUsers = [];
+        root.querySelectorAll('[data-moveuser]').forEach((el) => {
+          if (el.checked) moveUsers.push(String(el.dataset.moveuser).toLowerCase());
+        });
+        payload.moveUsers = moveUsers;
       }
 
       try {

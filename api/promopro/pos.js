@@ -90,7 +90,7 @@ export default async function handler(req, res) {
         employees,
         effectiveAccountManagerIds(settingsForGate, employees),
       );
-      const verdict = moveVerdict({ canEdit: false, role, po, meId: me && me.id, username: sess.username });
+      const verdict = moveVerdict({ canEdit: false, role, po, meId: me && me.id, username: sess.username, settings: settingsForGate });
       if (!verdict.allowed) return res.status(403).json({ error: verdict.why });
 
       const outside = outsideMove(body);

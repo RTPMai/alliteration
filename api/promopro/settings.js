@@ -26,6 +26,7 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { isAdminSession, callerFor, editVerdict, receiveVerdict } from "../../lib/promopro/access.js";
+import { namedMover } from "../../lib/promopro/move-own.js";
 import { validateSettings, withSettingDefaults } from "../../lib/promopro/schema.js";
 import { getSettings, saveSettings } from "../../lib/promopro/store.js";
 import { listEmployees } from "../../lib/crewcore/store.js";
@@ -68,9 +69,15 @@ export default async function handler(req, res) {
     // screen can recognise orders it owns. Which orders are "yours" is then
     // answered per order by ownsPo() in lib/promopro/move-own.js, the same
     // function the purchase-order route gates on.
-    function moveOwnFlags() {
+    // youCanMoveAny: named in Settings to move EVERY order along, not just
+    // their own. Same namedMover() the purchase-order route gates on, and
+    // still subject to the read-only check, so the screen and the server
+    // cannot disagree.
+    function moveOwnFlags(settings) {
+      const canMoveOwn = !!callerRole && callerRole.can_edit !== false;
       return {
-        youCanMoveOwn: !!callerRole && callerRole.can_edit !== false,
+        youCanMoveOwn: canMoveOwn,
+        youCanMoveAny: canMoveOwn && namedMover(settings, sess.username),
         meUsername: String(sess.username || "").trim().toLowerCase(),
       };
     }
@@ -91,7 +98,7 @@ export default async function handler(req, res) {
         // failure.
         settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
         settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
-        Object.assign(settings, moveOwnFlags());
+        Object.assign(settings, moveOwnFlags(settings));
         if (isAdmin) settings.candidates = [];
         return settings;
       }
@@ -132,7 +139,7 @@ export default async function handler(req, res) {
       // people who cannot use it and fail at the last step.
       settings.youCanRaise = editVerdict(caller, callerRole, settings).allowed;
       settings.youCanReceive = receiveVerdict(caller, callerRole).allowed;
-      Object.assign(settings, moveOwnFlags());
+      Object.assign(settings, moveOwnFlags(settings));
 
       // WHO CAN BUY, ONE ROW PER ACCOUNT. Admins only.
       //
@@ -189,6 +196,11 @@ export default async function handler(req, res) {
               // misleading on a screen being used to decide who to remove.
               canRaise: canOpen && raise.allowed,
               canReceive: canOpen && receiveVerdict(u, r).allowed,
+              // Buyers can move anything already. This column is about
+              // everybody else: named on the move-along list, and not
+              // read-only in the shell.
+              canMoveAny: canOpen && (raise.allowed ||
+                (!!r && r.can_edit !== false && namedMover(settings, u.username))),
               why: canOpen ? raise.why : "Cannot open PromoPro at all",
             });
           }
