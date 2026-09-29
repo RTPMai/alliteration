@@ -126,7 +126,7 @@ const SETTINGS = {
     t.equal(m.length, 1, 'exactly one mailto: ' + JSON.stringify(m));
     t.assert(m[0].startsWith('href="mailto:hannah@pmapparel.com?subject='), m[0]);
     t.assert(m[0].includes('subject=Let%27s%20start%20my%20holiday%20project'), 'subject rides along, apostrophe encoded like hers: ' + m[0]);
-    t.assert(html.includes('>Email Hannah</a>'), 'labelled with her name');
+    t.assert(html.includes('>email hannah.</a>'), 'labelled with her name, the brand way (lower case, period)');
     t.assert(html.includes('Hannah is your account manager.'), '{name} filled in');
     t.assert(!/Email (Abby|Alexis|Jacob)/.test(html), 'nobody else\'s button');
   });
@@ -141,8 +141,8 @@ const SETTINGS = {
     for (const am of ['Ryan Toney', 'House Account', 'TBD', '', '-', 'Megan']) {
       const html = S.renderHtml({}, ctx({ accountManager: am }));
       t.equal(mailtos(html).length, 0, `no mailto for ${JSON.stringify(am)}`);
-      t.assert(html.includes('Start a Project - Inquiry Form'), `form button for ${JSON.stringify(am)}`);
-      t.assert(!/>Email [A-Z]/.test(html), `no Email button for ${JSON.stringify(am)}`);
+      t.assert(html.includes('>start a project.</a>'), `form button for ${JSON.stringify(am)}`);
+      t.assert(!/>email [a-z]/i.test(html), `no Email button for ${JSON.stringify(am)}`);
     }
     const added = S.renderHtml({ people: ['Abby', 'Ryan'] }, ctx({ accountManager: 'Ryan Toney' }));
     t.assert(added.includes('mailto:ryan@pmapparel.com'), 'adding a name to the list gives them a button');
@@ -164,8 +164,8 @@ const SETTINGS = {
 
   await check('her dates are live text, not a picture', () => {
     const html = S.renderHtml({}, ctx());
-    ['Delivered by December 4', 'Get your gear by December 16', 'Oct 8 - 21', 'Nov 30 - Dec 4', 'Dec 10 - 16',
-      'Plan Ahead for Early December Delivery', 'November 26-27'].forEach((s) => t.assert(html.includes(s), 'missing ' + s));
+    ['delivered by december 4.', 'get your gear by december 16.', 'Oct 8 - 21', 'Nov 30 - Dec 4', 'Dec 10 - 16',
+      'plan ahead for early december delivery.', 'November 26-27'].forEach((s) => t.assert(html.includes(s), 'missing ' + s));
     t.assert(!html.includes('PM-Apparel-2026-Holiday-Email.png'), 'not her picture');
   });
 
@@ -282,7 +282,7 @@ const SETTINGS = {
     const before = JSON.stringify([...kv.entries()]);
     const as = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: {}, subject: 's', sample: { accountManager: 'Hannah' } } });
     t.equal(as.statusCode, 200, JSON.stringify(as.body));
-    t.assert(as.body.html.includes('>Email Hannah</a>'), 'Hannah\'s copy');
+    t.assert(as.body.html.includes('>email hannah.</a>'), 'Hannah\'s copy');
     t.equal(as.body.problems.length, 0, JSON.stringify(as.body.problems));
     const none = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: {}, subject: 's', sample: {} } });
     t.equal(mailtos(none.body.html).length, 0, 'no rep picked, no button');
