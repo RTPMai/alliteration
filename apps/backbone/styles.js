@@ -753,4 +753,14 @@ body.read-only .btn-green,body.read-only .btn-red{display:none !important}
   background: var(--accent-tint); border-radius: var(--radius-sm);
   padding: 10px 12px; margin-bottom: 12px; font-size: 12.5px;
 }
+
+/* Website and social links on a client record (Sep 30 2026). */
+.client-links { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.client-link {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border: 1px solid var(--line); border-radius: 999px; background: var(--card);
+  font-size: 12px; color: var(--ink); text-decoration: none;
+}
+.client-link:hover { border-color: var(--accent); }
+.client-link b { font-weight: 700; color: var(--muted); }
 `;

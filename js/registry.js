@@ -58,6 +58,8 @@ export const APPS = [
       // existed only because Leads had been built for cold outbound.
       ['inquiries', 'Inquiries'],
       ['roster', 'Roster'],
+      // Sep 30 2026: who sent us whom, confirmed and ranked by fiscal year.
+      ['referrals', 'Referrals'],
       ['scorecard', 'Scorecard'],
       // One Archived screen covers inquiries AND clients: "where did that go"
       // is the same question either way, and two near-identical screens drift.

@@ -2150,7 +2150,15 @@ export default async function handler(req, res) {
               if (!acc.workloadByCustomer[key]) {
                 acc.workloadByCustomer[key] = { customer_id: cust.id, company_name: cust.name, quotes: 0, inProgress: 0, onHold: 0 };
               }
-              acc.workloadByCustomer[key][grp]++;
+              const wrow = acc.workloadByCustomer[key];
+              wrow[grp]++;
+              // Dollar value per group, Sep 30 2026, for BackBone's Capacity
+              // card (open quote value and open job value per AM). Cents are
+              // kept to the penny here and rounded once on the screen. A
+              // partial saved before this change has no value fields, so the
+              // `|| 0` starts them cleanly on resume.
+              const vkey = grp + "Value";
+              wrow[vkey] = Math.round(((wrow[vkey] || 0) + (Number(q.total) || 0)) * 100) / 100;
             }
             if (created && created >= weekAgoIso) acc.quotesThisWeek++;
             if (created && created >= yearStart && normStatus(statusName) === normArtDeclined) acc.artDeclinedYtd++;

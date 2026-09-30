@@ -123,6 +123,45 @@ export default `
     </div>
   </div>
 
+  <!-- REFERRALS (Sep 30 2026). Who sent us whom, confirmed by an account
+       manager, thanked, and ranked by fiscal year (Dec 1 to Nov 30). The
+       public inquiry form only ever takes free text for "who referred you":
+       matching it to a client happens here, behind the login. -->
+  <div id="page-referrals" class="page">
+    <div class="kpi-grid" id="refKpiGrid"></div>
+
+    <div class="card">
+      <div class="card-hd">
+        <h3>Top referrers</h3>
+        <div style="display:flex;gap:8px;align-items:center;margin-left:auto">
+          <select class="field" id="refYearSelect" style="width:auto"></select>
+          <button class="btn btn-green btn-sm" id="refNewBtn">Log a referral</button>
+        </div>
+      </div>
+      <div class="card-bd">
+        <div class="help" id="refYearHelp"></div>
+        <div id="refRankWrap"></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:12px">
+      <div class="card-hd"><h3>Every referral this year</h3></div>
+      <div class="card-bd">
+        <div class="toolbar">
+          <input class="search" id="refSearch" placeholder="Search who referred or who was referred"/>
+          <select class="field" id="refStatusFilter" style="width:auto">
+            <option value="">All</option>
+            <option value="to_confirm">To confirm</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="unthanked">Confirmed, not thanked</option>
+            <option value="not_referral">Not a referral</option>
+          </select>
+        </div>
+        <div id="refListWrap"></div>
+      </div>
+    </div>
+  </div>
+
   <div id="page-scorecard" class="page">
     <div class="kpi-grid" id="tierKpiGrid"></div>
 
@@ -267,22 +306,23 @@ export default `
       </div>
     </div>
 
-    <!-- Capacity: coming soon. Deliberately OUTSIDE #dashGrid so the drag /
-         hide / reset-layout machinery never has to know about it. Static
-         placeholder; replace with the real Capacity view when it ships.
-         It will grow out of the Account Managers card above, adding
-         PTO-weighted availability once CrewCore exists to ask. -->
-    <div class="card" id="dashCapacitySoon" style="margin-top:12px">
+    <!-- Capacity (Sep 30 2026, replacing the coming-soon card). Deliberately
+         still OUTSIDE #dashGrid so the drag / hide / reset-layout machinery
+         never has to know about it. The math is lib/backbone/capacity.js;
+         days out come from CrewCore time off through api/capacity.js, and
+         only for people allowed to see the team calendar. -->
+    <div class="card" id="dashCapacity" style="margin-top:12px">
       <div class="card-hd">
-        <h3>Capacity <span class="badge badge-amber" style="margin-left:8px">Coming soon</span></h3>
+        <h3>Capacity</h3>
+        <span class="help" id="dashCapacityStamp" style="margin-left:auto"></span>
       </div>
       <div class="card-bd">
-        <div class="help">
-          Who has room for the next job: open jobs and open-quote value per
-          account manager, at a glance. Builds on the Account Managers card
-          above, and once CrewCore ships it can weight availability by PTO
-          — someone out Thursday and Friday has less capacity that week.
+        <div class="help" style="margin-bottom:8px">
+          Who has room for the next job. Open quotes and open jobs (approved,
+          in art or digitizing, ready to order, or on hold) per account manager,
+          with days out from CrewCore time off. Most room first.
         </div>
+        <div id="dashCapacityWrap"><div class="help">Loading&hellip;</div></div>
       </div>
     </div>
   </div>
@@ -463,6 +503,11 @@ export default `
       <div class="section-lbl">Synced from Printavo</div>
       <div class="synced-grid" id="syncedGrid"></div>
 
+      <!-- Website and social links, drawn from the fields below. Empty when none. -->
+      <div class="client-links" id="detailLinks" style="display:none"></div>
+      <!-- Who referred this client, and whom they have referred. -->
+      <div id="detailReferrals" class="help" style="display:none;margin-top:6px"></div>
+
       <div id="detailInquiries" style="display:none"></div>
 
       <div class="section-lbl">Manual / enrichment fields</div>
@@ -471,6 +516,7 @@ export default `
     </div>
     <div class="modal-ft">
       <button class="btn btn-green" id="saveEnrichBtn">Save</button>
+      <button class="btn btn-gray" id="clientReferralBtn">Log a referral</button>
       <button class="btn btn-gray" id="archiveClientBtn">Archive client</button>
       <button class="btn btn-gray" id="restoreClientBtn" style="display:none">Restore client</button>
       <span class="save-status" id="saveStatus"></span>
@@ -634,6 +680,51 @@ export default `
   </div>
 </div>
 
+<!-- One referral, new or existing. The client lists behind the two "who"
+     boxes are the signed-in roster; nothing here is reachable from outside. -->
+<div class="modal-overlay" id="referralOverlay">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-hd">
+      <h3 id="refModalTitle">Log a referral</h3>
+      <button class="modal-close" id="refModalClose">&times;</button>
+    </div>
+    <div class="modal-bd">
+      <div id="refModalStatus"></div>
+      <label class="field-lbl">Who was referred *</label>
+      <input class="field" id="refReferredInput" list="refClientList" placeholder="Their company or name"/>
+      <label class="field-lbl" style="margin-top:12px">What they said</label>
+      <textarea class="field" id="refSaidInput" rows="2" placeholder="Their own words, e.g. &quot;Jen at the Y told us to call you&quot;"></textarea>
+      <label class="field-lbl" style="margin-top:12px">Who referred them</label>
+      <input class="field" id="refReferrerInput" list="refClientList" placeholder="Start typing a client, or type a person's name"/>
+      <div class="help" id="refSuggest" style="margin-top:6px"></div>
+      <label class="field-lbl" style="margin-top:12px">Date of the referral</label>
+      <input class="field" type="date" id="refDateInput" style="width:auto"/>
+      <label class="field-lbl" style="margin-top:12px">Note</label>
+      <input class="field" id="refNoteInput" placeholder="Anything worth knowing later"/>
+      <div id="refThankBox" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line);display:none">
+        <label class="field-lbl">Thank-you</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+          <select class="field" id="refThankHow" style="width:auto"></select>
+          <input class="field" type="date" id="refThankOn" style="width:auto"/>
+          <button class="btn btn-gray btn-sm" id="refThankBtn">Save thank-you</button>
+        </div>
+      </div>
+      <div id="refHistory" class="help" style="margin-top:12px"></div>
+      <datalist id="refClientList"></datalist>
+      <div id="refModalErr" style="color:var(--danger);font-size:12px;margin-top:10px"></div>
+    </div>
+    <div class="modal-ft" style="justify-content:space-between;flex-wrap:wrap;gap:8px">
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-green" id="refSaveBtn">Save</button>
+        <button class="btn btn-gray" id="refConfirmBtn" style="display:none">Confirm referral</button>
+        <button class="btn btn-gray" id="refRejectBtn" style="display:none">Not a referral</button>
+        <button class="btn btn-gray" id="refReopenBtn" style="display:none">Reopen</button>
+      </div>
+      <button class="btn btn-danger btn-sm" id="refDeleteBtn" style="display:none">Delete</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-overlay" id="leadDetailOverlay">
   <div class="modal" style="max-width:640px">
     <div class="modal-hd">
@@ -664,6 +755,7 @@ export default `
         <button class="btn btn-gray btn-sm" id="archiveLeadBtn">Archive</button>
         <button class="btn btn-gray btn-sm" id="restoreLeadBtn" style="display:none">Restore</button>
         <button class="btn btn-gray btn-sm" id="rerunQualBtn">Run / re-run AI qualification (API)</button>
+        <button class="btn btn-gray btn-sm" id="leadReferralBtn">Referral</button>
         <button class="btn btn-green btn-sm" id="promoteLeadBtn">Promote to Roster</button>
       </div>
     </div>

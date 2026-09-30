@@ -63,7 +63,7 @@ const LIVE_PREFIXES = [
   '/api/intake', '/api/zip-check', '/api/inquiry-brief', '/api/qualify', '/api/brief', '/api/scan-card',
   '/api/printavo-sync', '/api/customer-match',
   '/api/reorder-settings', '/api/marketmachine/', '/api/merges',
-  '/api/archive-reasons', '/api/archived-clients',
+  '/api/archive-reasons', '/api/archived-clients', '/api/referrals', '/api/capacity',
   // ErrorEngine: api/errors.js, api/taxonomy.js and api/errorengine/customers.js
   // are deployed. ('/api/errors' does not prefix-match '/api/errorengine/…' —
   // the 's' vs 'e' at position 10 keeps them distinct.)
@@ -197,6 +197,11 @@ export const ENDPOINTS = {
   // server-side on every roster read, so this endpoint is only for managing
   // the merges themselves, never for reading customers.
   bbMerges:        '/api/merges',
+  // Referral tracking (Sep 30 2026). Behind the login: it names clients.
+  bbReferrals:     '/api/referrals',
+  // Capacity view: which account managers are out, from CrewCore time off.
+  // Dates only, and only for callers allowed to see them (see the route).
+  bbCapacity:      '/api/capacity',
   bbCustomerMatch: '/api/customer-match',
   bbZipCheck:      '/api/zip-check',
   bbInquiryBrief:  '/api/inquiry-brief',
@@ -290,6 +295,7 @@ export const ENDPOINTS = {
   // Time off (Sep 21 2026): requests, approvals, balances and the PTO
   // policy. Live by the '/api/crewcore/' prefix.
   ccTimeoff:       '/api/crewcore/timeoff',
+  ccIra:           '/api/crewcore/ira',
 
   // ---- Notifications (shell-level) ----
   notifications:   '/api/notifications',

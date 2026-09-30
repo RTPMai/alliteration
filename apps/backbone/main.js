@@ -57,6 +57,14 @@ import {
   reachBackDue, askSummary, combinedScore, inquiryPriority, isActive,
   inquiryFromSubmission, rosterMatches, normalizeCo, needsRosterPromotion, isPendingSubmission,
 } from '../../lib/backbone/inquiries.js';
+// Website and social links: one reader turns whatever was typed ("@handle",
+// "facebook.com/x", a full address) into a safe link, and refuses anything
+// that is not http or https.
+import { clientLinks, socialUrl } from '../../lib/backbone/social.js';
+// Referrals: every rule the ranking uses, shared with api/referrals.js.
+import * as REF from '../../lib/backbone/referrals.js';
+// Capacity: who has room, shared with api/capacity.js and the tests.
+import * as CAP from '../../lib/backbone/capacity.js';
 
 export async function start(ctx) {
   const root = ctx.root;
@@ -3827,6 +3835,9 @@ export async function start(ctx) {
     { key: "annual_revenue_range", label: "Annual revenue range" },
     { key: "website_url", label: "Website" },
     { key: "linkedin_company_page", label: "LinkedIn page" },
+    { key: "facebook_url", label: "Facebook (link or @handle)" },
+    { key: "instagram_url", label: "Instagram (link or @handle)" },
+    { key: "tiktok_url", label: "TikTok (link or @handle)" },
     { key: "persona", label: "Persona / ABM tag" },
     { key: "growth_potential", label: "Growth potential (scorecard)", type: "select", options: [
       ["", "Not set"],
@@ -5664,6 +5675,7 @@ export async function start(ctx) {
     //   Roster (from rows):         client count, revenue, tier mix, needs-review
     //   Ops    (from opsData):      live open-quote load (quotes / in-prog / on-hold)
     renderAmPanel(rows);
+    renderCapacity(rows);
 
     // --- Needs assignment ---
     // At-risk and re-engagement now live entirely in the Dormant & at-risk card (and
@@ -5766,6 +5778,21 @@ export async function start(ctx) {
     render();
   }
 
+  // Website and social links as buttons above the fields, so an AM can open a
+  // client's Instagram without copying it out of a text box. Only fields with
+  // something usable in them show; a bad value simply does not draw.
+  function renderClientLinks(enr) {
+    const el = $id("detailLinks");
+    if (!el) return;
+    const links = clientLinks(enr || {});
+    if (!links.length) { el.style.display = "none"; el.innerHTML = ""; return; }
+    el.innerHTML = links.map(function(l) {
+      return '<a class="client-link" href="' + escapeHtml(l.url) + '" target="_blank" rel="noopener noreferrer">' +
+        '<b>' + escapeHtml(l.label) + '</b>' + escapeHtml(l.text) + '</a>';
+    }).join("");
+    el.style.display = "";
+  }
+
   function openDetail(customerId) {
     const rec = state.synced.find(function(c) { return c.customer_id === customerId; });
     if (!rec) return;
@@ -5795,6 +5822,9 @@ export async function start(ctx) {
       '<div><span class="field-lbl">Invoice count</span>' + rec.invoice_count + '</div>' +
       '<div><span class="field-lbl">Last invoice</span>' + fmtDate(rec.last_invoice_date) + '</div>' +
       '<div><span class="field-lbl">Days since last invoice</span>' + daysSince(rec.last_invoice_date) + '</div>';
+
+    renderClientLinks(enrichment);
+    renderClientReferrals(customerId);
 
     // Attached inquiries — the Inbox→Scorecard link. Fresh intake activity shows right where
     // the AM sets Growth Potential / Client Communication / CSR Needs.
@@ -6007,7 +6037,7 @@ export async function start(ctx) {
     const stars = score == null ? 0 : Math.max(1, Math.min(5, Math.round(score)));
 
     const company = rec.company_name || "Client";
-    const website = (function(){ var w = (enr.website_url || "").trim(); return w && !/^(not found|n\/a|none)$/i.test(w) ? w : ""; })();
+    const website = socialUrl("website_url", enr.website_url) || "";
     const industry = (enr.industry || "").trim();
 
     // --- YoY trend ---
@@ -6288,6 +6318,7 @@ export async function start(ctx) {
     try {
       await saveEnrichment(state.enrichment);
       $id("saveStatus").textContent = "Saved";
+      renderClientLinks(state.enrichment[activeCustomerId]);
       render();
     } catch (e) {
       $id("saveStatus").textContent = "Save failed, try again";
@@ -8238,6 +8269,111 @@ export async function start(ctx) {
     return name.split(/\s+/).map(function(p) { return p[0] || ""; }).join("").slice(0, 2).toUpperCase();
   }
 
+  /* ------------------------------------------------------------------ *
+   * CAPACITY (Sep 30 2026)
+   *
+   * Replaces the coming-soon card. The arithmetic is lib/backbone/capacity.js
+   * so the tests can call it. Days out are fetched once per visit from
+   * api/capacity.js, which only answers for the Admin flag and the time off
+   * approvers; everyone else sees quotes and jobs without availability.
+   * ------------------------------------------------------------------ */
+  const capState = { out: null, canSeeOut: false, loaded: false, loading: null, unmatched: [] };
+
+  function loadCapacityOut() {
+    if (capState.loaded) return Promise.resolve();
+    if (capState.loading) return capState.loading;
+    const q = "?names=" + encodeURIComponent(ACCOUNT_MANAGERS.join("|"));
+    capState.loading = api.get(ENDPOINTS.bbCapacity + q).then(function(d) {
+      capState.canSeeOut = !!(d && d.canSeeOut);
+      capState.out = capState.canSeeOut ? (d.out || {}) : null;
+      capState.unmatched = (d && d.unmatched) || [];
+      capState.loaded = true;
+      capState.loadedAt = Date.now();
+    }).catch(function() {
+      // Time off is a nice-to-have on this card. Failing to load it must not
+      // cost the quotes and jobs, so the card just draws without it.
+      capState.out = null;
+      capState.loaded = true;
+      capState.loadedAt = Date.now();
+    });
+    return capState.loading;
+  }
+
+  function renderCapacity(rosterRows) {
+    const el = $id("dashCapacityWrap");
+    if (!el) return;
+    if (!(opsData && opsData.available && Array.isArray(opsData.workload))) {
+      el.innerHTML = '<div class="help">Capacity appears once the Printavo ops sync has run (it runs every morning around 6 AM).</div>';
+      return;
+    }
+    // Days out are re-asked after ten minutes, so a dashboard left open all
+    // day does not keep showing the morning's time off.
+    if (capState.loaded && capState.loadedAt && Date.now() - capState.loadedAt > 10 * 60 * 1000) {
+      capState.loaded = false;
+      capState.loading = null;
+    }
+    if (!capState.loaded) {
+      loadCapacityOut().then(function() { renderCapacity(rosterRows); });
+    }
+    const cap = CAP.computeCapacity({
+      ams: ACCOUNT_MANAGERS,
+      roster: rosterRows || getDashboardData(),
+      workload: opsData.workload,
+      out: capState.out,
+    });
+    const rows = cap.rows.filter(function(r) {
+      return r.quotes > 0 || r.jobs > 0 || (r.outThisWeek || 0) > 0 || (r.outNextWeek || 0) > 0;
+    });
+    const stamp = $id("dashCapacityStamp");
+    if (stamp) stamp.innerHTML = opsStampHtml();
+    if (!rows.length) {
+      el.innerHTML = '<div class="help">No open quotes or jobs on anybody right now.</div>';
+      return;
+    }
+    const maxLoad = rows.reduce(function(m, r) {
+      const v = r.load == null ? r.jobs : r.load;
+      return isFinite(v) ? Math.max(m, v) : m;
+    }, 0) || 1;
+    const money = function(v) { return v == null ? '<span style="color:var(--faint)" title="Values arrive with the next morning sync">not yet</span>' : fmtMoney(v); };
+    let html = '<table><thead><tr><th>Account manager</th><th>Open quotes</th><th>Quote value</th>' +
+      '<th>Open jobs</th><th>Job value</th>' +
+      (cap.outKnown ? '<th>Out this week</th><th>Out next week</th><th>Jobs per day in</th>' : '') +
+      '<th style="width:22%">Load</th></tr></thead><tbody>';
+    rows.forEach(function(r, i) {
+      const v = r.load == null ? r.jobs : r.load;
+      const w = isFinite(v) ? Math.round(v / maxLoad * 100) : 100;
+      const tone = !isFinite(v) ? "var(--danger)" : (w >= 75 ? "var(--amber)" : "var(--success)");
+      const outCell = function(n, days) {
+        if (n == null) return "";
+        if (!n) return '<td style="color:var(--faint)">0</td>';
+        return '<td><b>' + n + '</b> <span class="help" style="display:inline">' +
+          escapeHtml(CAP.outLabel(r.outDays, days)) + '</span></td>';
+      };
+      html += '<tr>' +
+        '<td>' + escapeHtml(r.am) + (i === 0 && rows.length > 1 ? ' <span class="badge badge-green">Most room</span>' : '') + '</td>' +
+        '<td>' + r.quotes + '</td><td>' + money(r.quotesValue) + '</td>' +
+        '<td>' + r.jobs + (r.onHold ? ' <span class="chip" title="On hold">' + r.onHold + ' on hold</span>' : '') + '</td>' +
+        '<td>' + money(r.jobsValue) + '</td>' +
+        (cap.outKnown ? outCell(r.outThisWeek, cap.weeks.thisWeek) + outCell(r.outNextWeek, cap.weeks.nextWeek) +
+          '<td>' + (r.load == null ? "" : (isFinite(r.load) ? r.load.toFixed(1) : "Out rest of week")) + '</td>' : '') +
+        '<td><div class="amp-bar"><div class="amp-fill" style="width:' + w + '%;background:' + tone + '"></div></div></td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+    const notes = [];
+    if (!cap.hasValues) notes.push("Dollar values start with the next morning sync; the counts are live now.");
+    if (!cap.outKnown) notes.push(capState.loaded && !capState.canSeeOut
+      ? "Days out are shown to admins and time off approvers only."
+      : "Days out could not be loaded, so the ranking is by open jobs.");
+    const missed = (capState.unmatched || []).filter(function(n) { return rows.some(function(r) { return r.am === n; }); });
+    if (cap.outKnown && missed.length) notes.push("No CrewCore record matched " + missed.join(", ") + ", so their days out are not counted.");
+    if (cap.unassigned.jobs || cap.unassigned.quotes) {
+      notes.push(cap.unassigned.quotes + " quotes and " + cap.unassigned.jobs + " jobs belong to clients with no account manager set, so they are not on anyone's line.");
+    }
+    if (notes.length) html += '<div class="help" style="margin-top:8px">' + notes.map(escapeHtml).join("<br>") + '</div>';
+    el.innerHTML = html;
+  }
+
   // --- Account Managers panel (merged leaderboard + workload) ------------------
   // amSort controls the ranking metric. All three data sources feed every row; the
   // toggle only changes what we sort on, never what's shown.
@@ -9148,6 +9284,7 @@ export async function start(ctx) {
       stSel.disabled = archived;
       stSel.title = archived ? "Restore the lead before changing its stage." : "";
     }
+    paintLeadReferralBtn(leadId);
     try {
       renderLeadDetailBody(lead);
     } catch (err) {
@@ -11134,6 +11271,350 @@ export async function start(ctx) {
     setTimeout(function() { status.textContent = ""; }, 3000);
   }
 
+  /* ------------------------------------------------------------------ *
+   * REFERRALS (Sep 30 2026)
+   *
+   * Who sent us whom. The rules (confirm before it counts, the same person
+   * counts once, the year ends Nov 30, rank on people not dollars) live in
+   * lib/backbone/referrals.js, shared with api/referrals.js, so the screen
+   * and the server cannot count differently.
+   *
+   * The client pickers below are a datalist of the signed-in roster. The
+   * public inquiry form never gets one: Ryan does not want the client list
+   * public, so "who referred you" stays free text out there and is matched
+   * to a client here.
+   * ------------------------------------------------------------------ */
+  const refState = { list: [], canEdit: false, canDelete: false, loaded: false, year: null, active: null, prefill: null };
+
+  async function loadReferrals() {
+    try {
+      const d = await api.get(ENDPOINTS.bbReferrals);
+      refState.list = (d && Array.isArray(d.referrals)) ? d.referrals : [];
+      refState.canEdit = !!(d && d.canEdit);
+      refState.canDelete = !!(d && d.canDelete);
+      refState.loaded = true;
+    } catch (e) {
+      refState.loaded = false;
+      refState.error = (e && e.message) || "Referrals did not load.";
+    }
+    return refState.list;
+  }
+
+  function refRoster() { return Array.isArray(state.synced) ? state.synced : []; }
+
+  function refClientName(id) {
+    if (!id) return "";
+    const c = refRoster().find(function(r) { return String(r.customer_id) === String(id); });
+    return c ? (c.company_name || "") : "";
+  }
+
+  // "Acme Co · #12345" in the datalist, so two clients with the same name
+  // stay distinguishable, and the id can be read back off the choice.
+  function refOptionFor(c) { return (c.company_name || "Client") + " · #" + c.customer_id; }
+  function refParsePick(text) {
+    const t = String(text || "").trim();
+    const m = /· #([^\s]+)$/.exec(t);
+    if (m) {
+      const id = m[1];
+      const c = refRoster().find(function(r) { return String(r.customer_id) === id; });
+      if (c) return { customer_id: String(c.customer_id), name: c.company_name || "" };
+    }
+    return { customer_id: null, name: t };
+  }
+
+  function refFillClientList() {
+    const dl = $id("refClientList");
+    if (!dl || dl.dataset.filled === String(refRoster().length)) return;
+    dl.innerHTML = refRoster().filter(function(c) { return c && c.customer_id != null; })
+      .map(function(c) { return '<option value="' + escapeHtml(refOptionFor(c)) + '"></option>'; }).join("");
+    dl.dataset.filled = String(refRoster().length);
+  }
+
+  function refStatusChip(r) {
+    if (r.status === "confirmed") {
+      return '<span class="badge badge-green">Confirmed</span>' +
+        (r.thanked_at ? ' <span class="chip">Thanked ' + escapeHtml(r.thanked_how || "") + '</span>'
+                      : ' <span class="chip chip-caution">Not thanked</span>');
+    }
+    if (r.status === "not_referral") return '<span class="chip">Not a referral</span>';
+    return '<span class="badge badge-amber">To confirm</span>';
+  }
+
+  function refWho(r, side) {
+    const id = side === "referrer" ? r.referrer_customer_id : r.referred_customer_id;
+    const typed = side === "referrer" ? r.referrer_name : r.referred_name;
+    const name = refClientName(id) || typed || "";
+    if (!name) return '<span style="color:var(--faint)">Not set</span>';
+    return escapeHtml(name) + (id ? "" : ' <span class="chip" title="Not matched to a client on the roster">typed</span>');
+  }
+
+  async function renderReferralsPage() {
+    if (!refState.loaded) {
+      $id("refListWrap").innerHTML = '<div class="help">Loading…</div>';
+      await loadReferrals();
+    }
+    if (!refState.loaded) {
+      $id("refListWrap").innerHTML = '<div class="err">' + escapeHtml(refState.error || "Referrals did not load.") + '</div>';
+      return;
+    }
+    const years = REF.fiscalYears(refState.list);
+    if (!refState.year || years.indexOf(refState.year) === -1) refState.year = years[0];
+    const sel = $id("refYearSelect");
+    sel.innerHTML = years.map(function(y) {
+      return '<option value="' + y + '"' + (y === refState.year ? " selected" : "") + '>Fiscal ' + y + '</option>';
+    }).join("");
+    $id("refYearHelp").textContent = REF.fiscalRange(refState.year) +
+      ". Ranked on confirmed people referred. Revenue is the referred clients' lifetime total, shown for context only; it never breaks a tie.";
+    $id("refNewBtn").style.display = refState.canEdit ? "" : "none";
+
+    const rank = REF.rankReferrers(refState.list, refState.year, refRoster());
+    const inYear = REF.referralsInYear(refState.list, refState.year);
+    const confirmed = inYear.filter(function(r) { return r.status === "confirmed"; }).length;
+    const leaderText = rank.leader ? escapeHtml(rank.leader.referrer_name) : (rank.tie ? "Tie" : "None yet");
+    $id("refKpiGrid").innerHTML =
+      '<div class="kpi"><div class="kpi-lbl">To confirm</div><div class="kpi-val">' + rank.toConfirm + '</div></div>' +
+      '<div class="kpi"><div class="kpi-lbl">Confirmed</div><div class="kpi-val">' + confirmed + '</div></div>' +
+      '<div class="kpi"><div class="kpi-lbl">Not thanked yet</div><div class="kpi-val">' + rank.unthanked + '</div></div>' +
+      '<div class="kpi"><div class="kpi-lbl">Leading referrer</div><div class="kpi-val" style="font-size:20px">' + leaderText + '</div>' +
+        (rank.tie ? '<div class="kpi-s">Tied at the top. Revenue does not break it.</div>' : '') + '</div>';
+
+    $id("refRankWrap").innerHTML = rank.rows.length
+      ? '<table><thead><tr><th>#</th><th>Referrer</th><th>People referred</th><th>Have ordered</th><th>Their revenue (lifetime)</th><th>Not thanked</th></tr></thead><tbody>' +
+          rank.rows.map(function(r) {
+            return '<tr><td>' + r.rank + '</td><td>' + escapeHtml(r.referrer_name) + '</td><td><b>' + r.count + '</b></td>' +
+              '<td>' + r.ordered + '</td><td>' + fmtMoney(r.revenue) + '</td>' +
+              '<td>' + (r.unthanked ? '<span class="chip chip-caution">' + r.unthanked + '</span>' : '0') + '</td></tr>';
+          }).join("") + '</tbody></table>'
+      : '<div class="help">No confirmed referrals in this fiscal year yet.</div>';
+
+    paintReferralList();
+  }
+
+  function paintReferralList() {
+    const q = ($id("refSearch").value || "").trim().toLowerCase();
+    const f = $id("refStatusFilter").value;
+    const rows = REF.referralsInYear(refState.list, refState.year).filter(function(r) {
+      if (f === "unthanked") { if (!(r.status === "confirmed" && !r.thanked_at)) return false; }
+      else if (f && r.status !== f) return false;
+      if (!q) return true;
+      const hay = [r.referred_name, r.referrer_name, refClientName(r.referred_customer_id), refClientName(r.referrer_customer_id), r.said, r.id].join(" ").toLowerCase();
+      return hay.indexOf(q) !== -1;
+    }).sort(function(a, b) { return String(b.referred_at).localeCompare(String(a.referred_at)); });
+    $id("refListWrap").innerHTML = rows.length
+      ? '<table><thead><tr><th>Date</th><th>Referred</th><th>By</th><th>What they said</th><th>Status</th></tr></thead><tbody>' +
+          rows.map(function(r) {
+            return '<tr class="ref-row" data-ref-id="' + escapeHtml(r.id) + '" style="cursor:pointer">' +
+              '<td>' + escapeHtml(r.referred_at || "") + '</td><td>' + refWho(r, "referred") + '</td>' +
+              '<td>' + refWho(r, "referrer") + '</td><td>' + escapeHtml(r.said || "") + '</td>' +
+              '<td>' + refStatusChip(r) + '</td></tr>';
+          }).join("") + '</tbody></table>'
+      : '<div class="help">Nothing matches.</div>';
+    $all("[data-ref-id]").forEach(function(tr) {
+      tr.addEventListener("click", function() { openReferral(tr.dataset.refId); });
+    });
+  }
+
+  // Open the modal: an existing referral by id, or a new one with prefill
+  // { referred_name, referred_customer_id, referred_lead_id, said, referrer }.
+  async function openReferral(id, prefill) {
+    if (!refState.loaded) await loadReferrals();
+    refFillClientList();
+    const r = id ? refState.list.find(function(x) { return x.id === id; }) : null;
+    refState.active = r || null;
+    const p = prefill || {};
+    $id("refModalErr").textContent = "";
+    $id("refModalTitle").textContent = r ? r.id + " · referral" : "Log a referral";
+    $id("refModalStatus").innerHTML = r ? '<div style="margin-bottom:10px">' + refStatusChip(r) + '</div>' : "";
+
+    const referredId = r ? r.referred_customer_id : p.referred_customer_id;
+    const referredName = r ? r.referred_name : (p.referred_name || "");
+    const refdC = referredId && refRoster().find(function(c) { return String(c.customer_id) === String(referredId); });
+    $id("refReferredInput").value = refdC ? refOptionFor(refdC) : referredName;
+    $id("refReferredInput").dataset.leadId = (r ? r.referred_lead_id : p.referred_lead_id) || "";
+    $id("refSaidInput").value = r ? (r.said || "") : (p.said || "");
+
+    const rrId = r ? r.referrer_customer_id : null;
+    const rrC = rrId && refRoster().find(function(c) { return String(c.customer_id) === String(rrId); });
+    $id("refReferrerInput").value = rrC ? refOptionFor(rrC) : (r ? (r.referrer_name || "") : (p.referrer || ""));
+    $id("refDateInput").value = r ? (r.referred_at || "") : REF.shopToday();
+    $id("refNoteInput").value = r ? (r.note || "") : "";
+    paintReferrerSuggestions();
+
+    const editable = refState.canEdit;
+    ["refReferredInput", "refSaidInput", "refReferrerInput", "refDateInput", "refNoteInput"].forEach(function(k) { $id(k).disabled = !editable; });
+    $id("refSaveBtn").style.display = editable ? "" : "none";
+    $id("refConfirmBtn").style.display = (editable && r && r.status === "to_confirm") ? "" : "none";
+    $id("refRejectBtn").style.display = (editable && r && r.status !== "not_referral") ? "" : "none";
+    $id("refReopenBtn").style.display = (editable && r && r.status !== "to_confirm") ? "" : "none";
+    $id("refDeleteBtn").style.display = (refState.canDelete && r) ? "" : "none";
+
+    const thank = $id("refThankBox");
+    if (r && r.status === "confirmed") {
+      thank.style.display = "";
+      $id("refThankHow").innerHTML = '<option value="">Not thanked yet</option>' +
+        REF.THANK_METHODS.map(function(m) { return '<option' + (r.thanked_how === m ? " selected" : "") + '>' + m + '</option>'; }).join("");
+      $id("refThankOn").value = r.thanked_at || REF.shopToday();
+      $id("refThankHow").disabled = $id("refThankOn").disabled = $id("refThankBtn").disabled = !editable;
+    } else {
+      thank.style.display = "none";
+    }
+    $id("refHistory").innerHTML = r && Array.isArray(r.history) && r.history.length
+      ? r.history.slice().reverse().map(function(h) {
+          return escapeHtml(REF.shopToday(new Date(h.at || 0)) + " · " + (h.what || "") + (h.by ? " by " + h.by : ""));
+        }).join("<br>")
+      : "";
+    $id("referralOverlay").classList.add("open");
+  }
+
+  // Likely clients for whatever was typed in "what they said", so an AM can
+  // turn "Jen at the YMCA" into the YMCA's record in one click.
+  function paintReferrerSuggestions() {
+    const box = $id("refSuggest");
+    if (!box) return;
+    if (refParsePick($id("refReferrerInput").value).customer_id) { box.innerHTML = ""; return; }
+    const text = [$id("refReferrerInput").value, $id("refSaidInput").value].join(" ");
+    const sug = REF.suggestReferrers(text, refRoster(), 3);
+    box.innerHTML = sug.length
+      ? "Maybe: " + sug.map(function(s, i) {
+          return '<a href="#" data-ref-sug="' + i + '">' + escapeHtml(s.company_name) + '</a>';
+        }).join(" · ")
+      : "";
+    box.querySelectorAll("[data-ref-sug]").forEach(function(a) {
+      a.addEventListener("click", function(ev) {
+        ev.preventDefault();
+        const s = sug[Number(a.dataset.refSug)];
+        $id("refReferrerInput").value = s.company_name + " · #" + s.customer_id;
+        box.innerHTML = "";
+      });
+    });
+  }
+
+  function refReplace(rec) {
+    const i = refState.list.findIndex(function(x) { return x.id === rec.id; });
+    if (i === -1) refState.list.push(rec); else refState.list[i] = rec;
+  }
+
+  async function refAfterChange(rec) {
+    if (rec) refReplace(rec);
+    $id("referralOverlay").classList.remove("open");
+    if ($id("page-referrals").classList.contains("active")) renderReferralsPage();
+    if (activeCustomerId && $id("detailOverlay").classList.contains("open")) renderClientReferrals(activeCustomerId);
+    if (activeLeadId) paintLeadReferralBtn(activeLeadId);
+  }
+
+  async function refPost(payload) {
+    $id("refModalErr").textContent = "";
+    try {
+      const d = await api.post(ENDPOINTS.bbReferrals, payload);
+      return d;
+    } catch (e) {
+      $id("refModalErr").textContent = (e && e.message) || "That did not save.";
+      return null;
+    }
+  }
+
+  async function saveReferralModal() {
+    const referred = refParsePick($id("refReferredInput").value);
+    const referrer = refParsePick($id("refReferrerInput").value);
+    const payload = {
+      referred_name: referred.name,
+      referred_customer_id: referred.customer_id,
+      referred_lead_id: $id("refReferredInput").dataset.leadId || null,
+      referrer_name: referrer.name,
+      referrer_customer_id: referrer.customer_id,
+      said: $id("refSaidInput").value,
+      note: $id("refNoteInput").value,
+      referred_at: $id("refDateInput").value,
+    };
+    const r = refState.active;
+    const d = await refPost(r ? Object.assign({ action: "update", id: r.id }, payload) : Object.assign({ action: "create" }, payload));
+    if (d && d.referral) refAfterChange(d.referral);
+  }
+
+  async function refAction(action, extra) {
+    const r = refState.active;
+    if (!r) return;
+    if (action === "delete" && !confirm("Delete " + r.id + "? This changes the ranking and cannot be undone.")) return;
+    const d = await refPost(Object.assign({ action: action, id: r.id }, extra || {}));
+    if (!d) return;
+    if (action === "delete") {
+      refState.list = refState.list.filter(function(x) { return x.id !== r.id; });
+      refAfterChange(null);
+    } else if (d.referral) {
+      refAfterChange(d.referral);
+    }
+  }
+
+  // The client record: who referred them, and whom they have referred.
+  function renderClientReferrals(customerId) {
+    const el = $id("detailReferrals");
+    if (!el) return;
+    const id = String(customerId);
+    const live = refState.list.filter(function(r) { return r.status !== "not_referral"; });
+    // A referral logged from the inquiry carries the lead, not the client id,
+    // so leads that became this client count as this client too.
+    const leadIds = (typeof state_leads !== "undefined" ? state_leads : []).filter(function(l) {
+      return String(l.promoted_customer_id || l.client_id || "") === id;
+    }).map(function(l) { return l.lead_id; });
+    const by = live.find(function(r) {
+      return String(r.referred_customer_id || "") === id || (r.referred_lead_id && leadIds.indexOf(r.referred_lead_id) !== -1);
+    });
+    const sent = live.filter(function(r) { return String(r.referrer_customer_id || "") === id; });
+    const bits = [];
+    if (by) {
+      bits.push('Referred by <a href="#" data-ref-open="' + escapeHtml(by.id) + '">' +
+        escapeHtml(refClientName(by.referrer_customer_id) || by.referrer_name || "someone not yet named") + '</a>' +
+        (by.status === "confirmed" ? "" : " (to confirm)"));
+    }
+    if (sent.length) {
+      bits.push('Has referred ' + sent.length + (sent.length === 1 ? " client" : " clients") +
+        ' (' + sent.filter(function(r) { return r.status === "confirmed"; }).length + ' confirmed)');
+    }
+    el.innerHTML = bits.join(" · ");
+    el.style.display = bits.length ? "" : "none";
+    el.querySelectorAll("[data-ref-open]").forEach(function(a) {
+      a.addEventListener("click", function(ev) { ev.preventDefault(); openReferral(a.dataset.refOpen); });
+    });
+    const btn = $id("clientReferralBtn");
+    if (btn) {
+      btn.style.display = refState.canEdit || by ? "" : "none";
+      btn.textContent = by ? "Open referral" : "Log how they were referred";
+      btn.onclick = function() {
+        if (by) return openReferral(by.id);
+        const rec = refRoster().find(function(c) { return String(c.customer_id) === id; });
+        openReferral(null, { referred_name: rec ? rec.company_name : "", referred_customer_id: id });
+      };
+    }
+  }
+
+  // The inquiry panel's Referral button: opens the one already logged for this
+  // lead, or starts one prefilled from what the customer typed on the form.
+  function paintLeadReferralBtn(leadId) {
+    const btn = $id("leadReferralBtn");
+    if (!btn) return;
+    const lead = state_leads.find(function(l) { return l.lead_id === leadId; });
+    if (!lead) { btn.style.display = "none"; return; }
+    const existing = refState.list.find(function(r) {
+      return r.status !== "not_referral" && (r.referred_lead_id === lead.lead_id ||
+        (r.referred_customer_id && String(r.referred_customer_id) === String(lead.client_id || lead.promoted_customer_id || "")));
+    });
+    const hint = REF.referralHintFromLead(lead);
+    btn.style.display = (existing || refState.canEdit) ? "" : "none";
+    btn.textContent = existing ? "Referral " + existing.id : (hint ? "Log as referral" : "Referral");
+    btn.classList.toggle("btn-green", !existing && !!hint);
+    btn.classList.toggle("btn-gray", !!existing || !hint);
+    btn.onclick = function() {
+      if (existing) return openReferral(existing.id);
+      openReferral(null, {
+        referred_name: lead.company_name && lead.company_name !== "(from inquiry)" ? lead.company_name : (lead.contact_name || ""),
+        referred_customer_id: lead.client_id || lead.promoted_customer_id || null,
+        referred_lead_id: lead.lead_id,
+        said: hint ? hint.said : "",
+        referrer: hint ? hint.who : "",
+      });
+    };
+  }
+
   // "inbox" and "leads" are the two screens that became one. Both names stay
   // routable FOREVER, not for a transition period: every notification ever sent
   // carries one of them in its link, and those records are not rewritten. A
@@ -11151,6 +11632,7 @@ export async function start(ctx) {
     if (resolved === "inquiries") renderLeadsPage();
     if (resolved === "scorecard") renderScorecard();
     if (resolved === "archive") renderArchivePage();
+    if (resolved === "referrals") renderReferralsPage();
 
     // A route param is a deep link into one specific record — a Notification
     // carrying a link to an inquiry, lead, or roster client opens straight
@@ -11223,6 +11705,26 @@ export async function start(ctx) {
     if (e.target.id === "detailOverlay") closeDetail();
   });
   $id("saveEnrichBtn").addEventListener("click", handleSaveEnrichment);
+
+  // Referrals: the modal, the page's filters and year picker.
+  $id("refModalClose").addEventListener("click", function() { $id("referralOverlay").classList.remove("open"); });
+  $id("refSaveBtn").addEventListener("click", saveReferralModal);
+  $id("refConfirmBtn").addEventListener("click", function() { refAction("confirm"); });
+  $id("refRejectBtn").addEventListener("click", function() { refAction("reject"); });
+  $id("refReopenBtn").addEventListener("click", function() { refAction("reopen"); });
+  $id("refDeleteBtn").addEventListener("click", function() { refAction("delete"); });
+  $id("refThankBtn").addEventListener("click", function() {
+    refAction("thank", { how: $id("refThankHow").value, on: $id("refThankOn").value });
+  });
+  $id("refReferrerInput").addEventListener("input", paintReferrerSuggestions);
+  $id("refSaidInput").addEventListener("input", paintReferrerSuggestions);
+  $id("refNewBtn").addEventListener("click", function() { openReferral(null); });
+  $id("refSearch").addEventListener("input", paintReferralList);
+  $id("refStatusFilter").addEventListener("change", paintReferralList);
+  $id("refYearSelect").addEventListener("change", function() {
+    refState.year = Number($id("refYearSelect").value);
+    renderReferralsPage();
+  });
   $id("resetBtn").addEventListener("click", handleReset);
   $id("reconcileBtn").addEventListener("click", handleReconcile);
   loadMarketingInitiatives();
@@ -11438,6 +11940,9 @@ export async function start(ctx) {
       openInquiry(id);
     }
   });
+  // Referrals load quietly so the Referral buttons on inquiries and clients
+  // know whether one is already logged. A failure here only hides those.
+  loadReferrals();
   loadLeads().then(function() {
     if (pendingDeepLink && pendingDeepLink.view === "leads") {
       var id = pendingDeepLink.id;
