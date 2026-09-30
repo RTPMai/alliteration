@@ -523,7 +523,11 @@ function renderBlocked() {
 
   host.querySelectorAll('[data-go]').forEach((tr) => {
     tr.style.cursor = 'pointer';
-    tr.addEventListener('click', () => ctx.go(tr.dataset.go));
+    tr.addEventListener('click', () => {
+      ctx.go(tr.dataset.go);
+      // Social rows open the decision or post itself, not just the screen.
+      if (tr.dataset.go === 'social' && tr.dataset.id && social) social.openItem(tr.dataset.id);
+    });
   });
 }
 

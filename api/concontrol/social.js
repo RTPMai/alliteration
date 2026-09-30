@@ -136,7 +136,7 @@ export default async function handler(req, res) {
         }
         if (patch.status === "open") { patch.decidedAt = null; patch.decidedBy = null; }
         const edited = new Set(Array.isArray(before.edited) ? before.edited : []);
-        Object.keys(patch).forEach((f) => { if (["status", "answer", "needed_by"].includes(f)) edited.add(f); });
+        Object.keys(patch).forEach((f) => { if (["status", "answer", "needed_by", "context"].includes(f)) edited.add(f); });
         patch.edited = Array.from(edited);
         const note = patch.status && patch.status !== before.status
           ? historyEntry(patch.status === "decided" ? "decided" : "reopened", sess.username, patch.answer || null)

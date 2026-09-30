@@ -364,6 +364,66 @@ const VIEWER = { username: 'viewer', name: 'Viewer' };
     t.equal(await store.getPost('FOC27-SOC-006'), null, 'gone');
   });
 
+  await t.test('a decision explains itself: the posts it holds, soonest first', async () => {
+    const plan = planAround(TODAY);
+    plan.posts.push({ id: 'FOC27-SOC-007', date: shift(TODAY, 1), title: 'Presale teaser', type: 'content', channels: ['instagram'], status: 'planned', depends_on: ['decision:price'], copy: { facebook_instagram: 'x '.repeat(400) }, cta: 'notify_list', notes: 'Use the countdown art' });
+    plan.posts.push({ id: 'FOC27-SOC-008', date: shift(TODAY, -1), title: 'Already out', type: 'content', channels: ['facebook'], status: 'posted', depends_on: ['decision:price'], copy: 'done' });
+    const r = L.readPlan(plan);
+    const price = r.decisions.find((d) => d.key === 'price');
+    const b = L.decisionBrief(price, r.posts, r.decisions, {}, TODAY);
+    t.equal(b.posts.length, 3, 'every post that waits on it, posted ones included');
+    t.equal(b.open, 2, 'but only the ones not gone out count as held up');
+    t.equal(b.first.id, 'FOC27-SOC-007', 'the soonest live post is first');
+    t.equal(b.first.days, 1, 'with how many days until it goes out');
+    t.assert(b.first.excerpt.length <= L.EXCERPT_CHARS + 3 && b.first.excerpt.endsWith('...'), 'long copy is cut to a readable excerpt');
+    t.equal(b.first.notes, 'Use the countdown art', 'the post note comes along');
+    t.assert(b.tooLate, 'a post due before the needed-by date is called out');
+    const reg = b.posts.find((i) => i.id === 'FOC27-SOC-004');
+    t.equal(reg.alsoWaitingOn.join('|'), 'Registration open date', 'other open decisions on the same post are named, this one is not repeated');
+    const none = L.decisionBrief({ key: 'nobody', needed_by: null }, r.posts, r.decisions, {}, TODAY);
+    t.equal(none.posts.length + none.open, 0, 'a decision no post waits on has an empty brief');
+    t.equal(none.tooLate, false, 'and is never too late');
+  });
+
+  await t.test('a plan file can carry background and options for a decision', async () => {
+    const plan = planAround(TODAY);
+    plan.decisions[0].context = 'Early bird pricing drives presale.';
+    plan.decisions[0].options = ['$149', { label: '$179', note: 'matches FOC26' }, 42, {}];
+    const d = L.readPlan(plan).decisions[0];
+    t.equal(d.context, 'Early bird pricing drives presale.', 'context kept');
+    t.equal(d.options.length, 2, 'strings and labelled objects kept, junk dropped');
+    t.equal(d.options[1].note, 'matches FOC26', 'with its note');
+    plan.decisions[1].why = 'Presale needs a week of runway.';
+    t.equal(L.readPlan(plan).decisions[1].context, 'Presale needs a week of runway.', '"why" read as context too');
+    t.equal(L.readPlan(planAround(TODAY)).decisions[0].options, null, 'no options means none');
+  });
+
+  await t.test('background typed in the app survives a plan reload', async () => {
+    const r1 = L.readPlan(planAround(TODAY));
+    const m1 = L.mergePlan([], [], null, r1, 'FOC27', 'ryan');
+    const v = L.validateDecisionPatch({ context: '  Ask Megan first.  ' });
+    t.equal(v.patch.context, 'Ask Megan first.', 'context is a patchable field');
+    const edited = m1.decisions.map((d) => d.key === 'price' ? { ...d, context: 'Ask Megan first.', edited: ['context'] } : d);
+    const plan = planAround(TODAY);
+    plan.decisions[0].context = 'From the file';
+    plan.decisions[1].context = 'Also from the file';
+    const m2 = L.mergePlan(m1.posts, edited, m1.meta, L.readPlan(plan), 'FOC27', 'ryan');
+    const byKey = new Map(edited.map((d) => [d.key, d]));
+    m2.decisions.forEach((d) => byKey.set(d.key, d));
+    t.equal(byKey.get('price').context, 'Ask Megan first.', 'a typed background is not overwritten');
+    t.equal(byKey.get('registration_date').context, 'Also from the file', 'an untouched one picks up the file');
+  });
+
+  await t.test('the route saves a decision background and marks it edited', async () => {
+    const get = await call(RYANC, 'GET');
+    const d = get.body.decisions.find((x) => x.key === 'price');
+    const res = await call(JOC, 'PATCH', { kind: 'decision', id: d.id, context: 'Tied to the early bird tier' });
+    t.equal(res.statusCode, 200, 'saved');
+    const after = await store.getDecision(d.id);
+    t.equal(after.context, 'Tied to the early bird tier', 'stored');
+    t.assert(after.edited.includes('context'), 'and protected from the next reload');
+  });
+
   await t.test('no session, no plan', async () => {
     const res = fakeRes();
     await route({ method: 'GET', headers: {}, query: {} }, res);

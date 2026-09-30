@@ -25,7 +25,7 @@ import { ENDPOINTS } from '../../js/api.js';
 import {
   POST_STATUSES, POST_STATUS_LABELS, DONE_STATUSES, CHANNELS, CHANNEL_LABELS,
   CTA_LABELS, postState, groupByWeek, phaseLabel, conditionLabel, splitDepends,
-  copyWarnings, hasCopy, nextPost, todayCentral,
+  copyWarnings, hasCopy, nextPost, todayCentral, decisionBrief,
 } from '../../lib/concontrol/social.js';
 
 export const SOCIAL_STYLES = `
@@ -41,7 +41,20 @@ export const SOCIAL_STYLES = `
   .con-post .m { font-size: 12px; color: var(--muted); margin-top: 3px; }
   .con-post .m.bad { color: var(--danger); font-weight: 600; }
   .con-post .r { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
-  .con-dec { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink); }
+  .con-dec { display: flex; justify-content: space-between; gap: 10px; align-items: center; padding: 8px 6px; margin: 0 -6px; border-bottom: 1px solid var(--line); font-size: 13px; color: var(--ink); cursor: pointer; border-radius: var(--radius-sm); }
+  .con-dec:hover { background: var(--bg); }
+  .con-dec .q { font-weight: 600; }
+  .con-brief { background: var(--bg); border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 10px 12px; margin-top: 10px; font-size: 13px; color: var(--ink); line-height: 1.5; }
+  .con-brief.bad { border-color: var(--danger); }
+  .con-brief .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; margin-bottom: 4px; }
+  .con-hold { border: 1px solid var(--line); border-radius: var(--radius-sm); padding: 9px 12px; margin-bottom: 8px; cursor: pointer; background: var(--card); }
+  .con-hold:hover { border-color: var(--accent); }
+  .con-hold.done { opacity: .55; }
+  .con-hold .t { font-weight: 600; font-size: 13px; color: var(--ink); }
+  .con-hold .m { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .con-hold .x { font-size: 12px; color: var(--ink); margin-top: 6px; white-space: pre-wrap; border-left: 2px solid var(--line); padding-left: 8px; }
+  .con-hold .w { font-size: 12px; color: var(--danger); margin-top: 4px; }
+  .con-opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
   .con-dec:last-child { border-bottom: 0; }
   .con-dec .m { font-size: 12px; color: var(--muted); }
   .con-dec .m.bad { color: var(--danger); font-weight: 600; }
@@ -227,13 +240,17 @@ export default function makeSocial(h) {
       const when = d.status === 'decided'
         ? `Decided: ${d.answer || 'yes'}`
         : d.needed_by ? `Needed by ${prettyDate(d.needed_by)}${late ? `, ${-days} days late` : days === 0 ? ', today' : ''}` : 'No date set';
+      const b = decisionBrief(d, S.posts, S.decisions, conditions(), S.today);
+      const holds = d.status === 'decided' ? ''
+        : b.first ? ` · Holds up ${plural(b.open, 'post')}, first ${shortDate(b.first.date)}${b.tooLate ? ' (before this is due)' : ''}`
+          : '';
       return `
-        <div class="con-dec">
+        <div class="con-dec" data-decision="${esc(d.id)}" title="Open for details">
           <div>
-            <div>${esc(d.question)}</div>
-            <div class="m${late ? ' bad' : ''}">${esc(when)}${d.status !== 'decided' && d.placeholder ? ` · Working assumption: ${esc(d.placeholder)}` : ''}</div>
+            <div class="q">${esc(d.question)}</div>
+            <div class="m${late || (d.status !== 'decided' && b.tooLate) ? ' bad' : ''}">${esc(when)}${esc(holds)}${d.status !== 'decided' && d.placeholder ? ` · Working assumption: ${esc(d.placeholder)}` : ''}</div>
           </div>
-          <button class="con-btn ghost" data-decision="${esc(d.id)}">${d.status === 'decided' ? 'View' : 'Decide'}</button>
+          <button class="con-btn ghost" type="button" tabindex="-1">${d.status === 'decided' ? 'View' : 'Decide'}</button>
         </div>`;
     };
     return `
@@ -487,14 +504,53 @@ export default function makeSocial(h) {
 
   function decisionDrawer(d) {
     const ro = S.canEdit ? '' : ' disabled';
-    const posts = S.posts.filter((p) => splitDepends(p.depends_on).decisions.includes(d.key));
-    openDrawerHtml(d.question, d.needed_by ? `Needed by ${prettyDate(d.needed_by)}` : '', `
-      ${d.placeholder ? `<div class="con-note" style="margin-top:8px">The plan is working from: ${esc(d.placeholder)}</div>` : ''}
+    const b = decisionBrief(d, S.posts, S.decisions, conditions(), S.today);
+    const days = d.needed_by ? Math.round((Date.parse(d.needed_by + 'T12:00:00Z') - Date.parse(S.today + 'T12:00:00Z')) / 86400000) : null;
+    const dueLine = d.needed_by
+      ? `Needed by ${prettyDate(d.needed_by)}${days === null ? '' : days < 0 ? `, ${-days} days late` : days === 0 ? ', today' : `, ${plural(days, 'day')} from now`}`
+      : 'No needed-by date';
+
+    const why = !b.posts.length
+      ? 'No post in the plan waits on this one directly. It is on the list because the plan needs the answer, not because a post is blocked.'
+      : b.open === 0
+        ? `Every post that waited on this has already gone out or been skipped.`
+        : `${plural(b.open, 'post')} can't go out as written until this is answered. The first is <b>${esc(b.first.title)}</b>, going out ${esc(shortDate(b.first.date))}${b.first.days !== null ? ` (${b.first.days < 0 ? `${-b.first.days} days ago` : b.first.days === 0 ? 'today' : `in ${plural(b.first.days, 'day')}`})` : ''}.`
+          + (b.tooLate ? ` That is before the needed-by date, so the date in the plan is too late.` : '');
+
+    const holdHtml = (i) => `
+      <div class="con-hold${i.done ? ' done' : ''}" data-holdpost="${esc(i.id)}" title="Open this post">
+        <div class="t">${esc(i.title)}</div>
+        <div class="m">${esc(shortDate(i.date))} · ${esc(POST_STATUS_LABELS[i.status] || i.status)}${i.channels.length ? ` · ${esc(i.channels.map((c) => CHANNEL_LABELS[c] || c).join(', '))}` : ''}${i.cta && CTA_LABELS[i.cta] ? ` · Points to ${esc(CTA_LABELS[i.cta])}` : ''}</div>
+        ${i.excerpt ? `<div class="x">${esc(i.excerpt)}</div>` : '<div class="m">No copy written yet.</div>'}
+        ${i.notes ? `<div class="m">Note: ${esc(i.notes)}</div>` : ''}
+        ${i.alsoWaitingOn.length ? `<div class="w">Also waiting on: ${esc(i.alsoWaitingOn.join('; '))}</div>` : ''}
+      </div>`;
+
+    openDrawerHtml(d.question, dueLine, `
+      <div class="con-brief${b.tooLate && d.status !== 'decided' ? ' bad' : ''}">
+        <div class="lbl">Why it matters</div>
+        <div>${why}</div>
+      </div>
+      ${d.placeholder ? `
+        <div class="con-brief">
+          <div class="lbl">What the plan assumes until you decide</div>
+          <div>${esc(d.placeholder)}</div>
+          ${S.canEdit && d.status !== 'decided' ? '<div class="con-opts"><button class="con-btn ghost" type="button" id="conDecUseAssume">Go with this</button></div>' : ''}
+        </div>` : ''}
+      ${d.options && d.options.length ? `
+        <div class="con-brief">
+          <div class="lbl">Options in the plan</div>
+          ${d.options.map((o) => `<div>${esc(o.label)}${o.note ? ` <span class="con-note">${esc(o.note)}</span>` : ''}</div>`).join('')}
+          ${S.canEdit && d.status !== 'decided' ? `<div class="con-opts">${d.options.map((o, n) => `<button class="con-btn ghost" type="button" data-decopt="${n}">${esc(o.label)}</button>`).join('')}</div>` : ''}
+        </div>` : ''}
+      <div class="con-field" style="margin-top:12px"><label>Background</label>
+        <textarea id="conDecContext" rows="3"${ro} placeholder="${S.canEdit ? 'What this is about, in a sentence or two, for whoever opens it next' : 'Nothing written yet'}">${esc(d.context || '')}</textarea>
+      </div>
+      ${b.posts.length ? `<div class="con-sec"><h4>Posts waiting on this (${b.posts.length})</h4>${b.posts.map(holdHtml).join('')}</div>` : ''}
       <div class="con-field" style="margin-top:12px"><label>What was decided</label>
         <textarea id="conDecAnswer" rows="4"${ro}>${esc(d.answer || '')}</textarea>
       </div>
       <div class="con-field"><label>Needed by</label><input type="date" id="conDecNeeded" value="${esc(d.needed_by || '')}"${ro}></div>
-      ${posts.length ? `<div class="con-sec"><h4>Posts waiting on this</h4>${posts.map((p) => `<div class="con-row"><span>${esc(p.title)}</span><span class="con-note">${esc(shortDate(p.date))}</span></div>`).join('')}</div>` : ''}
       ${S.canEdit ? `
         <div class="con-actions">
           ${d.status === 'decided'
@@ -511,6 +567,8 @@ export default function makeSocial(h) {
       const needed = drawer.querySelector('#conDecNeeded').value;
       if (answer !== (d.answer || '')) body.answer = answer;
       if (needed !== (d.needed_by || '')) body.needed_by = needed || null;
+      const context = drawer.querySelector('#conDecContext').value;
+      if (context !== (d.context || '')) body.context = context;
       if (body.status === 'decided') body.answer = answer;
       if (Object.keys(body).length <= 2) { closeDrawer(); return; }
       try { await patch(body); closeDrawer(); }
@@ -520,6 +578,20 @@ export default function makeSocial(h) {
     on('#conDecDecide', () => send({ status: 'decided' }));
     on('#conDecSave', () => send());
     on('#conDecReopen', () => send({ status: 'open' }));
+    const fill = (text) => {
+      const a = drawer.querySelector('#conDecAnswer');
+      a.value = text;
+      a.focus();
+    };
+    on('#conDecUseAssume', () => fill(d.placeholder || ''));
+    drawer.querySelectorAll('[data-decopt]').forEach((btn) => btn.addEventListener('click', () => {
+      const o = d.options[Number(btn.dataset.decopt)];
+      if (o) fill(o.label);
+    }));
+    drawer.querySelectorAll('[data-holdpost]').forEach((el) => el.addEventListener('click', () => {
+      const p = S.posts.find((x) => x.id === el.dataset.holdpost);
+      if (p) postDrawer(p);
+    }));
   }
 
   /* ---------------- for Home ---------------- */
@@ -551,5 +623,14 @@ export default function makeSocial(h) {
     };
   }
 
-  return { load, render, blockerRows, homeCard, state: S };
+  /** Open a decision or a post by id, for Home's blocked list. */
+  function openItem(id) {
+    const d = S.decisions.find((x) => x.id === id);
+    if (d) { decisionDrawer(d); return true; }
+    const p = S.posts.find((x) => x.id === id);
+    if (p) { postDrawer(p); return true; }
+    return false;
+  }
+
+  return { load, render, blockerRows, homeCard, openItem, state: S };
 }
