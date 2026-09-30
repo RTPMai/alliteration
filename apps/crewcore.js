@@ -79,6 +79,7 @@ import { ENDPOINTS } from '../js/api.js';
 // balance is never computed twice in two places. lib/crewcore/schema.js has
 // no imports of its own, so it is safe to pull into the browser.
 import { spendsFor, stipendBalance, stipendYears, spendLabel, isOverStipend, isCrewCoreAdmin,
+  daysUntilAnniversary, anniversaryLabel,
   DOC_CATEGORIES, DOC_LEVELS, docsFor, isFormalDoc,
   KUDOS_TAGS, KUDOS_MAX_LENGTH, kudosFor, canDeleteKudos } from '../lib/crewcore/schema.js';
 // Time off math, shared with api/crewcore/timeoff.js so the screen and the
@@ -124,29 +125,6 @@ function fmtStamp(iso) {
 function fmtMoney(n) {
   if (n === null || n === undefined || n === '') return '—';
   return '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-/**
- * Days until the next work anniversary, and WHICH anniversary it is.
- *
- * `years` is the milestone being reached on that date, already: somebody who
- * started Feb 14 2022, asked in Aug 2026, is 169 days from their FIFTH.
- * Both dashboards used to print `years + 1` and so aged everybody by a year
- * — Amanda's dashboard said 6 years on the first deploy of the self-serve
- * screen (Aug 28 2026), which is how the off-by-one was finally spotted.
- */
-function daysUntilAnniversary(startDate) {
-  if (!startDate) return null;
-  const start = new Date(startDate + 'T00:00:00');
-  if (Number.isNaN(start.getTime())) return null;
-  const now = new Date();
-  const next = new Date(now.getFullYear(), start.getMonth(), start.getDate());
-  if (next < new Date(now.getFullYear(), now.getMonth(), now.getDate())) {
-    next.setFullYear(next.getFullYear() + 1);
-  }
-  const days = Math.round((next - now) / 86400000);
-  const years = next.getFullYear() - start.getFullYear();
-  return { days, years };
 }
 
 export default {
@@ -1056,7 +1034,7 @@ export default {
                 <div class="who">${esc(x.e.name)}</div>
                 <div class="meta">${esc(x.e.title || x.e.department || '')}</div>
               </div>
-              <div class="meta">${x.ann.years} ${x.ann.years === 1 ? 'year' : 'years'} · ${x.ann.days === 0 ? 'today' : x.ann.days + 'd'}</div>
+              <div class="meta">${x.ann.years} ${x.ann.years === 1 ? 'year' : 'years'} · ${esc(anniversaryLabel(x.ann))}</div>
             </div>
           `).join('') : `<div class="cc-empty">Nothing in the next 60 days.</div>`}
         </div>
@@ -1233,7 +1211,7 @@ export default {
       ${ann ? `<p style="font-size:12.5px;color:var(--muted)">
         ${ann.days === 0
           ? `Today is ${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M. Thank you.`
-          : `${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
+          : `${ann.years} ${ann.years === 1 ? 'year' : 'years'} at P&amp;M on ${esc(ann.dateLabel)}, in ${ann.days} ${ann.days === 1 ? 'day' : 'days'}.`}
       </p>` : ''}
     `;
   },
