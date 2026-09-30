@@ -3929,18 +3929,27 @@ export default {
     async function commitImport() {
       if (!state.importPreview) return;
       const n = state.importPreview.summary.importable;
+      const known = state.importPreview.summary.addableToList || 0;
       const listName = $('#mmImportList') ? $('#mmImportList').value.trim() : '';
+      const plural = (k, w) => k + ' ' + w + (k === 1 ? '' : 's');
 
+      if (!listName && !n) {
+        msg('#mmImportMsg', 'Everyone in this file is already in MailMe. Name a list above to put them on it.', 'mm-err');
+        return;
+      }
       if (!listName && !window.confirm(
-        'Import ' + n + ' prospect' + (n === 1 ? '' : 's') + ' without putting them in a list?\n\n' +
+        'Import ' + plural(n, 'prospect') + ' without putting them in a list?\n\n' +
         'They will be mixed into the roster with no way to find this batch as a group ' +
-        'later. Naming a list now is much easier than reconstructing it afterwards.')) return;
+        'later. Naming a list now is much easier than reconstructing it afterwards.' +
+        (known ? '\n\nThe ' + plural(known, 'contact') + ' already in MailMe will not go anywhere without a list.' : ''))) return;
       if (listName && !window.confirm(
-        'Import ' + n + ' prospect' + (n === 1 ? '' : 's') + ' into "' + listName + '"?')) return;
+        (n ? 'Import ' + plural(n, 'new prospect') : 'Import nobody new') +
+        (known ? ' and add ' + plural(known, 'existing contact') : '') +
+        ' to "' + listName + '"?')) return;
 
       try {
         const d = await api.post(ENDPOINTS.mmImport, {
-          csv: state.importCsv, tags: importTags(), commit: true
+          csv: state.importCsv, tags: importTags(), commit: true, addExisting: !!listName
         });
 
         let listNote = '';
@@ -3951,7 +3960,8 @@ export default {
           // later cleanup deletes some of them, and it needs no id list the
           // client would have to fetch back.
           try {
-            listNote = ' ' + await listForBatch(listName, d.batchId);
+            listNote = ' ' + await listForBatch(listName, d.batchId, d.listMemberIds || []);
+            if (d.addedToList) listNote += ' That includes ' + plural(d.addedToList, 'contact') + ' who were already in MailMe.';
           } catch (e) {
             listNote = ' The contacts imported, but the list could not be created: ' + e.message;
           }
@@ -3972,11 +3982,12 @@ export default {
     // Create or extend the list an import lands in. Returns the sentence to
     // show, so the caller does not have to reproduce the branching in a
     // message string.
-    async function listForBatch(listName, batchId) {
+    async function listForBatch(listName, batchId, knownIds) {
       await loadContacts();
       const imported = state.contacts
-        .filter((c) => c.importBatch === batchId)
-        .map((c) => String(c.id));
+        .filter((c) => batchId && c.importBatch === batchId)
+        .map((c) => String(c.id))
+        .concat((knownIds || []).map(String));
 
       const existing = state.lists.find(
         (l) => l.name.trim().toLowerCase() === listName.toLowerCase());
@@ -4029,7 +4040,10 @@ export default {
       const s = d.summary;
       const rej = d.rejected || {};
 
-      $('#mmCommitImport').hidden = !s.importable;
+      const addable = s.addableToList || 0;
+      $('#mmCommitImport').hidden = !s.importable && !addable;
+      $('#mmCommitImport').textContent = !s.importable ? 'Add them to the list'
+        : addable ? 'Import ' + s.importable + ' and add ' + addable + ' to the list' : 'Import them';
 
       const unmapped = (s.unmappedColumns || []).length
         ? `<div class="mm-notice"><b>Columns not recognized:</b> ${esc(s.unmappedColumns.join(', '))}.
@@ -4076,7 +4090,10 @@ export default {
           </div>
         </div>` : ''}
         ${rejectTable('Already opted out, will not be imported', rej.suppressed, 'bad')}
-        ${rejectTable('Already clients in BackBone', rej.existingClients, 'warn')}
+        ${addable ? `<div class="mm-notice"><b>${addable} ${addable === 1 ? 'person is' : 'people are'} already in MailMe</b>
+            (clients in BackBone, or prospects from an earlier import). They are not imported again, but they
+            <b>are added to the list you name above</b>, as the contacts they already are.</div>` : ''}
+        ${rejectTable('Already clients in BackBone (added to your list, not imported)', rej.existingClients, 'warn')}
         ${rejectTable('Duplicates', rej.duplicate, 'mute')}
         ${rejectTable('Invalid rows', rej.invalid, 'bad')}`;
     }

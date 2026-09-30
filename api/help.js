@@ -90,6 +90,7 @@ export default async function handler(req, res) {
     const hits = pickDocs(DOCS, question, {
       allowedApps,
       currentApp: body.app,
+      currentView: body.view,
     });
 
     // Nothing scored. Answering anyway means inventing, so this returns a
@@ -146,7 +147,11 @@ export default async function handler(req, res) {
       .trim();
 
     const sources = hits.map((h) => h.doc.title);
-    await logQuestion({ by: me, question, app: body.app || null, sources, answered: true });
+    // An answer built without a single doc from the app the person was in is
+    // worth a look even though something answered: that is exactly how a
+    // MailMe question got a BackBone answer and still logged as answered.
+    const offApp = !!body.app && !hits.some((h) => h.doc.app === body.app);
+    await logQuestion({ by: me, question, app: body.app || null, sources, answered: true, offApp });
 
     return res.status(200).json({ answered: true, answer, sources });
   } catch (e) {

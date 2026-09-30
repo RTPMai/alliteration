@@ -39,5 +39,34 @@ export default function makeShared(app) {
         opts.map((a) => `<option value="${esc(a.id)}"${a.id === selected ? ' selected' : ''}>${esc(a.name)}</option>`).join('');
     }
 
-  return { limitedScreen, nameOf, amOptions };
+    /**
+     * More than one Account Manager (Sep 29 2026). Ticks rather than a
+     * multi-select box: a multi-select needs Ctrl-click, which nobody finds.
+     * `selected` is [{ id, name }]. Someone no longer on the list stays
+     * ticked under their saved name, so editing a campaign never quietly
+     * drops them.
+     */
+    function amPicker(prefix, selected) {
+      const chosen = Array.isArray(selected) ? selected : [];
+      const opts = state.accountManagers.slice();
+      // A saved Account Manager with a name but no id (very old records) is
+      // kept as a tick too, keyed by name, so saving never drops them.
+      const keyOf = (a) => a.id || ('name:' + (a.name || ''));
+      chosen.forEach((a) => {
+        if (!opts.some((o) => keyOf(o) === keyOf(a))) opts.push({ id: a.id || null, name: a.name || 'Former Account Manager' });
+      });
+      if (!opts.length) return '<div class="hint">No Account Managers to choose from yet.</div>';
+      return `<div class="mk-checks" id="${esc(prefix)}" role="group" aria-label="Account Managers">` +
+        opts.map((a) => `<label class="mk-check-pill"><input type="checkbox" value="${esc(keyOf(a))}" data-name="${esc(a.name)}"${chosen.some((x) => keyOf(x) === keyOf(a)) ? ' checked' : ''}> ${esc(a.name)}</label>`).join('') +
+        '</div>';
+    }
+
+    function readAmPicker(prefix) {
+      const box = root.querySelector('#' + prefix);
+      if (!box) return undefined;
+      return Array.from(box.querySelectorAll('input[type="checkbox"]:checked'))
+        .map((el) => ({ id: el.value.indexOf('name:') === 0 ? null : el.value, name: el.getAttribute('data-name') || '' }));
+    }
+
+  return { limitedScreen, nameOf, amOptions, amPicker, readAmPicker };
 }

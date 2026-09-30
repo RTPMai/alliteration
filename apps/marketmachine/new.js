@@ -10,7 +10,7 @@
  */
 
 import { CAMPAIGN_TYPES, FAMILIES, typeMeta, connectableTypes, typesByUse } from '../../lib/marketmachine/catalog.js';
-import { PARTICIPATION } from '../../lib/marketmachine/campaign.js';
+import { PARTICIPATION, amsOf } from '../../lib/marketmachine/campaign.js';
 import { ENDPOINTS } from '../../js/api.js';
 import { esc, PARTICIPATION_LABEL, msgBox } from './format.js';
 
@@ -63,8 +63,8 @@ export default function makeNew(app) {
       const defaults = parent ? {
         name: `${parent.name}: ${meta.label}`,
         date: parent.controlDate || '',
-        am: parent.accountManagerId || '',
-      } : { name: '', date: '', am: '' };
+        ams: amsOf(parent),
+      } : { name: '', date: '', ams: [] };
 
       pane.innerHTML = `
         <div class="mk-hd">
@@ -85,9 +85,9 @@ export default function makeNew(app) {
               <input type="text" id="mkNName" maxlength="120" value="${esc(defaults.name)}">
             </div>
             <div class="mk-field">
-              <label for="mkNAm">Account Manager</label>
-              <div class="hint">Required when a client, recipient, or sales follow-up is involved.</div>
-              <select id="mkNAm">${ui.amOptions(defaults.am)}</select>
+              <span class="lbl">Account Managers</span>
+              <div class="hint">Tick everyone involved. Required when a client, recipient, or sales follow-up is involved.</div>
+              ${ui.amPicker('mkNAms', defaults.ams)}
               ${state.amUnavailable ? '<div class="hint">The account manager list could not be read from CrewCore just now.</div>' : ''}
             </div>
             <div class="mk-field">
@@ -130,14 +130,11 @@ export default function makeNew(app) {
     async function createFromForm() {
       const val = (id) => { const el = $('#' + id); return el ? el.value : ''; };
       const kind = root.querySelector('input[name="mkNAudKind"]:checked');
-      const amId = val('mkNAm');
-      const am = state.accountManagers.find((a) => a.id === amId);
       const body = {
         type: state.newType,
         parentId: state.newParentId || undefined,
         name: val('mkNName'),
-        accountManagerId: amId || null,
-        accountManagerName: am ? am.name : null,
+        accountManagers: ui.readAmPicker('mkNAms') || [],
         controlDate: val('mkNDate') || null,
         audienceKind: kind ? kind.value : 'list',
         audience: val('mkNAudience'),

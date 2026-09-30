@@ -100,6 +100,17 @@ export default `
   .mk-radio label{display:flex;gap:6px;align-items:center;font-weight:500;color:var(--ink);margin:0}
 
   .mk-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .mk-checks{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 8px}
+  .mk-check-pill{display:inline-flex;gap:6px;align-items:center;font-size:13px;font-weight:500;color:var(--ink);
+    border:1px solid var(--line);border-radius:999px;padding:5px 11px;cursor:pointer;margin:0;background:var(--card)}
+  .mk-check-pill:has(input:checked){border-color:var(--accent);background:var(--accent-tint)}
+  .mk-plat{border-top:1px solid var(--line);padding:12px 0 10px}
+  .mk-plat-hd{display:flex;gap:10px;align-items:baseline;margin-bottom:6px;font-size:14px}
+  .mk-art{list-style:none;margin:0 0 8px;padding:0;font-size:13px}
+  .mk-art li{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;padding:3px 0}
+  .mk-upload{cursor:pointer}
+  .mk-inline-input{flex:1 1 220px;min-width:0;padding:7px 10px;border:1px solid var(--line);border-radius:var(--radius-sm);
+    font:inherit;font-size:13px;color:var(--ink);background:var(--card)}
   .mk-empty{text-align:center;padding:34px 20px;color:var(--muted);font-size:13px;line-height:1.6}
   .mk-empty h4{font-size:14px;color:var(--ink);margin-bottom:6px;font-weight:700}
 

@@ -10,6 +10,7 @@
  */
 
 import { CAMPAIGN_TYPES, typeMeta } from '../../lib/marketmachine/catalog.js';
+import { amsOf, amNames } from '../../lib/marketmachine/campaign.js';
 import { esc, fmtDate, statusClass } from './format.js';
 
 export default function makeList(app) {
@@ -23,7 +24,7 @@ export default function makeList(app) {
         if (f.show === 'closed' && c.status === 'open') return false;
         if (f.whose === 'mine' && !c.mine) return false;
         if (f.type && c.type !== f.type) return false;
-        if (f.am && String(c.accountManagerId || '') !== f.am) return false;
+        if (f.am && !amsOf(c).some((a) => String(a.id || '') === f.am)) return false;
         return true;
       }).sort((a, b) => {
         if ((a.status === 'open') !== (b.status === 'open')) return a.status === 'open' ? -1 : 1;
@@ -103,7 +104,7 @@ export default function makeList(app) {
                       <tr class="clickable" data-open="${esc(c.id)}" tabindex="0">
                         <td><div class="co">${esc(c.name)}</div>
                           <div class="who">${esc(meta.label || c.type)}${c.parentId ? `, connected to ${esc(ui.nameOf(c.parentId))}` : ''}${c.childCount ? `, ${c.childCount} connected` : ''}</div></td>
-                        <td>${c.accountManagerName ? esc(c.accountManagerName) : '<span class="who">Not set</span>'}</td>
+                        <td>${amNames(c) ? esc(amNames(c)) : '<span class="who">Not set</span>'}</td>
                         <td>${c.controlDate ? esc(fmtDate(c.controlDate)) : '<span class="who">No date</span>'}
                           <div class="who">${esc(meta.controlLabel || '')}</div></td>
                         <td><span class="pill ${statusClass(p.label)}">${esc(p.label || '')}</span>

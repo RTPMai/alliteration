@@ -9,6 +9,7 @@
  */
 
 import { CAMPAIGN_TYPES, typeMeta } from '../../lib/marketmachine/catalog.js';
+import { amsOf, amNames } from '../../lib/marketmachine/campaign.js';
 import { esc, fmtDate, statusClass, MONTHS_LONG } from './format.js';
 
 export default function makeTimeline(app) {
@@ -47,7 +48,7 @@ export default function makeTimeline(app) {
       state.campaigns.forEach((c) => {
         if (c.status === 'cancelled') return;
         if (tl.type && c.type !== tl.type) return;
-        if (tl.am && String(c.accountManagerId || '') !== tl.am) return;
+        if (tl.am && !amsOf(c).some((a) => String(a.id || '') === tl.am)) return;
         const meta = typeMeta(c.type) || {};
         const d = c.dates || {};
         if (d.control) events.push({ date: d.control, what: meta.controlLabel || 'Launch date', c });
@@ -85,7 +86,7 @@ export default function makeTimeline(app) {
               return `<div class="mk-tl-row" data-open="${esc(e.c.id)}" tabindex="0">
                 <span class="d">${esc(fmtDate(e.date))}</span>
                 <span class="w">${esc(e.what)}</span>
-                <span><b>${esc(e.c.name)}</b> <span class="who">${esc(meta.label || '')}${e.c.accountManagerName ? ', ' + esc(e.c.accountManagerName) : ''}</span></span>
+                <span><b>${esc(e.c.name)}</b> <span class="who">${esc(meta.label || '')}${amNames(e.c) ? ', ' + esc(amNames(e.c)) : ''}</span></span>
                 <span class="pill ${statusClass((e.c.progress || {}).label)}">${esc((e.c.progress || {}).label || '')}</span>
               </div>`;
             }).join('')}

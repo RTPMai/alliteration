@@ -33,6 +33,7 @@
 
 import { getSession } from "../lib/session.js";
 import { KEYS, readKey, kvSet, isConfigured } from "../lib/backbone-store.js";
+import { formatPhone, checkEmail, contactNameParts, cleanNamePart } from "../lib/contact-format.js";
 
 const MAX_SUBMISSIONS = 2000;
 const MAX_STRING = 4000;
@@ -59,6 +60,32 @@ function sanitize(val, depth) {
     return out;
   }
   return null;
+}
+
+// The form checks all of this as the person types, but the route is public,
+// so it checks again. Same rules, same file (lib/contact-format.js).
+//   - phone is stored in the one standard shape, (515) 555-0123
+//   - an email that is not an email address is refused, not stored
+//   - first and last are kept, and `name` is always their join, because the
+//     Inbox and older code read `name`
+export function normalizeContact(c) {
+  const out = Object.assign({}, c);
+  delete out.error; // never let a posted field pose as our own refusal
+  const parts = contactNameParts(out);
+  if (parts.first || parts.last) {
+    out.first_name = parts.first;
+    out.last_name = parts.last;
+    out.name = [parts.first, parts.last].filter(Boolean).join(" ");
+  } else {
+    out.name = cleanNamePart(out.name);
+  }
+  const ph = formatPhone(out.phone);
+  if (!ph.ok) return { error: "Phone: " + ph.error, refused: true };
+  out.phone = ph.value;
+  const em = checkEmail(out.email);
+  if (!em.ok) return { error: "Email: " + em.error, refused: true };
+  out.email = em.value;
+  return out;
 }
 
 function clean(v) {
@@ -122,7 +149,8 @@ export default async function handler(req, res) {
       : body; // tolerate a bare object too, in case a future caller skips the wrapper
 
     const company = sanitize(submission.company, 0) || {};
-    const contact = sanitize(submission.contact, 0) || {};
+    const contact = normalizeContact(sanitize(submission.contact, 0) || {});
+    if (contact.refused) return res.status(400).json({ error: contact.error });
 
     if (!clean(company.name) && !clean(contact.name) && !clean(contact.email) && !clean(contact.phone)) {
       return res.status(400).json({ error: "A company or a contact is required" });

@@ -21,6 +21,9 @@
 // GET    ?options=connections -> the trips and leads to pick from
 // GET    ?id=&printavo=1      -> current Printavo status of this campaign's
 //                        invoices (on demand; Printavo is slow)
+// POST   ?id=&art=1   -> attach art to one platform: { platform, dataUrl,
+//                        name } uploads a file (3 MB max), { platform, link,
+//                        name } records a link. Remove with PATCH removeArt.
 // DELETE ?id=         -> delete a campaign
 // DELETE ?legacy=all  -> delete the old pre-rebuild sample campaigns
 // POST   ?demo=load   -> load the example campaigns, for showing the app
@@ -42,13 +45,14 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { getUser } from "../../lib/users.js";
-import { progress, headerDates, childSummary, isMine, pickerShape } from "../../lib/marketmachine/campaign.js";
+import { progress, headerDates, childSummary, isMine, pickerShape, amsOf, artRefusal } from "../../lib/marketmachine/campaign.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
   childrenOf, legacyCount, clearLegacy, accountManagers,
   linkConnection, connectionOptions, connectionDetail, invoiceStatuses, setCalcInput, setScorecardRow,
-  loadDemo, removeDemo, demoCount,
+  loadDemo, removeDemo, demoCount, addCampaignArt,
 } from "../../lib/marketmachine/store.js";
+import { parseArtUpload, artPath, artPutOptions, checkArtLink } from "../../lib/marketmachine/art.js";
 import { computeCalculations, advisories, scorecardRows } from "../../lib/marketmachine/calculations.js";
 import { isParentType } from "../../lib/marketmachine/catalog.js";
 import { linksOf, scopeOf } from "../../lib/marketmachine/connections.js";
@@ -183,6 +187,7 @@ export default async function handler(req, res) {
         status: c.status,
         accountManagerId: c.accountManagerId || null,
         accountManagerName: c.accountManagerName || null,
+        accountManagers: amsOf(c),
         audienceKind: c.audienceKind,
         audience: c.audience,
         controlDate: c.controlDate || null,
@@ -204,6 +209,34 @@ export default async function handler(req, res) {
         canDelete: true,
         today,
       });
+    }
+
+    if (req.method === "POST" && q.art) {
+      if (!id) return res.status(400).json({ error: "Missing campaign id" });
+      const body = parseBody(req);
+      const platform = String(body.platform || "");
+      const target = await getCampaign(id);
+      if (!target) return res.status(404).json({ error: "Campaign not found" });
+      const refusal = artRefusal(target, platform);
+      if (refusal) return res.status(400).json({ error: refusal });
+      let file;
+      if (body.link) {
+        const chk = checkArtLink(body.link);
+        if (!chk.ok) return res.status(400).json({ error: chk.error });
+        file = { url: chk.url, name: body.name || chk.url, link: true };
+      } else {
+        const parsed = parseArtUpload(body.dataUrl);
+        if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+        const { put } = await import("@vercel/blob");
+        const { randomBytes } = await import("crypto");
+        const pathname = artPath(id, platform, body.name, parsed.mediaType, randomBytes(12).toString("hex"));
+        const blob = await put(pathname, Buffer.from(parsed.base64, "base64"),
+          artPutOptions(parsed.mediaType, process.env.BLOB_READ_WRITE_TOKEN));
+        file = { url: blob.url, name: body.name || "Art file", bytes: parsed.bytes };
+      }
+      const out = await addCampaignArt(id, platform, file, session);
+      if (!out.ok) return refuse(res, out);
+      return res.status(200).json({ ok: true, campaign: out.campaign, progress: progress(out.campaign, today) });
     }
 
     if (req.method === "POST") {
@@ -229,7 +262,7 @@ export default async function handler(req, res) {
           ? await updateStep(id, String(q.step), body, session, today)
           : await updateHeader(id, body, session);
       if (!out.ok) return refuse(res, out);
-      return res.status(200).json({ ok: true, campaign: out.campaign, progress: progress(out.campaign, today) });
+      return res.status(200).json({ ok: true, campaign: out.campaign, progress: progress(out.campaign, today), printavo: out.printavo || null });
     }
 
     if (req.method === "DELETE") {

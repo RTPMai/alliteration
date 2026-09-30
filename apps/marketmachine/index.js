@@ -224,6 +224,8 @@ export default {
     }
 
     async function openCampaign(id) {
+      state.platMsg = null;
+      state.artUploading = {};
       state.openStep = null;
       state.stepMsg = {};
       state.detailMsg = null;
@@ -288,9 +290,21 @@ export default {
       try {
         const d = await api.patch(ENDPOINTS.mkCampaigns, body, { query: { id: c.id, step: key } });
         state.detail.campaign = d.campaign;
-        state.stepMsg = okText ? { [key]: { cls: 'ok', text: okText } } : {};
+        const pv = Array.isArray(d.printavo) ? d.printavo : [];
+        const pvText = pv.map((r) => r.connected
+          ? `Printavo invoice ${r.number}${r.customer ? ' (' + r.customer + ')' : ''} ${r.connected === 'already' ? 'was already connected' : 'is now connected'}. Its status, total and due date are under Connections.`
+          : r.number
+            ? `Printavo invoice ${r.number} was found but not connected: ${r.error || 'try again'}.`
+            : `A Printavo link could not be matched: ${r.error}. Connect the invoice number by hand under Connections.`).join(' ');
+        const bad = pv.some((r) => !r.connected);
+        state.stepMsg = okText || pvText ? { [key]: { cls: bad ? 'err' : 'ok', text: [okText, pvText].filter(Boolean).join(' ') } } : {};
         const listRow = state.campaigns.find((x) => x.id === c.id);
         if (listRow && d.progress) listRow.progress = d.progress;
+        if (pv.some((r) => r.connected === 'added')) {
+          const keep = state.stepMsg;
+          await refreshDetailKeepingPlace();
+          state.stepMsg = keep;
+        }
       } catch (e) {
         state.stepMsg = { [key]: { cls: 'err', text: e.message || 'That change was not saved.' } };
       }
@@ -317,6 +331,33 @@ export default {
     const onClick = async (ev) => {
       const t = ev.target.closest('button, [data-open], input.mk-check');
       if (!t || !root.contains(t)) return;
+
+      if (t.dataset && t.dataset.artRemove !== undefined && t.dataset.artRemove) {
+        if (!window.confirm('Remove this art from the campaign? If it is already scheduled on a platform, it stays there.')) return;
+        state.platMsg = (await patchHeader({ removeArt: t.dataset.artRemove })) ? { cls: 'ok', text: 'Removed.' } : state.detailMsg;
+        state.detailMsg = null;
+        ui.renderDetail();
+        return;
+      }
+      if (t.dataset && t.dataset.artLink) {
+        const k = t.dataset.artLink;
+        const el = root.querySelector('#mkArtLink-' + k);
+        const url = el ? el.value.trim() : '';
+        if (!url) { state.platMsg = { cls: 'err', text: 'Paste the link first.' }; ui.renderDetail(); return; }
+        await postArt(k, { link: /^https?:\/\//i.test(url) ? url : 'https://' + url, name: url.replace(/^https?:\/\//i, '').slice(0, 80) });
+        return;
+      }
+      if (t.dataset && t.dataset.postLink) {
+        const k = t.dataset.postLink;
+        const el = root.querySelector('#mkPostLink-' + k);
+        let url = el ? el.value.trim() : '';
+        if (url && !/^https?:\/\//i.test(url)) url = 'https://' + url;
+        state.platMsg = (await patchHeader({ platformLink: { platform: k, url } }))
+          ? { cls: 'ok', text: url ? 'Link saved.' : 'Link cleared.' } : state.detailMsg;
+        state.detailMsg = null;
+        ui.renderDetail();
+        return;
+      }
 
       if (t.matches('input.mk-check')) {
         const campaignId = t.getAttribute('data-task-done');
@@ -518,13 +559,10 @@ export default {
         case 'save-header': {
           const c = state.detail.campaign;
           const val = (id) => { const el = root.querySelector('#' + id); return el ? el.value : undefined; };
-          const amId = val('mkHAm');
-          const am = state.accountManagers.find((a) => a.id === amId);
           const kind = root.querySelector('input[name="mkHAudKind"]:checked');
           const body = {
             name: val('mkHName'),
-            accountManagerId: amId || null,
-            accountManagerName: am ? am.name : (amId === c.accountManagerId ? c.accountManagerName : null),
+            accountManagers: ui.readAmPicker('mkHAms') || [],
             controlDate: val('mkHDate') || null,
             audienceKind: kind ? kind.value : c.audienceKind,
             audience: val('mkHAudience'),
@@ -597,8 +635,54 @@ export default {
       }
     };
 
-    const onChange = (ev) => {
+    async function postArt(platform, body) {
+      const c = state.detail && state.detail.campaign;
+      if (!c) return;
+      state.artUploading = Object.assign({}, state.artUploading, { [platform]: true });
+      ui.renderDetail();
+      const still = () => state.detail && state.detail.campaign && state.detail.campaign.id === c.id;
+      let d = null, err = null;
+      try {
+        d = await api.post(ENDPOINTS.mkCampaigns, Object.assign({ platform }, body), { query: { id: c.id, art: 1 } });
+      } catch (e) { err = e; }
+      // A 3 MB upload takes a few seconds. If somebody opened a different
+      // campaign meanwhile, this answer belongs to the old one and must not
+      // replace what is on screen now.
+      if (!still()) return;
+      if (d) { state.detail.campaign = d.campaign; state.platMsg = { cls: 'ok', text: 'Art added.' }; }
+      else state.platMsg = { cls: 'err', text: (err && err.message) || 'The art was not added.' };
+      state.artUploading = Object.assign({}, state.artUploading, { [platform]: false });
+      ui.renderDetail();
+    }
+
+    const onChange = async (ev) => {
       const t = ev.target;
+      if (t.dataset && t.dataset.platform) {
+        const picked = Array.from(root.querySelectorAll('input[data-platform]:checked')).map((el) => el.dataset.platform);
+        const ok = await patchHeader({ platforms: picked });
+        state.platMsg = ok ? null : state.detailMsg;
+        if (!ok) state.detailMsg = null;
+        ui.renderDetail();
+        return;
+      }
+      if (t.dataset && t.dataset.artFile && t.files && t.files[0]) {
+        const file = t.files[0];
+        const k = t.dataset.artFile;
+        if (file.size > 3 * 1024 * 1024) {
+          state.platMsg = { cls: 'err', text: `${file.name} is over 3 MB. Put it in Dropbox or Drive and add it as a link instead.` };
+          ui.renderDetail();
+          return;
+        }
+        const dataUrl = await new Promise((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result);
+          r.onerror = () => reject(new Error('That file could not be read.'));
+          r.readAsDataURL(file);
+        }).catch((e) => { state.platMsg = { cls: 'err', text: e.message }; return null; });
+        if (dataUrl) await postArt(k, { dataUrl, name: file.name });
+        else ui.renderDetail();
+        return;
+      }
       if (t.id === 'mkFType') { state.filters.type = t.value; ui.renderList(); }
       else if (t.id === 'mkFAm') { state.filters.am = t.value; ui.renderList(); }
       else if (t.id === 'mkTlType') { state.tl.type = t.value; ui.renderTimeline(); }

@@ -16,8 +16,8 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
-import { parseProspectCsv, classifyRows, domainBreakdown } from "../../lib/mailme/import.js";
-import { knownEmails, addProspects, deleteProspectBatch } from "../../lib/mailme/store.js";
+import { parseProspectCsv, classifyRows, domainBreakdown, listAdditions } from "../../lib/mailme/import.js";
+import { knownEmails, addProspects, deleteProspectBatch, resolveContacts } from "../../lib/mailme/store.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -79,8 +79,14 @@ export default async function handler(req, res) {
       ? [...new Set(body.tags.map((t) => String(t).trim().toLowerCase()).filter(Boolean))]
       : [];
 
+    // Rows already known to MailMe that can go on the named list as they are.
+    // See listAdditions() in lib/mailme/import.js.
+    const { contacts } = await resolveContacts();
+    const additions = listAdditions(classified, contacts);
+
     const summary = {
       parsed: rows.length,
+      addableToList: additions.emails.length,
       importable: classified.new.length,
       duplicate: classified.duplicate.length,
       existingClients: classified.existing.length,
@@ -110,18 +116,28 @@ export default async function handler(req, res) {
     }
 
     // ---- commit ----
-    if (!classified.new.length) {
+    // `addExisting` means a list was named, so rows MailMe already knows are
+    // going onto it. Without a list there is nothing to do with them.
+    const addExisting = !!body.addExisting;
+    if (!classified.new.length && !(addExisting && additions.ids.length)) {
       return res.status(400).json({ error: "Nothing importable in that file", summary });
     }
 
-    const batchId = "BATCH-" + new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
-    const rowsWithTags = classified.new.map((r) => ({ ...r, tags }));
-    const { added } = await addProspects(rowsWithTags, sess, batchId);
+    let batchId = null;
+    let added = [];
+    if (classified.new.length) {
+      batchId = "BATCH-" + new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14);
+      const rowsWithTags = classified.new.map((r) => ({ ...r, tags }));
+      ({ added } = await addProspects(rowsWithTags, sess, batchId));
+    }
 
     return res.status(201).json({
       ok: true,
       dryRun: false,
       imported: added.length,
+      // Existing contacts for the caller to put on the list, by id.
+      listMemberIds: addExisting ? additions.ids : [],
+      addedToList: addExisting ? additions.emails.length : 0,
       batchId,
       batchLabel: body.batchLabel ? String(body.batchLabel).trim() : null,
       summary,

@@ -10442,6 +10442,9 @@ export async function start(ctx) {
           inquiryBriefRow("Wants art meeting", vis.talk_to_art ? "Yes" : "") +
           inquiryBriefRow("Vision", vis.vision_description) +
           inquiryBriefRow("Inspiration", (vis.inspo || []).join(", ")) +
+          (vis.live ? inquiryBriefRow("Print on", vis.live.products) +
+            inquiryBriefRow("Designs", vis.live.design_count) +
+            inquiryBriefRow("Ink colors", vis.live.ink_colors) : '') +
         '</div>';
     }
 

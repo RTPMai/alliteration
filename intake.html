@@ -70,6 +70,12 @@
   }
   .notice.warn { background: #FBF4EC; border-color: #EBD9C2; color: #7A5A32; }
   .err { color: var(--danger); font-size: 13px; margin-top: 12px; display: none; }
+  .live-rules ul { margin: 6px 0 0 18px; padding: 0; }
+  .live-rules li { margin: 3px 0; }
+  .live-rules { margin-bottom: 16px; }
+  .field-err { display: none; color: var(--danger); font-size: 12px; margin-top: 4px; }
+  .field.bad input { border-color: var(--danger); }
+  .field.bad .field-err { display: block; }
   .check { display: flex; align-items: flex-start; gap: 10px; font-size: 13.5px; line-height: 1.5; }
   .check input { margin-top: 3px; }
   .done-icon { width: 56px; height: 56px; border-radius: 50%; background: #E7F4EC; color: var(--green); display: flex; align-items: center; justify-content: center; font-size: 26px; margin: 0 auto 16px; }
@@ -148,7 +154,7 @@ if (isInternal) document.getElementById("internalBadge").style.display = "block"
 let form = {
   entry: { existing_client: null, source: { channel: null, detail: null } },
   company: { name: "" },
-  contact: { name: "", phone: "", email: "", url: "", job_title: "" },
+  contact: { name: "", first_name: "", last_name: "", phone: "", email: "", url: "", job_title: "" },
   project: { name: "", in_hands_date: "", type: null, store_kind: null, description: "", details: {} },
   vision: null,
   internal: isInternal
@@ -197,6 +203,71 @@ function h(html) { card.innerHTML = html; }
 function v(id) { const el = document.getElementById(id); return el ? el.value.trim() : ""; }
 function fail(msg) { const e = document.getElementById("err"); e.textContent = msg; e.style.display = "block"; }
 function backBtn() { return '<button class="btn btn-ghost" onclick="back()">&larr; Back</button>'; }
+// Escape a value going into value="…". A company called Bob's "Best" Tees
+// used to cut the attribute short and lose the rest of what was typed.
+function ev(s) { return s == null ? "" : escapeHtmlClient(s); }
+
+/* ------------------------------------------------------ contact checks */
+// The rules live in lib/contact-format.js, shared with the server and the
+// lead builder. It loads as a module (see the bottom of the page) and sets
+// window.ContactFormat before anyone can press Continue.
+function CF() { return window.ContactFormat || null; }
+
+function nameFields() {
+  return '<div class="row">' +
+    '<div class="field"><label>First name</label><input type="text" id="cfirst" autocomplete="given-name" value="' + ev(form.contact.first_name) + '"><div class="field-err" id="cfirst-err"></div></div>' +
+    '<div class="field"><label>Last name</label><input type="text" id="clast" autocomplete="family-name" value="' + ev(form.contact.last_name) + '"><div class="field-err" id="clast-err"></div></div></div>';
+}
+function phoneEmailFields() {
+  return '<div class="row">' +
+    '<div class="field"><label>Phone</label><input type="tel" id="cphone" autocomplete="tel" placeholder="(515) 555-0123" value="' + ev(form.contact.phone) + '" onblur="checkPhoneField()"><div class="field-err" id="cphone-err"></div></div>' +
+    '<div class="field"><label>Email</label><input type="email" id="cemail" autocomplete="email" placeholder="name@company.com" value="' + ev(form.contact.email) + '" onblur="checkEmailField()"><div class="field-err" id="cemail-err"></div></div></div>';
+}
+function markField(id, msg) {
+  const el = document.getElementById(id); if (!el) return;
+  const wrap = el.closest(".field"), e = document.getElementById(id + "-err");
+  if (wrap) wrap.classList.toggle("bad", !!msg);
+  if (e) e.textContent = msg || "";
+}
+// On leaving the box: rewrite a good number into the one standard shape so
+// the person sees exactly what we will store, or say what is wrong with it.
+function checkPhoneField() {
+  const cf = CF(), el = document.getElementById("cphone"); if (!cf || !el) return true;
+  const r = cf.formatPhone(el.value);
+  if (r.ok) { el.value = r.value; draft.cphone = r.value; markField("cphone", ""); return true; }
+  markField("cphone", r.error); return false;
+}
+function checkEmailField() {
+  const cf = CF(), el = document.getElementById("cemail"); if (!cf || !el) return true;
+  const r = cf.checkEmail(el.value);
+  if (r.ok) { el.value = r.value; draft.cemail = r.value; markField("cemail", ""); return true; }
+  markField("cemail", r.error); return false;
+}
+// Reads and checks the contact fields on the current step. Returns the
+// cleaned contact, or null after showing what needs fixing.
+// needReach: an email or phone is required (true everywhere but Manual Entry).
+// namesOptional: Manual Entry, where staff capture a call with as little as a
+// company name. A name that is typed still has to look like a name.
+function readContact(needReach, namesOptional) {
+  const cf = CF();
+  if (!cf) { fail("The form is still loading. Give it a second and try again."); return null; }
+  const f = cf.checkNamePart(v("cfirst")), l = cf.checkNamePart(v("clast"));
+  const okOrBlank = (r) => r.ok || (namesOptional && r.error === "required");
+  markField("cfirst", f.ok || f.error === "required" ? "" : f.error);
+  markField("clast", l.ok || l.error === "required" ? "" : l.error);
+  if (!okOrBlank(f) || !okOrBlank(l)) {
+    fail(f.error === "required" || l.error === "required" ? "First and last name are both required." : "Check the highlighted name.");
+    return null;
+  }
+  let phone = "", email = "";
+  if (document.getElementById("cphone")) {
+    const pOk = checkPhoneField(), eOk = checkEmailField();
+    if (!pOk || !eOk) { fail("Fix the highlighted " + (!pOk && !eOk ? "phone and email" : (!pOk ? "phone number" : "email")) + " to continue."); return null; }
+    phone = v("cphone"); email = v("cemail");
+    if (needReach && !phone && !email) { fail("Give us an email or a phone number so we can reach you."); return null; }
+  }
+  return { first_name: f.value, last_name: l.value, name: [f.value, l.value].filter(Boolean).join(" "), phone: phone, email: email };
+}
 
 /* ------------------------------------------------------------------ steps */
 const STEPS = {
@@ -232,16 +303,13 @@ const STEPS = {
   existing() {
     h('<div class="step-label">Welcome back</div>' +
       '<h2>Tell us about your project</h2>' +
-      '<div class="field"><label>Company</label><input type="text" id="company" value="' + form.company.name + '"></div>' +
+      '<div class="field"><label>Company</label><input type="text" id="company" value="' + ev(form.company.name) + '"></div>' +
+      nameFields() +
+      phoneEmailFields() +
+      '<div class="field"><label>Website <span class="hint">(optional)</span></label><input type="url" id="curl" placeholder="https://" value="' + ev(form.contact.url) + '"></div>' +
       '<div class="row">' +
-      '<div class="field"><label>Your name</label><input type="text" id="cname" value="' + form.contact.name + '"></div>' +
-      '<div class="field"><label>Phone</label><input type="tel" id="cphone" value="' + form.contact.phone + '"></div></div>' +
-      '<div class="row">' +
-      '<div class="field"><label>Email</label><input type="email" id="cemail" value="' + form.contact.email + '"></div>' +
-      '<div class="field"><label>Website <span class="hint">(optional)</span></label><input type="url" id="curl" placeholder="https://" value="' + form.contact.url + '"></div></div>' +
-      '<div class="row">' +
-      '<div class="field"><label>Project name</label><input type="text" id="pname" placeholder="e.g. Staff polos 2026" value="' + form.project.name + '"></div>' +
-      '<div class="field"><label>In-hands date</label><input type="date" id="ihd" value="' + form.project.in_hands_date + '"></div></div>' +
+      '<div class="field"><label>Project name</label><input type="text" id="pname" placeholder="e.g. Staff polos 2026" value="' + ev(form.project.name) + '"></div>' +
+      '<div class="field"><label>In-hands date</label><input type="date" id="ihd" value="' + ev(form.project.in_hands_date) + '"></div></div>' +
       '<p class="err" id="err"></p>' +
       '<div class="actions">' + backBtn() +
       '<button class="btn btn-primary" onclick="saveExisting()">Continue</button></div>');
@@ -253,9 +321,8 @@ const STEPS = {
       '<h2>Quick capture</h2>' +
       '<p class="sub">Minimum fields — enrich it later in the Inbox.</p>' +
       '<div class="field"><label>Company</label><input type="text" id="company"></div>' +
-      '<div class="row">' +
-      '<div class="field"><label>Contact name</label><input type="text" id="cname"></div>' +
-      '<div class="field"><label>In-hand date</label><input type="date" id="ihd"></div></div>' +
+      nameFields() +
+      '<div class="field"><label>In-hand date</label><input type="date" id="ihd"></div>' +
       '<div class="field"><label>Type of project</label><select id="ptype"><option value="">Select…</option>' +
       PROJECT_TYPES.map(p => '<option value="' + p.key + '">' + p.label + '</option>').join("") + '</select></div>' +
       '<div class="field"><label>Notes <span class="hint">(optional)</span></label><textarea id="pdesc"></textarea></div>' +
@@ -268,17 +335,15 @@ const STEPS = {
   infoDump() {
     h('<div class="step-label">The basics</div>' +
       '<h2>A little about you</h2>' +
-      '<div class="field"><label>Company name</label><input type="text" id="company" value="' + form.company.name + '"></div>' +
+      '<div class="field"><label>Company name</label><input type="text" id="company" value="' + ev(form.company.name) + '"></div>' +
+      nameFields() +
+      phoneEmailFields() +
       '<div class="row">' +
-      '<div class="field"><label>Your name</label><input type="text" id="cname" value="' + form.contact.name + '"></div>' +
-      '<div class="field"><label>Job title</label><input type="text" id="ctitle" value="' + form.contact.job_title + '"></div></div>' +
+      '<div class="field"><label>Job title</label><input type="text" id="ctitle" value="' + ev(form.contact.job_title) + '"></div>' +
+      '<div class="field"><label>Website <span class="hint">(optional)</span></label><input type="url" id="curl" placeholder="https://" value="' + ev(form.contact.url) + '"></div></div>' +
       '<div class="row">' +
-      '<div class="field"><label>Phone</label><input type="tel" id="cphone" value="' + form.contact.phone + '"></div>' +
-      '<div class="field"><label>Email</label><input type="email" id="cemail" value="' + form.contact.email + '"></div></div>' +
-      '<div class="field"><label>Website <span class="hint">(optional)</span></label><input type="url" id="curl" placeholder="https://" value="' + form.contact.url + '"></div>' +
-      '<div class="row">' +
-      '<div class="field"><label>Project name</label><input type="text" id="pname" value="' + form.project.name + '"></div>' +
-      '<div class="field"><label>What is your in-hand date?</label><input type="date" id="ihd" value="' + form.project.in_hands_date + '"></div></div>' +
+      '<div class="field"><label>Project name</label><input type="text" id="pname" value="' + ev(form.project.name) + '"></div>' +
+      '<div class="field"><label>What is your in-hand date?</label><input type="date" id="ihd" value="' + ev(form.project.in_hands_date) + '"></div></div>' +
       '<p class="err" id="err"></p>' +
       '<div class="actions">' + backBtn() +
       '<button class="btn btn-primary" onclick="saveInfoDump()">Continue</button></div>');
@@ -303,7 +368,7 @@ const STEPS = {
       '<div class="field"><label>Location</label><input type="text" id="eloc" placeholder="Venue, city"></div>' +
       '<p class="err" id="err"></p>' +
       '<div class="actions">' + backBtn() +
-      '<button class="btn btn-primary" onclick="saveDetails(\'live\', {audience_size:v(\'aud\'), event_date:v(\'edate\'), location:v(\'eloc\')}, \'review\')">Review &amp; submit</button></div>');
+      '<button class="btn btn-primary" onclick="saveDetails(\'live\', {audience_size:v(\'aud\'), event_date:v(\'edate\'), location:v(\'eloc\')}, \'vision\')">Continue</button></div>');
   },
 
   justAFew() {
@@ -402,14 +467,28 @@ const STEPS = {
 
   /* VISION BOARD --------------------------------------------------------- */
   vision() {
-    h('<div class="step-label">Vision board</div><h2>The look</h2>' +
-      '<div class="field"><label>Garment / product colors</label><input type="text" id="colors" placeholder="e.g. black tees, forest green hoodies"></div>' +
-      '<div class="field"><label>Preferred decoration method</label>' +
-      '<select id="deco"><option value="">Choose…</option><option>Screen print</option><option>Embroidery</option><option>Heat transfer / vinyl</option><option>DTF / DTG</option><option>Patches</option><option>Not sure — advise me</option></select></div>' +
+    // Live Activation prints on site, which limits what the art can be. Say
+    // so up front, before anyone uploads a full-color photo we cannot print
+    // at a booth. Decoration method is not asked: live is screen print.
+    const live = form.project.type === "live_activation";
+    h('<div class="step-label">Vision board</div><h2>' + (live ? 'What you want printed' : 'The look') + '</h2>' +
+      (live
+        ? '<div class="notice live-rules"><b>What live printing can do</b>' +
+          '<ul><li>Up to <b>4 designs</b> to choose from at the event.</li>' +
+          '<li>Each design prints in <b>one ink color</b>. Solid shapes and text work great.</li>' +
+          '<li>Photos, gradients, shading and full-color art can\'t be printed live. If your logo has those, we\'ll help make a one-color version.</li></ul></div>' +
+          '<div class="field"><label>What should we print on?</label><input type="text" id="liveProducts" placeholder="e.g. tees and totes, or tees only"></div>' +
+          '<div class="field"><label>Garment / product colors</label><input type="text" id="colors" placeholder="e.g. black tees, natural totes"></div>' +
+          '<div class="row">' +
+          '<div class="field"><label>How many designs?</label><select id="liveDesigns"><option value="">Choose…</option><option>1</option><option>2</option><option>3</option><option>4</option><option>Not sure yet</option></select></div>' +
+          '<div class="field"><label>Ink color(s) <span class="hint">(one per design)</span></label><input type="text" id="liveInks" placeholder="e.g. white, gold"></div></div>'
+        : '<div class="field"><label>Garment / product colors</label><input type="text" id="colors" placeholder="e.g. black tees, forest green hoodies"></div>' +
+          '<div class="field"><label>Preferred decoration method</label>' +
+          '<select id="deco"><option value="">Choose…</option><option>Screen print</option><option>Embroidery</option><option>Heat transfer / vinyl</option><option>DTF / DTG</option><option>Patches</option><option>Not sure — advise me</option></select></div>') +
       '<div class="field"><label>Do you have art ready?</label>' +
       '<select id="hasArt" onchange="STEPS._visionToggle()"><option value="">Choose…</option><option value="yes">Yes</option><option value="no">No</option></select></div>' +
       '<div id="artYes" style="display:none">' +
-      '<div class="field"><label>Upload your art <span class="hint">(drag & drop, or click to browse — images, PDF, AI, EPS, SVG, PSD, up to 15MB each)</span></label>' +
+      '<div class="field"><label>Upload your art <span class="hint">(' + (live ? 'one file per design, up to 4 designs. ' : '') + 'drag & drop, or click to browse — images, PDF, AI, EPS, SVG, PSD, up to 15MB each)</span></label>' +
       '<div class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Upload art files">' +
       '<div class="dropzone-hint">Drop files here, or click to browse</div>' +
       '<input type="file" id="fileInput" multiple accept=".jpg,.jpeg,.png,.webp,.gif,.svg,.pdf,.ai,.eps,.psd" style="display:none"></div>' +
@@ -422,7 +501,7 @@ const STEPS = {
       '<div class="field"><label>Want to talk to our art team?</label>' +
       '<select id="talkArt" onchange="STEPS._visionToggle()"><option value="">Choose…</option><option value="yes">Yes — set up a meeting</option><option value="no">No — I\'ll describe it</option></select></div>' +
       '<div id="describeBlock" style="display:none">' +
-      '<div class="field"><label>Describe your vision</label><textarea id="visionDesc" placeholder="Style, mood, anything you\'re picturing…"></textarea></div>' +
+      '<div class="field"><label>Describe your vision</label><textarea id="visionDesc" placeholder="' + (live ? 'What each design should say or show. Remember, one color each.' : 'Style, mood, anything you\'re picturing…') + '"></textarea></div>' +
       '<div class="field"><label>Inspiration links <span class="hint">(Pinterest, screenshots, brands you like)</span></label><input type="text" id="inspo" placeholder="paste links, comma-separated"></div></div>' +
       '<div class="notice" id="meetingNote" style="display:none">Great — we\'ll reach out to schedule a meeting with the art team.</div></div>' +
       '<p class="err" id="err"></p>' +
@@ -446,10 +525,10 @@ const STEPS = {
     const typeLabel = p.type ? (PROJECT_TYPES.find(t => t.key === p.type) || {}).label || p.type : "—";
     h('<div class="step-label">Almost done</div><h2>Review your inquiry</h2>' +
       '<dl class="review">' +
-      '<dt>Company</dt><dd>' + (form.company.name || "—") + '</dd>' +
-      '<dt>Contact</dt><dd>' + [form.contact.name, form.contact.email, form.contact.phone].filter(Boolean).join(" · ") + '</dd>' +
-      '<dt>Project</dt><dd>' + (p.name || "—") + ' · ' + typeLabel + (p.store_kind ? " (" + p.store_kind.replace("_", "-") + ")" : "") + (p.in_hands_date ? " · in hands " + p.in_hands_date : "") + '</dd>' +
-      (p.description ? '<dt>Notes</dt><dd>' + p.description + '</dd>' : '') +
+      '<dt>Company</dt><dd>' + ev(form.company.name || "—") + '</dd>' +
+      '<dt>Contact</dt><dd>' + ev([form.contact.name, form.contact.email, form.contact.phone].filter(Boolean).join(" · ")) + '</dd>' +
+      '<dt>Project</dt><dd>' + ev(p.name || "—") + ' · ' + typeLabel + (p.store_kind ? " (" + p.store_kind.replace("_", "-") + ")" : "") + (p.in_hands_date ? " · in hands " + p.in_hands_date : "") + '</dd>' +
+      (p.description ? '<dt>Notes</dt><dd>' + ev(p.description) + '</dd>' : '') +
       '</dl>' +
       '<p class="err" id="err"></p>' +
       '<div class="actions">' + backBtn() +
@@ -500,16 +579,17 @@ function saveSource() {
 }
 function saveExisting() {
   if (!v("company")) return fail("Company is required.");
-  if (!v("cname") || (!v("cemail") && !v("cphone"))) return fail("Your name plus an email or phone are required.");
+  const c = readContact(true); if (!c) return;
   form.company = { name: v("company") };
-  form.contact = { name: v("cname"), phone: v("cphone"), email: v("cemail"), url: v("curl"), job_title: "" };
+  form.contact = Object.assign(c, { url: v("curl"), job_title: "" });
   form.project.name = v("pname"); form.project.in_hands_date = v("ihd");
   go("projectType", 45);
 }
 function saveManual() {
   if (!v("company")) return fail("Company is required.");
+  const c = readContact(false, true); if (!c) return;
   form.company.name = v("company");
-  form.contact.name = v("cname");
+  form.contact.first_name = c.first_name; form.contact.last_name = c.last_name; form.contact.name = c.name;
   form.project.in_hands_date = v("ihd");
   form.project.type = v("ptype") || null;
   form.project.description = v("pdesc");
@@ -517,9 +597,9 @@ function saveManual() {
 }
 function saveInfoDump() {
   if (!v("company")) return fail("Company name is required.");
-  if (!v("cname") || (!v("cemail") && !v("cphone"))) return fail("Your name plus an email or phone are required.");
+  const c = readContact(true); if (!c) return;
   form.company = { name: v("company") };
-  form.contact = { name: v("cname"), phone: v("cphone"), email: v("cemail"), url: v("curl"), job_title: v("ctitle") };
+  form.contact = Object.assign(c, { url: v("curl"), job_title: v("ctitle") });
   form.project.name = v("pname"); form.project.in_hands_date = v("ihd");
   go("projectType", 45);
 }
@@ -575,6 +655,7 @@ function initDropzone() {
 }
 
 function handleFiles(fileList) {
+  window._liveOverFour = false;
   Array.from(fileList || []).forEach(uploadOneFile);
 }
 
@@ -614,6 +695,7 @@ async function uploadOneFile(file) {
 }
 
 function removeUpload(idx) {
+  window._liveOverFour = false;
   uploadedArt.splice(idx, 1);
   renderUploadList();
 }
@@ -636,8 +718,16 @@ function saveVision() {
   if (hasArt === "yes" && uploadedArt.some(function(f) { return f.status === "uploading"; })) {
     return fail("Hang on — a file is still uploading. Give it a few seconds and try again.");
   }
+  const live = form.project.type === "live_activation";
+  if (live && !v("liveProducts")) return fail("Tell us what to print on (tees, totes, hoodies…).");
+  const doneFiles = uploadedArt.filter(function(f) { return f.status === "done"; });
+  if (live && hasArt === "yes" && doneFiles.length > 4 && !window._liveOverFour) {
+    window._liveOverFour = true;
+    return fail("Live printing offers up to 4 designs. If these are extra files for the same designs, press the button again to continue.");
+  }
   form.vision = {
-    colors: v("colors"), deco_method: v("deco"),
+    colors: v("colors"), deco_method: live ? "Live screen print" : v("deco"),
+    live: live ? { products: v("liveProducts"), design_count: v("liveDesigns") || null, ink_colors: v("liveInks") || null } : undefined,
     has_art: hasArt === "yes", art_url: v("artUrl") || null,
     art_files: hasArt === "yes"
       ? uploadedArt.filter(function(f) { return f.status === "done"; }).map(function(f) { return { url: f.url, filename: f.filename }; })
@@ -667,6 +757,10 @@ async function submitForm() {
 }
 
 go("gate", 5);
+</script>
+<script type="module">
+  import * as ContactFormat from "/lib/contact-format.js";
+  window.ContactFormat = ContactFormat;
 </script>
 </body>
 </html>

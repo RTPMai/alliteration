@@ -55,13 +55,29 @@ export function statusClass(label) {
  * dropping it silently.
  */
 export function parseLinks(text) {
-  return String(text || '').split('\n').map((line) => {
+  // A web address with or without https:// ("printavo.com/invoices/123",
+  // "www.x.com/y"). Without the scheme it used to be dropped as "no web
+  // address", which is how a pasted Printavo link vanished (Sep 29 2026).
+  const URL_AT_END = /((?:https?:\/\/|www\.)\S+|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\/\S*)\s*$/i;
+  const rows = String(text || '').split('\n').map((line) => {
     const t = line.trim();
     if (!t) return null;
-    const m = t.match(/(https?:\/\/\S+)\s*$/i);
+    const m = t.match(URL_AT_END);
     if (!m) return { label: t, url: '' };
-    return { label: t.slice(0, m.index).trim(), url: m[1] };
+    const raw = m[1];
+    return { label: t.slice(0, m.index).trim(), url: /^https?:\/\//i.test(raw) ? raw : 'https://' + raw };
   }).filter(Boolean);
+  // A name on its own line belongs to a web address next to it: the one
+  // after it if that has no name, otherwise the one before. "mousepad" under
+  // a Printavo link names that link instead of being thrown away.
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.url) continue;
+    const nextRow = rows[i + 1], prevRow = rows[i - 1];
+    if (nextRow && nextRow.url && !nextRow.label) { nextRow.label = r.label; r.used = true; }
+    else if (prevRow && prevRow.url && !prevRow.label) { prevRow.label = r.label; r.used = true; }
+  }
+  return rows.filter((r) => !r.used).map((r) => ({ label: r.label, url: r.url }));
 }
 
 /**

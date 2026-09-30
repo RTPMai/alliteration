@@ -10,7 +10,7 @@
  */
 
 import { STAGES, typeMeta, connectableTypes } from '../../lib/marketmachine/catalog.js';
-import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION } from '../../lib/marketmachine/campaign.js';
+import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION, amsOf, amNames, PLATFORMS, platformsOf, platformLabel, usesPlatforms, stepGate } from '../../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel } from '../../lib/marketmachine/dates.js';
 import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox } from './format.js';
 
@@ -27,7 +27,7 @@ export default function makeDetail(app) {
         <div class="mk-head">
           <div><div class="k">Campaign name and project number</div>${v(esc(c.name) + ' <span class="who">' + esc(c.id) + '</span>')}</div>
           <div><div class="k">Campaign type</div>${v(esc(meta.label || c.type))}</div>
-          <div><div class="k">Account Manager</div>${v(esc(c.accountManagerName || ''))}</div>
+          <div><div class="k">${amsOf(c).length > 1 ? 'Account Managers' : 'Account Manager'}</div>${v(esc(amNames(c)))}</div>
           <div><div class="k">Approver</div>${v('Ryan or Megan')}</div>
           <div><div class="k">Audience</div>${v(audience)}</div>
           <div><div class="k">Working start date</div>${v(esc(fmtDate(dates.workingStart)))}</div>
@@ -46,8 +46,8 @@ export default function makeDetail(app) {
         <div class="mk-grid">
           <div class="mk-field full"><label for="mkHName">Campaign name</label>
             <input type="text" id="mkHName" maxlength="120" value="${esc(c.name)}"></div>
-          <div class="mk-field"><label for="mkHAm">Account Manager</label>
-            <select id="mkHAm">${ui.amOptions(c.accountManagerId || '')}</select></div>
+          <div class="mk-field"><span class="lbl">Account Managers</span>
+            ${ui.amPicker('mkHAms', amsOf(c))}</div>
           <div class="mk-field"><label for="mkHDate">${esc(meta.controlLabel)}</label>
             <div class="hint">Moving this moves every suggested due date. Dates somebody set by hand stay put.</div>
             <input type="date" id="mkHDate" value="${esc(c.controlDate || '')}"></div>
@@ -78,7 +78,8 @@ export default function makeDetail(app) {
       const clear = s.done || s.notApplicable;
       const late = !clear && due && due < today;
       const unmet = clear ? [] : unmetDependencies(c, s.key);
-      const locked = unmet.length > 0;
+      const gate = clear ? '' : stepGate(c, s.key);
+      const locked = unmet.length > 0 || !!gate;
       const open = state.openStep === s.key;
       const m = state.stepMsg[s.key];
       const cls = ['mk-step', s.done ? 'is-done' : '', s.notApplicable ? 'is-na' : '', late ? 'is-late' : ''].join(' ');
@@ -104,7 +105,7 @@ export default function makeDetail(app) {
                 ${s.done ? `<span>${s.approval ? 'Approved' : 'Done'} ${esc(fmtDate(s.doneAt))}${s.doneBy ? ' by ' + esc(s.doneBy) : ''}</span>` : ''}
                 ${s.notApplicable ? '<span><b>Not applicable</b></span>' : ''}
               </div>
-              ${locked ? `<div class="wait">Waiting on: ${esc(unmet[0].label)}</div>` : ''}
+              ${unmet.length ? `<div class="wait">Waiting on: ${esc(unmet[0].label)}</div>` : gate ? `<div class="wait">${esc(gate)}</div>` : ''}
               ${s.blocked ? `<div class="blocker">Blocked: ${esc(s.blocked)}</div>` : ''}
               ${s.notes && !open ? `<div class="noted">${esc(s.notes)}</div>` : ''}
               ${(s.links || []).length && !open ? `<div class="facts">${s.links.map((l) =>
@@ -161,6 +162,57 @@ export default function makeDetail(app) {
               : (!s.done ? `<button class="mk-btn ghost sm" data-na="${esc(s.key)}" data-na-to="1"${dis}>Mark not applicable</button>` : ''))
               : ''}
             ${s.done ? `<button class="mk-btn ghost sm" data-undo="${esc(s.key)}"${dis}>Mark not done</button>` : ''}
+          </div>
+        </div>`;
+    }
+
+    /**
+     * Platforms and art (Sep 29 2026). Only on campaign types whose checklist
+     * picks platforms. Tick a platform, then each ticked one gets its art
+     * (upload, or a link for anything big) and, once it is live, the link to
+     * the post or ad. The checklist's platform and Art steps stay locked
+     * until this is filled in; the server holds the same rule.
+     */
+    function platformsCard(c) {
+      if (!usesPlatforms(c)) return '';
+      const chosen = platformsOf(c);
+      const art = Array.isArray(c.art) ? c.art : [];
+      const links = c.platformLinks || {};
+      const m = state.platMsg;
+      const up = state.artUploading || {};
+      const per = chosen.map((k) => {
+        const mine = art.filter((a) => a.platform === k);
+        return `
+          <div class="mk-plat">
+            <div class="mk-plat-hd"><b>${esc(platformLabel(k))}</b>
+              ${mine.length ? `<span class="who">${mine.length} art file${mine.length === 1 ? '' : 's'}</span>` : '<span class="late">Needs art</span>'}</div>
+            ${mine.length ? `<ul class="mk-art">${mine.map((a) => `
+              <li><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name || 'Art file')}</a>
+                <span class="who">${a.kind === 'link' ? 'link' : 'file'}${a.by ? ', ' + esc(a.by) : ''}</span>
+                <button class="mk-link" data-art-remove="${esc(a.url)}">Remove</button></li>`).join('')}</ul>` : ''}
+            <div class="mk-actions">
+              <label class="mk-btn sm mk-upload">${up[k] ? 'Uploading' : 'Upload art'}
+                <input type="file" data-art-file="${esc(k)}" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.mp4" hidden${up[k] ? ' disabled' : ''}></label>
+              <input type="url" class="mk-inline-input" id="mkArtLink-${esc(k)}" placeholder="Or paste a link to the art (Dropbox, Canva, Drive)">
+              <button class="mk-btn ghost sm" data-art-link="${esc(k)}">Add link</button>
+            </div>
+            <div class="mk-actions" style="margin-top:8px">
+              <input type="url" class="mk-inline-input" id="mkPostLink-${esc(k)}" value="${esc(links[k] || '')}" placeholder="Link to the live post or ad, once it is up">
+              <button class="mk-btn ghost sm" data-post-link="${esc(k)}">Save link</button>
+              ${links[k] ? `<a class="mk-link" href="${esc(links[k])}" target="_blank" rel="noopener">Open</a>` : ''}
+            </div>
+          </div>`;
+      }).join('');
+      return `
+        <div class="mk-card" id="mkPlatforms">
+          <div class="mk-card-hd"><h3>Platforms and art</h3><span class="meta">Tick where this runs. Only ticked platforms get art.</span></div>
+          <div class="mk-card-bd">
+            ${m ? msgBox(m) : ''}
+            <div class="mk-checks" role="group" aria-label="Platforms">
+              ${PLATFORMS.map((p) => `<label class="mk-check-pill"><input type="checkbox" data-platform="${esc(p.key)}"${chosen.includes(p.key) ? ' checked' : ''}> ${esc(p.label)}</label>`).join('')}
+            </div>
+            ${chosen.length ? per : '<div class="who" style="margin-top:8px">Nothing ticked yet. The platform and Art steps unlock once you pick.</div>'}
+            <div class="who" style="margin-top:8px">Files up to 3 MB (PNG, JPG, GIF, WebP, PDF, MP4). Anything bigger, add as a link.</div>
           </div>
         </div>`;
     }
@@ -278,6 +330,7 @@ export default function makeDetail(app) {
         <div class="mk-card"><div class="mk-card-bd">
           ${state.editingHeader ? headerForm(c, meta) : headerView(c, meta, dates)}
         </div></div>
+        ${platformsCard(c)}
         <nav class="mk-stages" aria-label="Stages">${stageTabs}</nav>
         ${stageSections}
         ${childrenCard}
