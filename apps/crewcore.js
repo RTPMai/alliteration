@@ -91,7 +91,7 @@ import { shiftPayPeriod } from '../lib/crewcore/timeclock.js';
 import { overBy, requestActions, whoIsOut, requestYear, hoursForRequest, requestSummary, REQUEST_TYPES, usesPto, weekBars } from '../lib/crewcore/pto.js';
 // SIMPLE IRA sign-up (Sep 30 2026). Rules and wording shared with
 // api/crewcore/ira.js and the tests. No imports of its own, so browser safe.
-import { iraStatus, iraLabel, packetLabel, packetOutstanding, iraPlanInfo, iraSummaryCsv } from '../lib/crewcore/ira.js';
+import { iraStatus, iraLabel, packetLabel, packetOutstanding, iraPlanInfo, iraSummaryCsv, formInstructions, STOP_WARNING } from '../lib/crewcore/ira.js';
 
 const DEPARTMENTS = ['Screen Printing', 'Embroidery', 'Sales', 'Art', 'Office'];
 const STIPEND_CATEGORIES = ['apparel', 'other'];
@@ -1341,8 +1341,9 @@ export default {
 
     return `${head}
       <div class="ira-now">${esc(iraLabel(ira))}</div>
-      ${ira && ira.start_date ? `<div class="ira-sub">Starting ${esc(fmtDate(ira.start_date))}</div>` : ''}
+      ${ira && ira.start_date ? `<div class="ira-sub">${status === 'declined' ? 'Stopping' : 'Starting'} ${esc(fmtDate(ira.start_date))}</div>` : ''}
       ${packetLine ? `<div class="ira-sub${due ? ' warn' : ''}">${esc(packetLine)}</div>` : ''}
+      ${due && formInstructions(ira) ? `<div class="ira-sub">${esc(formInstructions(ira))}</div>` : ''}
       ${admin ? '' : explainer}
       <div class="ira-acts">
         ${packetLink}
@@ -1374,8 +1375,13 @@ export default {
           <option value="percent" ${type === 'percent' ? 'selected' : ''}>% of my pay</option>
           <option value="dollars" ${type === 'dollars' ? 'selected' : ''}>dollars per paycheck</option>
         </select>
-        ${admin ? `<span class="lbl">Start</span><input type="date" data-ira-start value="${esc(ira && ira.start_date ? ira.start_date : '')}">` : ''}
       </div>
+      <div class="ira-amt" data-ira-date hidden>
+        <span class="lbl">Effective date</span>
+        <input type="date" data-ira-start value="${esc(ira && ira.start_date ? ira.start_date : '')}">
+        <span class="lbl" style="font-weight:400">The date that goes on the paper form</span>
+      </div>
+      <div class="ira-sub warn" data-ira-stopwarn hidden>${esc(STOP_WARNING)}</div>
       <div class="cc-err" data-ira-form-err hidden></div>
       <div class="ira-acts">
         <button class="cc-btn sm" data-ira-save>${admin ? 'Save choice' : 'Save my choice'}</button>
@@ -1407,9 +1413,20 @@ export default {
       const amtRow = q('[data-ira-amt]');
       const amt = q('[data-ira-amount]');
       const typeSel = q('[data-ira-type]');
-      form.querySelectorAll('input[type="radio"]').forEach((r) => {
-        r.onchange = () => { amtRow.hidden = r.value !== 'enrolled' || !r.checked; };
-      });
+      // The effective date is on the paper form for a new election, a change
+      // and a stop. A first-time "no thanks" (box E) has no date.
+      const wasEnrolled = iraStatus(data.ira) === 'enrolled';
+      const dateRow = q('[data-ira-date]');
+      const stopWarn = q('[data-ira-stopwarn]');
+      const sync = () => {
+        const picked = form.querySelector('input[type="radio"]:checked');
+        const v = picked ? picked.value : '';
+        amtRow.hidden = v !== 'enrolled';
+        if (dateRow) dateRow.hidden = !(v === 'enrolled' || (v === 'declined' && wasEnrolled));
+        if (stopWarn) stopWarn.hidden = !(v === 'declined' && wasEnrolled);
+      };
+      form.querySelectorAll('input[type="radio"]').forEach((r) => { r.onchange = sync; });
+      sync();
       if (typeSel && amt) typeSel.onchange = () => { amt.placeholder = typeSel.value === 'dollars' ? '50.00' : '3'; };
       const ferr = q('[data-ira-form-err]');
       const save = q('[data-ira-save]');
@@ -1420,9 +1437,9 @@ export default {
         if (admin) payload.employee_id = data.employee_id;
         if (picked.value === 'enrolled') {
           payload[typeSel.value === 'dollars' ? 'dollars' : 'percent'] = amt.value;
-          const start = q('[data-ira-start]');
-          if (start && start.value) payload.start_date = start.value;
         }
+        const start = q('[data-ira-start]');
+        if (start && start.value && !(dateRow && dateRow.hidden)) payload.start_date = start.value;
         save.disabled = true;
         try {
           const out = await this._ctx.api.post(ENDPOINTS.ccIra, payload);

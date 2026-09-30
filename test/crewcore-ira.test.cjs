@@ -235,6 +235,25 @@ const BOSS = { username: 'boss', name: 'Boss' };
 
   /* ---- the sign-up sheet --------------------------------------------- */
 
+  await t.test('each choice names its box on the paper Salary Deferral Election page', () => {
+    const v = ira.validateIraElection;
+    const first = ira.applyElection({}, v({ status: 'enrolled', percent: 4, start_date: '2026-11-01' }).value);
+    t.equal(first.form_box, 'A', 'first time enrolling is box A');
+    t.equal(ira.formInstructions(first),
+      'On the Salary Deferral Election page, check box A (New election for a new account), write 4%, effective date 11/01/2026, then sign and date it. Include the American Funds application pages if you have never had this account.');
+    const change = ira.applyElection({ ira: first }, v({ status: 'enrolled', dollars: 50 }).value);
+    t.equal(change.form_box, 'B', 'a new amount is box B');
+    t.assert(/write \$50\.00, and fill in an effective date/.test(ira.formInstructions(change)), 'asks for a date when none was given');
+    const stop = ira.applyElection({ ira: change }, v({ status: 'declined', start_date: '2027-01-01' }).value);
+    t.equal(stop.form_box, 'D', 'declining after enrolling is box D');
+    t.equal(stop.start_date, '2027-01-01', 'a stop keeps its effective date');
+    const never = ira.applyElection({}, v({ status: 'declined' }).value);
+    t.equal(never.form_box, 'E', 'a first-time no is box E');
+    t.assert(!/effective/.test(ira.formInstructions(never)), 'box E has no date');
+    t.equal(ira.formInstructions(null), '');
+    t.assert(!/\u2014/.test(ira.formInstructions(first) + ira.STOP_WARNING), 'no em dashes');
+  });
+
   await t.test('summary counts leave out terminated people', () => {
     const s = ira.iraSummary([
       { id: '1', name: 'A', status: 'active', ira: { status: 'enrolled', contribution_type: 'percent', contribution: 3, packet_returned: false } },
