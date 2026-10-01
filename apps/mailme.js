@@ -3092,7 +3092,8 @@ export default {
                 <td class="em">${esc(ct.email)}</td>
                 <td>${ct.industry ? esc(ct.industry) : ''}</td>
                 <td>${ct.tier ? `<span class="pill mute">${esc(ct.tier)}</span>` : ''}</td>
-                <td><span class="pill src" title="${esc(src.note)}">${esc(src.label)}</span></td>
+                <td><span class="pill src" title="${esc(src.note)}">${esc(src.label)}</span>
+                    ${ct.atClient ? `<div class="who" title="Same email domain as this BackBone client, so Clients sends include them">at ${esc(ct.atClient)}</div>` : ''}</td>
                 <td><span class="pill ${m.cls}">${esc(m.label)}</span>
                     ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}
                     ${ct.verification === 'invalid' ? '<div class="who">Failed verification</div>' : ''}</td>

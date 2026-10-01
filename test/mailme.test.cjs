@@ -394,7 +394,7 @@ t.test('every list member missing from a send is accounted for with a reason', (
   const fn = src.slice(src.indexOf('function exclusionReason'));
   const body = fn.slice(0, fn.indexOf('\nasync function recipientsFor'));
   t.assert(/SUPPRESSED_STATUSES/.test(body), 'an unsubscribe must be named as such');
-  t.assert(/contact\.source !== campaign\.source/.test(body),
+  t.assert(/!inAudience\(contact, campaign\.source\)/.test(body),
     'an audience mismatch is the most common cause and must be named');
   t.assert(/segmentTags/.test(body), 'a segment mismatch must be named');
 });
@@ -727,8 +727,8 @@ t.test('mixing cold prospects with warm contacts is refused', () => {
   const schema = stripComments(read('lib/mailme/schema.js'));
   const fn = schema.slice(schema.indexOf('export function campaignSourceConflict'));
   const body = fn.slice(0, fn.indexOf('\n}'));
-  t.assert(body.includes('COLD_SOURCES'),
-    'the conflict check must compare cold vs warm, not raw source');
+  t.assert(body.includes('isColdContact'),
+    'the conflict check must compare cold vs warm, not raw source (isColdContact; real calls in mailme-client-company.test.cjs)');
 });
 
 /* ---- v3.1: regressions from the first live run --------------------------- */

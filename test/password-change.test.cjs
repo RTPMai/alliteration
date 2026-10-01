@@ -319,5 +319,47 @@ async function check(name, fn) {
     t.assert(/href="password\.html"/.test(shell), 'the avatar menu offers Change password');
   });
 
+  /* ---- reset everyone (Oct 2026) ---------------------------------------- */
+
+  await check('reset everyone: one temp password for all but the Admin pressing it', async () => {
+    await seed();
+    await users.createUser({ username: 'amanda', password: 'amanda-own-pass', name: 'Amanda Clark' });
+    await users.createUser({ username: 'jacob', password: 'jacob-own-pass', name: 'Jacob Whitman', superuser: true });
+    const c = await ryanCookie();
+    const r = await call(usersRoute, { cookie: c, method: 'POST', body: { action: 'reset_all', password: 'Shirt-Ink-2026', confirm: 'RESET' } });
+    t.equal(r.statusCode, 200);
+    t.equal(r.body.people.map((p) => p.username).join(','), 'amanda,jacob', 'everyone but Ryan, by name');
+    t.assert(!JSON.stringify(r.body).includes('Shirt-Ink-2026'), 'the password is not echoed back');
+    t.equal((await login('amanda', 'amanda-own-pass')).statusCode, 401, 'old password is dead');
+    const a = await login('amanda', 'Shirt-Ink-2026');
+    t.equal(a.body.mustChangePassword, true, 'and they must pick their own');
+    const j = await login('jacob', 'Shirt-Ink-2026');
+    t.equal(j.body.mustChangePassword, true, 'admins too');
+    const me = await login('ryan', 'ryan-real-pass');
+    t.equal(me.statusCode, 200);
+    t.equal(me.body.mustChangePassword, false, 'Ryan is untouched');
+    const rec = JSON.parse(kv.get(P + 'users'));
+    t.assert(rec.amanda.password_hash !== rec.jacob.password_hash, 'each account still gets its own salt');
+  });
+
+  await check('reset everyone is Admin only, needs the confirm word, and a real password', async () => {
+    await seed();
+    await users.createUser({ username: 'amanda', password: 'amanda-own-pass', name: 'Amanda' });
+    const c = await ryanCookie();
+    t.equal((await call(usersRoute, { cookie: c, method: 'POST', body: { action: 'reset_all', password: 'Shirt-Ink-2026' } })).statusCode, 400);
+    t.equal((await call(usersRoute, { cookie: c, method: 'POST', body: { action: 'reset_all', password: 'short', confirm: 'RESET' } })).statusCode, 400);
+    const ac = cookieFrom(await login('amanda', 'amanda-own-pass'));
+    t.equal((await call(usersRoute, { cookie: ac, method: 'POST', body: { action: 'reset_all', password: 'Shirt-Ink-2026', confirm: 'RESET' } })).statusCode, 403);
+    t.equal((await login('amanda', 'amanda-own-pass')).statusCode, 200, 'nothing changed');
+  });
+
+  await check('the sheet has the website, username, password and the Oct 16 notice', async () => {
+    const src = fs.readFileSync(path.join(ROOT, 'apps/settings.js'), 'utf8');
+    t.assert(src.includes("const SITE = 'alliteration.pmapparel.com'"));
+    t.assert(/sheetHtml[\s\S]*esc\(p\.username\)[\s\S]*esc\(pw\)[\s\S]*October 16/.test(src));
+    t.assert(!/—/.test(src.slice(src.indexOf('function sheetHtml'), src.indexOf('function showSheets'))), 'no em dashes on the sheet');
+    t.assert(/break-after:page/.test(src), 'one sheet per printed page');
+  });
+
   process.exit(t.report());
 })();

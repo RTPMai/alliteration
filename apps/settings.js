@@ -214,7 +214,10 @@ export default {
       <div class="set-card">
         <div class="set-card-hd">
           <h2>People</h2>
-          <button class="set-btn primary" id="addUserBtn">Add someone</button>
+          <div style="display:flex;gap:8px">
+            <button class="set-btn danger" id="resetAllBtn" title="Give everyone but you one temporary password and print a sign-in sheet for each person">Reset everyone</button>
+            <button class="set-btn primary" id="addUserBtn">Add someone</button>
+          </div>
         </div>
         <div id="addUserForm" style="display:none">
           <div class="set-card-bd" style="border-bottom:1px solid var(--line)">
@@ -579,6 +582,138 @@ export default {
         }).join('') +
         '</tbody></table>';
     }
+
+    /* ---- reset everyone + sign-in sheets (Oct 2026) ----
+     *
+     * One temporary password for every account but yours, then one printable
+     * sheet per person: website, username, the password, and the Oct 16
+     * notice. The sheets are built here in the browser from the server's
+     * answer, so the password never leaves this screen except on paper.
+     */
+    const SITE = 'alliteration.pmapparel.com';
+
+    function suggestTemp() {
+      const words = ['Shirt', 'Hoodie', 'Ink', 'Thread', 'Press', 'Screen', 'Squeegee', 'Tote', 'Cap', 'Stitch'];
+      const r = new Uint32Array(3);
+      crypto.getRandomValues(r);
+      return words[r[0] % words.length] + '-' + words[(r[0] + 1 + (r[1] % (words.length - 1))) % words.length] +
+        '-' + String(r[2] % 10000).padStart(4, '0');
+    }
+
+    function sheetHtml(p, pw) {
+      const first = String(p.name || p.username).trim().split(/\s+/)[0];
+      return '<section class="pw-sheet">' +
+        '<div class="pw-brand">alliteration<span>.</span></div>' +
+        '<div class="pw-sub">P&amp;M Apparel</div>' +
+        '<p class="pw-hi">Hi ' + esc(first) + ',</p>' +
+        '<p>Here is your sign-in for alliteration, the system that runs our apps (BackBone, CrewCore, ShopStock, PromoPro and the rest). Everyone has a new temporary password.</p>' +
+        '<table class="pw-creds">' +
+          '<tr><th>Website</th><td>' + SITE + '</td></tr>' +
+          '<tr><th>Username</th><td>' + esc(p.username) + '</td></tr>' +
+          '<tr><th>Temporary password</th><td class="pw-pw">' + esc(pw) + '</td></tr>' +
+        '</table>' +
+        '<p class="pw-h">To sign in</p>' +
+        '<ol>' +
+          '<li>Go to <b>' + SITE + '</b></li>' +
+          '<li>Enter your username and the temporary password above.</li>' +
+          '<li>You will be asked to pick your own password. At least 8 characters. A short phrase is easiest to remember.</li>' +
+        '</ol>' +
+        '<div class="pw-notice">' +
+          '<div class="pw-notice-h">Friday, October 16</div>' +
+          '<div>I will be going over the entire system with everyone at our First Thing Friday all staff meeting on October 16. Please sign in and set your own password before then.</div>' +
+        '</div>' +
+        '<p class="pw-small">Keep this sheet to yourself and throw it away once you have picked your own password.</p>' +
+        '<p class="pw-sign">Ryan</p>' +
+      '</section>';
+    }
+
+    function showSheets(people, pw) {
+      const old = document.getElementById('pwSheets');
+      if (old) old.remove();
+      const style = document.getElementById('pwSheetsStyle') || document.createElement('style');
+      style.id = 'pwSheetsStyle';
+      style.textContent =
+        '#pwSheets{position:fixed;inset:0;z-index:200;overflow:auto;background:var(--bg);padding:20px}' +
+        '#pwSheets .pw-bar{max-width:720px;margin:0 auto 16px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}' +
+        '#pwSheets .pw-bar .pw-note{flex:1;font-size:13px;color:var(--ink)}' +
+        '.pw-sheet{max-width:720px;margin:0 auto 20px;background:white;color:black;padding:48px 56px;border:1px solid var(--line);font-size:14px;line-height:1.55}' +
+        // The app's own styles reset lists, paragraphs and table headers, so
+        // the sheet states its own.
+        '.pw-sheet p{margin:0 0 12px}' +
+        '.pw-sheet ol{margin:0 0 12px;padding-left:24px;list-style:decimal outside}' +
+        '.pw-sheet li{margin:0 0 4px;display:list-item}' +
+        '.pw-brand{font-size:30px;font-weight:800;letter-spacing:-.02em}' +
+        '.pw-brand span{color:var(--accent)}' +
+        '.pw-sub{font-size:12px;margin-bottom:28px;opacity:.7}' +
+        '.pw-hi{font-size:16px;font-weight:600}' +
+        '.pw-creds{border-collapse:collapse;margin:20px 0;width:100%}' +
+        '.pw-creds th{text-align:left;font-weight:600;font-size:14px;text-transform:none;letter-spacing:0;color:black;background:none;padding:10px 16px 10px 0;width:180px;border-bottom:1px solid var(--line);vertical-align:middle}' +
+        '.pw-creds td{padding:10px 0;font-size:17px;border-bottom:1px solid var(--line);font-family:ui-monospace,Menlo,Consolas,monospace}' +
+        '.pw-creds .pw-pw{font-size:20px;font-weight:700;color:black}' +
+        '.pw-creds tr:last-child td,.pw-creds tr:last-child th{border-bottom:1px solid var(--line)}' +
+        '.pw-h{font-weight:700;margin:20px 0 4px}' +
+        '.pw-notice{border:2px solid black;padding:14px 18px;margin:24px 0}' +
+        '.pw-notice-h{font-weight:800;font-size:16px;margin-bottom:4px}' +
+        '.pw-small{font-size:12px;opacity:.7}' +
+        '.pw-sign{margin-top:24px;font-weight:600}' +
+        '@media print{' +
+          'html,body{background:white!important}' +
+          'body>*:not(#pwSheets){display:none!important}' +
+          '#pwSheets{position:static;padding:0;background:white}' +
+          '#pwSheets .pw-bar{display:none}' +
+          '.pw-sheet{border:0;margin:0;max-width:none;padding:24px 8px;page-break-after:always;break-after:page}' +
+          '.pw-sheet:last-child{page-break-after:auto;break-after:auto}' +
+        '}';
+      document.head.appendChild(style);
+
+      const wrap = document.createElement('div');
+      wrap.id = 'pwSheets';
+      wrap.innerHTML =
+        '<div class="pw-bar">' +
+          '<div class="pw-note"><b>' + people.length + ' passwords reset.</b> Temporary password: <b>' + esc(pw) +
+            '</b>. Print now; once you close this, the sheets are gone (the password is not stored anywhere readable).</div>' +
+          '<button class="set-btn primary" data-pw="print">Print ' + people.length + ' sheets</button>' +
+          '<button class="set-btn" data-pw="close">Close</button>' +
+        '</div>' +
+        people.map((p) => sheetHtml(p, pw)).join('');
+      document.body.appendChild(wrap);
+      wrap.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-pw]');
+        if (!b) return;
+        if (b.dataset.pw === 'print') window.print();
+        if (b.dataset.pw === 'close') {
+          if (confirm('Close the sheets? Print them first if you have not.')) wrap.remove();
+        }
+      });
+    }
+
+    $('#resetAllBtn').addEventListener('click', async () => {
+      const me = ctx.user ? String(ctx.user.username || '').toLowerCase() : '';
+      const others = users.filter((u) => String(u.username).toLowerCase() !== me);
+      if (!others.length) { say('There is nobody else to reset.', 'err'); return; }
+      const pw = prompt(
+        'One temporary password for all ' + others.length + ' accounts except yours.\n\n' +
+        'Everyone will have to pick their own the next time they sign in. Use this one or type your own (at least 8 characters):',
+        suggestTemp());
+      if (pw == null) return;
+      if (pw.length < 8) { say('The temporary password needs at least 8 characters.', 'err'); return; }
+      if (!confirm('Reset ' + others.length + ' passwords to "' + pw + '"?\n\n' +
+        'Everyone except you is signed out of their old password right away. This cannot be undone.')) return;
+
+      const btn = $('#resetAllBtn');
+      btn.disabled = true;
+      say('Resetting...', '');
+      try {
+        const r = await ctx.api.post(ENDPOINTS.users, { action: 'reset_all', password: pw, confirm: 'RESET' });
+        say(r.people.length + ' passwords reset. Sheets are open to print.', 'ok');
+        showSheets(r.people, pw);
+        await load();
+      } catch (e) {
+        say(e.message || 'Could not reset passwords', 'err');
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     $('#addUserBtn').addEventListener('click', () => {
       const f = $('#addUserForm');

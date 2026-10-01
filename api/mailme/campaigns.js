@@ -32,7 +32,7 @@ import {
 import {
   validateCampaignPatch, selectRecipients, resolveList,
   computeRates, deliverabilityWarnings, identityForCampaign, campaignSourceConflict,
-  identityAudienceWarning, sendingIdentities, COLD_SOURCES,
+  identityAudienceWarning, sendingIdentities, COLD_SOURCES, isColdContact, inAudience,
   SUPPRESSED_STATUSES, SOURCE_LABELS,
 } from "../../lib/mailme/schema.js";
 import {
@@ -87,7 +87,7 @@ function exclusionReason(contact, campaign) {
     return contact.status === "unsubscribed"
       ? "Unsubscribed" : `Not mailable (${contact.status})`;
   }
-  if (campaign.source && contact.source !== campaign.source) {
+  if (campaign.source && !inAudience(contact, campaign.source)) {
     const label = (SOURCE_LABELS[campaign.source] || campaign.source);
     const own = (SOURCE_LABELS[contact.source] || contact.source);
     return `This campaign is going to ${label}, and this contact is a ${own}`;
@@ -158,7 +158,7 @@ export default async function handler(req, res) {
         // Matches lib/mailme/send.js: any cold recipient at all puts the
         // send on the cold ramp, so the plan shown here is the plan used.
         const isCold = COLD_SOURCES.includes(campaign.source) ||
-          recipients.some((r) => COLD_SOURCES.includes(r.source));
+          recipients.some(isColdContact);
         const rampDay = settings.coldStartedAt
           ? Math.floor((Date.now() - new Date(settings.coldStartedAt)) / 86400000) : 0;
         const dailyCap = isCold

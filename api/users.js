@@ -6,6 +6,8 @@
 //
 //   GET    /api/users            -> list accounts
 //   POST   /api/users            -> create { username, password, name, access? }
+//   POST   /api/users            -> { action:"reset_all", password, confirm:"RESET" }
+//                                    every account but the caller, temporary
 //   PATCH  /api/users?username=  -> update { name?, password?, access?, superuser? }
 //   DELETE /api/users?username=  -> remove
 //
@@ -19,7 +21,7 @@
 
 import { requireAuth } from "../lib/session.js";
 import {
-  listUsers, createUser, updateUser, deleteUser, permsFor,
+  listUsers, createUser, updateUser, deleteUser, permsFor, resetAllPasswords,
 } from "../lib/users.js";
 
 export default async function handler(req, res) {
@@ -48,6 +50,18 @@ export default async function handler(req, res) {
   try {
     if (req.method === "GET") {
       return res.status(200).json({ users: await listUsers() });
+    }
+
+    // ---- reset everyone (Oct 2026) ----
+    // Every account except the caller gets the same temporary password and
+    // must pick their own at next sign-in. confirm:"RESET" so a stray POST
+    // carrying a password cannot do this by accident.
+    if (req.method === "POST" && body.action === "reset_all") {
+      if (body.confirm !== "RESET") {
+        return res.status(400).json({ error: "Reset everyone needs confirm: RESET" });
+      }
+      const people = await resetAllPasswords(sess.username, body.password);
+      return res.status(200).json({ ok: true, people });
     }
 
     if (req.method === "POST") {
