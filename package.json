@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Single shell hosting P&M Apparel's internal apps under one login.",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "scripts": {
     "test": "bash test/run.sh"
