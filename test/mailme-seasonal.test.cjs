@@ -105,7 +105,13 @@ const SETTINGS = {
   const schema = await import(path.join(ROOT, 'lib/mailme/schema.js'));
 
   const ctx = (over) => Object.assign({ campaignId: 'MM-00050', settings: SETTINGS, unsubToken: 'tok123', assetBase: 'https://alliteration.pmapparel.com' }, over || {});
-  const mailtos = (html) => (html.match(/href="mailto:[^"]*"/g) || []);
+  // Account manager buttons: a plain mailto:, or since Oct 1 the counted
+  // /api/mailme/am link that opens one. Either way, one per button.
+  const mailtos = (html) => (html.match(/href="(mailto:|https:\/\/[^"]*\/api\/mailme\/am\?)[^"]*"/g) || []);
+  const emailsTo = (html, who) => html.includes(`mailto:${who}@pmapparel.com`) || html.includes(`/api/mailme/am?to=${who}&`);
+  // These checks are the "only each reader's own" mode. "Every account
+  // manager" has its own section below.
+  const THEIRS = { contactMode: 'theirs' };
 
   /* ---- 1. one button per reader ----------------------------------------- */
 
@@ -121,11 +127,11 @@ const SETTINGS = {
   });
 
   await check('a client of Hannah gets one button: Email Hannah, to hannah@', () => {
-    const html = S.renderHtml({}, ctx({ accountManager: 'Hannah Posey' }));
+    const html = S.renderHtml(THEIRS, ctx({ accountManager: 'Hannah Posey' }));
     const m = mailtos(html);
     t.equal(m.length, 1, 'exactly one mailto: ' + JSON.stringify(m));
-    t.assert(m[0].startsWith('href="mailto:hannah@pmapparel.com?subject='), m[0]);
-    t.assert(m[0].includes('subject=Let%27s%20start%20my%20holiday%20project'), 'subject rides along, apostrophe encoded like hers: ' + m[0]);
+    t.assert(emailsTo(html, 'hannah'), m[0]);
+    t.assert(/s=Let%27s(\+|%20)start(\+|%20)my(\+|%20)holiday(\+|%20)project/.test(m[0]), 'subject rides along, apostrophe encoded like hers: ' + m[0]);
     t.assert(html.includes('>email hannah.</a>'), 'labelled with her name, the brand way (lower case, period)');
     t.assert(html.includes('Hannah is your account manager.'), '{name} filled in');
     t.assert(!/Email (Abby|Alexis|Jacob)/.test(html), 'nobody else\'s button');
@@ -139,23 +145,23 @@ const SETTINGS = {
 
   await check('an owner not on the list, a placeholder, or nobody gets the inquiry form only', () => {
     for (const am of ['Ryan Toney', 'House Account', 'TBD', '', '-', 'Megan']) {
-      const html = S.renderHtml({}, ctx({ accountManager: am }));
+      const html = S.renderHtml(THEIRS, ctx({ accountManager: am }));
       t.equal(mailtos(html).length, 0, `no mailto for ${JSON.stringify(am)}`);
       t.assert(html.includes('>start a project.</a>'), `form button for ${JSON.stringify(am)}`);
       t.assert(!/>email [a-z]/i.test(html), `no Email button for ${JSON.stringify(am)}`);
     }
-    const added = S.renderHtml({ people: ['Abby', 'Ryan'] }, ctx({ accountManager: 'Ryan Toney' }));
-    t.assert(added.includes('mailto:ryan@pmapparel.com'), 'adding a name to the list gives them a button');
+    const added = S.renderHtml({ ...THEIRS, people: ['Abby', 'Ryan'] }, ctx({ accountManager: 'Ryan Toney' }));
+    t.assert(emailsTo(added, 'ryan'), 'adding a name to the list gives them a button');
   });
 
   await check('no reply-to domain in Settings means no guessed address', () => {
-    const html = S.renderHtml({}, ctx({ accountManager: 'Hannah Posey', settings: Object.assign({}, SETTINGS, { replyToDomain: '' }) }));
+    const html = S.renderHtml(THEIRS, ctx({ accountManager: 'Hannah Posey', settings: Object.assign({}, SETTINGS, { replyToDomain: '' }) }));
     t.equal(mailtos(html).length, 0);
     t.equal(S.accountManagerFor('Hannah', ['Hannah'], 'not a domain'), null);
   });
 
   await check('every reader gets the inquiry form, with or without an account manager', () => {
-    [S.renderHtml({}, ctx({ accountManager: 'Hannah Posey' })), S.renderHtml({}, ctx())].forEach((html) => {
+    [S.renderHtml(THEIRS, ctx({ accountManager: 'Hannah Posey' })), S.renderHtml(THEIRS, ctx())].forEach((html) => {
       t.assert(html.includes('https://forms.monday.com/forms/e8ecf816d4b9d2a116e0b777548f79f3'), 'form link');
     });
   });
@@ -163,7 +169,7 @@ const SETTINGS = {
   /* ---- 2. her copy, as text ---------------------------------------------- */
 
   await check('her dates are live text, not a picture', () => {
-    const html = S.renderHtml({}, ctx());
+    const html = S.renderHtml(THEIRS, ctx());
     ['delivered by december 4.', 'get your gear by december 16.', 'Oct 8 - 21', 'Nov 30 - Dec 4', 'Dec 10 - 16',
       'plan ahead for early december delivery.', 'November 26-27'].forEach((s) => t.assert(html.includes(s), 'missing ' + s));
     t.assert(!html.includes('PM-Apparel-2026-Holiday-Email.png'), 'not her picture');
@@ -229,7 +235,7 @@ const SETTINGS = {
   /* ---- 3. the law --------------------------------------------------------- */
 
   await check('every copy carries the postal address and its own unsubscribe link', () => {
-    const html = S.renderHtml({}, ctx({ unsubToken: 'abc999' }));
+    const html = S.renderHtml(THEIRS, ctx({ unsubToken: 'abc999' }));
     t.assert(html.includes('1220 W Broadway St, Polk City, IA, 50226'), 'address');
     t.assert(html.includes('https://alliteration.pmapparel.com/unsubscribe.html?t=abc999'), 'per-recipient unsubscribe');
   });
@@ -248,20 +254,20 @@ const SETTINGS = {
   });
 
   await check('no calendar picture, no calendar block', () => {
-    const html = S.renderHtml({}, ctx());
+    const html = S.renderHtml(THEIRS, ctx());
     t.assert(!html.includes('Tap the calendar'), 'nothing to tap');
   });
 
   /* ---- 5. the wiring ------------------------------------------------------ */
 
-  const campaign = { id: 'MM-00050', subject: 'Holiday stores', template: 'seasonal', templateData: S.defaults() };
+  const campaign = { id: 'MM-00050', subject: 'Holiday stores', template: 'seasonal', templateData: { ...S.defaults(), ...THEIRS } };
 
   await check('a real send hands each reader\'s own account manager to the design', () => {
     const hannah = send.buildHtml(campaign, { id: 'client:1', email: 'a@b.com', accountManager: 'Hannah Posey' }, SETTINGS, 'tok');
     const alexis = send.buildHtml(campaign, { id: 'client:2', email: 'c@d.com', accountManager: 'Alexis Davis' }, SETTINGS, 'tok');
     const nobody = send.buildHtml(campaign, { id: 'prospect:3', email: 'e@f.com', accountManager: '' }, SETTINGS, 'tok');
-    t.assert(hannah.includes('mailto:hannah@pmapparel.com'), 'Hannah\'s client');
-    t.assert(alexis.includes('mailto:alexis@pmapparel.com') && !alexis.includes('hannah@'), 'Alexis\'s client');
+    t.assert(emailsTo(hannah, 'hannah'), 'Hannah\'s client');
+    t.assert(emailsTo(alexis, 'alexis') && !emailsTo(alexis, 'hannah'), 'Alexis\'s client');
     t.equal(mailtos(nobody).length, 0, 'no rep, no mailto');
     const text = send.buildText(campaign, { id: 'client:1', email: 'a@b.com', accountManager: 'Hannah Posey' }, SETTINGS, 'tok');
     t.assert(text.includes('hannah@pmapparel.com'), 'plain text has the address too');
@@ -280,11 +286,11 @@ const SETTINGS = {
   await check('the preview route renders the copy for whichever account manager is picked', async () => {
     seedUsers();
     const before = JSON.stringify([...kv.entries()]);
-    const as = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: {}, subject: 's', sample: { accountManager: 'Hannah' } } });
+    const as = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: THEIRS, subject: 's', sample: { accountManager: 'Hannah' } } });
     t.equal(as.statusCode, 200, JSON.stringify(as.body));
     t.assert(as.body.html.includes('>email hannah.</a>'), 'Hannah\'s copy');
     t.equal(as.body.problems.length, 0, JSON.stringify(as.body.problems));
-    const none = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: {}, subject: 's', sample: {} } });
+    const none = await call(route, { as: { username: 'viewer' }, body: { action: 'render', template: 'seasonal', templateData: THEIRS, subject: 's', sample: {} } });
     t.equal(mailtos(none.body.html).length, 0, 'no rep picked, no button');
     t.equal(JSON.stringify([...kv.entries()]), before, 'render writes nothing');
   });
@@ -310,7 +316,7 @@ const SETTINGS = {
     const r = await send.sendTestEmail('MM-00050', 'ryan@pmapparel.com', { accountManager: 'Hannah Posey' });
     t.equal(r.ok, true, JSON.stringify(r));
     const sent = resendCalls.find((c) => /\/emails$/.test(c.url));
-    t.assert(sent && sent.body.html.includes('mailto:hannah@pmapparel.com'), 'Hannah\'s copy went out');
+    t.assert(sent && emailsTo(sent.body.html, 'hannah'), 'Hannah\'s copy went out');
     t.equal(sent.body.reply_to, 'hannah@pmapparel.com', 'and replies go to her too');
     resendCalls = [];
     const plainTest = await send.sendTestEmail('MM-00050', 'ryan@pmapparel.com');
@@ -320,7 +326,7 @@ const SETTINGS = {
     const res = await call(route, { as: { username: 'abby' }, query: { id: 'MM-00050', action: 'test', to: 'ryan@pmapparel.com' }, body: { accountManager: 'Hannah Posey' } });
     t.equal(res.statusCode, 200, 'route accepts it: ' + JSON.stringify(res.body));
     const viaRoute = resendCalls.find((c) => /\/emails$/.test(c.url));
-    t.assert(viaRoute && viaRoute.body.html.includes('mailto:hannah@pmapparel.com'), 'the route passes the pick through');
+    t.assert(viaRoute && emailsTo(viaRoute.body.html, 'hannah'), 'the route passes the pick through');
     delete process.env.RESEND_API_KEY;
   });
 

@@ -151,7 +151,7 @@ export default async function handler(req, res) {
         if (!campaign) return res.status(404).json({ error: "Campaign not found" });
 
         const { recipients, held, list, missingList, settings } = await recipientsFor(campaign);
-        const { stats, links, byPick, bySpot } = await campaignResults(id, recipients.length);
+        const { stats, links, byPick, bySpot, byAm, knewAm } = await campaignResults(id, recipients.length);
 
         // The cold ramp: a brand-new sending domain must not go from zero to
         // hundreds of cold emails in a day, which is itself a spam signal.
@@ -206,6 +206,8 @@ export default async function handler(req, res) {
             // card, read from the utm_content tag on each link.
             byPick: byPick || [],
             bySpot: bySpot || [],
+            byAm: byAm || [],
+            knewAm: knewAm || null,
             rates: computeRates(stats),
             warnings: deliverabilityWarnings(stats),
             primary: primaryMetric(stats),

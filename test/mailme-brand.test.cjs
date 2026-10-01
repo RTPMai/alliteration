@@ -149,7 +149,8 @@ function headersIn(html) {
   });
 
   await check('seasonal: buttons are lower case with a period', () => {
-    t.assert(renders.seasonal.includes('>email hannah.</a>'), 'rep button');
+    // Default is every account manager, labelled by name; the one-button mode says "email hannah."
+    t.assert(/>(email )?hannah\.<\/a>/.test(renders.seasonal), 'rep button');
     t.assert(renders.seasonal.includes('>start a project.</a>'), 'form button');
     t.assert(renders.seasonal.includes('good people. great gear.'), 'the tagline, the way the guidelines set it');
   });

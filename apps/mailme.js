@@ -2216,9 +2216,17 @@ export default {
         <div class="mm-tf-card">
           <div class="mm-tf-card-hd"><b>Contact buttons</b></div>
           ${tfText('contactHeadline', 'Heading', td.contactHeadline, { dis })}
-          ${tfArea('people', 'Account managers who get their own button, first names, one per line', people, { dis, list: true,
-            hint: 'Each reader\u2019s account manager comes from BackBone. If theirs is on this list, they get an "Email Hannah" button to firstname@ the reply-to domain in Settings. Everyone else gets only the inquiry form button.' })}
-          ${tfText('amText', 'Line above that button', td.amText, { dis, hint: '{name} becomes the account manager\u2019s first name.' })}
+          ${tfSelect('contactMode', 'Account manager buttons', td.contactMode === 'theirs' ? 'theirs' : 'all', [
+            ['all', 'Show every account manager, reader picks theirs'],
+            ['theirs', 'Show only each reader\u2019s own account manager']
+          ], dis)}
+          ${tfArea('people', 'Account managers, first names, one per line', people, { dis, list: true,
+            hint: td.contactMode === 'theirs'
+              ? 'Each reader\u2019s account manager comes from BackBone. If theirs is on this list, they get an "Email Hannah" button. Everyone else gets only the inquiry form button.'
+              : 'Every name here gets a button, in this order. Each opens an email to firstname@ the reply-to domain in Settings. Reports shows who clicked their own account manager and who picked someone else.' })}
+          ${td.contactMode === 'theirs'
+            ? tfText('amText', 'Line above that button', td.amText, { dis, hint: '{name} becomes the account manager\u2019s first name.' })
+            : tfText('allText', 'Line above the buttons', td.allText, { dis })}
           ${tfText('mailSubject', 'Subject line when they click it', td.mailSubject, { dis })}
           ${tfText('formPrompt', 'Line above the inquiry form button', td.formPrompt, { dis })}
           <div class="mm-tf-grid2">
@@ -2231,7 +2239,9 @@ export default {
               ${people.map((p) => `<option value="${esc(p)}"${asAm === p ? ' selected' : ''}>${esc(p)}</option>`).join('')}
               <option value=""${asAm === '' ? ' selected' : ''}>No account manager on the list</option>
             </select>
-            <div class="hint">Only changes what you see here and in a test. Each reader gets their own when it sends.</div>
+            <div class="hint">${td.contactMode === 'theirs'
+              ? 'Only changes what you see here and in a test. Each reader gets their own when it sends.'
+              : 'Everyone sees the same buttons. This only decides which click a test counts as \u201ctheir own\u201d in Reports.'}</div>
           </div>
         </div>
         ${tfArea('signoff', 'Sign-off', td.signoff, { dis })}`;
@@ -2425,7 +2435,7 @@ export default {
         onEdit(ev);
         // A new photo link or vendor changes what the form itself shows.
         const p = ev.target && ev.target.dataset && ev.target.dataset.tf;
-        if (p && (/\.image$/.test(p) || p === 'vendor' || p === 'people')) redrawTemplateForm();
+        if (p && (/\.image$/.test(p) || p === 'vendor' || p === 'people' || p === 'contactMode')) redrawTemplateForm();
       });
 
       form.addEventListener('click', (ev) => {
@@ -4279,20 +4289,44 @@ export default {
     // people clicked it, and whether they went for the photo, the colors or
     // the button. Counted from the same click events as the totals above,
     // read from the tag every template link carries.
+    // Account manager buttons (Oct 1 2026): which name people clicked, and
+    // whether it was their own. Counted in people, by their first pick.
+    function reportAmHtml(r) {
+      const rows = r.byAm || [];
+      if (!rows.length) return '';
+      const k = r.knewAm || { own: 0, other: 0, none: 0 };
+      const graded = k.own + k.other;
+      const pct = graded ? Math.round((k.own / graded) * 100) : 0;
+      return `
+        <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Account manager buttons</h3>
+        ${graded ? `<div class="mm-notice good" style="margin-bottom:10px">
+          <b>${k.own} of ${graded} (${pct}%) picked their own account manager.</b>
+          ${k.other ? `${k.other} picked someone else, worth a note to that account manager.` : ''}
+          ${k.none ? `${k.none} more clicked a name but have no account manager on record.` : ''}</div>` : ''}
+        <table class="mm-table" style="margin-bottom:14px">
+          <thead><tr><th>Button</th><th class="num">People</th><th class="num">Their own</th>
+            <th class="num">Someone else's client</th><th class="num">No AM on record</th><th class="num">Clicks</th></tr></thead>
+          <tbody>${rows.map((x) => `<tr><td>${esc(x.name)}</td><td class="num">${x.people}</td>
+            <td class="num">${x.own}</td><td class="num">${x.other}</td><td class="num">${x.none}</td>
+            <td class="num">${x.clicks}</td></tr>`).join('')}</tbody>
+        </table>`;
+    }
+
     function reportPicksHtml(c, r) {
       const rows = r.byPick || [];
-      const generalOnly = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot));
+      const isAm = (x) => /^am-/.test(String(x.spot || ''));
+      const generalOnly = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot) && !isAm(x));
       // A design with no products (the seasonal announcement) still has
       // buttons worth counting: the inquiry form and the calendar.
       if (!rows.length) {
-        return generalOnly.length ? `<div style="margin:0 0 14px;font-size:12px;color:var(--muted)">
-          Buttons: ${generalOnly.map((g) => `${esc(g.label)} ${g.clicks}`).join(' \u00b7 ')}</div>` : '';
+        return reportAmHtml(r) + (generalOnly.length ? `<div style="margin:0 0 14px;font-size:12px;color:var(--muted)">
+          Buttons: ${generalOnly.map((g) => `${esc(g.label)} ${g.clicks}`).join(' \u00b7 ')}</div>` : '');
       }
       const td = c.templateData || {};
       const items = td.picks || td.products || [];
       const hasColors = c.template === 'pwp';
       const hasButton = c.template === 'pwp';
-      const general = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot));
+      const general = (r.bySpot || []).filter((x) => !['photo', 'button', 'colors', 'text'].includes(x.spot) && !isAm(x));
       return `
         <h3 style="font-size:13px;font-weight:700;margin-bottom:8px">Clicks by product</h3>
         <table class="mm-table" style="margin-bottom:14px">
