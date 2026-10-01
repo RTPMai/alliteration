@@ -58,6 +58,9 @@ export default async function handler(req, res) {
         // Optional. Absent means an account with no apps at all, which is
         // deliberate: see emptyAccess() in lib/user-grants.js.
         access: body.access,
+        // Somebody else typed this password, so it is temporary: they pick
+        // their own at first sign-in.
+        mustChange: true,
       });
       return res.status(201).json({ ok: true, user });
     }
@@ -66,7 +69,13 @@ export default async function handler(req, res) {
       if (!username) return res.status(400).json({ error: "username is required" });
       const patch = {};
       if (body.name !== undefined) patch.name = body.name;
-      if (body.password !== undefined) patch.password = body.password;
+      if (body.password !== undefined) {
+        patch.password = body.password;
+        // A reset is a temporary password, EXCEPT an Admin setting their own:
+        // forcing them to immediately change what they just chose is noise.
+        patch.mustChange = String(username).trim().toLowerCase() !==
+          String(sess.username).trim().toLowerCase();
+      }
       if (body.superuser !== undefined) patch.superuser = body.superuser === true;
       // The whole access record for this person. updateUser normalizes:
       // unknown keys are dropped rather than stored looking like settings.

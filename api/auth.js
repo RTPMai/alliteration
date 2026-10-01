@@ -12,11 +12,18 @@
 //   session   GET   -> current session + permissions, or { authenticated:false }
 //   login     POST { username, password }
 //   logout    POST
+//   change    POST { current, password } -> replace your OWN password. Works
+//                                           while signed in on a temporary
+//                                           password, and is the only thing
+//                                           that does (see lib/session.js).
 //   bootstrap POST { username, password, name } -> creates the FIRST admin,
 //                                                  only while no users exist
 
 import { setSessionCookie, clearSessionCookie, getSession } from "../lib/session.js";
-import { authenticate, createUser, noUsersYet, touchLastLogin, permsFor } from "../lib/users.js";
+import {
+  authenticate, createUser, noUsersYet, touchLastLogin, permsFor,
+  getUserRecord, changeOwnPassword,
+} from "../lib/users.js";
 import { isConfigured } from "../lib/kv.js";
 import { isRateLimited, resetKey } from "../lib/rate-limit.js";
 
@@ -32,6 +39,20 @@ import { isRateLimited, resetKey } from "../lib/rate-limit.js";
 const LOGIN_MAX_PER_USER = 5;
 const LOGIN_MAX_PER_IP = 20;
 const LOGIN_WINDOW_SECONDS = 15 * 60;
+
+// Changing a password checks the current one, so it is a password guess like
+// any other and gets the same per-account limit.
+const CHANGE_MAX_PER_USER = 5;
+
+/**
+ * The cookie for a signed-in person. `mc` (must change) is only present when
+ * true, so an ordinary cookie is byte-for-byte what it was before Oct 2026.
+ */
+function sessionFor(user, mustChange) {
+  const s = { username: user.username, name: user.name };
+  if (mustChange) s.mc = 1;
+  return s;
+}
 
 function clientIp(req) {
   const fwd = req.headers && req.headers["x-forwarded-for"];
@@ -76,7 +97,9 @@ export default async function handler(req, res) {
   try {
     // ---- who am I ----
     if (action === "session" || action === "me" || req.method === "GET") {
-      const sess = getSession(req);
+      // allowPending: somebody on a temporary password IS signed in, and the
+      // shell needs to know who, so it can send them to password.html.
+      const sess = getSession(req, { allowPending: true });
       if (!sess) {
         // needsSetup tells the sign-in screen whether to offer "create the first
         // account" — a deterministic check, not a fragile probe.
@@ -88,12 +111,35 @@ export default async function handler(req, res) {
       // Permissions are looked up FRESH rather than read from the cookie. A role
       // change takes effect on the next request instead of waiting 12 hours for
       // the cookie to expire.
+      // The flag is read LIVE, like perms. An Admin resetting the password of
+      // somebody already signed in should catch them on their next page load,
+      // not twelve hours later when the cookie runs out.
+      //
+      // ONE DIRECTION ONLY. This may ADD the lock, never remove it. A locked
+      // cookie is unlocked by the "change" action, which proves the password,
+      // and nothing else. Otherwise: a temp password used by the wrong person
+      // first, the real owner changes it elsewhere, and the wrong person's
+      // locked cookie would quietly turn into a full session here.
+      let mustChange = !!sess.mc;
+      try {
+        const rec = await getUserRecord(sess.username);
+        if (rec && rec.must_change_password === true && !mustChange) {
+          mustChange = true;
+          setSessionCookie(res, sessionFor({ username: sess.username, name: sess.name }, true));
+        }
+      } catch (e) {
+        // Storage hiccup: keep whatever the cookie said rather than fail the
+        // whole session check.
+      }
+
       const perms = await permsFor(sess.username);
       return res.status(200).json({
         authenticated: true,
+        mustChangePassword: mustChange,
         user: {
           username: sess.username,
           name: sess.name,
+          mustChangePassword: mustChange,
           // Derived from the Admin flag in permsFor, not from a role name
           // carried in the cookie. Roles are gone (Sep 2026).
           role: perms.role,
@@ -110,6 +156,37 @@ export default async function handler(req, res) {
     // ---- logout ----
     if (action === "logout") {
       clearSessionCookie(res);
+      return res.status(200).json({ ok: true });
+    }
+
+    // ---- change your own password ----
+    // Before login in this chain on purpose: the login branch also fires on
+    // any body carrying a username and password.
+    if (action === "change") {
+      const sess = getSession(req, { allowPending: true });
+      if (!sess) return res.status(401).json({ error: "Not authenticated" });
+
+      const limitKey = "pwchange:user:" + String(sess.username).trim().toLowerCase();
+      if (await isRateLimited(limitKey, CHANGE_MAX_PER_USER, LOGIN_WINDOW_SECONDS)) {
+        res.setHeader("Retry-After", String(LOGIN_WINDOW_SECONDS));
+        return res.status(429).json({
+          error: "Too many tries. Wait 15 minutes and try again.",
+        });
+      }
+
+      let user;
+      try {
+        user = await changeOwnPassword(sess.username, body.current, body.password);
+      } catch (e) {
+        if (e.code === "bad_current" || e.code === "weak") {
+          return res.status(400).json({ error: e.message, field: e.code === "bad_current" ? "current" : "password" });
+        }
+        throw e;
+      }
+      await resetKey(limitKey);
+
+      // A fresh cookie without the lock. The person stays signed in.
+      setSessionCookie(res, sessionFor(user, false));
       return res.status(200).json({ ok: true });
     }
 
@@ -159,10 +236,11 @@ export default async function handler(req, res) {
       await resetKey(userKey);
 
       await touchLastLogin(user.username);
-      setSessionCookie(res, { username: user.username, name: user.name });
+      const mustChange = user.must_change_password === true;
+      setSessionCookie(res, sessionFor(user, mustChange));
 
       const perms = await permsFor(user.username);
-      return res.status(200).json({ ok: true, user: { ...user, perms } });
+      return res.status(200).json({ ok: true, mustChangePassword: mustChange, user: { ...user, perms } });
     }
 
     return res.status(400).json({ error: "Unknown action" });

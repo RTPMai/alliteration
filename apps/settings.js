@@ -121,6 +121,12 @@ export default {
   .set-msg.err{background:var(--danger-tint);color:var(--danger)}
   .set-msg.ok{background:var(--success-tint);color:var(--success-dk)}
 
+  /* Temporary password tag in the Accounts table. Oct 2026. */
+  .u-temp{
+    display:inline-block;margin-left:6px;padding:1px 8px;border-radius:var(--radius-pill);
+    font-size:10.5px;font-weight:700;background:var(--warn-tint);color:var(--warn-dk);
+    vertical-align:1px;
+  }
   .role-pill{
     display:inline-block;padding:2px 9px;border-radius:var(--radius-pill);
     font-size:11px;font-weight:700;background:var(--accent-tint);color:var(--accent-deep);
@@ -538,7 +544,13 @@ export default {
           return '<tr>' +
             '<td><div class="u-name">' + esc(u.name || u.username) +
               (isMe ? ' <span class="u-sub" style="display:inline">(you)</span>' : '') +
-            '</div><div class="u-sub">' + esc(u.username) + '</div></td>' +
+            '</div><div class="u-sub">' + esc(u.username) +
+              // Still on a password somebody else set. Clears itself when
+              // they pick their own at sign-in. Oct 2026.
+              (u.must_change_password
+                ? ' <span class="u-temp" title="Signed in with, or not yet used, a password an Admin set. They will be asked to pick their own at sign-in.">Temp password</span>'
+                : '') +
+            '</div></td>' +
             // ACCESS, Sep 2026. Roles are gone; this IS their access, not an
             // override of anything. Shown in the table rather than only inside
             // an editor, because an access model nobody can read at a glance
@@ -592,7 +604,7 @@ export default {
         });
         ['#nu-username', '#nu-name', '#nu-password'].forEach((s) => { $(s).value = ''; });
         $('#addUserForm').style.display = 'none';
-        say('Account created.', 'ok');
+        say('Account created. They will be asked to pick their own password the first time they sign in.', 'ok');
         await load();
       } catch (e) {
         say(e.message || 'Could not create that account', 'err');
@@ -625,14 +637,21 @@ export default {
       const reset = e.target.closest('[data-reset]');
       if (reset) {
         const username = reset.dataset.reset;
-        const pw = prompt('New password for ' + username + ' (at least 8 characters):');
+        const isSelf = username.toLowerCase() === (ctx.user ? String(ctx.user.username || '').toLowerCase() : '');
+        const pw = prompt(isSelf
+          ? 'New password for your own account (at least 8 characters):'
+          : 'Temporary password for ' + username + ' (at least 8 characters).\n\n' +
+            'Give it to them. They will be asked to pick their own the next time they sign in.');
         if (!pw) return;
         try {
           await ctx.api.request(ENDPOINTS.users + '?username=' + encodeURIComponent(username), {
             method: 'PATCH',
             body: { password: pw }
           });
-          say('Password updated for ' + username + '.', 'ok');
+          say(isSelf
+            ? 'Your password is updated.'
+            : 'Temporary password set for ' + username + '. They will pick their own at next sign-in.', 'ok');
+          await load();
         } catch (err) {
           say(err.message || 'Could not update that password', 'err');
         }

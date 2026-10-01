@@ -115,6 +115,14 @@ export async function boot() {
     return;
   }
 
+  // Signed in on a temporary password an Admin set. Every API refuses this
+  // session until it is replaced (lib/session.js), so mounting apps would
+  // only produce a screen of errors. Send them to pick their own first.
+  if (session.mustChangePassword || session.user.mustChangePassword) {
+    location.replace('password.html');
+    return;
+  }
+
   state.user  = session.user;
   state.perms = session.user.perms || {};
 
@@ -480,20 +488,51 @@ function renderAvatar() {
   if (!el.avatar || !state.user) return;
   const name = state.user.name || state.user.username || '?';
   el.avatar.textContent = name.trim()[0].toUpperCase();
-  el.avatar.title = name + ' — click to sign out';
+  el.avatar.title = name;
   el.avatar.style.cursor = 'pointer';
   el.avatar.setAttribute('role', 'button');
   el.avatar.setAttribute('tabindex', '0');
+  el.avatar.setAttribute('aria-haspopup', 'menu');
+  el.avatar.setAttribute('aria-expanded', 'false');
+
+  // ACCOUNT MENU, Oct 2026. The avatar used to sign out on click, which left
+  // nowhere to put "Change password". A two-item menu, built once, appended
+  // to <body> so the header's own layout never has to make room for it.
+  const menu = document.createElement('div');
+  menu.className = 'acct-menu';
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+  menu.innerHTML =
+    '<div class="acct-menu-name">' + escape(name) + '</div>' +
+    '<a role="menuitem" href="password.html" class="acct-menu-item">Change password</a>' +
+    '<button role="menuitem" type="button" class="acct-menu-item" data-signout>Sign out</button>';
+  document.body.appendChild(menu);
+
+  const place = () => {
+    const r = el.avatar.getBoundingClientRect();
+    menu.style.top = Math.round(r.bottom + 6) + 'px';
+    menu.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px';
+  };
+  const close = () => { menu.hidden = true; el.avatar.setAttribute('aria-expanded', 'false'); };
+  const toggle = () => {
+    if (menu.hidden) { place(); menu.hidden = false; el.avatar.setAttribute('aria-expanded', 'true'); }
+    else close();
+  };
 
   const signOut = async () => {
     try { await api.auth.logout(); } catch (e) { /* sign out locally regardless */ }
     location.replace('login.html');
   };
 
-  el.avatar.addEventListener('click', signOut);
+  el.avatar.addEventListener('click', (e) => { e.stopPropagation(); toggle(); });
   el.avatar.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); signOut(); }
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); }
+    if (e.key === 'Escape') close();
   });
+  menu.querySelector('[data-signout]').addEventListener('click', signOut);
+  document.addEventListener('click', (e) => { if (!menu.hidden && !menu.contains(e.target)) close(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') close(); });
+  window.addEventListener('resize', close);
 }
 
 /* ------------------------------------------------------------------ *

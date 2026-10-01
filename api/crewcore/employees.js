@@ -110,7 +110,9 @@ async function createLoginFor(emp) {
     if (!username) username = suggestUsername(emp.name, new Set([...accounts, ...claimed]));
     if (!username) return { error: "Couldn't work out a free username for " + emp.name };
     const temp_password = tempPassword((n) => randomInt(n));
-    await createUser({ username, password: temp_password, name: emp.name, access: { apps: ["crewcore"] } });
+    // mustChange: the temp password is shown on screen and handed over, so the
+    // person replaces it at first sign-in.
+    await createUser({ username, password: temp_password, name: emp.name, access: { apps: ["crewcore"] }, mustChange: true });
     await updateEmployee(emp.id, { username });
     return { username, temp_password };
   } catch (e) {

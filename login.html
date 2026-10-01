@@ -205,7 +205,8 @@
       }
 
       if (data.authenticated) {
-        location.replace(dest);
+        // Still on a temporary password: that page first, the apps after.
+        location.replace(data.mustChangePassword ? 'password.html' : dest);
       } else if (data.needsSetup) {
         setSetupMode();
       }
@@ -243,6 +244,11 @@
         return;
       }
 
+      if (data.mustChangePassword) {
+        show('Signed in. Pick your own password next...', 'ok');
+        location.replace('password.html');
+        return;
+      }
       show('Signed in. Loading...', 'ok');
       location.replace(dest);
     } catch (err) {
