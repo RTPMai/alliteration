@@ -57,7 +57,8 @@ export default function makeList(app) {
           </div>
           <div class="mk-actions">
             <button class="mk-btn ghost sm" data-act="refresh">Refresh</button>
-            <button class="mk-btn" data-act="new">New campaign</button>
+            ${state.mailmeAccess ? '<button class="mk-btn" data-act="new-email">New email</button>' : ''}
+            <button class="mk-btn${state.mailmeAccess ? ' ghost' : ''}" data-act="new">New campaign</button>
           </div>
         </div>
         ${state.loadError ? `<div class="mk-err">${esc(state.loadError)}</div>` : ''}

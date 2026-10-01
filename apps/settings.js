@@ -356,18 +356,22 @@ export default {
         // MarketMachine reads an empty list as My tasks only, so the boxes
         // must show that rather than everything ticked.
         const picked = draft.views[a.id]
-          || (a.id === 'marketmachine' ? ['tasks'] : []);
+          || (a.id === 'marketmachine' ? ['tasks', 'campaigns', 'calendar'] : []);
+        // MailMe folded into MarketMachine (Oct 1 2026): its switch stays, as
+        // "can send email", and its old screens are not choices any more.
+        const label = a.id === 'mailme' ? 'Email (send email, see contacts)' : a.name;
+        const showViews = a.id !== 'mailme';
         return '<div class="acc-app' + (on ? ' on' : '') + '" data-acc-block="' + esc(a.id) + '">' +
           '<button type="button" class="app-toggle' + (on ? ' on' : '') +
             '" data-acc-app="' + esc(a.id) + '" style="--c:' + esc(a.accent) + '">' +
-            '<span class="sq"></span>' + esc(a.name) + '</button>' +
-          (on && views.length > 1
+            '<span class="sq"></span>' + esc(label) + '</button>' +
+          (on && showViews && views.length > 1
             ? '<div class="acc-views">' + views.map((v) =>
                 '<label><input type="checkbox" data-acc-view="' + esc(a.id) + '" value="' + esc(v.id) + '"' +
                   (!picked.length || picked.indexOf(v.id) !== -1 ? ' checked' : '') + '> ' +
                   esc(v.name) + '</label>').join('') +
               '<div class="hint">' + (a.id === 'marketmachine'
-                ? 'My tasks only, unless you tick more. Ticking Campaigns gives the whole app: budgets, numbers and everyone\'s work.'
+                ? 'Account Managers read every campaign and change their own. Tick Settings for full access: budgets, numbers, deletes and approvals. The Email screen comes with the Email switch.'
                 : 'All ticked means every screen. Untick to narrow.') + '</div></div>'
             : '') +
         '</div>';

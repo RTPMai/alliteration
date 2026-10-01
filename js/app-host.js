@@ -274,6 +274,58 @@ export async function mountApp(meta, host, ctxExtras) {
   return entry;
 }
 
+/**
+ * One app shown INSIDE another (Oct 1 2026).
+ *
+ * MarketMachine shows MailMe's composer on a campaign page, so an email is
+ * written where the campaign is run instead of in a separate app. Rather than
+ * a second copy of the composer, the real MailMe module is mounted again into
+ * a container the host app owns.
+ *
+ * Safe alongside the normal mount because:
+ *   - Object.create(app) gives this copy its own `this`, so its _root, timers
+ *     and renderers never overwrite the real MailMe's.
+ *   - The container carries data-app-root="<id>", so the app's scoped styles
+ *     (already keyed on that attribute) apply unchanged.
+ *   - It is not added to `mounted`, so routing never sees it.
+ *
+ * Returns { root, ready, destroy }. `root` exists immediately so the host can
+ * place it; `ready` resolves to the instance once mount() has run.
+ */
+export function mountEmbedded(id, ctxExtras) {
+  const root = document.createElement('div');
+  root.className = 'app-root app-embed';
+  root.dataset.appRoot = id;
+  root.innerHTML = '<div class="shell-spinner"></div>';
+  let inst = null;
+  let gone = false;
+
+  const ready = (async () => {
+    const url = new URL('../apps/' + id + '.js', import.meta.url).href;
+    const mod = await import(url);
+    const app = mod.default || mod;
+    if (app.styles) injectStyles(id, app.styles, `[data-app-root="${id}"]`);
+    inst = Object.create(app);
+    root.innerHTML = typeof app.template === 'function' ? await app.template() : (app.template || '');
+    const ctx = Object.assign({ root, api, meta: { id }, embedded: true }, ctxExtras);
+    if (typeof inst.mount === 'function') await inst.mount(ctx);
+    if (gone && typeof inst.unmount === 'function') inst.unmount(ctx);
+    return inst;
+  })();
+
+  return {
+    root,
+    ready,
+    destroy() {
+      gone = true;
+      if (inst && typeof inst.unmount === 'function') {
+        try { inst.unmount(); } catch (e) { console.error(e); }
+      }
+      root.remove();
+    }
+  };
+}
+
 export function showView(id, view, param) {
   const entry = mounted.get(id);
   if (!entry) return;

@@ -166,6 +166,14 @@ async function handleRoute(route) {
     return activateShellPage(page);
   }
 
+  // An app folded into another (MailMe into MarketMachine, Oct 1 2026): its
+  // old links, bookmarks and stored layouts land on the matching screen.
+  const folded = getApp(appId) && getApp(appId).foldedInto;
+  if (folded) {
+    const to = (view && folded.views && folded.views[view]) || folded.defaultView;
+    return router.go(folded.app, to, { replace: true });
+  }
+
   // A real app this account cannot open: say so. Quietly landing somewhere
   // else made a scanned PO look like a broken QR code. See js/route-access.js.
   if (getApp(appId) && !canAccess(state.perms, appId)) {
@@ -341,7 +349,7 @@ function setBadge(appId, n) {
 function renderRail() {
   if (!el.rail) return;
 
-  const visible = APPS.filter((a) => canAccess(state.perms, a.id));
+  const visible = APPS.filter((a) => !a.railHidden && canAccess(state.perms, a.id));
   let html = '<div class="rail-label">Apps</div>';
 
   visible.forEach((a) => {

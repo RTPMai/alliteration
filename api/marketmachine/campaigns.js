@@ -44,7 +44,8 @@
 // file only decides who is asking.
 
 import { requireAuth } from "../../lib/session.js";
-import { getUser } from "../../lib/users.js";
+import { getUser, permsFor } from "../../lib/users.js";
+import { isMember, withoutMoney, connectionsWithoutMoney, memberWrite } from "../../lib/marketmachine/member.js";
 import { progress, headerDates, childSummary, isMine, pickerShape, amsOf, artRefusal } from "../../lib/marketmachine/campaign.js";
 import {
   listCampaigns, getCampaign, createCampaign, updateHeader, updateStep, deleteCampaign,
@@ -70,8 +71,12 @@ function parseBody(req) {
 
 async function accountFor(sess) {
   const user = sess && sess.username ? await getUser(sess.username) : null;
+  const perms = sess && sess.username ? await permsFor(sess.username) : null;
   return {
     user,
+    // Account Managers: read every campaign, change their own, no money.
+    // See lib/marketmachine/member.js. Admins are members too; `admin` wins.
+    member: isMember(perms),
     // The platform Admin flag, or the Campaigns grant on this account. See
     // lib/marketmachine/access.js: it is the one definition, and the rail
     // reads it too.
@@ -96,7 +101,7 @@ export default async function handler(req, res) {
   const id = q.id ? String(q.id) : null;
 
   try {
-    const { user, admin, session } = await accountFor(sess);
+    const { user, admin, member, session } = await accountFor(sess);
     const today = todayCentral();
 
     // My tasks: open to anyone signed in, because the point of it is that the
@@ -115,10 +120,10 @@ export default async function handler(req, res) {
       // `full` tells the screen whether to offer "Open the campaign". The
       // campaign read below still checks for itself; this only saves a
       // person a button that would answer "admin only".
-      return res.status(200).json({ tasks: myTasks(open, person, today), today, me: person.name, full: admin });
+      return res.status(200).json({ tasks: myTasks(open, person, today), today, me: person.name, full: admin || member });
     }
 
-    if (req.method === "GET" && !id && !admin) {
+    if (req.method === "GET" && !id && !admin && !member) {
       const all = await listCampaigns();
       return res.status(200).json({ campaigns: pickerShape(all), limited: true, message: ADMIN_ONLY });
     }
@@ -144,7 +149,23 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true });
     }
 
-    if (!admin) return res.status(403).json({ error: ADMIN_ONLY });
+    if (!admin && !member) return res.status(403).json({ error: ADMIN_ONLY });
+
+    // A member's write: allowed on their own campaigns, never on money,
+    // approvals or deletes. The body that goes on is the cleaned one.
+    let body = null;
+    if (!admin && req.method !== "GET") {
+      const people = await accountManagers(user ? { username: user.username, name: user.name } : null);
+      const campaign = id ? await getCampaign(id) : null;
+      const verdict = memberWrite({
+        method: req.method, q, body: parseBody(req), campaign,
+        mine: campaign ? isMine(campaign, sess.username, people.me ? people.me.id : null) : false,
+        me: people.me,
+      });
+      if (!verdict.ok) return res.status(verdict.status).json({ error: verdict.error });
+      body = verdict.body;
+    }
+    const bodyOf = () => body || parseBody(req);
 
     if (req.method === "GET") {
       const all = await listCampaigns();
@@ -164,7 +185,26 @@ export default async function handler(req, res) {
         }
         const parent = campaign.parentId ? all.find((c) => c.id === campaign.parentId) || null : null;
         const connections = await connectionDetail(campaign, all);
+        if (!admin) {
+          // A member reads everything but the money, and is told whether
+          // this one is theirs to change so the page can say so up front.
+          return res.status(200).json({
+            campaign: withoutMoney(campaign),
+            progress: progress(campaign, today),
+            dates: headerDates(campaign),
+            parent: parent ? childSummary(parent, today) : null,
+            children: childrenOf(id, all).map((c) => childSummary(c, today)),
+            connections: connectionsWithoutMoney(connections),
+            calculations: [],
+            advisories: advisories(campaign),
+            scorecard: [],
+            accountManagers: people.options,
+            access: { admin: false, canEdit: isMine(campaign, sess.username, myId) },
+            today,
+          });
+        }
         return res.status(200).json({
+          access: { admin: true, canEdit: true },
           campaign,
           progress: progress(campaign, today),
           dates: headerDates(campaign),
@@ -203,17 +243,18 @@ export default async function handler(req, res) {
         accountManagers: people.options,
         accountManagersUnavailable: people.unavailable,
         me: people.me,
-        legacyCount: await legacyCount(),
-        demoCount: await demoCount(),
+        legacyCount: admin ? await legacyCount() : 0,
+        demoCount: admin ? await demoCount() : 0,
         canEdit: true,
-        canDelete: true,
+        canDelete: admin,
+        admin,
         today,
       });
     }
 
     if (req.method === "POST" && q.art) {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
-      const body = parseBody(req);
+      const body = bodyOf();
       const platform = String(body.platform || "");
       const target = await getCampaign(id);
       if (!target) return res.status(404).json({ error: "Campaign not found" });
@@ -244,14 +285,14 @@ export default async function handler(req, res) {
         const out = await loadDemo(session, today);
         return res.status(201).json({ ok: true, ...out });
       }
-      const out = await createCampaign(parseBody(req), session);
+      const out = await createCampaign(bodyOf(), session);
       if (!out.ok) return refuse(res, out);
       return res.status(201).json({ ok: true, campaign: out.campaign });
     }
 
     if (req.method === "PATCH") {
       if (!id) return res.status(400).json({ error: "Missing campaign id" });
-      const body = parseBody(req);
+      const body = bodyOf();
       const out = q.scorecard
         ? await setScorecardRow(id, body, session)
         : q.calc

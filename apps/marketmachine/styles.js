@@ -23,6 +23,17 @@ export default `
   .mk-btn[disabled]{opacity:.5;cursor:not-allowed}
   .mk-btn.ghost{background:transparent;color:var(--muted);border-color:var(--line)}
   .mk-btn.ghost:hover{color:var(--ink);background:var(--row-hover)}
+  .mk-btn.ghost.on{color:var(--ink);background:var(--row-hover);border-color:var(--ink)}
+  /* The Email section's composer (MailMe, mounted in). Its own spinner and
+     sizing come with it; this only keeps it from overflowing the card. */
+  #mkEmailSlot{min-height:60px}
+  /* Somebody else's campaign (Oct 1 2026): readable, nothing to press. The
+     server refuses these writes regardless; this is so the page agrees. */
+  .mk-ro .mk-check,.mk-ro [data-status],.mk-ro [data-conn-add],.mk-ro [data-act="add-child"],
+  .mk-ro .mk-check-pill,.mk-ro .mk-upload,.mk-ro [data-art-file],.mk-ro [data-art-link],
+  .mk-ro [data-post-link],.mk-ro [data-art-remove],.mk-ro .mk-inline-input,.mk-ro .mk-plat button,
+  .mk-ro [data-step-save],.mk-ro .mk-step-form{pointer-events:none;opacity:.45}
+  #mkEmailSlot .app-embed{max-width:100%;overflow-x:auto}
   .mk-btn.sm{padding:4px 10px;font-size:12px}
   .mk-btn.danger{background:transparent;color:var(--danger-dk);border-color:var(--danger-line)}
   .mk-btn.danger:hover{background:var(--danger-tint)}

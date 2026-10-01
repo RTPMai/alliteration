@@ -190,7 +190,7 @@ export default {
     try { sampleApps = appsOnSampleData() || []; } catch (e) { /* seam predates helper */ }
 
     // Only apps this person can open; matches the rail.
-    const visible = APPS.filter((a) => canAccess(ctx.perms, a.id));
+    const visible = APPS.filter((a) => !a.railHidden && canAccess(ctx.perms, a.id));
     $('#hubApps').innerHTML = visible.map((a) => appCard(a, sampleApps.includes(a.id))).join('');
 
     // An app can ship before its logo does. PromoPro did; StitchSense does.

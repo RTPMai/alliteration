@@ -99,7 +99,10 @@ export default function makeTasks(app) {
             ? 'Everything with your name on it, soonest first. Tick what you have done.'
             : 'Nothing is waiting on you right now.'}</div>
         </div>
-        <div class="mk-actions"><button class="mk-btn ghost sm" data-act="tasks-refresh">Refresh</button></div>
+        <div class="mk-actions">
+          <button class="mk-btn ghost sm" data-act="tasks-refresh">Refresh</button>
+          ${state.mailmeAccess ? '<button class="mk-btn" data-act="new-email">New email</button>' : ''}
+        </div>
       </div>
       ${msgBox(state.taskMsg)}
       ${state.taskError ? `<div class="mk-err">${esc(state.taskError)}</div>` : ''}

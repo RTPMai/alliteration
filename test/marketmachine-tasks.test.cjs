@@ -269,13 +269,13 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     t.assert(!body.includes('"history"'), 'nor the history');
   });
 
-  await t.test('only a person who can open the campaign is offered the link', async () => {
+  await t.test('anybody with MarketMachine is offered the campaign, since they can open it', async () => {
+    // Oct 1 2026: Account Managers read every campaign.
     const hers = await call({ as: HANNAH_U, query: { mine: 'tasks' } });
-    t.equal(hers.body.full, false, 'staff are not offered a button the campaign page would refuse');
-    const refused = await call({ as: HANNAH_U, query: { id: ID } });
-    t.equal(refused.statusCode, 403, 'and the campaign page does refuse them');
+    t.equal(hers.body.full, true, 'she gets the button');
+    t.equal((await call({ as: HANNAH_U, query: { id: ID } })).statusCode, 200, 'and the page opens for her');
     const ryans = await call({ as: RYAN, query: { mine: 'tasks' } });
-    t.equal(ryans.body.full, true, 'an Admin is');
+    t.equal(ryans.body.full, true, 'an Admin too');
   });
 
   await t.test('a person can tick their own step and nobody else\'s', async () => {
@@ -304,11 +304,13 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     t.equal(step.blocked, '', 'nor a blocker');
   });
 
-  await t.test('the campaign itself is still Admin only', async () => {
-    t.equal((await call({ as: HANNAH_U, query: { id: ID } })).statusCode, 403, 'she cannot open the campaign page');
-    t.equal((await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID }, body: { name: 'Renamed' } })).statusCode, 403, 'or rename it');
-    t.equal((await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID, step: 'tod_store' }, body: { done: true } })).statusCode, 403,
-      'and a step patch without the tasks route is still refused');
+  await t.test('reading is open, changing somebody else\'s campaign is not', async () => {
+    t.equal((await call({ as: HANNAH_U, query: { id: ID } })).statusCode, 200, 'she can open the campaign page');
+    const mine = (await call({ as: HANNAH_U, query: { id: ID } })).body.access.canEdit;
+    const rename = await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID }, body: { name: 'Renamed' } });
+    t.equal(rename.statusCode, mine ? 200 : 403, 'renaming follows whether it is hers');
+    t.equal((await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID, step: 'tod_store' }, body: { done: true } })).statusCode, mine ? 200 : 403,
+      'and a step patch from the campaign page follows the same rule');
   });
 
   await t.test('a cancelled campaign stops giving people work', async () => {
@@ -329,32 +331,34 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
 
   /* ================= who sees the app at all ================= */
 
-  await t.test('ticking MarketMachine on an account gives My tasks and nothing else', async () => {
+  await t.test('ticking MarketMachine on an account gives the campaign screens, not Settings', async () => {
+    // Oct 1 2026: was My tasks alone. Account Managers now read every
+    // campaign and change their own; Settings stays Admin only.
     const reg = await import('../js/registry.js');
     const users = await import('../lib/users.js');
 
     const perms = await users.permsFor('hannah');
     t.assert(perms.tabs.includes('marketmachine'), 'she can open the app');
     const mm = perms.tabs.filter((x) => x.startsWith('marketmachine:'));
-    t.equal(mm.join(','), 'marketmachine:tasks', 'and the only screen she is granted is My tasks');
+    t.equal(mm.join(','), 'marketmachine:tasks,marketmachine:campaigns,marketmachine:calendar', 'her screens');
 
-    t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks',
-      'so the rail shows her one screen, not four');
+    t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks,campaigns,calendar',
+      'so the rail shows those three, and no Settings');
 
     // What IS ticked for a person is what they get: that is how Jacob has the
     // whole app without the platform Admin flag. The default, with nothing
     // ticked, stays My tasks, which is the part that matters for everyone
     // else. The next test covers the granting side.
-    const widened = { ...perms, tabs: perms.tabs.concat(['marketmachine:campaigns']) };
-    t.equal(reg.allowedViews(widened, 'marketmachine').join(','), 'tasks,campaigns',
-      'ticking a screen grants that screen, and only that screen');
+    const narrowed = { ...perms, tabs: ['marketmachine', 'marketmachine:tasks'] };
+    t.equal(reg.allowedViews(narrowed, 'marketmachine').join(','), 'tasks',
+      'an account narrowed by hand keeps exactly what was ticked');
     const plain = { ...perms, tabs: ['marketmachine'] };
-    t.equal(reg.allowedViews(plain, 'marketmachine').join(','), 'tasks',
-      'and an account with nothing narrowed still gets My tasks only, never everything');
+    t.equal(reg.allowedViews(plain, 'marketmachine').join(','), 'tasks,campaigns,calendar',
+      'and an account with nothing narrowed gets the default three, never Settings');
 
     const admin = await users.permsFor('ryan');
-    t.equal(reg.allowedViews(admin, 'marketmachine').join(','), 'tasks,campaigns,calendar,settings',
-      'an Admin still gets all four');
+    t.equal(reg.allowedViews(admin, 'marketmachine').join(','), 'tasks,campaigns,email,calendar,settings',
+      'an Admin gets all five, Email included');
   });
 
   await t.test('ticking Campaigns gives the whole app, and nothing outside it', async () => {
@@ -374,11 +378,13 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     const perms = await users.permsFor('jacob');
     t.assert(!perms.superuser, 'he is not a platform Admin');
     t.equal(reg.allowedViews(perms, 'marketmachine').join(','), 'tasks,campaigns,calendar,settings',
-      'but he gets all four MarketMachine screens');
-    t.assert(access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'campaigns'] } } }),
-      'Campaigns is the switch');
-    t.assert(!access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'calendar'] } } }),
-      'and Timeline alone is not');
+      'but he gets every MarketMachine screen he was ticked for');
+    t.assert(access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'settings'] } } }),
+      'Settings is the switch (Oct 1 2026; was Campaigns)');
+    t.assert(!access.isMarketMachineAdmin({ access: { views: { marketmachine: ['tasks', 'campaigns', 'calendar'] } } }),
+      'and the Account Manager defaults, ticked and saved, are not');
+    t.assert(!access.isMarketMachineAdmin({ tabs: ['marketmachine', 'marketmachine:settings'] }),
+      'and perms never decide it, only the stored account');
 
     const list = await call({ as: JACOB_U });
     t.equal(list.statusCode, 200, 'the campaign list opens for him');
@@ -399,19 +405,60 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
       'MarketMachine is still the only app he was given');
 
     // And an ordinary grant is unchanged by any of this.
-    t.equal(reg.allowedViews(await users.permsFor('hannah'), 'marketmachine').join(','), 'tasks',
-      'somebody with the plain grant still gets My tasks only');
-    t.equal((await call({ as: HANNAH_U, query: { id } })).statusCode, 403, 'and is still refused a campaign');
+    t.equal(reg.allowedViews(await users.permsFor('hannah'), 'marketmachine').join(','), 'tasks,campaigns,calendar',
+      'somebody with the plain grant gets the Account Manager screens, no Settings');
+    const hers = await call({ as: HANNAH_U, query: { id } });
+    t.equal(hers.statusCode, 200, 'and reads a campaign');
+    t.equal(hers.body.access.admin, false, 'as a member, not an Admin like Jacob');
   });
 
-  await t.test('the ceiling is a second gate, not the only one', async () => {
-    // Even with the rail told to show her everything, the server still
-    // refuses: the campaign screens are Admin only in the route.
+  await t.test('the money and the deletes are the server\'s to refuse, not just the screen\'s', async () => {
     const list = await call({ as: RYAN });
     const id = list.body.campaigns[0].id;
-    t.equal((await call({ as: HANNAH_U, query: { id } })).statusCode, 403, 'the campaign page is still refused');
-    t.equal((await call({ as: HANNAH_U, query: { options: 'connections' } })).statusCode, 200, 'the picker read is the only exception');
-    t.assert((await call({ as: HANNAH_U, query: { options: 'connections' } })).body.limited, 'and it is marked limited');
+    const page = await call({ as: HANNAH_U, query: { id } });
+    t.equal(page.body.campaign.budget, undefined, 'no budget reaches her');
+    t.equal((await call({ as: HANNAH_U, method: 'DELETE', query: { id } })).statusCode, 403, 'and she cannot delete');
+    t.equal((await call({ as: HANNAH_U, method: 'PATCH', query: { id, calc: 1 }, body: { key: 'x', value: 1 } })).statusCode, 403, 'or touch its numbers');
+  });
+
+  /* ================= Account Managers on their own campaigns (Oct 1 2026) ================= */
+
+  await t.test('an Account Manager works her own campaign from its page', async () => {
+    kv.set('alliteration:users', JSON.stringify({
+      ryan: { username: 'ryan', name: 'Ryan Toney', superuser: true, access: { apps: [] } },
+      hannah: { username: 'hannah', name: 'Hannah Posey', access: { apps: ['mailme', 'marketmachine'], can_edit: true } },
+      amanda: { username: 'amanda', name: 'Amanda Clark', access: { apps: ['marketmachine'] } },
+    }));
+    const page = await call({ as: HANNAH_U, query: { id: ID } });
+    t.equal(page.body.access.canEdit, true, 'it is hers, so the page says she can change it');
+    const rename = await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID }, body: { name: 'Ankeny Schools store, fall', budget: 999999 } });
+    t.equal(rename.statusCode, 200, 'she renames it: ' + JSON.stringify(rename.body));
+    const saved = await store.getCampaign(ID);
+    t.equal(saved.name, 'Ankeny Schools store, fall');
+    t.assert(saved.budget !== 999999, 'and a budget slipped into the same edit is dropped, not saved');
+    const approve = await call({ as: HANNAH_U, method: 'PATCH', query: { id: ID, step: 'prelaunch_review' }, body: { done: true } });
+    t.equal(approve.statusCode, 403, 'the approval is still Ryan or Megan\'s');
+    t.equal((await call({ as: HANNAH_U, method: 'DELETE', query: { id: ID } })).statusCode, 403, 'and only an Admin deletes');
+  });
+
+  await t.test('somebody not on a campaign reads it and cannot change it', async () => {
+    const page = await call({ as: AMANDA_U, query: { id: ID } });
+    t.equal(page.statusCode, 200, 'Amanda can read it');
+    t.equal(page.body.access.canEdit, false, 'and is told it is read only');
+    t.equal((await call({ as: AMANDA_U, method: 'PATCH', query: { id: ID }, body: { name: 'Mine now' } })).statusCode, 403, 'she cannot rename it');
+    t.equal((await call({ as: AMANDA_U, method: 'PATCH', query: { id: ID, step: 'tod_store' }, body: { done: true } })).statusCode, 403, 'or tick its steps');
+  });
+
+  await t.test('New email: an Account Manager starts a Quick Email in her own name', async () => {
+    const made2 = await call({ as: HANNAH_U, method: 'POST', body: { type: 'quick_email', name: 'Quick email, Oct 1', platforms: ['email'], budget: 50 } });
+    t.equal(made2.statusCode, 201, 'created: ' + JSON.stringify(made2.body));
+    const c = made2.body.campaign;
+    t.assert(model.amsOf(c).some((a) => String(a.id) === String(hannahEmp.id)), 'with her on it, even though the request did not say so');
+    t.equal(c.budget, null, 'and no budget');
+    const edit = await call({ as: HANNAH_U, method: 'PATCH', query: { id: c.id }, body: { name: 'Fall reorder nudge' } });
+    t.equal(edit.statusCode, 200, 'so it is hers to change straight away');
+    const amandas = await call({ as: AMANDA_U, method: 'POST', body: { type: 'quick_email', name: 'X' } });
+    t.equal(amandas.statusCode, 403, 'somebody who is not set up as an Account Manager cannot start one');
   });
 
   process.exit(t.report());

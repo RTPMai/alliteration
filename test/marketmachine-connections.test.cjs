@@ -281,12 +281,13 @@ const SESSION = { username: 'ryan', name: 'Ryan Toney' };
     t.equal(Object.keys(many).length, store.PRINTAVO_CHECK_LIMIT, 'a check is capped so it cannot hang the screen');
   });
 
-  await t.test('connections are Admin only, like the rest', async () => {
-    t.equal((await call({ as: HANNAH, query: { options: 'connections' } })).statusCode, 200, 'the bare list read is the only exception');
-    const opts = await call({ as: HANNAH, query: { options: 'connections' } });
-    t.assert(opts.body.limited && !opts.body.trips, 'and it carries no trips or leads');
+  await t.test('an Account Manager cannot connect things to somebody else\'s campaign', async () => {
+    // Oct 1 2026: she reads every campaign now, and changes only her own.
     t.equal((await call({ as: HANNAH, method: 'PATCH', query: { id: EV, connect: 1 }, body: { kind: 'invoices', ref: '1' } })).statusCode, 403, 'cannot connect');
-    t.equal((await call({ as: HANNAH, query: { id: EV, printavo: 1 } })).statusCode, 403, 'cannot check Printavo');
+    const read = await call({ as: HANNAH, query: { id: EV } });
+    t.equal(read.statusCode, 200, 'but can read it');
+    const tr = read.body.connections && read.body.connections.travel;
+    t.assert(!tr || (tr.total === undefined && tr.moneyHidden), 'without the trip spend');
   });
 
   await t.test('disconnecting from the child leaves the event\'s own link', async () => {

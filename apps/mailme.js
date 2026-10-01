@@ -636,6 +636,8 @@ export default {
   .mm-modal-x{position:absolute;top:12px;right:14px;border:0;background:transparent;
     font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:4px 8px}
   .mm-modal-x:hover{color:var(--ink)}
+  /* Room for the X, so it never sits on a card header's right-hand note. */
+  .mm-modal .mm-card-hd{padding-right:44px}
   `,
 
   template: `
@@ -808,7 +810,29 @@ export default {
     const listEditorMsg = (html, cls) => msg(modalCarrier ? '#mmModalMsg' : '#mmAudienceMsg', html, cls);
     const composerMsg = (html, cls) => msg('#mmComposeMsg', html, cls);
 
+    /* EMBEDDED IN A MARKETMACHINE CAMPAIGN (Oct 1 2026).
+     *
+     * ctx.embed = { campaignId, campaignName, onChange } when this composer is
+     * shown on a campaign page (see mountEmbedded in js/app-host.js). Then it
+     * lists only that campaign's emails, every new email belongs to it, the
+     * "Part of a campaign" step is implied and hidden, and anything that
+     * changes an email tells the campaign page so its numbers refresh.
+     * Without ctx.embed nothing here changes: MailMe works as it always has.
+     */
+    const embed = ctx.embed && ctx.embed.campaignId ? ctx.embed : null;
+    let campaignsLoadedOnce = false;
+    const embedChanged = () => {
+      if (embed && typeof embed.onChange === 'function') {
+        try { embed.onChange(); } catch (e) { console.error(e); }
+      }
+    };
+
+    // Shown as MarketMachine's Email screen (Oct 1 2026): MailMe's people,
+    // every-email and results views, under MarketMachine's own heading.
+    const hub = !!ctx.embedHub;
+
     const canEditUI = () =>
+      !(embed && embed.readOnly) &&
       !!(ctx.perms && (ctx.perms.superuser === true || ctx.perms.can_edit !== false));
     // Admin = the per-account superuser flag, strictly. Only used to SHOW the
     // delete button on sends that went out; the server decides for itself
@@ -853,7 +877,12 @@ export default {
 
     async function loadCampaigns() {
       const d = await api.get(ENDPOINTS.mmCampaigns);
-      state.campaigns = Array.isArray(d && d.campaigns) ? d.campaigns : [];
+      const all = Array.isArray(d && d.campaigns) ? d.campaigns : [];
+      state.campaigns = embed ? all.filter((c) => c.marketingCampaignId === embed.campaignId) : all;
+      // A reload after the first means something changed (saved, sent,
+      // scheduled, deleted), which the campaign page wants to know.
+      if (campaignsLoadedOnce) embedChanged();
+      campaignsLoadedOnce = true;
     }
 
     // MarketMachine's campaigns, so an email can say which one it belongs to.
@@ -865,6 +894,9 @@ export default {
         const d = await api.get(ENDPOINTS.mkCampaigns);
         state.marketing = Array.isArray(d && d.campaigns) ? d.campaigns : [];
         state.marketingDown = false;
+        // Whether this person can open MarketMachine's campaign pages, which
+        // is where new emails are written now (see the New send button).
+        state.marketingFull = !(d && d.limited);
       } catch (e) {
         state.marketing = [];
         state.marketingDown = true;
@@ -993,10 +1025,12 @@ export default {
       if (!box) return;
 
       if (!state.campaigns.length) {
-        box.innerHTML =
-          '<div class="mm-empty"><h4>No sends yet</h4>' +
-          '<div>Start one to work out the wording and who it goes to. ' +
-          'Nothing sends until you press Send on it.</div></div>';
+        box.innerHTML = embed
+          ? '<div class="mm-empty"><h4>No emails in this campaign yet</h4>' +
+            '<div>Press New email. You pick who gets it, write it, and send it right here.</div></div>'
+          : '<div class="mm-empty"><h4>No sends yet</h4>' +
+            '<div>Start one to work out the wording and who it goes to. ' +
+            'Nothing sends until you press Send on it.</div></div>';
         return;
       }
 
@@ -1242,6 +1276,11 @@ export default {
           </select>
           <div class="hint" id="mmAudienceHint"></div>
         </div>
+        ${readOnly || sent ? '' : `<div class="mm-actions" style="margin:-4px 0 14px">
+          <button class="mm-btn ghost sm" id="mmWhoFilter" type="button">Build a list from filters</button>
+          <button class="mm-btn ghost sm" id="mmWhoUpload" type="button">Upload a file for this email</button>
+          <span style="font-size:12px;color:var(--muted)">Either one makes a list and points this email at it.</span>
+        </div>`}
         ${legacyTags}
         ${detail && detail.heldCount ? `
           <details>
@@ -1382,7 +1421,7 @@ export default {
         ${stepHtml('Who gets it', stepMark(steps.who.done), esc(steps.who.text), whoBody)}
         ${stepHtml('Who it comes from', stepMark(steps.from.done), esc(steps.from.text), fromBody)}
         ${stepHtml('What it says', stepMark(steps.write.done), esc(steps.write.text), designPicker + writeBody, 'mmStepWrite')}
-        ${stepHtml('Part of a campaign', stepMark(steps.campaign.done),
+        ${embed ? '' : stepHtml('Part of a campaign', stepMark(steps.campaign.done),
           esc(steps.campaign.text), campaignBody)}
         <div id="mmReadyBlock"></div>
         ${!canDeleteUI(d) || !d.id ? '' : `<div class="mm-actions" style="margin-top:6px">
@@ -1543,6 +1582,26 @@ export default {
       const back = $('#mmBackToList');
       if (back) back.addEventListener('click', closeCampaign);
 
+      const fb = $('#mmWhoFilter');
+      if (fb) fb.addEventListener('click', () => { syncComposerFromDom(); openFilterList(); });
+
+      // Upload straight from step 1: the list is picked where the email is
+      // written, not set up first in another tab. See commitImport().
+      const up = $('#mmWhoUpload');
+      if (up) {
+        up.addEventListener('click', () => {
+          syncComposerFromDom();
+          state.importForSend = true;
+          openImport();
+          const name = $('#mmImportList');
+          if (name && !name.value) {
+            const cur = state.editingCampaign && state.editingCampaign.listId
+              ? state.lists.find((l) => l.id === state.editingCampaign.listId) : null;
+            name.value = cur ? cur.name : (embed && embed.campaignName ? embed.campaignName : '');
+          }
+        });
+      }
+
       const aud = $('#mmAudience');
       if (aud) {
         aud.addEventListener('change', async () => {
@@ -1638,7 +1697,8 @@ export default {
       if (aHint) {
         const q = QUICK_AUDIENCES.find((x) => x.value === currentAudienceValue(d));
         aHint.textContent = q ? q.note
-          : 'A saved list. Edit who is on it from the Audience tab.';
+          : (embed ? 'A saved list. Upload a file below to add people, or edit it in MailMe, Audience.'
+            : 'A saved list. Edit who is on it from the Audience tab.');
       }
       const iHint = $('#mmIdentityHint');
       if (iHint) {
@@ -2635,7 +2695,9 @@ export default {
       const n = state.composerDetail ? state.composerDetail.recipientCount : detail.recipientCount;
       const label = isContinuation
         ? 'Send the next batch of this one now, rather than waiting for it to continue automatically?'
-        : `Send this campaign for real, to ${n} recipient${n === 1 ? '' : 's'}? This cannot be taken back.`;
+        // Who, not just how many: "1,842" is easy to click past, "All clients"
+        // is not (Oct 1 2026).
+        : `Send this for real to ${Number(n).toLocaleString()} ${n === 1 ? 'person' : 'people'} in "${audienceLabel(d)}"? This cannot be taken back.`;
       if (!window.confirm(label)) return;
 
       try {
@@ -4100,9 +4162,16 @@ export default {
         state.importPreview = null;
         closeModalIf('import');
         clearSelection();
+        const forSend = state.importForSend && state.editingCampaign;
+        state.importForSend = false;
         if (d.list) state.activeListId = d.list.id;
         await refreshAudience();
-        msg('#mmAudienceMsg', esc(note), d.listError ? 'mm-err' : 'mm-ok');
+        if (forSend && d.list) {
+          // Opened from a send's "Who gets it": that send now goes to the list.
+          await sendToList(d.list.id, note + ' This email now goes to that list.');
+        } else {
+          msg('#mmAudienceMsg', esc(note), d.listError ? 'mm-err' : 'mm-ok');
+        }
       } catch (e) {
         btn.disabled = false;
         msg('#mmImportMsg', 'Nothing was added: ' + esc(e.message), 'mm-err');
@@ -4212,6 +4281,174 @@ export default {
         </details>`;
     }
 
+    // Point the open email at a list and save it. Shared by the upload and
+    // the filter builder, the two ways step 1 can make a list.
+    // `source` is who the list holds. It matters: a send aimed at Clients
+    // holds back anyone who is not one (the Holiday Store problem), so a list
+    // of leads or prospects has to say so.
+    async function sendToList(listId, note, source) {
+      const ed = state.editingCampaign;
+      if (!ed) return;
+      await loadLists();
+      ed.listId = listId;
+      ed.source = source || 'client';
+      ed.segmentTags = [];
+      ed.identityKey = defaultIdentityFor(ed);
+      renderComposer();
+      if (ed.id) await saveCampaign({ silent: true });
+      composerMsg(esc(note), 'mm-ok');
+    }
+
+    /* ---------------- build a list from filters (Oct 1 2026) ----------------
+     *
+     * Step 1's other door: who gets it, chosen by industry, tier and top
+     * clients without leaving the email. The count is the server's (the same
+     * filterContacts the Audience tab uses) and only mailable people count.
+     *
+     * Two kinds of list come out of it, on purpose:
+     *   - a plain filter saves as a RULE list, so "Gold clients in Healthcare"
+     *     stays right as tiers and industries change;
+     *   - "top 50" saves as a FIXED list of those 50 people, because a rule
+     *     that re-ranks would swap people out between the test and the send.
+     */
+    const TOP_CHOICES = [
+      ['', 'Everyone who matches'],
+      ['25:lifetimeRevenue', 'Top 25 clients, all time'],
+      ['50:lifetimeRevenue', 'Top 50 clients, all time'],
+      ['100:lifetimeRevenue', 'Top 100 clients, all time'],
+      ['25:ytdRevenue', 'Top 25 clients, this year'],
+      ['50:ytdRevenue', 'Top 50 clients, this year'],
+      ['100:ytdRevenue', 'Top 100 clients, this year']
+    ];
+    const TIERS = ['Platinum', 'Gold', 'Silver', 'Bronze', 'Valuable Dirt'];
+    let filterTimer = null;
+    let filterHits = [];
+
+    function filterChoice() {
+      const v = (sel) => ($(sel) ? $(sel).value : '');
+      const [n, by] = v('#mmFlTop').split(':');
+      return {
+        source: v('#mmFlSource') || 'client',
+        industry: v('#mmFlIndustry'),
+        tier: v('#mmFlTier'),
+        top: n ? Number(n) : 0,
+        by: by || 'lifetimeRevenue'
+      };
+    }
+
+    function filterListName(f) {
+      const who = { client: 'Clients', lead: 'Leads', prospect: 'Prospects', all: 'Everyone' }[f.source] || 'Contacts';
+      const bits = [];
+      if (f.top) bits.push(`Top ${f.top} ${f.by === 'ytdRevenue' ? 'this year' : 'all time'}`);
+      if (f.tier) bits.push(f.tier);
+      if (f.industry) bits.push(f.industry);
+      return bits.length ? `${bits.join(', ')} (${who.toLowerCase()})` : who;
+    }
+
+    function openFilterList() {
+      const f = state.facets || {};
+      const inds = (f.industries || []).map((i) => i.value);
+      openModal(`
+        <div class="mm-card">
+          <div class="mm-card-hd"><h3>Build a list from filters</h3>
+            <span class="meta">Only people who can be emailed are counted</span></div>
+          <div class="mm-card-bd">
+            <div class="mm-row">
+              <div class="mm-field"><label for="mmFlSource">Who</label>
+                <select id="mmFlSource">
+                  <option value="client">Clients</option>
+                  <option value="lead">Leads</option>
+                  <option value="prospect">Prospects</option>
+                  <option value="all">Everyone</option>
+                </select></div>
+              <div class="mm-field"><label for="mmFlTop">How many</label>
+                <select id="mmFlTop">${TOP_CHOICES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select></div>
+            </div>
+            <div class="mm-row">
+              <div class="mm-field"><label for="mmFlIndustry">Industry</label>
+                <select id="mmFlIndustry"><option value="">Any industry</option>
+                  ${inds.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></div>
+              <div class="mm-field"><label for="mmFlTier">Tier</label>
+                <select id="mmFlTier"><option value="">Any tier</option>
+                  ${TIERS.map((v) => `<option value="${v}">${v}</option>`).join('')}</select></div>
+            </div>
+            <div class="mm-field"><label for="mmFlName">List name</label>
+              <input id="mmFlName" type="text"></div>
+            <div id="mmFlCount" class="mm-notice good" style="margin-bottom:12px">Counting...</div>
+            <div class="mm-actions">
+              <button class="mm-btn" id="mmFlSave" disabled>Make the list</button>
+              <button class="mm-btn ghost" id="mmFlCancel">Cancel</button>
+            </div>
+          </div>
+        </div>`, 'filterlist');
+
+      let named = false;
+      const name = $('#mmFlName');
+      name.addEventListener('input', () => { named = true; });
+      const refresh = () => {
+        if (!named) name.value = filterListName(filterChoice());
+        clearTimeout(filterTimer);
+        filterTimer = setTimeout(countFilter, 200);
+      };
+      ['#mmFlSource', '#mmFlTop', '#mmFlIndustry', '#mmFlTier'].forEach((sel) => $(sel).addEventListener('change', refresh));
+      $('#mmFlCancel').addEventListener('click', () => closeModal());
+      $('#mmFlSave').addEventListener('click', saveFilterList);
+      refresh();
+    }
+
+    async function countFilter() {
+      const box = $('#mmFlCount');
+      const btn = $('#mmFlSave');
+      if (!box) return;
+      const f = filterChoice();
+      const q = { status: 'mailable', sort: 'company_name', dir: 'asc' };
+      if (f.top) { q.top = f.top; q.by = f.by; }
+      if (f.source !== 'all') q.source = f.source;
+      if (f.industry) q.industry = f.industry;
+      if (f.tier) q.tier = f.tier;
+      try {
+        const d = await api.get(ENDPOINTS.mmContacts, q);
+        // Ranked and cut on the server (topContacts in lib/mailme/schema.js).
+        const rows = Array.isArray(d && d.contacts) ? d.contacts : [];
+        filterHits = rows;
+        const names = rows.slice(0, 6).map((c) => c.company_name || c.email);
+        box.className = 'mm-notice' + (rows.length ? ' good' : '');
+        box.innerHTML = rows.length
+          ? `<b>${rows.length} ${rows.length === 1 ? 'person' : 'people'}</b> can be emailed.
+             ${names.length ? `<div style="margin-top:4px">${esc(names.join(', '))}${rows.length > names.length ? ', and more' : ''}</div>` : ''}`
+          : '<b>Nobody matches.</b> Loosen a filter.';
+        if (btn) btn.disabled = !rows.length;
+      } catch (e) {
+        box.className = 'mm-notice danger';
+        box.textContent = 'Could not count: ' + e.message;
+        if (btn) btn.disabled = true;
+      }
+    }
+
+    async function saveFilterList() {
+      const f = filterChoice();
+      const nm = ($('#mmFlName').value || '').trim() || filterListName(f);
+      const btn = $('#mmFlSave');
+      btn.disabled = true;
+      try {
+        const payload = f.top
+          ? { name: nm, kind: 'static', members: filterHits.map((c) => String(c.id)) }
+          : { name: nm, kind: 'dynamic', rule: {
+              source: f.source === 'all' ? null : f.source,
+              tags: [], tagMatch: 'any', search: '',
+              industries: f.industry ? [f.industry] : [],
+              tiers: f.tier ? [f.tier] : []
+            } };
+        const res = await api.post(ENDPOINTS.mmLists, payload);
+        const id = res && res.list && res.list.id;
+        closeModal();
+        if (id) await sendToList(id, `Made "${nm}" (${filterHits.length}) and pointed this email at it.`, f.source);
+      } catch (e) {
+        msg('#mmModalMsg', 'Could not make the list: ' + esc(e.message), 'mm-err');
+        btn.disabled = false;
+      }
+    }
+
     /* ---------------- modal machinery ---------------- */
 
     // Created on demand and appended to <body>, not left in the markup, so it
@@ -4250,7 +4487,7 @@ export default {
     // repaint sees "an editor is open" and skips rendering.
     function dismissModal() {
       if (modalKind === 'list') state.editingList = null;
-      if (modalKind === 'import') state.importPreview = null;
+      if (modalKind === 'import') { state.importPreview = null; state.importForSend = false; }
       if (modalKind === 'addcontact') { /* nothing held on state */ }
       closeModal();
     }
@@ -4986,11 +5223,37 @@ export default {
 
     /* ---------------- wiring that lives on the page ---------------- */
 
-    $('#mmNewCampaign').addEventListener('click', () => {
+    $('#mmNewCampaign').addEventListener('click', async () => {
+      // On MarketMachine's Email screen, its own New email does the whole
+      // thing (campaign, open, first email started).
+      if (hub && typeof ctx.newEmail === 'function') { ctx.newEmail($('#mmNewCampaign')); return; }
+      // EMAIL LIVES ON CAMPAIGNS NOW (Oct 1 2026). For anyone who can open
+      // MarketMachine's campaign pages, a new email starts as a Quick Email
+      // campaign there, where who-gets-it, the writing and the results sit
+      // together. Everyone else (MarketMachine is admin only today) writes
+      // here exactly as before, and so does anyone if MarketMachine is down.
+      if (!embed && state.marketingFull && !state.marketingDown && typeof ctx.goApp === 'function') {
+        const btn = $('#mmNewCampaign');
+        if (btn) btn.disabled = true;
+        try {
+          const day = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+          const r = await api.post(ENDPOINTS.mkCampaigns, {
+            type: 'quick_email', name: `Quick email, ${day}`, audienceKind: 'list', platforms: ['email']
+          });
+          const id = r && r.campaign && r.campaign.id;
+          if (id) { ctx.goApp('marketmachine', 'campaigns', id); return; }
+        } catch (e) {
+          msg('#mmCampaignMsg', 'MarketMachine did not start a campaign (' + esc(e.message) +
+            '), so this one is being written here instead.', 'mm-err');
+        } finally {
+          if (btn) btn.disabled = false;
+        }
+      }
       const d = {
         subject: '', preheader: '', body: '', template: 'freeform', templateData: null,
         source: 'client', listId: null, segmentTags: [], status: 'draft',
-        marketingCampaignId: null, marketingChannelId: null
+        marketingCampaignId: embed ? embed.campaignId : null,
+        marketingChannelId: embed ? 'email' : null
       };
       d.identityKey = defaultIdentityFor(d);
       state.editingCampaign = d;
@@ -5038,12 +5301,63 @@ export default {
 
     /* ---------------- boot ---------------- */
 
+    if (hub) {
+      // MarketMachine's Email screen already has the heading; each section's
+      // own big title would say it twice.
+      root.querySelectorAll('.mm-hd h1').forEach((h) => { h.style.display = 'none'; });
+      // MarketMachine's Email screen has its own New email, and the
+      // address-book strip belongs with People, not with Every email.
+      const nb3 = root.querySelector('#mmNewCampaign');
+      if (nb3) nb3.style.display = 'none';
+      const strip3 = root.querySelector('#mmStrip');
+      if (strip3) strip3.style.display = 'none';
+      const subs = root.querySelector('#mmCampaignListPane .mm-hd .sub');
+      if (subs) subs.textContent = 'Every email that went out, on a campaign or not. Open one to see it, or Report for how it did.';
+      const allH3 = root.querySelector('#mmCampaignListPane .mm-card-hd h3');
+      if (allH3) allH3.textContent = 'Every email';
+      const page = root.querySelector('.mm-page');
+      if (page) page.style.padding = '0';
+    }
+
+    if (embed) {
+      // The card around this already says Email, and MailMe's contact-count
+      // strip is about the whole address book, not this campaign.
+      const h1 = root.querySelector('#mmCampaignListPane .mm-hd h1');
+      if (h1) h1.style.display = 'none';
+      const sub = root.querySelector('#mmCampaignListPane .mm-hd .sub');
+      if (sub) sub.textContent = 'Pick who gets it, write it and send it, all on this campaign.';
+      const strip = root.querySelector('#mmStrip');
+      if (strip) strip.style.display = 'none';
+      const allH = root.querySelector('#mmCampaignListPane .mm-card-hd h3');
+      if (allH) allH.textContent = 'Emails in this campaign';
+      const nb = root.querySelector('#mmNewCampaign');
+      if (nb) nb.textContent = 'New email';
+      root.classList.add('mm-embedded');
+      if (embed.readOnly) {
+        const nb2 = root.querySelector('#mmNewCampaign');
+        if (nb2) nb2.style.display = 'none';
+        const sub2 = root.querySelector('#mmCampaignListPane .mm-hd .sub');
+        if (sub2) sub2.textContent = '';
+      }
+      const page = root.querySelector('.mm-page');
+      if (page) page.style.padding = '0';
+    }
+
     try {
       await Promise.all([
         loadContacts(), loadLists(), loadCampaigns(), loadSettings(), loadMarketingCampaigns()
       ]);
     } catch (e) {
       msg('#mmCampaignMsg', 'Could not load MailMe: ' + esc(e.message), 'mm-err');
+    }
+
+    // Say where new emails go, so the button doing something different from
+    // last week is not a surprise. See the New send handler.
+    if (!embed && !hub && state.marketingFull && !state.marketingDown) {
+      const nb = $('#mmNewCampaign');
+      if (nb) { nb.textContent = 'New email'; nb.title = 'Starts a Quick Email campaign in MarketMachine'; }
+      const sub = root.querySelector('#mmCampaignListPane .mm-hd .sub');
+      if (sub) sub.textContent = 'New emails are written on campaigns in MarketMachine. Everything sent from here is still here.';
     }
 
     renderHealth();

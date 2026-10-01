@@ -16,6 +16,13 @@ import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox } from
 
 export default function makeDetail(app) {
   const { state, api, root, ui } = app;
+
+  // What this person may do on the open campaign (Oct 1 2026). The server
+  // sends `access` with every campaign; an older answer without it is an
+  // Admin's, which is what everyone was before Account Managers got in.
+  const access = () => (state.detail && state.detail.access) || { admin: true, canEdit: true };
+  const isAdmin = () => access().admin !== false;
+  const canEdit = () => access().canEdit !== false;
   const $ = (sel) => root.querySelector(sel);
 
     function headerView(c, meta, dates) {
@@ -36,7 +43,7 @@ export default function makeDetail(app) {
           <div><div class="k">Post-launch review date</div>${v(esc(fmtDate(dates.postLaunchReview)))}</div>
           ${meta.parent ? `
             <div><div class="k">Participation</div>${v(esc(PARTICIPATION_LABEL[c.participation] || ''))}</div>
-            <div><div class="k">Total budget</div>${v(c.budget != null ? '$' + Number(c.budget).toLocaleString() : '')}</div>` : ''}
+            ${isAdmin() ? `<div><div class="k">Total budget</div>${v(c.budget != null ? '$' + Number(c.budget).toLocaleString() : '')}</div>` : ''}` : ''}
           ${c.notes ? `<div style="grid-column:1/-1"><div class="k">Notes</div><div class="v" style="white-space:pre-wrap">${esc(c.notes)}</div></div>` : ''}
         </div>`;
     }
@@ -62,8 +69,8 @@ export default function makeDetail(app) {
               <select id="mkHPart"><option value="">Not decided yet</option>
                 ${PARTICIPATION.map((p) => `<option value="${p}"${c.participation === p ? ' selected' : ''}>${esc(PARTICIPATION_LABEL[p])}</option>`).join('')}
               </select></div>
-            <div class="mk-field"><label for="mkHBudget">Total budget</label>
-              <input type="text" id="mkHBudget" inputmode="decimal" value="${c.budget != null ? esc(c.budget) : ''}"></div>` : ''}
+            ${isAdmin() ? `<div class="mk-field"><label for="mkHBudget">Total budget</label>
+              <input type="text" id="mkHBudget" inputmode="decimal" value="${c.budget != null ? esc(c.budget) : ''}"></div>` : ''}` : ''}
           <div class="mk-field full"><label for="mkHNotes">Notes</label>
             <textarea id="mkHNotes" maxlength="4000">${esc(c.notes || '')}</textarea></div>
         </div>
@@ -263,7 +270,7 @@ export default function makeDetail(app) {
       } else if (!p.next) {
         now = `<div class="mk-now done"><div class="k">Every step is finished</div>
           <div class="step">Ready to close</div>
-          <div class="facts">Mark it complete below when the results are in.</div></div>`;
+          <div class="facts">${canEdit() ? 'Mark it complete below when the results are in.' : 'Its Account Managers mark it complete.'}</div></div>`;
       } else {
         const late = p.next.due && p.next.due < today;
         now = `<div class="mk-now">
@@ -308,8 +315,34 @@ export default function makeDetail(app) {
 
       const emailCard = ui.calculationsSection(c, meta) + ui.connectionsSection(c, meta, connections);
 
+      // EMAIL, WRITTEN HERE (Oct 1 2026). The sales director's ask: email is a
+      // tool used inside a campaign, not its own app, and who gets it is
+      // chosen right here. The section holds MailMe's real composer, mounted
+      // into #mkEmailSlot by index.js (mountEmbedded), so there is one
+      // composer with every safety check, not a second copy that drifts.
+      const em = (connections && connections.email) || {};
+      const wantsEmail = c.type === 'quick_email' || platformsOf(c).includes('email') || (em.count || 0) > 0 || state.emailOpen;
+      const emailSection = !wantsEmail ? '' : `
+        <div class="mk-card" id="mkEmailCard">
+          <div class="mk-card-hd"><h3>Email</h3>
+            ${state.mailmeAccess ? `<div class="mk-actions">
+              <button class="mk-btn ghost sm${state.emailTab !== 'reports' ? ' on' : ''}" data-act="email-tab" data-tab="campaigns">Emails</button>
+              <button class="mk-btn ghost sm${state.emailTab === 'reports' ? ' on' : ''}" data-act="email-tab" data-tab="reports">Results</button>
+            </div>` : ''}</div>
+          <div class="mk-card-bd">
+            ${!canEdit() ? '<div class="who" style="margin-bottom:10px">Emails here are written by this campaign\'s Account Managers. You can read them and their results.</div>' : ''}
+            ${state.mailmeAccess
+              ? '<div id="mkEmailSlot"></div>'
+              : '<div class="mk-notice" style="margin:0">Writing and sending email needs MailMe access on your account. An Admin can turn it on in Settings, Accounts.</div>'}
+          </div>
+        </div>`;
+
       const history = (c.history || []).slice().reverse().slice(0, 40);
 
+      // Read only for somebody else's campaign (Oct 1 2026). The server
+      // refuses the writes anyway (lib/marketmachine/member.js); this keeps
+      // the page from offering them.
+      if (det.classList) det.classList.toggle('mk-ro', !canEdit());
       det.innerHTML = `
         <div class="mk-actions" style="margin-bottom:12px">
           <button class="mk-link" data-act="to-list">Back to campaigns</button>
@@ -322,20 +355,24 @@ export default function makeDetail(app) {
           </div>
           <div class="mk-actions">
             <button class="mk-btn ghost sm" data-act="reload">Refresh</button>
-            ${!state.editingHeader ? '<button class="mk-btn ghost sm" data-act="edit-header">Edit details</button>' : ''}
+            ${!state.editingHeader && canEdit() ? '<button class="mk-btn ghost sm" data-act="edit-header">Edit details</button>' : ''}
           </div>
         </div>
+        ${canEdit() ? '' : `<div class="mk-notice" style="margin-bottom:14px"><b>Read only.</b>
+          This is ${esc(amNames(c) || 'somebody else')}'s campaign. You can see where it stands;
+          only its Account Managers or an Admin can change it.</div>`}
         ${msgBox(state.detailMsg)}
         ${now}
         <div class="mk-card"><div class="mk-card-bd">
           ${state.editingHeader ? headerForm(c, meta) : headerView(c, meta, dates)}
         </div></div>
         ${platformsCard(c)}
+        ${emailSection}
         <nav class="mk-stages" aria-label="Stages">${stageTabs}</nav>
         ${stageSections}
         ${childrenCard}
         ${emailCard}
-        <div class="mk-card">
+        ${!canEdit() ? '' : `<div class="mk-card">
           <div class="mk-card-hd"><h3>Close out</h3></div>
           <div class="mk-card-bd">
             <div class="mk-actions">
@@ -343,11 +380,11 @@ export default function makeDetail(app) {
                 <button class="mk-btn" data-status="complete"${p.next ? ' disabled' : ''}>Mark complete</button>
                 <button class="mk-btn ghost" data-status="cancelled">Cancel this campaign</button>`
                 : '<button class="mk-btn ghost" data-status="open">Reopen</button>'}
-              <button class="mk-btn danger" data-act="delete">Delete</button>
+              ${isAdmin() ? '<button class="mk-btn danger" data-act="delete">Delete</button>' : ''}
             </div>
             ${c.status === 'open' && p.next ? '<div class="who" style="margin-top:8px">Complete becomes available when every step is done or not applicable.</div>' : ''}
           </div>
-        </div>
+        </div>`}
         <div class="mk-card">
           <div class="mk-card-hd"><h3>History</h3><span class="meta">Who changed what, newest first</span></div>
           <div class="mk-card-bd"><div class="mk-history">

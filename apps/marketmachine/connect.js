@@ -85,7 +85,7 @@ export default function makeConnect(app) {
             <td><div class="co">${esc(e.subject || 'No subject yet')}</div><div class="who">${esc(e.id)}${e.sentAt ? ', sent ' + esc(fmtStamp(e.sentAt)) : ''}</div></td>
             ${multi ? `<td>${esc(scopeName(e.campaignId, conn))}</td>` : ''}
             <td>${esc(e.status)}</td><td>${e.delivered}</td><td>${e.uniqueClicks}</td></tr>`).join('')}</tbody></table></div>`
-          : '<div class="mk-conn-note" style="padding-bottom:14px">No emails yet. Start one here, or attach an existing email from its own screen in MailMe.</div>'}`;
+          : '<div class="mk-conn-note" style="padding-bottom:14px">No emails yet. Press Write an email, or tick Email under Platforms, and it opens in the Email section near the top.</div>'}`;
 
       // Travel
       const tr = conn.travel || {};
@@ -159,7 +159,7 @@ export default function makeConnect(app) {
           : 'Read live from each app. Nothing here is a copy.'}</div>
         ${msgBox(state.connMsg)}
         <div class="mk-card">
-          ${head('Email, in MailMe', '', c.status === 'open' ? '<button class="mk-btn ghost sm" data-act="start-email">Start an email in MailMe</button>' : '')}
+          ${head('Email results', '', c.status === 'open' && state.mailmeAccess ? '<button class="mk-btn ghost sm" data-act="open-email">Write an email</button>' : '')}
           ${emailBody}
         </div>
         <div class="mk-card">

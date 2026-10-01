@@ -34,7 +34,8 @@ const SELF_SERVE_VIEWS = {
   crewcore: ['dashboard', 'timeclock', 'timeoff', 'stipend', 'kudos', 'reviews', 'handbook'],
   // MARKETMACHINE, Sept 2026. Ticking the app on somebody's account is how
   // they get their tasks, and it must not also hand them the campaign screens.
-  // Whatever IS ticked for them is honoured, so ticking Campaigns is how Jacob
+  // Whatever IS ticked for them is honoured, so ticking Settings (Campaigns
+  // until Oct 1 2026) is how Jacob
   // gets the whole app without the platform Admin flag. One definition, in
   // lib/marketmachine/access.js, which the server reads as well.
   marketmachine: MM_SELF_SERVE,
@@ -302,7 +303,18 @@ export const APPS = [
     // live domain verification, a from-address, and current suppression for
     // every recipient). A draft can sit for weeks, so nothing about it is
     // trusted as still true at send time.
-    stub: false
+    stub: false,
+    // FOLDED INTO MARKETMACHINE, Oct 1 2026. Off the rail and the All apps
+    // page; an old MailMe link lands on the matching MarketMachine screen
+    // (see handleRoute in js/shell.js). It stays in this list because the
+    // MailMe grant on an account is still the switch for "can send email",
+    // and Settings, Accounts shows the switch from here.
+    railHidden: true,
+    foldedInto: {
+      app: 'marketmachine',
+      views: { campaigns: 'email', audience: 'email', reports: 'email', settings: 'settings' },
+      defaultView: 'email'
+    }
   },
   {
     id: 'marketmachine',
@@ -334,9 +346,14 @@ export const APPS = [
     // the only view somebody who is not an Admin can use. Everyone lands here,
     // Admins included, because "what do I owe" is the right first question for
     // them too. Campaigns is one click away.
+    // EMAIL, Oct 1 2026: MailMe folded in. Written on a campaign's own page;
+    // this screen is everything else about email: people and lists, every
+    // email ever sent, and results. Granted by the MailMe switch on the
+    // account (permsFor), not by MarketMachine alone.
     views: [
       ['tasks', 'My tasks'],
       ['campaigns', 'Campaigns'],
+      ['email', 'Email'],
       ['calendar', 'Timeline'],
       ['settings', 'Settings']
     ],
@@ -606,6 +623,7 @@ export function isApp(id) {
 /** First app the user is allowed to see, or null if none. */
 export function firstAllowed(perms) {
   for (const app of APPS) {
+    if (app.railHidden) continue;
     if (canAccess(perms, app.id)) return app;
   }
   return null;

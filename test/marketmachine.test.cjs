@@ -76,6 +76,7 @@ function seedUsers() {
     hannah: { username: 'hannah', name: 'Hannah Posey', access: { apps: ['mailme', 'marketmachine'], can_edit: true } },
     // A superuser flag that is truthy but not true must not count.
     sneaky: { username: 'sneaky', name: 'Sneaky', superuser: 'yes', access: { apps: ['marketmachine'] } },
+    outsider: { username: 'outsider', name: 'Out Sider', access: { apps: ['backbone'] } },
   }));
 }
 
@@ -179,8 +180,10 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     // business decided not to pursue.
     const want = ['Digital Platform', 'Poll Sending', 'Picks with Personality', 'Referral', 'Sampling', 'Postal',
       'In-Order Gifting', 'This One Is On Us', 'Christmas Gifting', 'Parade Day', 'Live Screen Printing',
-      'Live Customization', 'External Trade Show', 'Try On Day'];
-    t.equal(cat.CAMPAIGN_TYPES.length, 14, 'fourteen types');
+      'Live Customization', 'External Trade Show', 'Try On Day', 'Quick Email'];
+    // Quick Email (Oct 1 2026): where a one-off email lives now that email is
+    // written inside campaigns.
+    t.equal(cat.CAMPAIGN_TYPES.length, 15, 'fifteen types');
     want.forEach((l) => t.assert(cat.CAMPAIGN_TYPES.some((x) => x.label === l), l + ' is missing'));
     cat.CAMPAIGN_TYPES.forEach((x) => t.assert(cat.FAMILIES.some((f) => f.key === x.family), x.label + ' has no family'));
   });
@@ -461,14 +464,19 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     'MC-00002': { id: 'MC-00002', name: 'SAMPLE: Fall' } }));
   kv.set('marketmachine:entries:MC-00001', JSON.stringify([{ id: 'r1' }]));
 
-  await t.test('someone who is not an Admin is refused, even with the app ticked', async () => {
+  await t.test('someone who is not an Admin cannot create, edit or delete what is not theirs', async () => {
+    // Oct 1 2026: Account Managers read every campaign and change their own
+    // (lib/marketmachine/member.js). Sneaky's string "yes" is still not the
+    // Admin flag, so Sneaky is an ordinary member, never an Admin.
     for (const who of [HANNAH, SNEAKY]) {
-      t.equal((await call({ as: who, method: 'POST', body: { type: 'postal', name: 'X' } })).statusCode, 403, who.username + ' cannot create');
-      t.equal((await call({ as: who, query: { id: 'CP-00001' } })).statusCode, 403, who.username + ' cannot open a campaign');
-      t.equal((await call({ as: who, method: 'PATCH', query: { id: 'CP-00001' }, body: { name: 'Y' } })).statusCode, 403, who.username + ' cannot edit');
+      t.equal((await call({ as: who, method: 'POST', body: { type: 'postal', name: 'X' } })).statusCode, 403,
+        who.username + ' cannot create without being set up as an Account Manager');
+      t.assert((await call({ as: who, method: 'PATCH', query: { id: 'CP-00001' }, body: { name: 'Y' } })).statusCode >= 403, who.username + ' cannot edit somebody else\'s');
       t.equal((await call({ as: who, method: 'DELETE', query: { legacy: 'all' } })).statusCode, 403, who.username + ' cannot delete');
     }
     t.equal(await store.legacyCount(), 2, 'the refused delete really did nothing');
+    const outsider = { username: 'outsider', name: 'Out Sider' };
+    t.equal((await call({ as: outsider, query: { id: 'CP-00001' } })).statusCode, 403, 'without MarketMachine at all, a campaign stays closed');
   });
 
   await t.test('an Admin creates campaigns with CP ids that cannot collide with the old MC ones', async () => {
@@ -498,13 +506,29 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     t.equal(child.body.parent.id, 'CP-00001', 'and the child links back');
   });
 
-  await t.test('everyone else still gets the MailMe picker, and nothing more', async () => {
-    const res = await call({ as: HANNAH });
+  await t.test('somebody without MarketMachine still gets the picker, and nothing more', async () => {
+    const res = await call({ as: { username: 'outsider', name: 'Out Sider' } });
     t.equal(res.statusCode, 200, 'the bare list read is allowed');
     t.assert(res.body.limited, 'marked as limited');
     t.equal(res.body.campaigns.length, 2, 'both open campaigns are offered');
     const keys = Object.keys(res.body.campaigns[0]).sort().join(',');
     t.equal(keys, 'channels,id,name', 'only names, ids and the email slot');
+  });
+
+  await t.test('an Account Manager reads every campaign, without the money', async () => {
+    const list = await call({ as: HANNAH });
+    t.equal(list.statusCode, 200);
+    t.assert(!list.body.limited, 'the real list, not the picker');
+    t.equal(list.body.canDelete, false, 'and no delete');
+    t.assert(list.body.campaigns.every((c) => c.budget === undefined), 'no budget on the list');
+    await call({ as: RYAN, method: 'PATCH', query: { id: 'CP-00001' }, body: { budget: 1500 } });
+    const one = await call({ as: HANNAH, query: { id: 'CP-00001' } });
+    t.equal(one.statusCode, 200, 'a campaign opens');
+    t.equal(one.body.campaign.budget, undefined, 'without its budget');
+    t.equal(one.body.calculations.length, 0, 'or the numbers built on it');
+    t.equal(one.body.access.canEdit, false, 'and the page is told it is read only');
+    const ryans = await call({ as: RYAN, query: { id: 'CP-00001' } });
+    t.equal(ryans.body.campaign.budget, 1500, 'an Admin still sees it');
   });
 
   await t.test('the launch gate holds through the real route', async () => {

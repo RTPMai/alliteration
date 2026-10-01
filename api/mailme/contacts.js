@@ -29,7 +29,7 @@ import {
 } from "../../lib/mailme/store.js";
 import {
   SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts, CONTACT_SOURCES,
-  filterContacts, facetCounts,
+  filterContacts, facetCounts, topContacts,
   CONTACT_DETAIL_FIELDS, validateContactDetailPatch, normalizeEmail,
 } from "../../lib/mailme/schema.js";
 
@@ -59,6 +59,8 @@ export default async function handler(req, res) {
       // Sorting happens SERVER-side so a filtered page and a full page order
       // identically, and so the client cannot drift from the canonical rule.
       contacts = sortContacts(contacts, q.sort, q.dir);
+      // "Top 50 clients" from step 1's list builder. See topContacts().
+      if (q.top) contacts = topContacts(contacts, q.top, q.by);
 
       const all = resolved.contacts;
       const tagSet = new Set();

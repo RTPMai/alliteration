@@ -58,6 +58,7 @@
  */
 
 import { ENDPOINTS } from '../../js/api.js';
+import { mountEmbedded } from '../../js/app-host.js';
 import { todayCentral } from '../../lib/marketmachine/dates.js';
 import { CALC_INPUTS } from '../../lib/marketmachine/calculations.js';
 import { esc, msgBox } from './format.js';
@@ -121,6 +122,12 @@ export default {
       detailMsg: null,
       editingHeader: false,
 
+      // The Email section (Oct 1 2026): MailMe's composer, on the campaign.
+      emailOpen: false,      // shown even before Email is ticked as a platform
+      emailTab: 'campaigns', // campaigns (the emails) | reports (their results)
+      mailmeAccess: !!(ctx.perms && (ctx.perms.superuser === true ||
+        (Array.isArray(ctx.perms.tabs) && ctx.perms.tabs.includes('mailme')))),
+
       newParentId: null,
       newType: null,
       newMsg: null,
@@ -150,6 +157,139 @@ export default {
       loadTasks, loadList, loadDetail, loadInitiatives, showPane, openCampaign,
       refreshDetailKeepingPlace, patchConnection, patchStep, patchHeader,
     });
+
+    /* ---------------- the Email section ----------------
+     *
+     * MailMe's own composer, mounted once per open campaign and MOVED into
+     * the slot after every repaint of this page. Moving a live node keeps
+     * everything typed into it; re-mounting would throw it away. Destroyed
+     * when the page leaves this campaign.
+     */
+    let emailEmbed = null;   // { campaignId, root, ready, destroy }
+
+    function dropEmailEmbed() {
+      if (emailEmbed) { emailEmbed.destroy(); emailEmbed = null; }
+    }
+
+    function attachEmailEmbed() {
+      const slot = root.querySelector('#mkEmailSlot');
+      const c = state.detail && state.detail.campaign;
+      if (!slot || !c) return;
+      if (emailEmbed && emailEmbed.campaignId !== c.id) dropEmailEmbed();
+      if (!emailEmbed) {
+        let refreshTimer = null;
+        const e = mountEmbedded('mailme', {
+          perms: ctx.perms,
+          user: ctx.user,
+          embed: {
+            campaignId: c.id,
+            campaignName: c.name,
+            // Somebody else's campaign: its emails and results, nothing to write.
+            readOnly: !!(state.detail.access && state.detail.access.canEdit === false),
+            // Saved, sent, scheduled or deleted: the numbers further down
+            // this page are read live, so ask for them again. Debounced, as
+            // one save can reload the email list more than once.
+            onChange: () => {
+              clearTimeout(refreshTimer);
+              refreshTimer = setTimeout(() => {
+                if (state.pane === 'detail' && state.detail && state.detail.campaign.id === c.id) {
+                  refreshDetailKeepingPlace();
+                }
+              }, 400);
+            },
+          },
+          // MailMe's Report button routes to its Results view; here that is
+          // the Results tab of this section.
+          go: (view) => { state.emailTab = view === 'reports' ? 'reports' : 'campaigns'; showEmailTab(); },
+          goApp: ctx.goApp,
+        });
+        emailEmbed = { campaignId: c.id, ...e };
+        e.ready.then(async () => {
+          await showEmailTab();
+          // New email from anywhere lands here with the first email already
+          // started: one click from "I need to send something" to step 1.
+          if (state.autoNewEmail) {
+            state.autoNewEmail = false;
+            const nb = e.root.querySelector('#mmNewCampaign');
+            if (nb) nb.click();
+          }
+        }).catch((err) => {
+          e.root.innerHTML = `<div class="mk-err">Email did not load: ${esc(err.message || 'try Refresh')}</div>`;
+        });
+      }
+      slot.appendChild(emailEmbed.root);
+    }
+
+    async function showEmailTab() {
+      if (!emailEmbed) return;
+      root.querySelectorAll('[data-act="email-tab"]').forEach((b) => {
+        b.classList.toggle('on', b.dataset.tab === state.emailTab);
+      });
+      try {
+        const inst = await emailEmbed.ready;
+        inst.showView(state.emailTab === 'reports' ? 'reports' : 'campaigns');
+      } catch (e) { /* the load error is already on screen */ }
+    }
+
+    /* ---------------- New email, from anywhere ----------------
+     *
+     * The one button for "I need to send an email" (Oct 1 2026). It makes a
+     * Quick Email campaign in this person's name, opens it, and starts the
+     * email, so the first thing on screen is "who gets it". Everything else
+     * about email is on the Email screen.
+     */
+    async function newEmail(btn) {
+      if (btn) btn.disabled = true;
+      try {
+        const day = new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        const body = { type: 'quick_email', name: `Quick email, ${day}`, audienceKind: 'list', platforms: ['email'] };
+        if (state.me && state.me.id) body.accountManagers = [{ id: state.me.id, name: state.me.name }];
+        const r = await api.post(ENDPOINTS.mkCampaigns, body);
+        const id = r && r.campaign && r.campaign.id;
+        if (!id) throw new Error('no campaign came back');
+        state.autoNewEmail = true;
+        if (typeof ctx.goApp === 'function') ctx.goApp('marketmachine', 'campaigns', id);
+        else { await openCampaign(id); }
+      } catch (e) {
+        window.alert('A new email could not be started: ' + (e.message || 'try again'));
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
+
+    /* ---------------- the Email screen and email settings ----------------
+     *
+     * Everything about email that is not one campaign's: people and lists,
+     * every email that went out (including the ones from before email moved
+     * here), and results. Plus the sending setup, under Settings, for
+     * Admins. One more copy of MailMe's own screens, moved between the two
+     * slots so there is only ever one.
+     */
+    let hubEmbed = null;
+    async function showEmailHub(slotId, view) {
+      const slot = root.querySelector('#' + slotId);
+      if (!slot || !state.mailmeAccess) return;
+      if (!hubEmbed) {
+        hubEmbed = mountEmbedded('mailme', {
+          perms: ctx.perms, user: ctx.user, goApp: ctx.goApp,
+          embedHub: true,
+          newEmail: (btn) => newEmail(btn),
+          go: (v) => { state.hubTab = v; showEmailHub('mkEmailHubSlot', v); },
+        });
+        hubEmbed.ready.catch((err) => {
+          hubEmbed.root.innerHTML = `<div class="mk-err">Email did not load: ${esc(err.message || 'try again')}</div>`;
+        });
+      }
+      slot.appendChild(hubEmbed.root);
+      root.querySelectorAll('[data-act="hub-tab"]').forEach((b) => b.classList.toggle('on', b.dataset.tab === view));
+      try { (await hubEmbed.ready).showView(view); } catch (e) { /* shown above */ }
+    }
+    this._dropHubEmbed = () => { if (hubEmbed) { hubEmbed.destroy(); hubEmbed = null; } };
+
+    // Every repaint of the campaign page puts the composer back in its slot.
+    const paintDetail = ui.renderDetail;
+    ui.renderDetail = () => { paintDetail(); attachEmailEmbed(); };
+    this._dropEmailEmbed = dropEmailEmbed;
 
     /**
      * My tasks. Its own request, and the only one this screen needs, so a
@@ -200,6 +340,7 @@ export default {
         calculations: Array.isArray(d.calculations) ? d.calculations : [],
         advisories: Array.isArray(d.advisories) ? d.advisories : [],
         scorecard: Array.isArray(d.scorecard) ? d.scorecard : [],
+        access: d.access || null,
       };
       if (Array.isArray(d.accountManagers)) state.accountManagers = d.accountManagers;
       if (d.today) state.today = d.today;
@@ -217,6 +358,7 @@ export default {
 
     function showPane(which) {
       state.pane = which;
+      if (which !== 'detail') dropEmailEmbed();
       const list = $('#mkListPane'), neu = $('#mkNewPane'), det = $('#mkDetailPane');
       if (list) list.hidden = which !== 'list';
       if (neu) neu.hidden = which !== 'new';
@@ -224,6 +366,8 @@ export default {
     }
 
     async function openCampaign(id) {
+      state.emailOpen = false;
+      state.emailTab = 'campaigns';
       state.platMsg = null;
       state.artUploading = {};
       state.openStep = null;
@@ -525,19 +669,25 @@ export default {
         }
         case 'scorecard-edit': state.scorecardEditing = !state.scorecardEditing; ui.renderDetail(); break;
         case 'calc-edit': state.calcEditing = !state.calcEditing; state.calcMsg = null; ui.renderDetail(); break;
-        case 'start-email': {
-          const c = state.detail.campaign;
-          try {
-            // Subject and body are left out, not blanked: MailMe refuses an
-            // explicitly empty subject, and a subject written by nobody is
-            // worse than none. The Account Manager writes every email.
-            const d2 = await api.post(ENDPOINTS.mmCampaigns, { marketingCampaignId: c.id, marketingChannelId: 'email' });
-            const made = d2 && d2.campaign;
-            state.connMsg = { cls: 'ok', text: `Draft ${made && made.id ? made.id : ''} started in MailMe and attached to this campaign. Open MailMe, Sends, to write it.` };
-          } catch (e) {
-            state.connMsg = { cls: 'err', text: 'MailMe did not start the draft: ' + (e.message || 'no answer') };
-          }
-          await refreshDetailKeepingPlace();
+        case 'open-email': {
+          // Opens the Email section on this page instead of sending people
+          // to MailMe. The section mounts MailMe's composer itself.
+          state.emailOpen = true;
+          state.emailTab = 'campaigns';
+          ui.renderDetail();
+          const card = root.querySelector('#mkEmailCard');
+          if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          break;
+        }
+        case 'new-email': await newEmail(t); break;
+        case 'hub-tab': {
+          state.hubTab = t.dataset.tab;
+          await showEmailHub('mkEmailHubSlot', state.hubTab);
+          break;
+        }
+        case 'email-tab': {
+          state.emailTab = t.dataset.tab === 'reports' ? 'reports' : 'campaigns';
+          await showEmailTab();
           break;
         }
         case 'check-printavo': {
@@ -695,13 +845,23 @@ export default {
       if (row && row.tagName !== 'BUTTON') { ev.preventDefault(); openCampaign(row.getAttribute('data-open')); }
     };
 
-    root.addEventListener('click', onClick);
-    root.addEventListener('change', onChange);
-    root.addEventListener('keydown', onKey);
+    // The Email section holds MailMe's composer, which wires its own
+    // controls. Its rows use data-open too (for an email id), so without this
+    // fence a click on an email would try to open a campaign by that id.
+    const notEmbedded = (fn) => (ev) => {
+      if (ev.target && ev.target.closest && ev.target.closest('.app-embed')) return;
+      return fn(ev);
+    };
+    const onClickOwn = notEmbedded(onClick);
+    const onChangeOwn = notEmbedded(onChange);
+    const onKeyOwn = notEmbedded(onKey);
+    root.addEventListener('click', onClickOwn);
+    root.addEventListener('change', onChangeOwn);
+    root.addEventListener('keydown', onKeyOwn);
     this._off = () => {
-      root.removeEventListener('click', onClick);
-      root.removeEventListener('change', onChange);
-      root.removeEventListener('keydown', onKey);
+      root.removeEventListener('click', onClickOwn);
+      root.removeEventListener('change', onChangeOwn);
+      root.removeEventListener('keydown', onKeyOwn);
     };
 
     await Promise.all([loadTasks(), loadList(), loadInitiatives()]);
@@ -713,13 +873,21 @@ export default {
       tasks: async () => { await loadTasks(); ui.renderTasks(); },
       campaigns: async () => { if (state.pane === 'list') { await loadList(); ui.renderList(); } },
       calendar: async () => { await loadList(); ui.renderTimeline(); },
-      settings: async () => { await Promise.all([loadList(), loadInitiatives()]); ui.renderSettings(); },
+      settings: async () => {
+        await Promise.all([loadList(), loadInitiatives()]);
+        ui.renderSettings();
+        // Sending setup lives with the rest of the Admin settings now.
+        const wrap = root.querySelector('#mkEmailSettingsWrap');
+        if (wrap) wrap.hidden = !state.mailmeAccess;
+        await showEmailHub('mkEmailSettingsSlot', 'settings');
+      },
+      email: async () => { await showEmailHub('mkEmailHubSlot', state.hubTab || 'audience'); },
     };
   },
   showView(view, param) {
     const root = this._root;
     if (!root) return;
-    const ids = { tasks: 'mkTasksView', campaigns: 'mkCampaignsView', calendar: 'mkCalendarView', settings: 'mkSettingsView' };
+    const ids = { tasks: 'mkTasksView', campaigns: 'mkCampaignsView', email: 'mkEmailView', calendar: 'mkCalendarView', settings: 'mkSettingsView' };
     Object.entries(ids).forEach(([v, id]) => {
       const el = root.querySelector('#' + id);
       if (el) el.hidden = v !== view;
@@ -732,5 +900,7 @@ export default {
 
   unmount() {
     if (this._off) { this._off(); this._off = null; }
+    if (this._dropEmailEmbed) this._dropEmailEmbed();
+    if (this._dropHubEmbed) this._dropHubEmbed();
   }
 };
