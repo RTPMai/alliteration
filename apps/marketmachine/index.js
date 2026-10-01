@@ -61,6 +61,7 @@ import { ENDPOINTS } from '../../js/api.js';
 import { mountEmbedded } from '../../js/app-host.js';
 import { todayCentral } from '../../lib/marketmachine/dates.js';
 import { CALC_INPUTS } from '../../lib/marketmachine/calculations.js';
+import { emailPrefill } from '../../lib/marketmachine/forms.js';
 import { esc, msgBox } from './format.js';
 import styles from './styles.js';
 import template from './template.js';
@@ -73,6 +74,7 @@ import makeCalc from './calc.js';
 import makeTimeline from './timeline.js';
 import makeSettings from './settings.js';
 import makeTasks from './tasks.js';
+import makeStepForms from './stepforms.js';
 
 export default {
   id: 'marketmachine',
@@ -146,7 +148,7 @@ export default {
     const app = { state, api, root, ui: {} };
     Object.assign(app.ui,
       makeShared(app), makeList(app), makeNew(app), makeDetail(app),
-      makeConnect(app), makeCalc(app), makeTimeline(app), makeSettings(app), makeTasks(app));
+      makeConnect(app), makeCalc(app), makeTimeline(app), makeSettings(app), makeTasks(app), makeStepForms(app));
     const ui = app.ui;
 
     // Loading and saving stay here, and go on `ui` too, because a screen
@@ -186,6 +188,9 @@ export default {
             campaignName: c.name,
             // Somebody else's campaign: its emails and results, nothing to write.
             readOnly: !!(state.detail.access && state.detail.access.canEdit === false),
+            // The audience step's list and the Picks steps' answers, read
+            // when an email is started so they are always the latest.
+            prefill: () => (state.detail && state.detail.campaign ? emailPrefill(state.detail.campaign) : {}),
             // Saved, sent, scheduled or deleted: the numbers further down
             // this page are read live, so ask for them again. Debounced, as
             // one save can reload the email list more than once.
@@ -514,6 +519,9 @@ export default {
         return;
       }
 
+      // The step forms (results, approvals, audience, picks, spend).
+      if (await ui.onFormClick(t)) return;
+
       const d = t.dataset;
       if (d.taskMore) { ui.toggleTask(d.taskMore); return; }
       if (d.taskCampaign) { openFromTask(d.taskCampaign); return; }
@@ -807,6 +815,7 @@ export default {
 
     const onChange = async (ev) => {
       const t = ev.target;
+      if (await ui.onFormChange(t)) return;
       if (t.dataset && t.dataset.platform) {
         const picked = Array.from(root.querySelectorAll('input[data-platform]:checked')).map((el) => el.dataset.platform);
         const ok = await patchHeader({ platforms: picked });

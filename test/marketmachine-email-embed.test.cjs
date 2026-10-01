@@ -57,7 +57,12 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
   });
 
   await t.test('who gets it can be uploaded from the email itself, and the email then goes to that list', () => {
-    t.assert(/id="mmWhoUpload"/.test(mm), 'upload button in step 1');
+    // Oct 1 2026: step 1 is one inline form with three ways in, no popups.
+    t.assert(/\['list', 'A saved list'\], \['upload', 'Upload a file'\], \['filter', 'Pick by filters'\]/.test(mm), 'the three ways in');
+    t.assert(/whoMode === 'upload' \? importFormHtml\(\)/.test(mm) && /whoMode === 'filter' \? filterFormHtml\(\)/.test(mm), 'each shows its own fields in the step');
+    t.assert(!/function openFilterList/.test(mm), 'the filter popup is gone');
+    const sm = mm.slice(mm.indexOf('async function saveFilterList'), mm.indexOf('/* ---------------- modal machinery'));
+    t.assert(!/closeModal\(\)/.test(sm), 'and the filter save does not reach for a popup');
     const ci = mm.slice(mm.indexOf('async function commitImport'), mm.indexOf('function rejectTable'));
     t.assert(/forSend && d\.list/.test(ci) && /sendToList\(d\.list\.id/.test(ci), 'the open email is pointed at the uploaded list');
     const stl = mm.slice(mm.indexOf('async function sendToList'), mm.indexOf('const TOP_CHOICES'));

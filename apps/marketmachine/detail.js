@@ -12,7 +12,8 @@
 import { STAGES, typeMeta, connectableTypes } from '../../lib/marketmachine/catalog.js';
 import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION, amsOf, amNames, PLATFORMS, platformsOf, platformLabel, usesPlatforms, stepGate } from '../../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel } from '../../lib/marketmachine/dates.js';
-import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox } from './format.js';
+import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox, fmtMoney } from './format.js';
+import { formFor, formSummary, resultsTotals, RESULT_FIELDS, proposalsFor, approvedSpend } from '../../lib/marketmachine/forms.js';
 
 export default function makeDetail(app) {
   const { state, api, root, ui } = app;
@@ -93,9 +94,18 @@ export default function makeDetail(app) {
       const timing = timingLabel(s.timing, (typeMeta(c.type) || {}).controlLabel);
       const editable = c.status === 'open';
 
-      const control = s.approval && !s.done && !s.notApplicable
-        ? `<button class="mk-btn sm" data-approve="${esc(s.key)}"${locked || !editable ? ' disabled' : ''}>Approve</button>`
-        : '';
+      // Approvals (Oct 1 2026): Approve or Send back, for Ryan or Megan. Everyone
+      // else sees who it is waiting on. What a spend approval is deciding is
+      // shown on the row, so nobody opens the step to find the number.
+      const kind = formFor(s);
+      const pending = s.approval && !s.done && !s.notApplicable;
+      const control = pending && isAdmin()
+        ? `<button class="mk-btn sm" data-approve="${esc(s.key)}"${locked || !editable ? ' disabled' : ''}>Approve</button>
+           <button class="mk-btn ghost sm" data-sendback-open="${esc(s.key)}"${!editable ? ' disabled' : ''}>Send back</button>`
+        : pending ? '<span class="who">Waiting on Ryan or Megan</span>' : '';
+      const deciding = s.approval ? proposalsFor(c, s).map((p) => `${fmtMoney(p.form.amount)}${p.form.what ? ', ' + esc(p.form.what) : ''}`).join(' + ') : '';
+      const summary = kind && kind !== 'approval' ? formSummary(s, fmtMoney) : '';
+      const toFill = kind && kind !== 'approval' && !s.form && !clear;
 
       return `
         <div class="${cls}" data-step="${esc(s.key)}">
@@ -114,6 +124,8 @@ export default function makeDetail(app) {
               </div>
               ${unmet.length ? `<div class="wait">Waiting on: ${esc(unmet[0].label)}</div>` : gate ? `<div class="wait">${esc(gate)}</div>` : ''}
               ${s.blocked ? `<div class="blocker">Blocked: ${esc(s.blocked)}</div>` : ''}
+              ${deciding ? `<div class="facts"><span>${s.done ? 'Approved' : 'Deciding'}: <b>${deciding}</b></span></div>` : ''}
+              ${summary ? `<div class="mk-form-sum">${esc(summary)}</div>` : ''}
               ${s.notes && !open ? `<div class="noted">${esc(s.notes)}</div>` : ''}
               ${(s.links || []).length && !open ? `<div class="facts">${s.links.map((l) =>
                 `<a href="${esc(l.url)}" target="_blank" rel="noopener">${esc(l.label || l.url)}</a>`).join('')}</div>` : ''}
@@ -121,19 +133,38 @@ export default function makeDetail(app) {
             </div>
             <div class="mk-step-side">
               ${control}
-              <button class="mk-btn ghost sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : 'Details'}</button>
+              <button class="mk-btn${toFill && canEdit() ? '' : ' ghost'} sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : toFill && canEdit() ? 'Fill in' : 'Details'}</button>
             </div>
           </div>
           ${open ? stepDetails(c, s, due) : ''}
         </div>`;
     }
 
+    // RESULTS SO FAR (Oct 1 2026): what the results steps recorded, added up
+    // the right way (each number from the latest step that has it). Approved
+    // spend is shown to Admins only; Account Managers never see money.
+    function resultsCard(c) {
+      const t = resultsTotals(c);
+      const keys = Object.keys(RESULT_FIELDS).filter((k) => t[k]);
+      const spent = isAdmin() ? approvedSpend(c) : 0;
+      if (!keys.length && !spent) return '';
+      return `<div class="mk-card"><div class="mk-card-hd"><h3>Results so far</h3>
+          <span class="meta">From the results steps below</span></div>
+        <div class="mk-card-bd"><div class="mk-stat-row">
+          ${keys.map((k) => `<div class="mk-stat" title="From: ${esc(t[k].from)}"><div class="v">${RESULT_FIELDS[k].money ? fmtMoney(t[k].value) : Number(t[k].value).toLocaleString()}</div><div class="l">${esc(RESULT_FIELDS[k].label)}</div></div>`).join('')}
+          ${spent ? `<div class="mk-stat"><div class="v">${fmtMoney(spent)}</div><div class="l">Approved spend</div></div>` : ''}
+        </div></div></div>`;
+    }
+
     function stepDetails(c, s, due) {
       const editable = c.status === 'open';
       const dis = editable ? '' : ' disabled';
       const links = (s.links || []).map((l) => `${l.label ? l.label + ' ' : ''}${l.url}`).join('\n');
+      const form = ui.stepFormHtml ? ui.stepFormHtml(c, s, editable && canEdit(), isAdmin()) : '';
       return `
         <div class="mk-step-more">
+          ${form}
+          ${form ? '<div class="mk-more-label">Notes, links and dates</div>' : ''}
           <div class="mk-grid">
             <div class="mk-field">
               <label for="mkSDue-${esc(s.key)}">Due date</label>
@@ -321,7 +352,7 @@ export default function makeDetail(app) {
       // into #mkEmailSlot by index.js (mountEmbedded), so there is one
       // composer with every safety check, not a second copy that drifts.
       const em = (connections && connections.email) || {};
-      const wantsEmail = c.type === 'quick_email' || platformsOf(c).includes('email') || (em.count || 0) > 0 || state.emailOpen;
+      const wantsEmail = c.type === 'quick_email' || c.type === 'picks' || platformsOf(c).includes('email') || (em.count || 0) > 0 || state.emailOpen;
       const emailSection = !wantsEmail ? '' : `
         <div class="mk-card" id="mkEmailCard">
           <div class="mk-card-hd"><h3>Email</h3>
@@ -363,6 +394,7 @@ export default function makeDetail(app) {
           only its Account Managers or an Admin can change it.</div>`}
         ${msgBox(state.detailMsg)}
         ${now}
+        ${resultsCard(c)}
         <div class="mk-card"><div class="mk-card-bd">
           ${state.editingHeader ? headerForm(c, meta) : headerView(c, meta, dates)}
         </div></div>

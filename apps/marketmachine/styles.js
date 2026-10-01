@@ -274,4 +274,20 @@ export default `
   .mk-tl-row .d{font-variant-numeric:tabular-nums;color:var(--muted)}
   .mk-tl-row .w{font-weight:600;color:var(--accent-deep)}
   @media (max-width:640px){.mk-tl-row{grid-template-columns:1fr}}
+
+  /* Step forms (Oct 1 2026) */
+  .mk-form{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-sm);padding:12px 14px 2px;margin:4px 0 14px}
+  .mk-form-hd{font-weight:700;margin-bottom:10px}
+  .mk-form-hd .who{font-weight:400;margin-left:6px}
+  .mk-form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:0 12px}
+  .mk-form-grid .mk-field{margin-bottom:10px}
+  .mk-form-grid .mk-field.full{grid-column:1/-1}
+  .mk-form input[type=file]{font:inherit;font-size:13px;max-width:100%}
+  .mk-form .mk-seg{margin-bottom:12px}
+  .mk-form .mk-notice.good{background:var(--success-tint);border-left-color:var(--success, var(--accent))}
+  .mk-pick{border:1px dashed var(--line);border-radius:var(--radius-sm);padding:10px 12px 0;margin-bottom:10px}
+  .mk-pick.ok{border-style:solid;border-color:var(--success-line, var(--line))}
+  .mk-pick-hd{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+  .mk-form-sum{font-size:13px;color:var(--muted);margin-top:4px}
+  .mk-more-label{font-size:12px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:6px 0 8px}
 `;

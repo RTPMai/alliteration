@@ -27,7 +27,7 @@ const ROOT = path.join(__dirname, '..');
 // Listed here so a new screen that forgets the seam or hardcodes a color
 // cannot hide in it.
 const MODULE_FILES = ['index', 'styles', 'template', 'format', 'shared', 'list', 'new',
-  'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks'].map((n) => `apps/marketmachine/${n}.js`);
+  'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks', 'stepforms'].map((n) => `apps/marketmachine/${n}.js`);
 const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
 const exists = (p) => fs.existsSync(path.join(ROOT, p));
 
@@ -630,7 +630,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     // here and the names really compared.
     const app = { state: {}, api: {}, root: { querySelector: () => null }, ui: {} };
     const made = {};
-    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks']) {
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks', 'stepforms']) {
       const mod = await import(`../apps/marketmachine/${name}.js`);
       const fns = mod.default(app);
       Object.entries(fns).forEach(([fn, impl]) => {
@@ -722,7 +722,7 @@ const SNEAKY = { username: 'sneaky', name: 'Sneaky' };
     };
 
     const app = { state, api: {}, root, ui: {} };
-    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks']) {
+    for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks', 'stepforms']) {
       Object.assign(app.ui, (await import(`../apps/marketmachine/${name}.js`)).default(app));
     }
 

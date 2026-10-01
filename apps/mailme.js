@@ -636,6 +636,13 @@ export default {
   .mm-modal-x{position:absolute;top:12px;right:14px;border:0;background:transparent;
     font-size:22px;line-height:1;cursor:pointer;color:var(--muted);padding:4px 8px}
   .mm-modal-x:hover{color:var(--ink)}
+  /* Step 1's "how do you want to pick who gets it" switch (Oct 1 2026). */
+  .mm-seg{display:flex;flex-wrap:wrap;gap:0;border:1px solid var(--line);border-radius:var(--radius-sm);
+    overflow:hidden;margin-bottom:16px;width:fit-content;max-width:100%}
+  .mm-seg button{border:0;border-right:1px solid var(--line);background:transparent;padding:9px 16px;
+    font:inherit;font-size:13px;font-weight:700;color:var(--muted);cursor:pointer}
+  .mm-seg button:last-child{border-right:0}
+  .mm-seg button.on{background:var(--ink);color:var(--card)}
   /* Room for the X, so it never sits on a card header's right-hand note. */
   .mm-modal .mm-card-hd{padding-right:44px}
   `,
@@ -1098,6 +1105,7 @@ export default {
     async function openCampaign(id) {
       const c = state.campaigns.find((x) => x.id === id);
       if (!c) return;
+      state.whoMode = 'list';
       state.editingCampaign = { ...c, segmentTags: c.segmentTags || [] };
       state.composerDetail = null;
       state.composerLoading = true;
@@ -1109,6 +1117,8 @@ export default {
 
     function closeCampaign() {
       state.editingCampaign = null;
+      state.whoMode = 'list';
+      state.importForSend = false;
       state.composerDetail = null;
       renderComposer();
       renderCampaignList();
@@ -1259,7 +1269,20 @@ export default {
              dropped the moment you choose something else here.</div>`
         : '';
 
-      const whoBody = `
+      // STEP 1 AS ONE SMALL FORM (Oct 1 2026). Three ways to say who gets
+      // it, and only the one picked is on screen: no popups, nothing spread
+      // around the step. Each way ends by pointing the email at a list, then
+      // drops back to "A saved list" showing it.
+      const whoMode = (readOnly || sent) ? 'list' : (state.whoMode || 'list');
+      const whoSeg = (readOnly || sent) ? '' : `
+        <div class="mm-seg" role="tablist" aria-label="How to pick who gets it">
+          ${[['list', 'A saved list'], ['upload', 'Upload a file'], ['filter', 'Pick by filters']].map(([k, l]) => `
+            <button type="button" role="tab" data-who="${k}" aria-selected="${whoMode === k}"
+              class="${whoMode === k ? 'on' : ''}">${l}</button>`).join('')}
+        </div>`;
+      const whoForm = whoMode === 'upload' ? importFormHtml()
+        : whoMode === 'filter' ? filterFormHtml()
+        : `
         <div class="mm-field">
           <label for="mmAudience">Send to</label>
           <select id="mmAudience"${readOnly || sent ? ' disabled' : ''}>
@@ -1276,11 +1299,10 @@ export default {
           </select>
           <div class="hint" id="mmAudienceHint"></div>
         </div>
-        ${readOnly || sent ? '' : `<div class="mm-actions" style="margin:-4px 0 14px">
-          <button class="mm-btn ghost sm" id="mmWhoFilter" type="button">Build a list from filters</button>
-          <button class="mm-btn ghost sm" id="mmWhoUpload" type="button">Upload a file for this email</button>
-          <span style="font-size:12px;color:var(--muted)">Either one makes a list and points this email at it.</span>
-        </div>`}
+`;
+      const whoBody = `
+        ${whoSeg}
+        ${whoForm}
         ${legacyTags}
         ${detail && detail.heldCount ? `
           <details>
@@ -1582,25 +1604,29 @@ export default {
       const back = $('#mmBackToList');
       if (back) back.addEventListener('click', closeCampaign);
 
-      const fb = $('#mmWhoFilter');
-      if (fb) fb.addEventListener('click', () => { syncComposerFromDom(); openFilterList(); });
-
-      // Upload straight from step 1: the list is picked where the email is
-      // written, not set up first in another tab. See commitImport().
-      const up = $('#mmWhoUpload');
-      if (up) {
-        up.addEventListener('click', () => {
+      // Step 1's three ways in. Switching only changes which fields show.
+      root.querySelectorAll('#mmComposeView [data-who]').forEach((b) => {
+        b.addEventListener('click', () => {
           syncComposerFromDom();
-          state.importForSend = true;
-          openImport();
-          const name = $('#mmImportList');
-          if (name && !name.value) {
-            const cur = state.editingCampaign && state.editingCampaign.listId
-              ? state.lists.find((l) => l.id === state.editingCampaign.listId) : null;
-            name.value = cur ? cur.name : (embed && embed.campaignName ? embed.campaignName : '');
-          }
+          state.whoMode = b.dataset.who;
+          state.importPreview = null;
+          renderComposer();
         });
+      });
+
+      // Upload: the same form as Audience's, aimed at this email. See
+      // commitImport(): the email is pointed at the list it fills.
+      if ((state.whoMode || 'list') === 'upload' && root.querySelector('#mmComposeView #mmImportList')) {
+        state.importForSend = true;
+        wireImportForm();
+        const name = $('#mmImportList');
+        if (name && !name.value) {
+          const cur = state.editingCampaign && state.editingCampaign.listId
+            ? state.lists.find((l) => l.id === state.editingCampaign.listId) : null;
+          name.value = cur ? cur.name : (embed && embed.campaignName ? embed.campaignName : '');
+        }
       }
+      if ((state.whoMode || 'list') === 'filter') wireFilterForm();
 
       const aud = $('#mmAudience');
       if (aud) {
@@ -2418,6 +2444,30 @@ export default {
         (td.timelines || []).some((x) => x && x.title);
     }
 
+    function campaignPrefill() {
+      try { return (embed && typeof embed.prefill === 'function' && embed.prefill()) || {}; }
+      catch (e) { console.error(e); return {}; }
+    }
+
+    // The Picks steps' answers, laid over the design's empty starting picks.
+    // Anything the step did not have (photos, color swatches) stays blank.
+    function fillPwpFromCampaign(td) {
+      const pwp = campaignPrefill().pwp;
+      if (!pwp || !td) return;
+      ['season', 'year', 'vendor', 'teamMember'].forEach((k) => { if (pwp[k]) td[k] = pwp[k]; });
+      if (Array.isArray(pwp.picks) && pwp.picks.length) {
+        const base = Array.isArray(td.picks) ? td.picks : [];
+        td.picks = pwp.picks.map((p, i) => {
+          const out = Object.assign({}, base[i] || {});
+          Object.keys(p).forEach((k) => {
+            const v = p[k];
+            if (v !== '' && v != null && !(Array.isArray(v) && !v.length)) out[k] = v;
+          });
+          return out;
+        });
+      }
+    }
+
     async function switchTemplate(key) {
       const d = state.editingCampaign;
       if (!d) return;
@@ -2442,6 +2492,7 @@ export default {
           action: 'render', template: key, templateData: {}, subject: d.subject || '', preheader: d.preheader || ''
         });
         d.templateData = res.templateData || {};
+        if (key === 'pwp') fillPwpFromCampaign(d.templateData);
       } catch (e) {
         d.templateData = {};
         composerMsg('Could not load that design: ' + esc(e.message), 'mm-err');
@@ -4002,16 +4053,12 @@ export default {
      * a large CSV off the network until it has been parsed and looked at.
      */
 
-    function openImport() {
+    // The upload form's fields, shared by the Audience popup and step 1 of
+    // an email (Oct 1 2026), so both behave exactly the same.
+    function importFormHtml() {
       const listOptions = (state.lists || [])
         .map((l) => `<option value="${esc(l.name)}"></option>`).join('');
-      openModal(`
-        <div class="mm-card">
-          <div class="mm-card-hd">
-            <h3>Upload to a list</h3>
-            <span class="meta">Check first, then add</span>
-          </div>
-          <div class="mm-card-bd">
+      return `
             <div id="mmImportMsg"></div>
             <div class="mm-field">
               <label for="mmImportList">List</label>
@@ -4049,9 +4096,23 @@ export default {
               <button class="mm-btn ghost" id="mmClearImport">Clear</button>
             </div>
             <div id="mmImportPreview"></div>
-          </div>
-        </div>`, 'import');
+`;
+    }
 
+    function openImport() {
+      state.importForSend = false;
+      openModal(`
+        <div class="mm-card">
+          <div class="mm-card-hd">
+            <h3>Upload to a list</h3>
+            <span class="meta">Check first, then add</span>
+          </div>
+          <div class="mm-card-bd">${importFormHtml()}</div>
+        </div>`, 'import');
+      wireImportForm();
+    }
+
+    function wireImportForm() {
       // Anything changed after a check makes the check stale: the button would
       // otherwise add a different file, or to a different list, than it says.
       const stale = () => {
@@ -4290,6 +4351,8 @@ export default {
       const ed = state.editingCampaign;
       if (!ed) return;
       await loadLists();
+      // Back to "A saved list", now showing the list that was just made.
+      state.whoMode = 'list';
       ed.listId = listId;
       ed.source = source || 'client';
       ed.segmentTags = [];
@@ -4345,45 +4408,43 @@ export default {
       return bits.length ? `${bits.join(', ')} (${who.toLowerCase()})` : who;
     }
 
-    function openFilterList() {
+    // Pick by filters, inside step 1 of an email (Oct 1 2026: was a popup).
+    function filterFormHtml() {
       const f = state.facets || {};
       const inds = (f.industries || []).map((i) => i.value);
-      openModal(`
-        <div class="mm-card">
-          <div class="mm-card-hd"><h3>Build a list from filters</h3>
-            <span class="meta">Only people who can be emailed are counted</span></div>
-          <div class="mm-card-bd">
-            <div class="mm-row">
-              <div class="mm-field"><label for="mmFlSource">Who</label>
-                <select id="mmFlSource">
-                  <option value="client">Clients</option>
-                  <option value="lead">Leads</option>
-                  <option value="prospect">Prospects</option>
-                  <option value="all">Everyone</option>
-                </select></div>
-              <div class="mm-field"><label for="mmFlTop">How many</label>
-                <select id="mmFlTop">${TOP_CHOICES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select></div>
-            </div>
-            <div class="mm-row">
-              <div class="mm-field"><label for="mmFlIndustry">Industry</label>
-                <select id="mmFlIndustry"><option value="">Any industry</option>
-                  ${inds.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></div>
-              <div class="mm-field"><label for="mmFlTier">Tier</label>
-                <select id="mmFlTier"><option value="">Any tier</option>
-                  ${TIERS.map((v) => `<option value="${v}">${v}</option>`).join('')}</select></div>
-            </div>
-            <div class="mm-field"><label for="mmFlName">List name</label>
-              <input id="mmFlName" type="text"></div>
-            <div id="mmFlCount" class="mm-notice good" style="margin-bottom:12px">Counting...</div>
-            <div class="mm-actions">
-              <button class="mm-btn" id="mmFlSave" disabled>Make the list</button>
-              <button class="mm-btn ghost" id="mmFlCancel">Cancel</button>
-            </div>
-          </div>
-        </div>`, 'filterlist');
+      return `
+        <div class="mm-row">
+          <div class="mm-field"><label for="mmFlSource">Who</label>
+            <select id="mmFlSource">
+              <option value="client">Clients</option>
+              <option value="lead">Leads</option>
+              <option value="prospect">Prospects</option>
+              <option value="all">Everyone</option>
+            </select></div>
+          <div class="mm-field"><label for="mmFlTop">How many</label>
+            <select id="mmFlTop">${TOP_CHOICES.map(([v, l]) => `<option value="${v}">${esc(l)}</option>`).join('')}</select></div>
+        </div>
+        <div class="mm-row">
+          <div class="mm-field"><label for="mmFlIndustry">Industry</label>
+            <select id="mmFlIndustry"><option value="">Any industry</option>
+              ${inds.map((v) => `<option value="${esc(v)}">${esc(v)}</option>`).join('')}</select></div>
+          <div class="mm-field"><label for="mmFlTier">Tier</label>
+            <select id="mmFlTier"><option value="">Any tier</option>
+              ${TIERS.map((v) => `<option value="${v}">${v}</option>`).join('')}</select></div>
+        </div>
+        <div class="mm-field"><label for="mmFlName">Save the list as</label>
+          <input id="mmFlName" type="text"></div>
+        <div id="mmFlMsg"></div>
+        <div id="mmFlCount" class="mm-notice good" style="margin-bottom:12px">Counting...</div>
+        <div class="mm-actions">
+          <button class="mm-btn" id="mmFlSave" type="button" disabled>Use these people</button>
+        </div>`;
+    }
 
+    function wireFilterForm() {
       let named = false;
       const name = $('#mmFlName');
+      if (!name) return;
       name.addEventListener('input', () => { named = true; });
       const refresh = () => {
         if (!named) name.value = filterListName(filterChoice());
@@ -4391,7 +4452,6 @@ export default {
         filterTimer = setTimeout(countFilter, 200);
       };
       ['#mmFlSource', '#mmFlTop', '#mmFlIndustry', '#mmFlTier'].forEach((sel) => $(sel).addEventListener('change', refresh));
-      $('#mmFlCancel').addEventListener('click', () => closeModal());
       $('#mmFlSave').addEventListener('click', saveFilterList);
       refresh();
     }
@@ -4441,10 +4501,9 @@ export default {
             } };
         const res = await api.post(ENDPOINTS.mmLists, payload);
         const id = res && res.list && res.list.id;
-        closeModal();
         if (id) await sendToList(id, `Made "${nm}" (${filterHits.length}) and pointed this email at it.`, f.source);
       } catch (e) {
-        msg('#mmModalMsg', 'Could not make the list: ' + esc(e.message), 'mm-err');
+        msg('#mmFlMsg', 'Could not make the list: ' + esc(e.message), 'mm-err');
         btn.disabled = false;
       }
     }
@@ -5255,11 +5314,18 @@ export default {
         marketingCampaignId: embed ? embed.campaignId : null,
         marketingChannelId: embed ? 'email' : null
       };
+      // What the campaign's own steps already know (Oct 1 2026): the list
+      // picked in its audience step, and for Picks, the season, vendor and
+      // products. Typed once in the step, never again here.
+      const pre = campaignPrefill();
+      if (pre.listId) d.listId = pre.listId;
       d.identityKey = defaultIdentityFor(d);
+      state.whoMode = 'list';
       state.editingCampaign = d;
       state.composerDetail = null;
       renderComposer();
       msg('#mmCampaignMsg', '', '');
+      if (pre.pwp) await switchTemplate('pwp');
     });
 
     $('#mmNewList').addEventListener('click', () => {
