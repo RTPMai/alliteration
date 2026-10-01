@@ -61,7 +61,7 @@ import { ENDPOINTS } from '../../js/api.js';
 import { mountEmbedded } from '../../js/app-host.js';
 import { todayCentral } from '../../lib/marketmachine/dates.js';
 import { CALC_INPUTS } from '../../lib/marketmachine/calculations.js';
-import { emailPrefill } from '../../lib/marketmachine/forms.js';
+import { emailPrefill, formFor, emailInSteps, nextEmailStep } from '../../lib/marketmachine/forms.js';
 import { esc, msgBox } from './format.js';
 import styles from './styles.js';
 import template from './template.js';
@@ -211,18 +211,35 @@ export default {
         emailEmbed = { campaignId: c.id, ...e };
         e.ready.then(async () => {
           await showEmailTab();
-          // New email from anywhere lands here with the first email already
-          // started: one click from "I need to send something" to step 1.
-          if (state.autoNewEmail) {
-            state.autoNewEmail = false;
-            const nb = e.root.querySelector('#mmNewCampaign');
-            if (nb) nb.click();
-          }
         }).catch((err) => {
           e.root.innerHTML = `<div class="mk-err">Email did not load: ${esc(err.message || 'try Refresh')}</div>`;
         });
       }
       slot.appendChild(emailEmbed.root);
+      maybeStartEmail();
+    }
+
+    // Opening an email step on a campaign with no email yet starts one, so
+    // the first thing on screen is the email, not a button to make one.
+    // 'ifNone' leaves a campaign that already has emails on its list.
+    async function maybeStartEmail() {
+      const want = state.autoNewEmail;
+      if (!want || !emailEmbed) return;
+      state.autoNewEmail = false;
+      const det = state.detail || {};
+      if (det.access && det.access.canEdit === false) return;
+      const had = (det.connections && det.connections.email && det.connections.email.count) || 0;
+      if (want === 'ifNone' && had > 0) return;
+      try {
+        const inst = await emailEmbed.ready;
+        inst.showView('campaigns');
+        state.emailTab = 'campaigns';
+        const r = emailEmbed.root;
+        // Already writing one (the step was closed and reopened): leave it.
+        if (r.querySelector('#mmComposeView:not([hidden]) #mmSubject')) return;
+        const nb = r.querySelector('#mmNewCampaign');
+        if (nb) nb.click();
+      } catch (e) { /* the load error is already on screen */ }
     }
 
     async function showEmailTab() {
@@ -252,7 +269,9 @@ export default {
         const r = await api.post(ENDPOINTS.mkCampaigns, body);
         const id = r && r.campaign && r.campaign.id;
         if (!id) throw new Error('no campaign came back');
-        state.autoNewEmail = true;
+        // Lands on the campaign with "Pick who gets it" open. Its Save and
+        // mark done opens "Write the email", which starts the email.
+        state.pendingOpenStep = 'qe_audience';
         if (typeof ctx.goApp === 'function') ctx.goApp('marketmachine', 'campaigns', id);
         else { await openCampaign(id); }
       } catch (e) {
@@ -390,6 +409,11 @@ export default {
       if (det) det.innerHTML = '<div class="mk-empty">Loading the campaign.</div>';
       try {
         await loadDetail(id);
+        if (state.pendingOpenStep) {
+          const k = state.pendingOpenStep;
+          state.pendingOpenStep = null;
+          if ((state.detail.campaign.steps || []).some((x) => x.key === k && !x.done)) state.openStep = k;
+        }
         ui.renderDetail();
         window.scrollTo(0, 0);
       } catch (e) {
@@ -534,7 +558,14 @@ export default {
         if (el) el.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
         return;
       }
-      if (d.more) { state.openStep = state.openStep === d.more ? null : d.more; state.stepMsg = {}; ui.renderDetail(); return; }
+      if (d.more) {
+        state.openStep = state.openStep === d.more ? null : d.more;
+        state.stepMsg = {};
+        const st = state.openStep && state.detail && (state.detail.campaign.steps || []).find((x) => x.key === state.openStep);
+        if (st && formFor(st) === 'email' && !st.done) state.autoNewEmail = 'ifNone';
+        ui.renderDetail();
+        return;
+      }
       if (d.approve) { await patchStep(d.approve, { done: true }, 'Approved.'); return; }
       if (d.undo) { await patchStep(d.undo, { done: false }, 'Marked not done.'); return; }
       if (d.na) { await patchStep(d.na, { notApplicable: d.naTo === '1' }, d.naTo === '1' ? 'Marked not applicable.' : 'This step applies again.'); return; }
@@ -680,8 +711,19 @@ export default {
         case 'open-email': {
           // Opens the Email section on this page instead of sending people
           // to MailMe. The section mounts MailMe's composer itself.
-          state.emailOpen = true;
           state.emailTab = 'campaigns';
+          const cc = state.detail && state.detail.campaign;
+          if (cc && emailInSteps(cc)) {
+            // The email lives in the campaign's email step: open that one.
+            const st = nextEmailStep(cc);
+            state.openStep = st.key;
+            if (!st.done) state.autoNewEmail = 'ifNone';
+            ui.renderDetail();
+            const el = root.querySelector(`[data-step="${CSS.escape(st.key)}"]`);
+            if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            break;
+          }
+          state.emailOpen = true;
           ui.renderDetail();
           const card = root.querySelector('#mkEmailCard');
           if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });

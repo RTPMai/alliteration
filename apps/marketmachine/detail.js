@@ -13,7 +13,7 @@ import { STAGES, typeMeta, connectableTypes } from '../../lib/marketmachine/cata
 import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION, amsOf, amNames, PLATFORMS, platformsOf, platformLabel, usesPlatforms, stepGate } from '../../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel } from '../../lib/marketmachine/dates.js';
 import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox, fmtMoney } from './format.js';
-import { formFor, formSummary, resultsTotals, RESULT_FIELDS, proposalsFor, approvedSpend } from '../../lib/marketmachine/forms.js';
+import { formFor, formSummary, resultsTotals, RESULT_FIELDS, proposalsFor, approvedSpend, emailInSteps } from '../../lib/marketmachine/forms.js';
 
 export default function makeDetail(app) {
   const { state, api, root, ui } = app;
@@ -105,7 +105,9 @@ export default function makeDetail(app) {
         : pending ? '<span class="who">Waiting on Ryan or Megan</span>' : '';
       const deciding = s.approval ? proposalsFor(c, s).map((p) => `${fmtMoney(p.form.amount)}${p.form.what ? ', ' + esc(p.form.what) : ''}`).join(' + ') : '';
       const summary = kind && kind !== 'approval' ? formSummary(s, fmtMoney) : '';
-      const toFill = kind && kind !== 'approval' && !s.form && !clear;
+      const toFill = kind && kind !== 'approval' && kind !== 'email' && !s.form && !clear;
+      // The email steps open the email itself, so their button says so.
+      const emailBtn = kind === 'email' && !clear && state.mailmeAccess;
 
       return `
         <div class="${cls}" data-step="${esc(s.key)}">
@@ -133,7 +135,7 @@ export default function makeDetail(app) {
             </div>
             <div class="mk-step-side">
               ${control}
-              <button class="mk-btn${toFill && canEdit() ? '' : ' ghost'} sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : toFill && canEdit() ? 'Fill in' : 'Details'}</button>
+              <button class="mk-btn${(toFill || emailBtn) && canEdit() ? '' : ' ghost'} sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : emailBtn ? (canEdit() ? 'Open the email' : 'See the email') : toFill && canEdit() ? 'Fill in' : 'Details'}</button>
             </div>
           </div>
           ${open ? stepDetails(c, s, due) : ''}
@@ -352,7 +354,9 @@ export default function makeDetail(app) {
       // into #mkEmailSlot by index.js (mountEmbedded), so there is one
       // composer with every safety check, not a second copy that drifts.
       const em = (connections && connections.email) || {};
-      const wantsEmail = c.type === 'quick_email' || c.type === 'picks' || platformsOf(c).includes('email') || (em.count || 0) > 0 || state.emailOpen;
+      // When the campaign has email steps (Write the email, Send it), the
+      // email lives in those steps and this section is not drawn at all.
+      const wantsEmail = !emailInSteps(c) && (platformsOf(c).includes('email') || (em.count || 0) > 0 || state.emailOpen);
       const emailSection = !wantsEmail ? '' : `
         <div class="mk-card" id="mkEmailCard">
           <div class="mk-card-hd"><h3>Email</h3>

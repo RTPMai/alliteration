@@ -123,6 +123,27 @@ export default function makeStepForms(app) {
 
     if (kind === 'audience') return audienceHtml(c, s, canEdit);
 
+    // The email itself, right in the step (Oct 1 2026). MailMe's composer is
+    // moved into #mkEmailSlot by index.js; only one step is open at a time,
+    // so there is only ever one slot.
+    if (kind === 'email') {
+      if (!state.mailmeAccess) {
+        return '<div class="mk-notice" style="margin:0 0 12px">Writing and sending email needs Email access on your account. An Admin can turn it on in Settings, Accounts.</div>';
+      }
+      return `<div class="mk-form mk-email-step">
+        <div class="mk-form-hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <span>The email</span>
+          <span class="mk-actions" style="margin:0">
+            <button class="mk-btn ghost sm${state.emailTab !== 'reports' ? ' on' : ''}" data-act="email-tab" data-tab="campaigns">Emails</button>
+            <button class="mk-btn ghost sm${state.emailTab === 'reports' ? ' on' : ''}" data-act="email-tab" data-tab="reports">Results</button>
+          </span></div>
+        ${!canEdit ? '<div class="who" style="margin-bottom:10px">Written by this campaign\'s Account Managers. You can read it and its results.</div>' : ''}
+        <div id="mkEmailSlot"></div>
+        ${canEdit && !s.done ? `<div class="mk-actions" style="margin:12px 0">
+          <button class="mk-btn sm" data-email-step-done="${esc(s.key)}">This step is done</button></div>` : ''}
+      </div>`;
+    }
+
     if (kind === 'approval') {
       const props = proposalsFor(c, s);
       const last = f.decision === 'sent_back' ? `<div class="mk-notice" style="margin:0 0 10px"><b>Sent back${f.by ? ' by ' + esc(f.by) : ''}:</b> ${esc(f.comment)}</div>` : '';
@@ -242,6 +263,24 @@ export default function makeStepForms(app) {
     ui.renderDetail();
   }
 
+  // After a step is done, the next one is opened for you, so the page always
+  // shows what to do now. Only when this one really is done (the save went
+  // through), and only steps that are not done or skipped.
+  function openNext(key) {
+    const c = state.detail && state.detail.campaign;
+    const steps = (c && c.steps) || [];
+    const at = steps.findIndex((x) => x.key === key);
+    if (at < 0 || !steps[at].done) { ui.renderDetail(); return; }
+    const next = steps.slice(at + 1).find((x) => !x.done && !x.notApplicable);
+    if (next) {
+      state.openStep = next.key;
+      if (formFor(next) === 'email') state.autoNewEmail = 'ifNone';
+    }
+    ui.renderDetail();
+    const el = next && root.querySelector(`[data-step="${CSS.escape(next.key)}"]`);
+    if (el && el.scrollIntoView) el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+  }
+
   /* ---------------- reading and saving ---------------- */
 
   function readPicks(key) {
@@ -295,7 +334,15 @@ export default function makeStepForms(app) {
       delete state.pickDraft[key];
       await ui.patchStep(key, body, d.formDone ? 'Saved and marked done.' : 'Saved.');
       const m = state.stepMsg && state.stepMsg[key];
-      if (!(m && m.cls === 'err')) { delete state.formDraft[key]; ui.renderDetail(); }
+      if (!(m && m.cls === 'err')) {
+        delete state.formDraft[key];
+        if (d.formDone) openNext(key); else ui.renderDetail();
+      }
+      return true;
+    }
+    if (d.emailStepDone) {
+      await ui.patchStep(d.emailStepDone, { done: true }, 'Done.');
+      openNext(d.emailStepDone);
       return true;
     }
     if (d.pickAdd) { state.pickDraft[d.pickAdd] = readPicks(d.pickAdd).concat([{}]); ui.renderDetail(); return true; }
@@ -380,5 +427,5 @@ export default function makeStepForms(app) {
     return false;
   }
 
-  return { stepFormHtml, onFormClick, onFormChange };
+  return { stepFormHtml, onFormClick, onFormChange, openNext };
 }

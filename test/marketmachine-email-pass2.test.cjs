@@ -95,8 +95,10 @@ const read = (f) => fs.readFileSync(path.join(ROOT, f), 'utf8');
     t.assert(/state\.marketingFull = !\(d && d\.limited\)/.test(app), 'access read from MarketMachine\'s own answer');
   });
 
-  await t.test('a Quick Email campaign always shows the Email section', () => {
-    t.assert(/c\.type === 'quick_email' \|\|/.test(read('apps/marketmachine/detail.js')));
+  await t.test('a campaign with email steps has its email in those steps, not a separate section', () => {
+    const det = read('apps/marketmachine/detail.js');
+    t.assert(/const wantsEmail = !emailInSteps\(c\)/.test(det), 'no Email section when the steps hold it');
+    t.assert(/id="mkEmailSlot"/.test(read('apps/marketmachine/stepforms.js')), 'the email step holds the composer');
   });
 
   process.exit(t.report());

@@ -91,6 +91,19 @@ const PICK = (n) => ({ name: 'Tee ' + n, style: 'PC5' + n, msrp: '$9.98', url: '
     t.equal(F.formFor(all.get('dp_launch')), '', 'an ordinary step stays a checkbox');
   });
 
+  await t.test('writing, testing and sending are email steps, and Quick Email keeps its email there', async () => {
+    const cat = await import('../lib/marketmachine/catalog.js');
+    const qe = cat.typeMeta('quick_email');
+    t.equal(qe.steps.map((s) => F.formFor(s)).join(','), 'audience,email,email,email,results');
+    const c = model.buildCampaign({ type: 'quick_email', name: 'Nudge' }, S, null);
+    t.assert(F.emailInSteps(c), 'Quick Email has no separate Email section');
+    t.equal(F.nextEmailStep(c).key, 'qe_write', 'Open the email goes to Write the email first');
+    const dp = model.buildCampaign({ type: 'digital_platform', name: 'Ads', controlDate: '2027-03-04' }, S, null);
+    dp.steps.find((s) => s.key === 'dp_email_copy').notApplicable = true;
+    t.assert(!F.emailInSteps(dp), 'an email step marked not applicable does not count');
+    t.equal(F.cleanForm({ key: 'qe_write' }, { anything: 1 }).ok, false, 'nothing is posted as an email step form');
+  });
+
   /* ================= cleaning ================= */
 
   await t.test('results keep only their own numbers; blank is unknown, not zero', () => {
