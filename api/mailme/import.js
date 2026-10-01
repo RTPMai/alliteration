@@ -1,6 +1,11 @@
 // api/mailme/import.js — cold-outreach contact import.
 //
-// POST { csv, commit?, tags?, batchLabel? }
+// POST { csv, commit?, tags?, batchLabel?, listName? }
+//
+// listName (Oct 1 2026): the list this upload is for. The preview reports the
+// list before and after; the commit imports the new people AND puts everyone
+// on the list in this one request. It used to be a second step run in the
+// browser, which could act on stale list data and left the list at 7.
 //
 // TWO-PHASE ON PURPOSE. The default is a DRY RUN: it parses, classifies and
 // returns exactly what would happen, importing nothing. Only commit:true
@@ -16,8 +21,15 @@
 
 import { requireAuth } from "../../lib/session.js";
 import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
-import { parseProspectCsv, classifyRows, domainBreakdown, listAdditions } from "../../lib/mailme/import.js";
-import { knownEmails, addProspects, deleteProspectBatch, resolveContacts } from "../../lib/mailme/store.js";
+import {
+  parseProspectCsv, classifyRows, domainBreakdown, listAdditions,
+  findListByName, planListAdd, peopleCount,
+} from "../../lib/mailme/import.js";
+import {
+  knownEmails, addProspects, deleteProspectBatch, resolveContacts,
+  listLists, createList, updateList,
+} from "../../lib/mailme/store.js";
+import { resolveList } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -98,12 +110,35 @@ export default async function handler(req, res) {
       tags,
     };
 
+    const listName = body.listName ? String(body.listName).trim() : "";
+    const lists = listName ? await listLists() : [];
+    const target = listName ? findListByName(lists, listName) : null;
+    const memberIdsOf = (l) => (l ? resolveList(l, contacts).map((c) => String(c.id)) : []);
+
     // ---- dry run (default) ----
     if (!body.commit) {
+      let listPlan = null;
+      if (listName) {
+        const current = memberIdsOf(target);
+        const plan = planListAdd(target, additions.ids, current, listName);
+        const before = peopleCount(current, contacts);
+        const adding = peopleCount(plan.addingIds, contacts);
+        listPlan = {
+          name: target ? target.name : listName,
+          exists: !!target,
+          kind: target ? target.kind : "static",
+          before,
+          addingExisting: adding,
+          alreadyOn: peopleCount(plan.alreadyIds, contacts),
+          addingNew: classified.new.length,
+          after: before + adding + classified.new.length,
+        };
+      }
       return res.status(200).json({
         ok: true,
         dryRun: true,
         summary,
+        listPlan,
         // Capped: the preview needs to be reviewable, not exhaustive.
         preview: classified.new.slice(0, 25),
         rejected: {
@@ -116,11 +151,20 @@ export default async function handler(req, res) {
     }
 
     // ---- commit ----
-    // `addExisting` means a list was named, so rows MailMe already knows are
-    // going onto it. Without a list there is nothing to do with them.
-    const addExisting = !!body.addExisting;
-    if (!classified.new.length && !(addExisting && additions.ids.length)) {
-      return res.status(400).json({ error: "Nothing importable in that file", summary });
+    // `addExisting` without a listName is the older client: it puts the
+    // returned ids on the list itself. Kept so a cached page still works
+    // for the one deploy where both exist.
+    const addExisting = !!body.addExisting || !!listName;
+    const current = memberIdsOf(target);
+    const knownToAdd = listName
+      ? planListAdd(target, additions.ids, current, listName).addingIds
+      : additions.ids;
+
+    if (!classified.new.length && !(addExisting && knownToAdd.length)) {
+      const error = listName && additions.ids.length
+        ? `Everyone in that file is already on "${target ? target.name : listName}". Nothing to add.`
+        : "Nothing importable in that file";
+      return res.status(400).json({ error, summary });
     }
 
     let batchId = null;
@@ -131,13 +175,42 @@ export default async function handler(req, res) {
       ({ added } = await addProspects(rowsWithTags, sess, batchId));
     }
 
+    // The list, in the same request. A failure here is reported on its own,
+    // because the people above ARE imported and must not be imported twice.
+    let list = null;
+    let listError = null;
+    if (listName) {
+      try {
+        const newIds = added.map((r) => `prospect:${r.prospect_id}`);
+        const plan = planListAdd(target, additions.ids.concat(newIds), current, listName);
+        const saved = plan.action === "create"
+          ? await createList(plan.patch, sess)
+          : await updateList(target.id, plan.patch);
+        const after = await resolveContacts();
+        const members = resolveList(saved, after.contacts);
+        list = {
+          id: saved.id,
+          name: saved.name,
+          created: plan.action === "create",
+          added: peopleCount(plan.addingIds, after.contacts),
+          alreadyOn: peopleCount(plan.alreadyIds, after.contacts),
+          memberCount: peopleCount(members.map((m) => String(m.id)), after.contacts),
+        };
+      } catch (e) {
+        console.error("mailme import list step failed:", e);
+        listError = e.message || "the list could not be updated";
+      }
+    }
+
     return res.status(201).json({
       ok: true,
       dryRun: false,
       imported: added.length,
-      // Existing contacts for the caller to put on the list, by id.
-      listMemberIds: addExisting ? additions.ids : [],
-      addedToList: addExisting ? additions.emails.length : 0,
+      list,
+      listError,
+      // Older client only: existing contacts for it to put on the list.
+      listMemberIds: (!listName && addExisting) ? additions.ids : [],
+      addedToList: (!listName && addExisting) ? additions.emails.length : 0,
       batchId,
       batchLabel: body.batchLabel ? String(body.batchLabel).trim() : null,
       summary,

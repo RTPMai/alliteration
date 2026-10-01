@@ -65,11 +65,69 @@ await t.test('the Holiday Store shape: 7 new, 67 clients, 1 invalid all accounte
   t.equal(cls.new.length + add.ids.length + cls.invalid.length, 75, 'a row went missing');
 });
 
-await t.test('the route passes known contacts back only when a list was named', () => {
+/* ---- Oct 1 2026: the list is written by the server, in the same request ---- */
+
+await t.test('a list name finds the existing list whatever the case or spacing', async () => {
+  const { findListByName } = await load();
+  const lists = [{ id: 'LS-1', name: 'Holiday Store Prospects' }, { id: 'LS-2', name: 'Other' }];
+  t.equal(findListByName(lists, '  holiday store prospects ').id, 'LS-1');
+  t.equal(findListByName(lists, 'nope'), null);
+  t.equal(findListByName(lists, ''), null);
+});
+
+await t.test('the Holiday Store case: 7 on a static list, 67 clients added, list ends at 74', async () => {
+  const { planListAdd } = await load();
+  const seven = Array.from({ length: 7 }, (_, i) => 'prospect:' + i);
+  const clients = Array.from({ length: 67 }, (_, i) => 'client:' + i);
+  const list = { id: 'LS-1', name: 'Holiday Store Prospects', kind: 'static', members: seven };
+  const plan = planListAdd(list, clients.concat(seven), seven);
+  t.equal(plan.action, 'static');
+  t.equal(plan.addingIds.length, 67);
+  t.equal(plan.alreadyIds.length, 7, 'the 7 already there are reported, not re-added');
+  t.equal(plan.patch.members.length, 74);
+});
+
+await t.test('no list yet: one is created holding everyone', async () => {
+  const { planListAdd } = await load();
+  const plan = planListAdd(null, ['client:1', 'prospect:2', 'client:1'], [], ' Spring schools ');
+  t.equal(plan.action, 'create');
+  t.equal(plan.patch.kind, 'static');
+  t.equal(plan.patch.name, 'Spring schools');
+  t.equal(plan.patch.members.join(','), 'client:1,prospect:2');
+});
+
+await t.test('a rule-based list gets exceptions, and anyone removed by hand is let back in', async () => {
+  const { planListAdd } = await load();
+  const list = { kind: 'dynamic', rule: {}, extraMembers: ['client:9'], excludedMembers: ['client:2', 'client:5'] };
+  const plan = planListAdd(list, ['client:1', 'client:2', 'client:3'], ['client:3', 'client:9']);
+  t.equal(plan.action, 'dynamic');
+  t.equal(plan.patch.extraMembers.sort().join(','), 'client:1,client:2,client:9');
+  t.equal(plan.patch.excludedMembers.join(','), 'client:5', 'an excluded person named in the upload comes back');
+  t.equal(plan.alreadyIds.join(','), 'client:3');
+});
+
+await t.test('a static list keeps the members it already had', async () => {
+  const { planListAdd } = await load();
+  const plan = planListAdd({ kind: 'static', members: ['a', 'b'] }, ['c'], ['a', 'b']);
+  t.equal(plan.patch.members.join(','), 'a,b,c');
+});
+
+await t.test('counts are people, not records', async () => {
+  const { peopleCount } = await load();
+  const contacts = [{ id: 'client:1', email: 'sam@x.com' }, { id: 'client:2', email: 'SAM@x.com' }, { id: 'client:3', email: 'jo@x.com' }];
+  t.equal(peopleCount(['client:1', 'client:2', 'client:3'], contacts), 2);
+  t.equal(peopleCount(['prospect:new'], contacts), 1, 'an id not yet resolvable still counts');
+});
+
+await t.test('the route writes the list itself, in the commit, and reports a list failure separately', () => {
   const src = require('fs').readFileSync(path.join(ROOT, 'api/mailme/import.js'), 'utf8');
-  t.assert(/listMemberIds: addExisting \? additions\.ids : \[\]/.test(src), 'route does not gate on a named list');
-  t.assert(/!classified\.new\.length && !\(addExisting && additions\.ids\.length\)/.test(src),
-    'a file of only existing clients is still refused even with a list named');
+  const commit = src.slice(src.indexOf('// ---- commit ----'));
+  t.assert(/planListAdd\(target, additions\.ids\.concat\(newIds\)/.test(commit),
+    'the newly imported people must go on the list with everyone else');
+  t.assert(/createList\(/.test(commit) && /updateList\(/.test(commit), 'the server must write the list');
+  t.assert(/listError/.test(commit), 'a list failure must not be reported as an import failure');
+  t.assert(commit.indexOf('addProspects(') < commit.indexOf('planListAdd(target, additions.ids.concat'),
+    'import first, then list, so a list failure never loses the import');
 });
 
 process.exit(t.report());

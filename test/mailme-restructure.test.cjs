@@ -358,28 +358,24 @@ t.test('the create route accepts the fields the add form collects', () => {
 
 t.test('an import can land straight in a list, and warns when it will not', () => {
   // Without this an imported batch dissolves into the roster and there is no
-  // way to find those people again as a group.
+  // way to find those people again as a group. Since Oct 1 the list is
+  // written by the server in the import request itself; the behavior is
+  // tested with real calls in test/mailme-import-list.test.cjs.
   t.assert(/id="mmImportList"/.test(src), 'the import list field is missing');
-  t.assert(/function listForBatch/.test(src), 'listForBatch() is missing');
   const fn = src.slice(src.indexOf('async function commitImport'));
-  const body = fn.slice(0, fn.indexOf('async function listForBatch'));
+  const body = fn.slice(0, fn.indexOf('function rejectTable'));
   t.assert(/without putting them in a list/.test(body),
     'importing with no list must ask first, since it is the harder thing to undo');
-
-  const lf = src.slice(src.indexOf('async function listForBatch'));
-  const lbody = lf.slice(0, lf.indexOf('function rejectTable'));
-  t.assert(/importBatch === batchId/.test(lbody),
-    'the list must be built from the batch the server stamped, not a client guess');
-  t.assert(/extraMembers/.test(lbody),
-    'importing into a rule-based list must record exceptions rather than doing nothing');
+  t.assert(/listName/.test(body), 'the commit must send the list name to the server');
+  t.assert(!/function listForBatch/.test(src), 'the browser-side list step should be gone');
 });
 
-t.test('a failed list creation does not hide a successful import', () => {
+t.test('a failed list step does not hide a successful import', () => {
   // The contacts are in either way. Reporting the whole thing as failed would
   // send someone off to re-import people who are already there.
   const fn = src.slice(src.indexOf('async function commitImport'));
-  const body = fn.slice(0, fn.indexOf('async function listForBatch'));
-  t.assert(/could not be created/.test(body),
+  const body = fn.slice(0, fn.indexOf('function rejectTable'));
+  t.assert(/listError/.test(body) && /could not be updated/.test(body),
     'a list failure must be reported separately from the import result');
 });
 

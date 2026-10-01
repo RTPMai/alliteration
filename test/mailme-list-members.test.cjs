@@ -43,7 +43,7 @@ t.test('selecting a list fetches its resolved members from the server, not a cli
   t.assert(/async function selectList/.test(src), 'selectList() is missing');
   const fn = src.slice(src.indexOf('async function selectList'));
   const body = fn.slice(0, fn.indexOf('\n    /* ----------------'));
-  t.assert(/api\.get\(ENDPOINTS\.mmLists,\s*\{\s*id:\s*listId\s*\}\)/.test(body),
+  t.assert(/api\.get\(ENDPOINTS\.mmLists,[\s\S]{0,80}id:\s*listId/.test(body),
     'selectList must call GET ENDPOINTS.mmLists with ?id= to get resolved membership');
   t.assert(!/matchesRule/.test(body), 'the front end must not re-implement list-rule matching itself');
 });
@@ -77,16 +77,18 @@ t.test('the table shows email, source and status per row, list or not', () => {
     'the table should reuse the shared STATUS_META/SOURCE_META labels, not invent new ones');
 });
 
-t.test('leaving a list is always possible and filtering by source does it explicitly', () => {
-  // Two filters at once (a list AND a source) is a state nothing else in the
-  // app can express, so picking a source drops the list rather than showing
-  // a silent intersection.
+t.test('filters narrow a list without leaving it, and say when they hide anyone', () => {
+  // Until Oct 1 picking a source dropped the list, because nothing could
+  // express "this list, but only Gold clients". Ryan asked for exactly that.
+  // The list stays selected, the list route applies the same filters, and the
+  // table says when a filter is hiding people, since a send still goes to all.
   const fn = src.slice(src.indexOf('async function choosePicker'));
   const body = fn.slice(0, fn.indexOf('async function selectList'));
-  t.assert(/state\.activeListId = null/.test(body),
-    'choosing a source filter must leave the selected list rather than intersecting');
+  t.assert(!/state\.activeListId = null/.test(body), 'a filter must not drop the selected list any more');
+  t.assert(/if \(state\.activeListId\) await selectList/.test(body), 'a filter must reload the list it narrows');
   t.assert(/clearSelection\(\)/.test(body),
     'changing the filter must drop the selection, or a bulk action hits rows nobody can see');
+  t.assert(/still goes to all/.test(src), 'a filtered list must say a send goes to the whole list');
 });
 
 /* ---- editing membership: add/remove ---- */

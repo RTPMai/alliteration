@@ -770,6 +770,9 @@ export default {
       contacts: [], counts: {}, tags: [],
       lists: [], campaigns: [],
       source: 'all', status: 'all', search: '',
+      // Industry and tier filters (Oct 1 2026). Same filters work on everyone
+      // and inside a list; see filterContacts() in lib/mailme/schema.js.
+      industry: 'all', tier: 'all', facets: { industries: [], tiers: [] },
       sort: 'company_name', dir: 'asc',
       // Which list the Audience table is showing, or null for everyone. This
       // is a FILTER over the same table, not a separate screen.
@@ -821,15 +824,27 @@ export default {
       // agree on the same rule. The client re-sorting locally would be a
       // second implementation to keep in step.
       const q = { sort: state.sort, dir: state.dir };
-      if (state.source !== 'all') q.source = state.source;
-      if (state.status !== 'all') q.status = state.status;
-      if (state.search.trim()) q.q = state.search.trim();
+      Object.assign(q, filterQuery());
 
       const d = await api.get(ENDPOINTS.mmContacts, q);
+      state.facets = (d && d.facets) || state.facets;
       state.contacts = Array.isArray(d && d.contacts) ? d.contacts : [];
       state.counts = (d && d.counts) || {};
       state.tags = Array.isArray(d && d.tags) ? d.tags : [];
     }
+
+    // The filters as query params, shared by the roster and a list's members.
+    function filterQuery() {
+      const q = {};
+      if (state.source !== 'all') q.source = state.source;
+      if (state.status !== 'all') q.status = state.status;
+      if (state.industry !== 'all') q.industry = state.industry;
+      if (state.tier !== 'all') q.tier = state.tier;
+      if (state.search.trim()) q.q = state.search.trim();
+      return q;
+    }
+    const filtersOn = () => state.source !== 'all' || state.status !== 'all' ||
+      state.industry !== 'all' || state.tier !== 'all' || !!state.search.trim();
 
     async function loadLists() {
       const d = await api.get(ENDPOINTS.mmLists);
@@ -2681,8 +2696,19 @@ export default {
     // dropdowns overlapping each other is nobody's idea of a filter bar.
     let openPicker = null;
 
+    // "Top clients" is lifetime revenue, high to low. Tier sorts best first.
+    const SORT_CHOICES = [
+      { value: 'company_name:asc', label: 'Company A to Z', n: null },
+      { value: 'lifetimeRevenue:desc', label: 'Top clients, all time', n: null },
+      { value: 'ytdRevenue:desc', label: 'Top clients, this year', n: null },
+      { value: 'tier:asc', label: 'Tier, best first', n: null },
+      { value: 'industry:asc', label: 'Industry', n: null },
+      { value: 'updatedAt:desc', label: 'Recently changed', n: null }
+    ];
+
     function pickerOptions() {
       const c = state.counts;
+      const f = state.facets || {};
       return {
         list: {
           label: 'List',
@@ -2715,6 +2741,26 @@ export default {
             { value: 'unsubscribed', label: 'Unsubscribed', n: c.unsubscribed || 0 },
             { value: 'bounced', label: 'Bounced', n: c.bounced || 0 }
           ]
+        },
+        industry: {
+          label: 'Industry',
+          value: state.industry,
+          options: [{ value: 'all', label: 'Any industry', n: null }]
+            .concat((f.industries || []).map((i) => ({ value: i.value, label: i.value, n: i.n })))
+            .concat(f.clientsWithoutIndustry
+              ? [{ value: '(none)', label: 'No industry set', n: f.clientsWithoutIndustry }] : [])
+        },
+        tier: {
+          label: 'Tier',
+          value: state.tier,
+          options: [{ value: 'all', label: 'Any tier', n: null }]
+            .concat((f.tiers || []).map((t) => ({ value: t.value, label: t.value, n: t.n })))
+            .concat([{ value: '(none)', label: 'No tier (not a client)', n: null }])
+        },
+        sort: {
+          label: 'Sort',
+          value: state.sort + ':' + state.dir,
+          options: SORT_CHOICES
         }
       };
     }
@@ -2726,7 +2772,14 @@ export default {
 
       box.innerHTML = Object.keys(defs).map((key) => {
         const d = defs[key];
-        const chosen = d.options.find((o) => String(o.value) === String(d.value)) || d.options[0];
+        // A column-header sort that is not one of the Sort choices still says
+        // what it is, rather than claiming "Company A to Z".
+        const found = d.options.find((o) => String(o.value) === String(d.value));
+        const colName = key === 'sort' && !found
+          ? ((COLUMNS.find(([k]) => k === state.sort) || [null, state.sort])[1] +
+             (state.dir === 'asc' ? ', A to Z' : ', Z to A'))
+          : null;
+        const chosen = found || (colName ? { label: colName, n: null } : d.options[0]);
         return `
           <div class="mm-picker" data-picker="${key}">
             <span class="plbl">${esc(d.label)}</span>
@@ -2758,7 +2811,13 @@ export default {
           timer = setTimeout(async () => {
             clearSelection();
             await loadContacts();
-            renderContactsTable();
+            if (state.activeListId) await selectList(state.activeListId);
+            else renderContactsTable();
+            const again = $('#mmSearch');
+            if (again && document.activeElement !== again) {
+              again.focus();
+              again.setSelectionRange(again.value.length, again.value.length);
+            }
           }, 250);
         });
       }
@@ -2841,17 +2900,18 @@ export default {
 
       if (key === 'list') { await selectList(value || null); return; }
 
-      if (key === 'source') {
-        state.source = value;
-        // Filtering by source while a list is selected is two rules at once.
-        // The list is the container, so leaving it is the honest move rather
-        // than showing an intersection nothing else in the app can express.
-        state.activeListId = null; state.activeList = null; state.activeListMembers = null;
+      if (key === 'sort') {
+        const [k, d] = String(value).split(':');
+        state.sort = k; state.dir = d || 'asc';
       } else {
-        state.status = value;
+        // Filters now work INSIDE a list too (Oct 1 2026): pick a list, then
+        // narrow it to Gold clients in Healthcare. The list itself does not
+        // change, and the table says so whenever a filter hides anyone.
+        state[key] = value;
       }
       await loadContacts();
-      renderPickers(); renderContactsTable();
+      if (state.activeListId) await selectList(state.activeListId);
+      else { renderPickers(); renderContactsTable(); }
     }
 
     // Membership is resolved SERVER-side (GET /api/mailme/lists?id=), the
@@ -2867,10 +2927,12 @@ export default {
         return;
       }
       try {
-        const d = await api.get(ENDPOINTS.mmLists, { id: listId });
+        const d = await api.get(ENDPOINTS.mmLists,
+          Object.assign({ id: listId, sort: state.sort, dir: state.dir }, filterQuery()));
         state.activeList = d.list || null;
         state.activeListMembers = d.members || [];
-        state.listMemberIds = (d.members || []).map((m) => String(m.id));
+        state.activeListTotal = d.memberCount != null ? d.memberCount : (d.members || []).length;
+        state.listMemberIds = (d.memberIds || (d.members || []).map((m) => String(m.id))).map(String);
       } catch (e) {
         state.activeList = null;
         state.activeListMembers = [];
@@ -2889,6 +2951,8 @@ export default {
       ['company_name', 'Company'],
       ['contact_name', 'Contact'],
       ['email', 'Email'],
+      ['industry', 'Industry'],
+      ['tier', 'Tier'],
       ['source', 'Source'],
       ['status', 'Status']
     ];
@@ -2899,7 +2963,8 @@ export default {
       if (state.sort === key) state.dir = state.dir === 'asc' ? 'desc' : 'asc';
       else { state.sort = key; state.dir = 'asc'; }
       await loadContacts();
-      renderContactsTable();
+      if (state.activeListId) await selectList(state.activeListId);
+      else { renderPickers(); renderContactsTable(); }
     }
 
     // Reorder timing only means anything for clients, and only when they have
@@ -2927,8 +2992,9 @@ export default {
       if (meta) {
         if (listMode && state.activeList) {
           const l = state.activeList;
+          const total = state.activeListTotal != null ? state.activeListTotal : rows.length;
           meta.textContent =
-            `${rows.length} member${rows.length === 1 ? '' : 's'}` +
+            (rows.length !== total ? `${rows.length} of ${total} shown` : `${total} member${total === 1 ? '' : 's'}`) +
             (l.mailableCount != null ? `, ${l.mailableCount} mailable` : '') +
             ` \u00b7 ${l.kind === 'static' ? 'fixed set' : 'a rule, re-checked every time'}`;
         } else {
@@ -2959,6 +3025,13 @@ export default {
             Adding or removing someone here is kept as an exception to this list's rule.
             The rule still runs and still picks up new matches around them.
           </div>` : ''}
+        ${filtersOn() && rows.length !== (state.activeListTotal || 0) ? `
+          <div class="mm-notice" style="margin:0 16px 10px">
+            <b>Showing ${rows.length} of ${state.activeListTotal} on this list.</b>
+            The filters only change what you see; a send to "${esc(state.activeList.name)}" still goes to all
+            ${state.activeListTotal}. To send to just these, save them as their own list.
+            ${rows.length ? `<button class="mm-btn sm" id="mmSaveShownBtn" style="margin-left:8px">Save these ${rows.length} as a list</button>` : ''}
+          </div>` : ''}
         <div id="mmListMembersMsg"></div>` : '';
 
       if (!rows.length) {
@@ -2976,16 +3049,13 @@ export default {
       }
 
       const head = COLUMNS.map(([key, label]) => {
-        const active = !listMode && state.sort === key;
+        const active = state.sort === key;
         // Literal glyphs, not HTML entities: an entity like &#9650; matches
         // the repo's hex-color test regex and fails the no-hex rule.
         const arrow = active ? (state.dir === 'asc' ? '\u25B2' : '\u25BC') : '\u25C6';
-        // Sorting is a server round trip against the roster query, which a
-        // resolved list membership is not part of. Headers stay inert in
-        // list mode rather than looking clickable and doing nothing.
-        return listMode
-          ? `<th>${esc(label)}</th>`
-          : `<th class="sortable" data-sort="${key}"${active ? ` aria-sort="${state.dir === 'asc' ? 'ascending' : 'descending'}"` : ''}>
+        // Sorting works in list mode too since Oct 1: the list route takes
+        // the same sort and filters as the roster.
+        return `<th class="sortable" data-sort="${key}"${active ? ` aria-sort="${state.dir === 'asc' ? 'ascending' : 'descending'}"` : ''}>
                ${esc(label)}<span class="arrow">${arrow}</span></th>`;
       }).join('');
 
@@ -3010,6 +3080,8 @@ export default {
                 <td>${esc(ct.contact_name || '')}
                     ${ct.title ? `<div class="who">${esc(ct.title)}</div>` : ''}</td>
                 <td class="em">${esc(ct.email)}</td>
+                <td>${ct.industry ? esc(ct.industry) : ''}</td>
+                <td>${ct.tier ? `<span class="pill mute">${esc(ct.tier)}</span>` : ''}</td>
                 <td><span class="pill src" title="${esc(src.note)}">${esc(src.label)}</span></td>
                 <td><span class="pill ${m.cls}">${esc(m.label)}</span>
                     ${ct.reason ? `<div class="who" style="margin-top:3px">${esc(ct.reason)}</div>` : ''}
@@ -3267,6 +3339,21 @@ export default {
     function wireListTools() {
       const l = state.activeList;
       if (!l) return;
+      // A filtered list view saved as its own fixed list: the way to send to
+      // "just the Gold ones" without changing the original list.
+      const saveShown = $('#mmSaveShownBtn');
+      if (saveShown) {
+        saveShown.addEventListener('click', () => {
+          const parts = [l.name];
+          if (state.tier !== 'all') parts.push(state.tier === '(none)' ? 'no tier' : state.tier);
+          if (state.industry !== 'all') parts.push(state.industry === '(none)' ? 'no industry' : state.industry);
+          state.editingList = {
+            name: parts.join(', '), kind: 'static',
+            members: (state.activeListMembers || []).map((m) => String(m.id))
+          };
+          renderListEditor();
+        });
+      }
       const addBtn = $('#mmAddMemberBtn');
       const addInput = $('#mmAddMemberEmail');
       if (addBtn && addInput) {
@@ -3503,6 +3590,25 @@ export default {
                 <div class="hint">${state.tags.length
                   ? 'Tags in use: ' + esc(state.tags.join(', ')) : 'No tags created yet.'}</div>
               </div>
+              <div class="mm-row">
+                <div class="mm-field">
+                  <label for="mmRuleIndustry">Industry</label>
+                  <select id="mmRuleIndustry">
+                    <option value="">Any industry</option>
+                    ${Array.from(new Set(((state.facets && state.facets.industries) || []).map((i) => i.value)
+                        .concat(rule.industries || []))).map((v) =>
+                      `<option value="${esc(v)}"${(rule.industries || []).includes(v) ? ' selected' : ''}>${esc(v)}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="mm-field">
+                  <label for="mmRuleTier">Tier</label>
+                  <select id="mmRuleTier">
+                    <option value="">Any tier</option>
+                    ${['Platinum', 'Gold', 'Silver', 'Bronze', 'Valuable Dirt'].map((v) =>
+                      `<option value="${v}"${(rule.tiers || []).includes(v) ? ' selected' : ''}>${v}</option>`).join('')}
+                  </select>
+                </div>
+              </div>
               <div class="mm-field">
                 <label for="mmRuleSearch">Text match</label>
                 <input id="mmRuleSearch" type="text" value="${esc(rule.search || '')}"
@@ -3535,7 +3641,9 @@ export default {
           statuses: [],
           tags: $('#mmRuleTags').value.split(',').map((t) => t.trim()).filter(Boolean),
           tagMatch: $('#mmRuleTagMatch').value,
-          search: $('#mmRuleSearch').value
+          search: $('#mmRuleSearch').value,
+          industries: $('#mmRuleIndustry').value ? [$('#mmRuleIndustry').value] : [],
+          tiers: $('#mmRuleTier').value ? [$('#mmRuleTier').value] : []
         };
       }
 
@@ -3822,57 +3930,64 @@ export default {
      */
 
     function openImport() {
+      const listOptions = (state.lists || [])
+        .map((l) => `<option value="${esc(l.name)}"></option>`).join('');
       openModal(`
         <div class="mm-card">
           <div class="mm-card-hd">
-            <h3>Import prospects from a CSV</h3>
-            <span class="meta">Preview first, import second</span>
+            <h3>Upload to a list</h3>
+            <span class="meta">Check first, then add</span>
           </div>
           <div class="mm-card-bd">
             <div id="mmImportMsg"></div>
             <div class="mm-field">
+              <label for="mmImportList">List</label>
+              <input id="mmImportList" type="text" list="mmImportListNames"
+                     placeholder="Pick a list or type a new name">
+              <datalist id="mmImportListNames">${listOptions}</datalist>
+              <div class="hint">
+                Everyone in the file goes on this list: new people are created, people
+                already in MailMe go on as they are. Opted-out and invalid rows never do.
+              </div>
+            </div>
+            <div class="mm-field">
               <label for="mmCsvFile">CSV file</label>
               <input type="file" id="mmCsvFile" accept=".csv,text/csv">
-              <div class="hint">
-                Needs an email column. Company, Name, Title, Phone, City and State are
-                picked up automatically if present, under most common column names.
-              </div>
-            </div>
-            <div class="mm-field">
-              <label for="mmCsvText">Or paste the rows</label>
-              <textarea id="mmCsvText" class="csv" placeholder="Email,Company,Name,Title"></textarea>
-            </div>
-            <div class="mm-field">
-              <label for="mmImportList">Put this batch in a list</label>
-              <input id="mmImportList" type="text"
-                     placeholder="Central Iowa schools, spring 2026">
-              <div class="hint">
-                Strongly recommended. Without it, an imported batch dissolves into the
-                roster and there is no way to find those people again as a group. Type an
-                existing list name to add to it, or a new name to create one.
-              </div>
+              <div class="hint">Needs an email column. Company, Name, Title, Phone, City and
+                State are picked up if present.</div>
             </div>
             <details style="margin-bottom:14px">
               <summary style="cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600">
-                Tags (optional)
+                More options (paste rows, tags)
               </summary>
               <div class="mm-field" style="margin-top:10px">
+                <label for="mmCsvText">Paste the rows instead of a file</label>
+                <textarea id="mmCsvText" class="csv" placeholder="Email,Company,Name,Title"></textarea>
+              </div>
+              <div class="mm-field">
+                <label for="mmImportTags">Tags for new people</label>
                 <input id="mmImportTags" type="text" placeholder="cold-2026-q3, school-districts">
-                <div class="hint">
-                  Comma separated, applied to every imported row. The list above covers
-                  most of what tags were used for; these are still here for rule-based
-                  lists that key on them.
-                </div>
+                <div class="hint">Comma separated. Only used by rule-based lists that key on tags.</div>
               </div>
             </details>
             <div class="mm-actions">
-              <button class="mm-btn" id="mmPreviewImport">Preview</button>
-              <button class="mm-btn" id="mmCommitImport" hidden>Import them</button>
+              <button class="mm-btn" id="mmPreviewImport">Check the file</button>
+              <button class="mm-btn" id="mmCommitImport" hidden>Add them</button>
               <button class="mm-btn ghost" id="mmClearImport">Clear</button>
             </div>
             <div id="mmImportPreview"></div>
           </div>
         </div>`, 'import');
+
+      // Anything changed after a check makes the check stale: the button would
+      // otherwise add a different file, or to a different list, than it says.
+      const stale = () => {
+        if (!state.importPreview) return;
+        state.importPreview = null;
+        $('#mmImportPreview').innerHTML = '';
+        $('#mmCommitImport').hidden = true;
+        msg('#mmImportMsg', 'Changed. Check the file again.', 'mm-ok');
+      };
 
       $('#mmCsvFile').addEventListener('change', (e) => {
         const file = e.target.files && e.target.files[0];
@@ -3880,11 +3995,16 @@ export default {
         const reader = new FileReader();
         reader.onload = () => {
           $('#mmCsvText').value = String(reader.result || '');
-          msg('#mmImportMsg', 'Loaded ' + esc(file.name) + '. Preview it before importing.', 'mm-ok');
+          stale();
+          // Choosing a file is the obvious moment to check it. One less click.
+          previewImport();
         };
         reader.onerror = () => msg('#mmImportMsg', 'Could not read that file.', 'mm-err');
         reader.readAsText(file);
       });
+      $('#mmImportList').addEventListener('input', stale);
+      $('#mmCsvText').addEventListener('input', stale);
+      $('#mmImportTags').addEventListener('input', stale);
 
       $('#mmClearImport').addEventListener('click', () => {
         $('#mmCsvText').value = '';
@@ -3904,18 +4024,22 @@ export default {
       const el = $('#mmImportTags');
       return el ? el.value.split(',').map((t) => t.trim()).filter(Boolean) : [];
     };
+    const importListName = () => ($('#mmImportList') ? $('#mmImportList').value.trim() : '');
 
     async function previewImport() {
       const csv = $('#mmCsvText').value;
       if (!csv.trim()) {
-        msg('#mmImportMsg', 'Paste some rows or choose a file first.', 'mm-err');
+        msg('#mmImportMsg', 'Choose a file or paste some rows first.', 'mm-err');
         return;
       }
       msg('#mmImportMsg', 'Checking the file...', 'mm-ok');
       try {
-        const d = await api.post(ENDPOINTS.mmImport, { csv, tags: importTags() });
+        const d = await api.post(ENDPOINTS.mmImport, {
+          csv, tags: importTags(), listName: importListName()
+        });
         state.importPreview = d;
         state.importCsv = csv;
+        state.importListName = importListName();
         renderImportPreview();
         msg('#mmImportMsg', '', '');
       } catch (e) {
@@ -3926,88 +4050,52 @@ export default {
       }
     }
 
+    const plural = (k, w) => k + ' ' + w + (k === 1 ? '' : 's');
+
     async function commitImport() {
       if (!state.importPreview) return;
       const n = state.importPreview.summary.importable;
-      const known = state.importPreview.summary.addableToList || 0;
-      const listName = $('#mmImportList') ? $('#mmImportList').value.trim() : '';
-      const plural = (k, w) => k + ' ' + w + (k === 1 ? '' : 's');
+      const listName = state.importListName || '';
 
-      if (!listName && !n) {
-        msg('#mmImportMsg', 'Everyone in this file is already in MailMe. Name a list above to put them on it.', 'mm-err');
-        return;
-      }
       if (!listName && !window.confirm(
         'Import ' + plural(n, 'prospect') + ' without putting them in a list?\n\n' +
         'They will be mixed into the roster with no way to find this batch as a group ' +
-        'later. Naming a list now is much easier than reconstructing it afterwards.' +
-        (known ? '\n\nThe ' + plural(known, 'contact') + ' already in MailMe will not go anywhere without a list.' : ''))) return;
-      if (listName && !window.confirm(
-        (n ? 'Import ' + plural(n, 'new prospect') : 'Import nobody new') +
-        (known ? ' and add ' + plural(known, 'existing contact') : '') +
-        ' to "' + listName + '"?')) return;
+        'later. Pick a list to keep them together.')) return;
 
+      const btn = $('#mmCommitImport');
+      btn.disabled = true;
+      msg('#mmImportMsg', 'Adding...', 'mm-ok');
       try {
         const d = await api.post(ENDPOINTS.mmImport, {
-          csv: state.importCsv, tags: importTags(), commit: true, addExisting: !!listName
+          csv: state.importCsv, tags: importTags(), commit: true, listName
         });
 
-        let listNote = '';
-        if (listName) {
-          // The imported rows are identified by their batch, which the server
-          // stamps on every record. A DYNAMIC list on that batch is the right
-          // shape: it keeps meaning "the people from this import" even if a
-          // later cleanup deletes some of them, and it needs no id list the
-          // client would have to fetch back.
-          try {
-            listNote = ' ' + await listForBatch(listName, d.batchId, d.listMemberIds || []);
-            if (d.addedToList) listNote += ' That includes ' + plural(d.addedToList, 'contact') + ' who were already in MailMe.';
-          } catch (e) {
-            listNote = ' The contacts imported, but the list could not be created: ' + e.message;
-          }
+        let note;
+        if (d.list) {
+          // Lead with the number that matters: how big the list is now.
+          note = '"' + d.list.name + '" ' + (d.list.created ? 'created with ' : 'now has ') +
+            d.list.memberCount + (d.list.memberCount === 1 ? ' person.' : ' people.') +
+            (d.imported ? ' ' + d.imported + ' of them new to MailMe.' : '');
+        } else if (d.listError) {
+          // The people are in either way. Saying the whole thing failed would
+          // send someone off to import them twice.
+          note = 'Imported ' + plural(d.imported, 'prospect') +
+            ', but the list could not be updated: ' + d.listError +
+            '. Run the same file again to finish; nobody will be duplicated.';
+        } else {
+          note = 'Imported ' + plural(d.imported, 'prospect') + '.';
         }
 
         state.importPreview = null;
         closeModalIf('import');
         clearSelection();
+        if (d.list) state.activeListId = d.list.id;
         await refreshAudience();
-        msg('#mmAudienceMsg',
-          'Imported ' + d.imported + ' prospect' + (d.imported === 1 ? '' : 's') + '.' +
-          esc(listNote), 'mm-ok');
+        msg('#mmAudienceMsg', esc(note), d.listError ? 'mm-err' : 'mm-ok');
       } catch (e) {
-        msg('#mmImportMsg', 'Import failed: ' + esc(e.message), 'mm-err');
+        btn.disabled = false;
+        msg('#mmImportMsg', 'Nothing was added: ' + esc(e.message), 'mm-err');
       }
-    }
-
-    // Create or extend the list an import lands in. Returns the sentence to
-    // show, so the caller does not have to reproduce the branching in a
-    // message string.
-    async function listForBatch(listName, batchId, knownIds) {
-      await loadContacts();
-      const imported = state.contacts
-        .filter((c) => batchId && c.importBatch === batchId)
-        .map((c) => String(c.id))
-        .concat((knownIds || []).map(String));
-
-      const existing = state.lists.find(
-        (l) => l.name.trim().toLowerCase() === listName.toLowerCase());
-
-      if (!existing) {
-        await api.post(ENDPOINTS.mmLists, {
-          name: listName, kind: 'static', members: imported
-        });
-        return 'Created the list "' + listName + '" with them in it.';
-      }
-      if (existing.kind === 'static') {
-        const members = [...new Set([...(existing.members || []).map(String), ...imported])];
-        await api.patch(ENDPOINTS.mmLists, { id: existing.id, members });
-        return 'Added them to "' + listName + '".';
-      }
-      // A rule-based list decides its own membership, so these go on as
-      // exceptions rather than silently doing nothing.
-      const extraMembers = [...new Set([...(existing.extraMembers || []).map(String), ...imported])];
-      await api.patch(ENDPOINTS.mmLists, { id: existing.id, extraMembers });
-      return 'Added them to "' + listName + '" as exceptions to its rule.';
     }
 
     function rejectTable(title, rows, tone) {
@@ -4032,6 +4120,9 @@ export default {
         </div>`;
     }
 
+    // The preview is a plan, in the future tense, with the button saying
+    // exactly what it will do. The Sep 29 version read "added to your list"
+    // above a still-unpressed button, which looked finished when it was not.
     function renderImportPreview() {
       const d = state.importPreview;
       const box = $('#mmImportPreview');
@@ -4039,63 +4130,75 @@ export default {
       if (!d) { box.innerHTML = ''; return; }
       const s = d.summary;
       const rej = d.rejected || {};
+      const p = d.listPlan;
+      const skipped = (s.suppressed || 0) + (s.invalid || 0);
+      const people = (k) => k + ' ' + (k === 1 ? 'person' : 'people');
+      const btn = $('#mmCommitImport');
 
-      const addable = s.addableToList || 0;
-      $('#mmCommitImport').hidden = !s.importable && !addable;
-      $('#mmCommitImport').textContent = !s.importable ? 'Add them to the list'
-        : addable ? 'Import ' + s.importable + ' and add ' + addable + ' to the list' : 'Import them';
+      let plan;
+      if (p) {
+        const adding = p.addingNew + p.addingExisting;
+        btn.hidden = !adding;
+        btn.disabled = false;
+        btn.textContent = 'Add ' + people(adding) + ' to "' + p.name + '"';
+        const lines = [
+          p.addingNew ? `<li><b>${p.addingNew}</b> new to MailMe, created as prospects</li>` : '',
+          p.addingExisting ? `<li><b>${p.addingExisting}</b> already in MailMe, added as they are</li>` : '',
+          p.alreadyOn ? `<li><b>${p.alreadyOn}</b> already on this list, nothing to do</li>` : '',
+          skipped ? `<li><b>${skipped}</b> skipped (opted out or invalid, listed below)</li>` : '',
+        ].join('');
+        plan = `
+          <div class="mm-notice ${adding ? 'good' : ''}" style="margin-top:14px">
+            <b>Not added yet.</b>
+            ${adding
+              ? (p.exists
+                  ? `"${esc(p.name)}" has ${people(p.before)} now. After you press the button it will have <b>${people(p.after)}</b>.`
+                  : `This creates the list "${esc(p.name)}" with <b>${people(p.after)}</b>.`)
+              : `Everyone in this file is already on "${esc(p.name)}". Nothing to add.`}
+            <ul style="margin:8px 0 0 18px;padding:0">${lines}</ul>
+          </div>`;
+      } else {
+        btn.hidden = !s.importable;
+        btn.disabled = false;
+        btn.textContent = 'Import ' + plural(s.importable, 'prospect') + ' with no list';
+        plan = `
+          <div class="mm-notice" style="margin-top:14px">
+            <b>No list picked.</b> ${s.importable} new ${s.importable === 1 ? 'person' : 'people'} can be
+            imported. ${s.addableToList ? `The ${people(s.addableToList)} already in MailMe only go
+            somewhere if you pick a list above and check again.` : ''}
+          </div>`;
+      }
 
       const unmapped = (s.unmappedColumns || []).length
         ? `<div class="mm-notice"><b>Columns not recognized:</b> ${esc(s.unmappedColumns.join(', '))}.
-             These are ignored. If one of them holds the company or contact name, rename it
-             and preview again.</div>` : '';
-
-      // A cold batch dominated by one domain is usually a scrape of a single
-      // directory, and is worth a second look before it goes out.
-      const domains = (s.topDomains || []).length
-        ? `<div class="mm-field"><label>Top domains in this batch</label>
-             <div>${s.topDomains.map((t) =>
-               `<span class="tag">${esc(t.domain)} \u00D7${t.count}</span>`).join('')}</div>
-             <div class="hint">A batch heavily weighted to one domain is often a scrape of a
-               single directory. Worth a look before sending.</div></div>` : '';
+             These are ignored. If one holds the company or contact name, rename it and check again.</div>` : '';
 
       box.innerHTML = `
+        ${plan}
         ${unmapped}
-        <div class="mm-stat-row" style="margin-top:14px">
-          <div class="mm-stat"><div class="v">${s.parsed}</div><div class="l">Rows read</div></div>
-          <div class="mm-stat"><div class="v">${s.importable}</div><div class="l">Importable</div></div>
-          <div class="mm-stat"><div class="v">${s.duplicate}</div><div class="l">Duplicates</div></div>
-          <div class="mm-stat"><div class="v">${s.existingClients}</div><div class="l">Already clients</div></div>
-          <div class="mm-stat"><div class="v">${s.suppressed}</div><div class="l">Opted out before</div></div>
-          <div class="mm-stat"><div class="v">${s.invalid}</div><div class="l">Invalid</div></div>
-        </div>
-        ${domains}
-        ${(s.tags || []).length
-          ? `<div class="mm-field"><label>Tags to apply</label>
-               <div>${s.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('')}</div></div>`
-          : `<div class="hint" style="margin-bottom:14px">No batch tags set. Adding one now
-               makes this batch far easier to turn into a list later.</div>`}
-        ${(d.preview || []).length ? `
-        <div class="mm-card">
-          <div class="mm-card-hd"><h3>Will be imported</h3>
-            <span class="meta">first ${Math.min(25, d.preview.length)} of ${s.importable}</span></div>
-          <div class="mm-card-bd flush">
-            <table class="mm-table">
-              <thead><tr><th>Email</th><th>Company</th><th>Contact</th><th>Title</th></tr></thead>
-              <tbody>${d.preview.map((r) => `
-                <tr><td class="em">${esc(r.email)}</td><td>${esc(r.company_name || '')}</td>
-                    <td>${esc(r.contact_name || '')}</td><td class="who">${esc(r.title || '')}</td></tr>`).join('')}
-              </tbody>
-            </table>
-          </div>
-        </div>` : ''}
-        ${rejectTable('Already opted out, will not be imported', rej.suppressed, 'bad')}
-        ${addable ? `<div class="mm-notice"><b>${addable} ${addable === 1 ? 'person is' : 'people are'} already in MailMe</b>
-            (clients in BackBone, or prospects from an earlier import). They are not imported again, but they
-            <b>are added to the list you name above</b>, as the contacts they already are.</div>` : ''}
-        ${rejectTable('Already clients in BackBone (added to your list, not imported)', rej.existingClients, 'warn')}
-        ${rejectTable('Duplicates', rej.duplicate, 'mute')}
-        ${rejectTable('Invalid rows', rej.invalid, 'bad')}`;
+        ${rejectTable('Skipped: opted out before', rej.suppressed, 'bad')}
+        ${rejectTable('Skipped: invalid', rej.invalid, 'bad')}
+        <details style="margin-top:10px">
+          <summary style="cursor:pointer;font-size:12.5px;color:var(--muted);font-weight:600">
+            See the rows (${s.parsed} read)
+          </summary>
+          ${(d.preview || []).length ? `
+          <div class="mm-card" style="margin-top:10px">
+            <div class="mm-card-hd"><h3>New to MailMe</h3>
+              <span class="meta">first ${Math.min(25, d.preview.length)} of ${s.importable}</span></div>
+            <div class="mm-card-bd flush">
+              <table class="mm-table">
+                <thead><tr><th>Email</th><th>Company</th><th>Contact</th><th>Title</th></tr></thead>
+                <tbody>${d.preview.map((r) => `
+                  <tr><td class="em">${esc(r.email)}</td><td>${esc(r.company_name || '')}</td>
+                      <td>${esc(r.contact_name || '')}</td><td class="who">${esc(r.title || '')}</td></tr>`).join('')}
+                </tbody>
+              </table>
+            </div>
+          </div>` : ''}
+          ${rejectTable('Already clients in BackBone', rej.existingClients, 'warn')}
+          ${rejectTable('Already prospects, or repeated in this file', rej.duplicate, 'mute')}
+        </details>`;
     }
 
     /* ---------------- modal machinery ---------------- */
@@ -4880,7 +4983,9 @@ export default {
           source: state.source === 'all' ? '' : state.source,
           tags: [],
           tagMatch: 'any',
-          search: state.search.trim()
+          search: state.search.trim(),
+          industries: state.industry !== 'all' && state.industry !== '(none)' ? [state.industry] : [],
+          tiers: state.tier !== 'all' && state.tier !== '(none)' ? [state.tier] : []
         }
       };
       renderListEditor();

@@ -24,7 +24,7 @@ import { requireMailMe, canEditMailMe } from "../../lib/mailme/access.js";
 import {
   listLists, getList, createList, updateList, deleteList, membersOf,
 } from "../../lib/mailme/store.js";
-import { validateListPatch, SUPPRESSED_STATUSES } from "../../lib/mailme/schema.js";
+import { validateListPatch, SUPPRESSED_STATUSES, filterContacts, sortContacts } from "../../lib/mailme/schema.js";
 
 function parseBody(req) {
   let b = req.body;
@@ -49,11 +49,18 @@ export default async function handler(req, res) {
         if (!list) return res.status(404).json({ error: "List not found" });
         const members = await membersOf(list);
         const mailable = members.filter((m) => !SUPPRESSED_STATUSES.includes(m.status));
+        // Filters narrow what is SHOWN, never what the list is: the counts
+        // below stay the whole list's, because a send goes to the whole list.
+        const shown = sortContacts(filterContacts(members, req.query), req.query.sort, req.query.dir);
         return res.status(200).json({
           list,
-          members,
+          members: shown,
           memberCount: members.length,
           mailableCount: mailable.length,
+          shownCount: shown.length,
+          // Every member's id, filtered or not, for "already on this list" checks.
+          memberIds: members.map((m) => String(m.id)),
+          filtered: shown.length !== members.length,
         });
       }
 

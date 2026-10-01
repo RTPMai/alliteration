@@ -29,6 +29,7 @@ import {
 } from "../../lib/mailme/store.js";
 import {
   SUBSCRIPTION_STATUSES, SUPPRESSED_STATUSES, sortContacts, CONTACT_SOURCES,
+  filterContacts, facetCounts,
   CONTACT_DETAIL_FIELDS, validateContactDetailPatch, normalizeEmail,
 } from "../../lib/mailme/schema.js";
 
@@ -52,24 +53,8 @@ export default async function handler(req, res) {
       const resolved = await resolveContacts();
       let contacts = resolved.contacts;
 
-      if (q.source) contacts = contacts.filter((c) => c.source === q.source);
-      if (q.status) {
-        if (q.status === "mailable") {
-          contacts = contacts.filter((c) => !SUPPRESSED_STATUSES.includes(c.status));
-        } else {
-          contacts = contacts.filter((c) => c.status === q.status);
-        }
-      }
-      if (q.tag) {
-        const want = String(q.tag).trim().toLowerCase();
-        contacts = contacts.filter((c) => (c.tags || []).some((t) => String(t).toLowerCase() === want));
-      }
-      if (q.q) {
-        const needle = String(q.q).trim().toLowerCase();
-        contacts = contacts.filter((c) =>
-          [c.company_name, c.contact_name, c.email, c.title, (c.tags || []).join(" ")]
-            .filter(Boolean).join(" ").toLowerCase().includes(needle));
-      }
+      // One filter for the roster and for a list's members. See filterContacts().
+      contacts = filterContacts(contacts, q);
 
       // Sorting happens SERVER-side so a filtered page and a full page order
       // identically, and so the client cannot drift from the canonical rule.
@@ -102,6 +87,8 @@ export default async function handler(req, res) {
           totalRosterSize: resolved.totalRosterSize,
         },
         tags: [...tagSet].sort(),
+        // Industry and tier choices for the pickers, counted over everyone.
+        facets: facetCounts(all),
       });
     }
 
