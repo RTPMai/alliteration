@@ -104,6 +104,32 @@ const PICK = (n) => ({ name: 'Tee ' + n, style: 'PC5' + n, msrp: '$9.98', url: '
     t.equal(F.cleanForm({ key: 'qe_write' }, { anything: 1 }).ok, false, 'nothing is posted as an email step form');
   });
 
+  await t.test('every step a tool or app button names is real, and so is the app view', async () => {
+    const cat = await import('../lib/marketmachine/catalog.js');
+    const keys = new Set();
+    cat.CAMPAIGN_TYPES.forEach((ty) => ty.steps.forEach((s) => keys.add(s.key)));
+    Object.keys(F.STEP_TOOLS).forEach((k) => t.assert(keys.has(k), 'STEP_TOOLS names a step that does not exist: ' + k));
+    const reg = fs.readFileSync(path.join(ROOT, 'js/registry.js'), 'utf8');
+    Object.entries(F.STEP_TOOLS).filter(([, v]) => v.app).forEach(([k, v]) => {
+      const block = reg.slice(reg.indexOf(`id: '${v.app[0]}'`));
+      t.assert(reg.includes(`id: '${v.app[0]}'`), `${k}: no app ${v.app[0]}`);
+      t.assert(block.slice(0, 1500).includes(`['${v.app[1]}'`), `${k}: ${v.app[0]} has no view ${v.app[1]}`);
+    });
+    t.equal(F.formFor({ key: 'poll_send' }), 'email', 'the poll send opens the email');
+    t.equal(F.formFor({ key: 'poll_reminder' }), 'email');
+  });
+
+  await t.test('shipping, delivery and counts keep their facts', () => {
+    t.equal(F.cleanForm({ key: 'samp_send' }, { date: '2026-10-01' }).ok, false, 'how it went out is required');
+    const sh = F.cleanForm({ key: 'samp_send' }, { method: 'carrier', date: '2026-10-01', carrier: 'UPS', tracking: '1Z999' });
+    t.equal(sh.ok, true); t.equal(sh.form.tracking, '1Z999');
+    t.equal(F.cleanForm({ key: 'samp_delivered' }, { evidence: 'x' }).ok, false, 'the arrival date is required');
+    t.equal(F.cleanForm({ key: 'tod_count' }, { out: 10, back: 6, damaged: 1, missing: 2 }).ok, false, 'a Try On Day count must add up');
+    t.equal(F.cleanForm({ key: 'tod_count' }, { out: 10, back: 7, damaged: 1, missing: 2 }).ok, true);
+    t.equal(F.cleanForm({ key: 'lsp_return' }, { out: 100, back: 40, damaged: 2 }).ok, true, 'at a live event the rest sold');
+    t.equal(F.cleanForm({ key: 'par_count' }, { left: 'some' }).ok, false, 'counts are numbers');
+  });
+
   /* ================= cleaning ================= */
 
   await t.test('results keep only their own numbers; blank is unknown, not zero', () => {

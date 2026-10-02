@@ -313,17 +313,25 @@ await t.test('a Digital Platform campaign page renders platforms, art and the AM
       calculations: [], advisories: [], scorecard: [] },
   };
   const app = { state, api: {}, root, ui: {} };
-  for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks']) {
+  for (const name of ['shared', 'list', 'new', 'detail', 'connect', 'calc', 'timeline', 'settings', 'tasks', 'stepforms']) {
     Object.assign(app.ui, (await import(path.join(ROOT, `apps/marketmachine/${name}.js`))).default(app));
   }
   app.ui.renderDetail();
   const page = written['#mkDetailPane'] || '';
-  t.assert(page.includes('Platforms and art'), 'no platforms card');
-  t.assert(/data-platform="facebook" checked/.test(page), 'facebook not shown ticked');
-  t.assert(page.includes('fb.png'), 'art file not listed');
-  t.assert(/Email<\/b>\s*<span class="late">Needs art/.test(page), 'missing art not flagged');
-  t.assert(/id="mkHAms"/.test(page) && (page.match(/value="E[12]"[^>]*checked/g) || []).length === 2, 'AM ticks missing or unticked');
-  t.assert(page.includes('Add art for Email first'), 'the Art step does not say why it is locked');
+  // Oct 1 2026: no separate box. The ticks are in the platform step, the art
+  // in the Art step, each shown when that step is opened.
+  t.assert(!page.includes('<h3>Platforms and art</h3>'), 'the separate box is gone');
+  state.openStep = 'dp_audience'; state.editingHeader = false; app.ui.renderDetail();
+  const pick = written['#mkDetailPane'] || '';
+  t.assert(/data-platform="facebook" checked/.test(pick), 'facebook not shown ticked in the platform step');
+  state.openStep = 'dp_art'; app.ui.renderDetail();
+  const artStep = written['#mkDetailPane'] || '';
+  t.assert(artStep.includes('fb.png'), 'art file not listed in the Art step');
+  t.assert(/Email<\/b>\s*<span class="late">Needs art/.test(artStep), 'missing art not flagged');
+  state.openStep = null; state.editingHeader = true; app.ui.renderDetail();
+  const page2 = written['#mkDetailPane'] || '';
+  t.assert(/id="mkHAms"/.test(page2) && (page2.match(/value="E[12]"[^>]*checked/g) || []).length === 2, 'AM ticks missing or unticked');
+  t.assert(page2.includes('Add art for Email first'), 'the Art step does not say why it is locked');
 });
 
 process.exit(t.report());

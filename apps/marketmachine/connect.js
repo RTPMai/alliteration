@@ -85,7 +85,7 @@ export default function makeConnect(app) {
             <td><div class="co">${esc(e.subject || 'No subject yet')}</div><div class="who">${esc(e.id)}${e.sentAt ? ', sent ' + esc(fmtStamp(e.sentAt)) : ''}</div></td>
             ${multi ? `<td>${esc(scopeName(e.campaignId, conn))}</td>` : ''}
             <td>${esc(e.status)}</td><td>${e.delivered}</td><td>${e.uniqueClicks}</td></tr>`).join('')}</tbody></table></div>`
-          : '<div class="mk-conn-note" style="padding-bottom:14px">No emails yet. Press Write an email, or tick Email under Platforms, and it opens in the Email section near the top.</div>'}`;
+          : '<div class="mk-conn-note" style="padding-bottom:14px">No emails yet. Press Write an email.</div>'}`;
 
       // Travel
       const tr = conn.travel || {};
@@ -150,7 +150,7 @@ export default function makeConnect(app) {
         : '<div class="mk-conn-note" style="padding-bottom:14px">No invoices connected. Create the invoice in Printavo, then connect its number here.</div>';
 
       const head = (title, meta2, actions) => `<div class="mk-card-hd"><h3>${title}</h3><div class="mk-actions">${meta2 ? `<span class="meta">${meta2}</span>` : ''}${actions || ''}</div></div>`;
-      const connectBtn = (kind, label) => state.connAdding === kind ? '' : `<button class="mk-btn ghost sm" data-conn-add="${kind}">${label}</button>`;
+      const connectBtn = (kind, label) => state.connAdding === kind && !state.connWhere ? '' : `<button class="mk-btn ghost sm" data-conn-add="${kind}">${label}</button>`;
 
       return `
         <h2 style="font-size:17px;font-weight:800;margin:26px 0 6px">connections.</h2>
@@ -165,21 +165,64 @@ export default function makeConnect(app) {
         <div class="mk-card">
           ${head('Travel, in TravelTrack', '', connectBtn('trips', 'Connect a trip'))}
           ${travelBody}
-          ${addForm('trips')}
+          ${state.connWhere ? '' : addForm('trips')}
         </div>
         <div class="mk-card">
           ${head('Leads, in BackBone', '', connectBtn('leads', 'Connect a lead'))}
           ${leadsBody}
-          ${addForm('leads')}
+          ${state.connWhere ? '' : addForm('leads')}
         </div>
         <div class="mk-card">
           ${head('Printavo invoices', '', ((inv.invoices || []).length ? `<button class="mk-btn ghost sm" data-act="check-printavo"${state.printavoChecking ? ' disabled' : ''}>${state.printavoChecking ? 'Checking Printavo' : 'Check status in Printavo'}</button>` : '') + connectBtn('invoices', 'Connect an invoice'))}
           ${invoicesBody}
-          ${addForm('invoices')}
+          ${state.connWhere ? '' : addForm('invoices')}
         </div>`;
+    }
+
+    /**
+     * The same connections, shown in the step that needs them (Oct 1 2026):
+     * "Create the Printavo invoice" holds the invoices, "Arrange travel" the
+     * trips, "Photograph each business card" the leads. One list, read live,
+     * with Connect right there. `stepKey` keeps the connect form in this step
+     * and out of the Connections section below, so there is only one.
+     */
+    function stepConnectHtml(c, kind, stepKey, editable) {
+      const conn = (state.detail && state.detail.connections) || {};
+      const label = { invoices: 'Printavo invoices', trips: 'Trips in TravelTrack', leads: 'Leads in BackBone' }[kind];
+      const btnLabel = { invoices: 'Connect an invoice', trips: 'Connect a trip', leads: 'Connect a lead' }[kind];
+      let rows = [];
+      let down = false;
+      if (kind === 'invoices') {
+        rows = ((conn.invoices || {}).invoices || []).map((x) => {
+          const st = state.printavo[x.ref];
+          return `<li><b>#${esc(x.ref)}</b> <span class="who">${!st ? '' : st.found ? esc([st.status, st.customer].filter(Boolean).join(', ')) : st.unavailable ? 'Printavo did not answer' : 'Not found in Printavo'}</span></li>`;
+        });
+      } else if (kind === 'trips') {
+        const tr = conn.travel || {};
+        down = !!tr.unavailable;
+        rows = (tr.trips || []).map((t) => `<li><b>${esc(t.missing ? 'Trip no longer in TravelTrack' : (t.title || t.destination || t.ref))}</b> <span class="who">${esc(fmtDate(t.start_date))}${t.receipts != null ? `, ${t.receipts} receipt${t.receipts === 1 ? '' : 's'}` : ''}</span></li>`);
+      } else if (kind === 'leads') {
+        const ld = conn.leads || {};
+        down = !!ld.unavailable;
+        rows = (ld.leads || []).map((l) => `<li><b>${esc(l.missing ? 'Lead no longer in BackBone' : l.company)}</b> <span class="who">${esc([l.leadNo, l.status].filter(Boolean).join(', '))}</span></li>`);
+      }
+      const here = state.connAdding === kind && state.connWhere === stepKey;
+      return `<div class="mk-form">
+        <div class="mk-form-hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+          <span>${label}</span>
+          <span class="mk-actions" style="margin:0">
+            ${kind === 'invoices' && rows.length ? `<button class="mk-btn ghost sm" data-act="check-printavo"${state.printavoChecking ? ' disabled' : ''}>${state.printavoChecking ? 'Checking' : 'Check status'}</button>` : ''}
+            ${editable && !here ? `<button class="mk-btn sm" data-conn-add="${kind}" data-conn-where="${esc(stepKey)}">${btnLabel}</button>` : ''}
+          </span></div>
+        ${state.connWhere === stepKey && state.connMsg ? msgBox(state.connMsg) : ''}
+        ${down ? '<div class="who">That app did not answer, so this cannot be shown right now. Nothing is lost.</div>'
+          : rows.length ? `<ul class="mk-art">${rows.join('')}</ul>`
+          : `<div class="who">${kind === 'invoices' ? 'None yet. Make it in Printavo, then connect its number here.' : 'None connected yet.'}</div>`}
+        ${here ? addForm(kind) : ''}
+      </div>`;
     }
 
     /* ---------------- calculations ---------------- */
 
-  return { scopeName, creditCell, removable, addForm, connectionsSection };
+  return { scopeName, creditCell, removable, addForm, connectionsSection, stepConnectHtml };
 }

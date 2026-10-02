@@ -13,7 +13,7 @@ import { STAGES, typeMeta, connectableTypes } from '../../lib/marketmachine/cata
 import { progress, headerDates, ownerFor, unmetDependencies, PARTICIPATION, amsOf, amNames, PLATFORMS, platformsOf, platformLabel, usesPlatforms, stepGate } from '../../lib/marketmachine/campaign.js';
 import { dueDateFor, timingLabel } from '../../lib/marketmachine/dates.js';
 import { esc, fmtDate, fmtStamp, statusClass, PARTICIPATION_LABEL, msgBox, fmtMoney } from './format.js';
-import { formFor, formSummary, resultsTotals, RESULT_FIELDS, proposalsFor, approvedSpend, emailInSteps } from '../../lib/marketmachine/forms.js';
+import { formFor, formSummary, resultsTotals, RESULT_FIELDS, proposalsFor, approvedSpend, emailInSteps, toolsFor, appFor } from '../../lib/marketmachine/forms.js';
 
 export default function makeDetail(app) {
   const { state, api, root, ui } = app;
@@ -108,6 +108,8 @@ export default function makeDetail(app) {
       const toFill = kind && kind !== 'approval' && kind !== 'email' && !s.form && !clear;
       // The email steps open the email itself, so their button says so.
       const emailBtn = kind === 'email' && !clear && state.mailmeAccess;
+      // A step with a tool in it (platforms, art, invoices, trips) says Open.
+      const toolBtn = !clear && (toolsFor(s).length > 0 || !!appFor(s)) && !toFill && !emailBtn;
 
       return `
         <div class="${cls}" data-step="${esc(s.key)}">
@@ -135,7 +137,7 @@ export default function makeDetail(app) {
             </div>
             <div class="mk-step-side">
               ${control}
-              <button class="mk-btn${(toFill || emailBtn) && canEdit() ? '' : ' ghost'} sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : emailBtn ? (canEdit() ? 'Open the email' : 'See the email') : toFill && canEdit() ? 'Fill in' : 'Details'}</button>
+              <button class="mk-btn${(toFill || emailBtn || toolBtn) && canEdit() ? '' : ' ghost'} sm" data-more="${esc(s.key)}" aria-expanded="${open}">${open ? 'Close' : emailBtn ? (canEdit() ? 'Open the email' : 'See the email') : toFill && canEdit() ? 'Fill in' : toolBtn ? 'Open' : 'Details'}</button>
             </div>
           </div>
           ${open ? stepDetails(c, s, due) : ''}
@@ -162,7 +164,8 @@ export default function makeDetail(app) {
       const editable = c.status === 'open';
       const dis = editable ? '' : ' disabled';
       const links = (s.links || []).map((l) => `${l.label ? l.label + ' ' : ''}${l.url}`).join('\n');
-      const form = ui.stepFormHtml ? ui.stepFormHtml(c, s, editable && canEdit(), isAdmin()) : '';
+      const form = (ui.stepToolsHtml ? ui.stepToolsHtml(c, s, editable && canEdit(), isAdmin()) : '') +
+        (ui.stepFormHtml ? ui.stepFormHtml(c, s, editable && canEdit(), isAdmin()) : '');
       return `
         <div class="mk-step-more">
           ${form}
@@ -207,54 +210,58 @@ export default function makeDetail(app) {
     }
 
     /**
-     * Platforms and art (Sep 29 2026). Only on campaign types whose checklist
-     * picks platforms. Tick a platform, then each ticked one gets its art
-     * (upload, or a link for anything big) and, once it is live, the link to
-     * the post or ad. The checklist's platform and Art steps stay locked
-     * until this is filled in; the server holds the same rule.
+     * Platforms and art (Sep 29 2026), shown INSIDE the steps that need them
+     * since Oct 1 2026: the ticks in "Choose the audience, platforms, and
+     * schedule", the art in "Art creates the assets", the live links in the
+     * setup and launch steps. `part` is "pick", "art" or "links". The
+     * checklist's platform and Art steps stay locked until this is filled
+     * in; the server holds the same rule.
      */
-    function platformsCard(c) {
+    function platformsHtml(c, part, editable) {
       if (!usesPlatforms(c)) return '';
       const chosen = platformsOf(c);
       const art = Array.isArray(c.art) ? c.art : [];
       const links = c.platformLinks || {};
       const m = state.platMsg;
       const up = state.artUploading || {};
-      const per = chosen.map((k) => {
-        const mine = art.filter((a) => a.platform === k);
-        return `
+      const dis = editable ? '' : ' disabled';
+      let body = '';
+      if (part === 'pick') {
+        body = `<div class="mk-form-hd">Platforms <span class="who">Only ticked platforms get art.</span></div>
+          <div class="mk-checks" role="group" aria-label="Platforms">
+            ${PLATFORMS.map((p) => `<label class="mk-check-pill"><input type="checkbox" data-platform="${esc(p.key)}"${chosen.includes(p.key) ? ' checked' : ''}${dis}> ${esc(p.label)}</label>`).join('')}
+          </div>`;
+      } else if (!chosen.length) {
+        body = '<div class="who">No platforms ticked yet. Tick them in "Choose the audience, platforms, and schedule."</div>';
+      } else if (part === 'art') {
+        body = `<div class="mk-form-hd">Art for each platform</div>` + chosen.map((k) => {
+          const mine = art.filter((a) => a.platform === k);
+          return `
           <div class="mk-plat">
             <div class="mk-plat-hd"><b>${esc(platformLabel(k))}</b>
               ${mine.length ? `<span class="who">${mine.length} art file${mine.length === 1 ? '' : 's'}</span>` : '<span class="late">Needs art</span>'}</div>
             ${mine.length ? `<ul class="mk-art">${mine.map((a) => `
               <li><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name || 'Art file')}</a>
                 <span class="who">${a.kind === 'link' ? 'link' : 'file'}${a.by ? ', ' + esc(a.by) : ''}</span>
-                <button class="mk-link" data-art-remove="${esc(a.url)}">Remove</button></li>`).join('')}</ul>` : ''}
-            <div class="mk-actions">
+                ${editable ? `<button class="mk-link" data-art-remove="${esc(a.url)}">Remove</button>` : ''}</li>`).join('')}</ul>` : ''}
+            ${editable ? `<div class="mk-actions">
               <label class="mk-btn sm mk-upload">${up[k] ? 'Uploading' : 'Upload art'}
                 <input type="file" data-art-file="${esc(k)}" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf,.mp4" hidden${up[k] ? ' disabled' : ''}></label>
               <input type="url" class="mk-inline-input" id="mkArtLink-${esc(k)}" placeholder="Or paste a link to the art (Dropbox, Canva, Drive)">
               <button class="mk-btn ghost sm" data-art-link="${esc(k)}">Add link</button>
-            </div>
-            <div class="mk-actions" style="margin-top:8px">
-              <input type="url" class="mk-inline-input" id="mkPostLink-${esc(k)}" value="${esc(links[k] || '')}" placeholder="Link to the live post or ad, once it is up">
-              <button class="mk-btn ghost sm" data-post-link="${esc(k)}">Save link</button>
-              ${links[k] ? `<a class="mk-link" href="${esc(links[k])}" target="_blank" rel="noopener">Open</a>` : ''}
-            </div>
+            </div>` : ''}
           </div>`;
-      }).join('');
-      return `
-        <div class="mk-card" id="mkPlatforms">
-          <div class="mk-card-hd"><h3>Platforms and art</h3><span class="meta">Tick where this runs. Only ticked platforms get art.</span></div>
-          <div class="mk-card-bd">
-            ${m ? msgBox(m) : ''}
-            <div class="mk-checks" role="group" aria-label="Platforms">
-              ${PLATFORMS.map((p) => `<label class="mk-check-pill"><input type="checkbox" data-platform="${esc(p.key)}"${chosen.includes(p.key) ? ' checked' : ''}> ${esc(p.label)}</label>`).join('')}
-            </div>
-            ${chosen.length ? per : '<div class="who" style="margin-top:8px">Nothing ticked yet. The platform and Art steps unlock once you pick.</div>'}
-            <div class="who" style="margin-top:8px">Files up to 3 MB (PNG, JPG, GIF, WebP, PDF, MP4). Anything bigger, add as a link.</div>
-          </div>
-        </div>`;
+        }).join('') + '<div class="who" style="margin-top:8px">Files up to 3 MB (PNG, JPG, GIF, WebP, PDF, MP4). Anything bigger, add as a link.</div>';
+      } else if (part === 'links') {
+        body = `<div class="mk-form-hd">Links to the live posts and ads</div>` + chosen.map((k) => `
+          <div class="mk-actions" style="margin-bottom:8px;align-items:center">
+            <b style="min-width:90px">${esc(platformLabel(k))}</b>
+            <input type="url" class="mk-inline-input" id="mkPostLink-${esc(k)}" value="${esc(links[k] || '')}" placeholder="Link to the live post or ad, once it is up"${dis}>
+            ${editable ? `<button class="mk-btn ghost sm" data-post-link="${esc(k)}">Save link</button>` : ''}
+            ${links[k] ? `<a class="mk-link" href="${esc(links[k])}" target="_blank" rel="noopener">Open</a>` : ''}
+          </div>`).join('');
+      }
+      return `<div class="mk-form">${m ? msgBox(m) : ''}${body}</div>`;
     }
 
     function renderDetail() {
@@ -402,7 +409,6 @@ export default function makeDetail(app) {
         <div class="mk-card"><div class="mk-card-bd">
           ${state.editingHeader ? headerForm(c, meta) : headerView(c, meta, dates)}
         </div></div>
-        ${platformsCard(c)}
         ${emailSection}
         <nav class="mk-stages" aria-label="Stages">${stageTabs}</nav>
         ${stageSections}
@@ -429,5 +435,5 @@ export default function makeDetail(app) {
         </div>`;
     }
 
-  return { headerView, headerForm, stepRow, stepDetails, renderDetail };
+  return { headerView, headerForm, stepRow, stepDetails, renderDetail, platformsHtml };
 }

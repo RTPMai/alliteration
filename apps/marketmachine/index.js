@@ -399,6 +399,7 @@ export default {
       state.detailMsg = null;
       state.editingHeader = false;
       state.connAdding = null;
+      state.connWhere = null;
       state.connMsg = null;
       state.printavo = {};
       state.calcEditing = false;
@@ -547,6 +548,8 @@ export default {
       if (await ui.onFormClick(t)) return;
 
       const d = t.dataset;
+      // A step whose work happens in another app: TravelTrack, BackBone, ShopStock.
+      if (d.goApp) { if (typeof ctx.goApp === 'function') ctx.goApp(d.goApp, d.goView || undefined); return; }
       if (d.taskMore) { ui.toggleTask(d.taskMore); return; }
       if (d.taskCampaign) { openFromTask(d.taskCampaign); return; }
       if (d.open) { ev.preventDefault(); await openCampaign(d.open); return; }
@@ -595,6 +598,8 @@ export default {
       }
       if (d.connAdd) {
         state.connAdding = d.connAdd;
+        // From inside a step, the connect form opens in that step.
+        state.connWhere = d.connWhere || null;
         state.connMsg = null;
         if ((d.connAdd === 'trips' || d.connAdd === 'leads') && !state.connOptions) {
           try { state.connOptions = await api.get(ENDPOINTS.mkCampaigns, { options: 'connections' }); }
@@ -619,7 +624,7 @@ export default {
         await refreshDetailKeepingPlace();
         return;
       }
-      if (d.connCancel) { state.connAdding = null; ui.renderDetail(); return; }
+      if (d.connCancel) { state.connAdding = null; state.connWhere = null; ui.renderDetail(); return; }
       if (d.connSave) {
         const el = root.querySelector('#mkConnRef-' + d.connSave);
         const ref = el ? el.value.trim() : '';

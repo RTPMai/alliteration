@@ -19,6 +19,7 @@ import { esc, fmtMoney } from './format.js';
 import {
   formFor, resultFieldsFor, RESULT_FIELDS, picksStatus, pickComplete,
   MAX_PICKS, PICKS_NEEDED, SEASONS, VENDORS, proposalsFor,
+  SHIP_METHODS, COUNT_FIELDS, countFieldsFor, toolsFor, appFor,
 } from '../../lib/marketmachine/forms.js';
 
 const TOP = [['', 'Everyone who matches'], ['25:lifetimeRevenue', 'Top 25 clients, all time'],
@@ -123,6 +124,52 @@ export default function makeStepForms(app) {
 
     if (kind === 'audience') return audienceHtml(c, s, canEdit);
 
+    if (kind === 'ship') {
+      return `<div class="mk-form">
+        <div class="mk-form-hd">How it went out</div>
+        <div class="mk-form-grid">
+          <div class="mk-field"><label for="${id(s.key, 'method')}">How</label>
+            <select id="${id(s.key, 'method')}"${d}><option value="">Pick one</option>
+              ${Object.entries(SHIP_METHODS).map(([k, l]) => `<option value="${k}"${f.method === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></div>
+          <div class="mk-field"><label for="${id(s.key, 'date')}">Date</label>
+            <input type="date" id="${id(s.key, 'date')}" value="${esc(f.date || '')}"${d}></div>
+          <div class="mk-field"><label for="${id(s.key, 'carrier')}">Carrier</label>
+            <input type="text" id="${id(s.key, 'carrier')}" maxlength="60" value="${esc(f.carrier || '')}" placeholder="UPS, USPS, FedEx"${d}></div>
+          <div class="mk-field"><label for="${id(s.key, 'tracking')}">Tracking number</label>
+            <input type="text" id="${id(s.key, 'tracking')}" maxlength="120" value="${esc(f.tracking || '')}"${d}></div>
+        </div>
+        ${actions(s.key, canEdit)}
+      </div>`;
+    }
+
+    if (kind === 'delivered') {
+      return `<div class="mk-form">
+        <div class="mk-form-hd">When it arrived</div>
+        <div class="mk-form-grid">
+          <div class="mk-field"><label for="${id(s.key, 'date')}">Date it arrived</label>
+            <input type="date" id="${id(s.key, 'date')}" value="${esc(f.date || '')}"${d}></div>
+          <div class="mk-field full"><label for="${id(s.key, 'evidence')}">Proof (tracking link, photo link, who signed)</label>
+            <input type="text" id="${id(s.key, 'evidence')}" maxlength="600" value="${esc(f.evidence || '')}"${d}></div>
+        </div>
+        ${actions(s.key, canEdit)}
+      </div>`;
+    }
+
+    if (kind === 'count') {
+      const fields = countFieldsFor(s);
+      return `<div class="mk-form">
+        <div class="mk-form-hd">The count</div>
+        <div class="mk-form-grid">${fields.map((k) => `
+          <div class="mk-field"><label for="${id(s.key, k)}">${esc(COUNT_FIELDS[k])}</label>
+            <input type="text" inputmode="numeric" id="${id(s.key, k)}" value="${f[k] != null ? esc(f[k]) : ''}" placeholder="0"${d}></div>`).join('')}
+          <div class="mk-field full"><label for="${id(s.key, 'disposition')}">What happens to the rest</label>
+            <input type="text" id="${id(s.key, 'disposition')}" maxlength="400" value="${esc(f.disposition || '')}" placeholder="Back to stock, Postal campaign, donated"${d}></div>
+        </div>
+        ${fields.includes('missing') ? '<div class="hint" style="margin-bottom:8px">Went out has to equal came back, damaged and missing together.</div>' : ''}
+        ${actions(s.key, canEdit)}
+      </div>`;
+    }
+
     // The email itself, right in the step (Oct 1 2026). MailMe's composer is
     // moved into #mkEmailSlot by index.js; only one step is open at a time,
     // so there is only ever one slot.
@@ -162,6 +209,49 @@ export default function makeStepForms(app) {
       </div>`;
     }
     return '';
+  }
+
+  /* ---------------- tools in a step ---------------- */
+
+  // What lives elsewhere (the platform ticks, art, invoices, trips, leads,
+  // the budget, connected campaigns, another app) shown in the step that
+  // needs it. Which step gets which: STEP_TOOLS in lib/marketmachine/forms.js.
+  function stepToolsHtml(c, s, canEdit, admin) {
+    const parts = toolsFor(s).map((tool) => {
+      if (tool === 'platforms') return ui.platformsHtml(c, 'pick', canEdit);
+      if (tool === 'art') return ui.platformsHtml(c, 'art', canEdit);
+      if (tool === 'postLinks') return ui.platformsHtml(c, 'links', canEdit);
+      if (tool === 'invoices' || tool === 'trips' || tool === 'leads') return ui.stepConnectHtml(c, tool, s.key, canEdit);
+      if (tool === 'budget') {
+        if (!admin) return '';
+        return `<div class="mk-form">
+          <div class="mk-form-hd">Total budget</div>
+          <div class="mk-actions" style="align-items:flex-end">
+            <div class="mk-field" style="margin:0"><label for="${id(s.key, 'budget')}">Amount</label>
+              <input type="text" inputmode="decimal" id="${id(s.key, 'budget')}" value="${c.budget != null ? esc(c.budget) : ''}" placeholder="$0"${dis(canEdit)}></div>
+            ${canEdit ? `<button class="mk-btn sm" data-budget-save="${esc(s.key)}">Save budget</button>` : ''}
+          </div>
+          <div class="hint" style="margin-top:6px">Later increases: change it here and note why below.</div>
+        </div>`;
+      }
+      if (tool === 'children') {
+        const kids = (state.detail && state.detail.children) || [];
+        return `<div class="mk-form">
+          <div class="mk-form-hd" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+            <span>Connected campaigns</span>
+            ${canEdit && c.status === 'open' ? '<button class="mk-btn sm" data-act="add-child">Add a connected campaign</button>' : ''}</div>
+          ${kids.length ? `<ul class="mk-art">${kids.map((k) => `<li><button class="mk-link" data-open="${esc(k.id)}">${esc(k.name)}</button>
+            <span class="who">${esc(k.typeLabel || '')}${k.progress && k.progress.label ? ', ' + esc(k.progress.label) : ''}</span></li>`).join('')}</ul>`
+            : '<div class="who">None yet.</div>'}
+        </div>`;
+      }
+      return '';
+    });
+    const app = appFor(s);
+    if (app) {
+      parts.push(`<div class="mk-actions" style="margin:0 0 12px"><button class="mk-btn ghost sm" data-go-app="${esc(app[0])}" data-go-view="${esc(app[1])}">${esc(app[2])}</button></div>`);
+    }
+    return parts.join('');
   }
 
   /* ---------------- audience ---------------- */
@@ -305,6 +395,13 @@ export default function makeStepForms(app) {
       return out;
     }
     if (kind === 'spend') return { amount: val(s.key, 'amount'), what: val(s.key, 'what') };
+    if (kind === 'ship') return { method: val(s.key, 'method'), date: val(s.key, 'date'), carrier: val(s.key, 'carrier'), tracking: val(s.key, 'tracking') };
+    if (kind === 'delivered') return { date: val(s.key, 'date'), evidence: val(s.key, 'evidence') };
+    if (kind === 'count') {
+      const out = { disposition: val(s.key, 'disposition') };
+      countFieldsFor(s).forEach((k) => { out[k] = val(s.key, k); });
+      return out;
+    }
     if (kind === 'picksInfo') return { season: val(s.key, 'season'), year: val(s.key, 'year'), vendor: val(s.key, 'vendor'), teamMember: val(s.key, 'teamMember') };
     if (kind === 'picks') return { picks: readPicks(s.key) };
     if (kind === 'audience') {
@@ -338,6 +435,13 @@ export default function makeStepForms(app) {
         delete state.formDraft[key];
         if (d.formDone) openNext(key); else ui.renderDetail();
       }
+      return true;
+    }
+    if (d.budgetSave) {
+      const ok = await ui.patchHeader({ budget: val(d.budgetSave, 'budget') });
+      state.stepMsg = { [d.budgetSave]: ok ? { cls: 'ok', text: 'Budget saved.' } : (state.detailMsg || { cls: 'err', text: 'Not saved.' }) };
+      state.detailMsg = null;
+      ui.renderDetail();
       return true;
     }
     if (d.emailStepDone) {
@@ -427,5 +531,5 @@ export default function makeStepForms(app) {
     return false;
   }
 
-  return { stepFormHtml, onFormClick, onFormChange, openNext };
+  return { stepFormHtml, stepToolsHtml, onFormClick, onFormChange, openNext };
 }
